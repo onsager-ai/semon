@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS native_original_text_policy (
 const POLICY: u32 = 1;
 const PAGE_PARTS: usize = 8;
 const CHUNK: usize = 32 * 1024;
+// A SHA block may retain 63 source-backed scalar references. Each replay and
+// the next scalar can require 72 raw bytes through the layered native decoder.
+// Keep at least one new scalar's allowance after the worst pending replay.
+pub(crate) const TEXT_VIEW_BUILD_NATIVE_MIN: usize = 64 * 72;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1069,6 +1073,8 @@ impl NativeStore {
 
     /// Construct or resume one producer view. Join membership is supplied one
     /// parent at a time and rechecked by the same caller closure after I/O.
+    /// Building requires TEXT_VIEW_BUILD_NATIVE_MIN bytes; smaller allowances
+    /// defer before metadata/provider I/O. Scanning/ordering have separate minima.
     pub(crate) fn original_text_view_step(
         &mut self,
         job: &Job,
@@ -1103,7 +1109,7 @@ impl NativeStore {
                     .unwrap_or(0),
             };
         if cancelled()
-            || native_allowance < 72
+            || native_allowance < TEXT_VIEW_BUILD_NATIVE_MIN
             || native_allowance > crate::SESSION_SOURCE_CHUNK_MAX
             || metadata_allowance < 24
             || metadata_allowance > ROWS
@@ -1483,56 +1489,55 @@ impl NativeStore {
                 }
             }
         } else if matches!(state.phase, BuildPhase::Hash) {
-            let reserve = state.pending.len() * 72;
-            if reserve + 72 <= native_allowance {
-                let mut bytes = replay_refs(&state.pending, repair, records, &mut work)?;
-                let prefix = bytes.len();
-                let temporary = QualifiedTextView {
-                    original: repair.original,
-                    id,
-                    revision: state.ready_revision,
-                    record,
-                    epoch: state.epoch,
-                    pages: state.pages,
-                    receipt: Receipt {
-                        decoded_bytes: 0,
-                        sha256: [0; 32],
-                    },
-                };
-                let chunk = read_chunk(
-                    &self.connection,
-                    repair,
-                    &temporary,
-                    &state.reader,
-                    records,
-                    native_allowance.saturating_sub(work.native_bytes),
-                    metadata_allowance.saturating_sub(work.metadata_rows + 16),
-                    CHUNK - prefix,
-                    prefix,
-                    &mut work,
-                    &mut meter,
-                    &mut |_, _, _, _, _, _| Ok(()),
-                );
-                match chunk {
-                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                        state.phase = BuildPhase::Invalid
-                    }
-                    Err(error) => return Err(error),
-                    Ok(chunk) => {
-                        bytes.extend_from_slice(&chunk.bytes);
-                        state.reader = chunk.cursor;
-                        if chunk.complete {
-                            state.fingerprint.observe(&bytes, true)?;
-                            state.pending.clear();
-                            state.phase = BuildPhase::Complete;
+            // Preflight reserves the worst legal pending block plus one new
+            // scalar. replay_refs also rejects malformed oversized tails.
+            let mut bytes = replay_refs(&state.pending, repair, records, &mut work)?;
+            let prefix = bytes.len();
+            let temporary = QualifiedTextView {
+                original: repair.original,
+                id,
+                revision: state.ready_revision,
+                record,
+                epoch: state.epoch,
+                pages: state.pages,
+                receipt: Receipt {
+                    decoded_bytes: 0,
+                    sha256: [0; 32],
+                },
+            };
+            let chunk = read_chunk(
+                &self.connection,
+                repair,
+                &temporary,
+                &state.reader,
+                records,
+                native_allowance.saturating_sub(work.native_bytes),
+                metadata_allowance.saturating_sub(work.metadata_rows + 16),
+                CHUNK - prefix,
+                prefix,
+                &mut work,
+                &mut meter,
+                &mut |_, _, _, _, _, _| Ok(()),
+            );
+            match chunk {
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    state.phase = BuildPhase::Invalid
+                }
+                Err(error) => return Err(error),
+                Ok(chunk) => {
+                    bytes.extend_from_slice(&chunk.bytes);
+                    state.reader = chunk.cursor;
+                    if chunk.complete {
+                        state.fingerprint.observe(&bytes, true)?;
+                        state.pending.clear();
+                        state.phase = BuildPhase::Complete;
+                    } else {
+                        let full = bytes.len() / 64 * 64;
+                        state.fingerprint.observe(&bytes[..full], false)?;
+                        if full > 0 {
+                            state.pending = chunk.tail;
                         } else {
-                            let full = bytes.len() / 64 * 64;
-                            state.fingerprint.observe(&bytes[..full], false)?;
-                            if full > 0 {
-                                state.pending = chunk.tail;
-                            } else {
-                                state.pending.extend(chunk.tail);
-                            }
+                            state.pending.extend(chunk.tail);
                         }
                     }
                 }
@@ -1747,6 +1752,9 @@ mod tests {
         fixture.store.connection.execute_batch(SCHEMA).unwrap();
         fixture
     }
+    fn membership(db: &Connection, job: i64) -> rusqlite::Result<bool> {
+        db.query_row("SELECT NOT EXISTS(SELECT 1 FROM comparison_required_owners r LEFT JOIN native_query_owners w ON w.job=?1 AND w.session_key=r.key WHERE w.session_key IS NULL)",[job],|row|row.get(0))
+    }
     fn step(
         fixture: &mut Fixture,
         request: &ViewRequest,
@@ -1911,6 +1919,661 @@ mod tests {
     fn clear_derived_classes(fixture: &Fixture) {
         fixture.store.connection.execute_batch("DELETE FROM native_original_identities; DELETE FROM native_original_view_identities; DELETE FROM native_original_class_values; DELETE FROM native_original_classes; DELETE FROM native_original_text_policy;").unwrap();
     }
+    fn joined_literal(fixture: &mut Fixture) -> OriginalText {
+        let parent = whole(fixture);
+        let mut parts = Vec::new();
+        for (start, end) in [(0, 3), (3, 8)] {
+            parts.push(
+                complete(
+                    fixture,
+                    &ViewRequest::Slice {
+                        parent: parent.clone(),
+                        start,
+                        end,
+                    },
+                    &[],
+                )
+                .unwrap(),
+            );
+        }
+        let join = complete(
+            fixture,
+            &ViewRequest::Join {
+                record: 0,
+                producer: 101,
+                count: 2,
+                newline: false,
+            },
+            &parts,
+        )
+        .unwrap();
+        assert_eq!(rendered(fixture, &join), "selected");
+        clear_derived_classes(fixture);
+        let text = identity(fixture, Some(&join), 0);
+        assert!(matches!(
+            fixture
+                .store
+                .original_text_representative(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &text,
+                )
+                .unwrap()
+                .value,
+            native_values::Value::View(_)
+        ));
+        text
+    }
+    fn literal_snapshot(fixture: &Fixture) -> Option<(i64, String)> {
+        fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT revision,cursor FROM native_original_class_literals LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+    fn cache_literal(fixture: &mut Fixture, text: &OriginalText) {
+        let records = fixture.sources.reader();
+        let step = fixture
+            .store
+            .original_text_literal_step(
+                &fixture.job,
+                &fixture.witnesses[0],
+                &fixture.repairs[0],
+                text,
+                "selected",
+                &records,
+                &membership,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(step.matches, Some(true));
+        assert!(literal_snapshot(fixture).is_some());
+    }
+
+    #[test]
+    fn joined_literals_fence_related_owners_membership_and_sources_after_provider_io() {
+        for cached in [false, true] {
+            for change in [
+                "third", "new", "source", "runtime", "epoch", "repair", "provider",
+            ] {
+                let encoded = serde_json::to_string("selected").unwrap();
+                let mut fixture = Fixture::new(&[encoded.clone(), encoded.clone(), encoded]);
+                let text = joined_literal(&mut fixture);
+                if cached {
+                    cache_literal(&mut fixture, &text);
+                }
+                let before = literal_snapshot(&fixture);
+                // No local original may satisfy the retained-provider path.
+                fs::remove_file(&fixture.witnesses[0].source.path).unwrap();
+                let cache =
+                    super::super::super::super::super::EventCache::path(&fixture.options.cache);
+                let runtime = fixture.options.claude_json.clone();
+                let path = fixture.witnesses[0]
+                    .source
+                    .path
+                    .to_string_lossy()
+                    .into_owned();
+                let original = fixture.repairs[0].original;
+                let provider = Provider::new(
+                    fixture.repairs[0].source.clone(),
+                    &fixture.bytes[0],
+                    (change == "provider").then_some(0),
+                    move |call| {
+                        if call != 0 {
+                            return;
+                        }
+                        if change == "runtime" {
+                            fs::write(&runtime, b"{\"changed\":true}").unwrap();
+                            return;
+                        }
+                        let db = Connection::open(&cache).unwrap();
+                        match change {
+                            "third" => {
+                                db.execute("UPDATE session_catalog SET metadata=metadata WHERE session_key='owner-2'", []).unwrap();
+                            }
+                            "new" => {
+                                db.execute("INSERT INTO comparison_required_owners VALUES('new-related-owner')", []).unwrap();
+                            }
+                            "source" => {
+                                db.execute("INSERT INTO session_catalog_invalidations VALUES(?1,1,'changed',0)", [&path]).unwrap();
+                            }
+                            "epoch" => {
+                                db.execute("UPDATE native_original_fields SET decoded_bytes=decoded_bytes+1 WHERE original=?1 AND is_key=0", params![original.as_slice()]).unwrap();
+                            }
+                            "repair" => {
+                                db.execute("UPDATE native_original_repairs SET revision=revision+1 WHERE original=?1", params![original.as_slice()]).unwrap();
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+                let records = fixture.sources.reader_with(Some((
+                    &provider,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                )));
+                let step = fixture.store.original_text_literal_step_with_budget(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &text,
+                    "selected",
+                    &records,
+                    &membership,
+                    &|| false,
+                    72,
+                    24,
+                );
+                if change == "provider" {
+                    assert!(step.is_err());
+                } else {
+                    let step = step.unwrap();
+                    assert_eq!(step.outcome, Outcome::Conflict, "{change}, cached={cached}");
+                    assert_eq!(step.matches, None);
+                    assert!(step.work.native_bytes <= 72);
+                    assert!(step.work.metadata_rows <= 24);
+                    assert!(step.work.metadata_bytes <= BYTES);
+                }
+                assert!(provider.observed().0 > 0);
+                assert_eq!(literal_snapshot(&fixture), before);
+            }
+        }
+    }
+
+    #[test]
+    fn changed_join_membership_refuses_fresh_and_cached_literals_before_io() {
+        for cached in [false, true] {
+            let mut fixture = make_fixture("selected");
+            let text = joined_literal(&mut fixture);
+            if cached {
+                cache_literal(&mut fixture, &text);
+            }
+            let before = literal_snapshot(&fixture);
+            fixture
+                .store
+                .connection
+                .execute(
+                    "INSERT INTO comparison_required_owners VALUES('new-related-owner')",
+                    [],
+                )
+                .unwrap();
+            let provider = Provider::new(
+                fixture.repairs[0].source.clone(),
+                &fixture.bytes[0],
+                None,
+                |_| {},
+            );
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            let step = fixture
+                .store
+                .original_text_literal_step(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &text,
+                    "selected",
+                    &records,
+                    &membership,
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Conflict);
+            assert!(step.matches.is_none());
+            assert_eq!((step.work.native_bytes, step.work.range_requests), (0, 0));
+            assert_eq!(provider.observed(), (0, 0));
+            assert_eq!(literal_snapshot(&fixture), before);
+        }
+    }
+
+    #[test]
+    fn literal_callbacks_precede_owned_rechecks_and_cached_cursor_cas() {
+        for cached in [false, true] {
+            for phase in [0, 1, 2] {
+                for change in ["owner", "runtime", "epoch", "cas"] {
+                    if change == "cas" && !cached {
+                        continue;
+                    }
+                    let encoded = serde_json::to_string("selected").unwrap();
+                    let mut fixture = Fixture::new(&[encoded.clone(), encoded.clone(), encoded]);
+                    let text = joined_literal(&mut fixture);
+                    if cached {
+                        cache_literal(&mut fixture, &text);
+                    }
+                    let before = literal_snapshot(&fixture);
+                    let provider = Provider::new(
+                        fixture.repairs[0].source.clone(),
+                        &fixture.bytes[0],
+                        None,
+                        |_| {},
+                    );
+                    let records = fixture.sources.reader_with(Some((
+                        &provider,
+                        crate::SessionSourceReadMode::ProviderOnly,
+                    )));
+                    let calls = Cell::new(0);
+                    let original = fixture.repairs[0].original;
+                    let runtime = fixture.options.claude_json.clone();
+                    let closure = |db: &Connection, job| {
+                        let call = calls.get();
+                        calls.set(call + 1);
+                        if call == phase {
+                            match change {
+                                "owner" => {
+                                    db.execute("UPDATE session_catalog SET metadata=metadata WHERE session_key='owner-2'", [])?;
+                                }
+                                "runtime" => {
+                                    fs::write(&runtime, b"{\"changed\":true}").unwrap();
+                                }
+                                "epoch" => {
+                                    db.execute("UPDATE native_original_fields SET decoded_bytes=decoded_bytes+1 WHERE original=?1 AND is_key=0", params![original.as_slice()])?;
+                                }
+                                "cas" => {
+                                    db.execute("UPDATE native_original_class_literals SET revision=revision+1 WHERE original=?1", params![original.as_slice()])?;
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        membership(db, job)
+                    };
+                    let result = fixture.store.original_text_literal_step_with_budget(
+                        &fixture.job,
+                        &fixture.witnesses[0],
+                        &fixture.repairs[0],
+                        &text,
+                        "selected",
+                        &records,
+                        &closure,
+                        &|| false,
+                        72,
+                        24,
+                    );
+                    assert!(calls.get() > phase, "callback {phase} was not reached");
+                    // A stale typed view may refuse as invalid native evidence;
+                    // no phase may publish an answer or change its cached cursor.
+                    if let Ok(step) = result {
+                        assert_eq!(step.outcome, Outcome::Conflict, "{change} phase={phase}");
+                        assert!(step.matches.is_none());
+                        assert!(step.work.native_bytes <= 72);
+                        assert!(step.work.metadata_rows <= 24);
+                    }
+                    assert_eq!(literal_snapshot(&fixture), before);
+                    if phase == 0 && change != "cas" {
+                        assert_eq!(provider.observed(), (0, 0));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joined_literal_cancellation_reopen_and_cached_provider_proof_work_are_separate() {
+        for unrelated in [0, 16] {
+            let encoded = serde_json::to_string("selected").unwrap();
+            let mut fixture = Fixture::new(&vec![encoded; unrelated + 3]);
+            let text = joined_literal(&mut fixture);
+            let calls = Cell::new(0);
+            let cancel = || {
+                calls.set(calls.get() + 1);
+                calls.get() == 3
+            };
+            let records = fixture.sources.reader();
+            let cancelled = fixture
+                .store
+                .original_text_literal_step_with_budget(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &text,
+                    "selected",
+                    &records,
+                    &membership,
+                    &cancel,
+                    72,
+                    24,
+                )
+                .unwrap();
+            assert_eq!(cancelled.outcome, Outcome::Deferred);
+            assert!(cancelled.matches.is_none());
+            assert!(literal_snapshot(&fixture).is_none());
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            cache_literal(&mut fixture, &text);
+            let before = literal_snapshot(&fixture);
+            fs::remove_file(&fixture.witnesses[0].source.path).unwrap();
+            let provider = Provider::new(
+                fixture.repairs[0].source.clone(),
+                &fixture.bytes[0],
+                None,
+                |_| {},
+            );
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            let cached = fixture
+                .store
+                .original_text_literal_step_with_budget(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &text,
+                    "selected",
+                    &records,
+                    &membership,
+                    &|| false,
+                    72,
+                    24,
+                )
+                .unwrap();
+            assert_eq!(cached.outcome, Outcome::Written);
+            assert_eq!(cached.matches, Some(true));
+            assert_eq!(
+                (cached.work.range_requests, cached.work.native_bytes),
+                (1, 1)
+            );
+            assert!(cached.work.metadata_rows <= 24);
+            assert!(cached.work.metadata_bytes <= BYTES);
+            assert_eq!(provider.observed(), (2, fixture.bytes[0].len() * 2));
+            assert_eq!(literal_snapshot(&fixture), before);
+        }
+    }
+
+    fn budgeted_build(
+        fixture: &mut Fixture,
+        request: &ViewRequest,
+        parents: &[QualifiedTextView],
+        native: usize,
+        rows: usize,
+    ) -> ViewStep {
+        let records = fixture.sources.reader();
+        fixture
+            .store
+            .original_text_view_step(
+                &fixture.job,
+                &fixture.witnesses[0],
+                &fixture.repairs[0],
+                request,
+                &mut |index| {
+                    parents
+                        .get(index as usize)
+                        .cloned()
+                        .ok_or_else(|| io::Error::other("test Join parent missing"))
+                },
+                &records,
+                &membership,
+                &|| false,
+                native,
+                rows,
+            )
+            .unwrap()
+    }
+    fn saved_build(fixture: &Fixture, request: &ViewRequest) -> Option<(u64, Build)> {
+        let value: Option<(i64, String)> = fixture.store.connection.query_row(
+            "SELECT view_id,cursor FROM native_original_text_views WHERE original=?1 AND request=?2",
+            params![fixture.repairs[0].original.as_slice(), bounded_json(request, STATE_BYTES).unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().unwrap();
+        value.map(|(id, text)| (id as u64, serde_json::from_str(&text).unwrap()))
+    }
+    fn progress_bytes(mut state: Build) -> Vec<u8> {
+        // Merely incrementing the row revision cannot establish progress.
+        state.ready_revision = 0;
+        serde_json::to_vec(&state).unwrap()
+    }
+
+    #[test]
+    fn every_undersized_builder_allowance_defers_before_metadata_or_provider_io() {
+        let mut fixture = make_fixture(&"x".repeat(512));
+        let parent = whole(&mut fixture);
+        let request = ViewRequest::Slice {
+            parent,
+            start: 0,
+            end: 512,
+        };
+        let provider = Provider::new(
+            fixture.repairs[0].source.clone(),
+            &fixture.bytes[0],
+            None,
+            |_| {},
+        );
+        let records = fixture.sources.reader_with(Some((
+            &provider,
+            crate::SessionSourceReadMode::ProviderOnly,
+        )));
+        for native in 0..TEXT_VIEW_BUILD_NATIVE_MIN {
+            let step = fixture
+                .store
+                .original_text_view_step(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &request,
+                    &mut |_| unreachable!(),
+                    &records,
+                    &membership,
+                    &|| false,
+                    native,
+                    24,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            assert_eq!(
+                (
+                    step.work.native_bytes,
+                    step.work.range_requests,
+                    step.work.metadata_rows,
+                    step.work.metadata_bytes,
+                    step.sql_vm_steps
+                ),
+                (0, 0, 0, 0, 0)
+            );
+        }
+        assert_eq!(provider.observed(), (0, 0));
+        assert!(saved_build(&fixture, &request).is_none());
+    }
+
+    #[test]
+    fn builder_minimum_advances_a_maximal_raw_reference_tail_without_plaintext_state() {
+        let text = "x".repeat(512);
+        let mut fixture = make_fixture(&text);
+        let parent = whole(&mut fixture);
+        let request = ViewRequest::Slice {
+            parent,
+            start: 0,
+            end: 512,
+        };
+        let mut hash = None;
+        for _ in 0..64 {
+            budgeted_build(&mut fixture, &request, &[], TEXT_VIEW_BUILD_NATIVE_MIN, 24);
+            let (id, state) = saved_build(&fixture, &request).unwrap();
+            if matches!(state.phase, BuildPhase::Hash) {
+                hash = Some((id, state));
+                break;
+            }
+        }
+        let (id, mut state) = hash.expect("slice Parts must reach Hash");
+        let temporary = QualifiedTextView {
+            original: fixture.repairs[0].original,
+            id,
+            revision: state.ready_revision,
+            record: state.record,
+            epoch: state.epoch,
+            pages: state.pages,
+            receipt: Receipt {
+                decoded_bytes: 0,
+                sha256: [0; 32],
+            },
+        };
+        let records = fixture.sources.reader();
+        let chunk = read_chunk(
+            &fixture.store.connection,
+            &fixture.repairs[0],
+            &temporary,
+            &state.reader,
+            &records,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+            63,
+            0,
+            &mut RepairWork::default(),
+            &mut ViewMeter::default(),
+            &mut |_, _, _, _, _, _| Ok(()),
+        )
+        .unwrap();
+        records.finish().unwrap();
+        assert_eq!(chunk.bytes, vec![b'x'; 63]);
+        assert_eq!(chunk.tail.len(), 63);
+        state.reader = chunk.cursor;
+        state.pending = chunk.tail;
+        let encoded = bounded_json(&state, STATE_BYTES).unwrap();
+        assert!(!encoded.contains(&"x".repeat(16)));
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_original_text_views SET cursor=?3 WHERE original=?1 AND view_id=?2",
+                params![
+                    fixture.repairs[0].original.as_slice(),
+                    seq_u64(id).unwrap(),
+                    encoded
+                ],
+            )
+            .unwrap();
+        let before = progress_bytes(state);
+        let reads = super::super::super::super::super::FILE_READS.with(Cell::get);
+        // The old accepted 292-byte call made an anchor read and saved an
+        // unchanged tail forever. It must now defer without touching that tail.
+        let denied = budgeted_build(&mut fixture, &request, &[], 292, 24);
+        assert_eq!(
+            (denied.work.range_requests, denied.work.native_bytes),
+            (0, 0)
+        );
+        assert_eq!(
+            progress_bytes(saved_build(&fixture, &request).unwrap().1),
+            before
+        );
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let mut finished = None;
+        for _ in 0..64 {
+            let before = progress_bytes(saved_build(&fixture, &request).unwrap().1);
+            let step = budgeted_build(&mut fixture, &request, &[], TEXT_VIEW_BUILD_NATIVE_MIN, 24);
+            assert!(step.work.native_bytes <= TEXT_VIEW_BUILD_NATIVE_MIN);
+            assert!(step.work.metadata_rows <= 24);
+            assert!(step.work.metadata_bytes <= BYTES);
+            assert!(step.serialized_cursor_bytes <= STATE_BYTES);
+            let state = saved_build(&fixture, &request).unwrap().1;
+            assert!(state.pending.len() <= 63);
+            assert!(state.pending.iter().map(|part| part.count).sum::<usize>() <= 63);
+            assert_ne!(progress_bytes(state), before);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            if step.complete {
+                finished = step.view;
+                break;
+            }
+            assert_eq!(step.outcome, Outcome::Deferred);
+        }
+        let view = finished.expect("minimum builder must finish the retained SHA tail");
+        assert_eq!(rendered(&fixture, &view), text);
+        assert_eq!(
+            view.receipt.sha256,
+            <[u8; 32]>::from(Sha256::digest(text.as_bytes()))
+        );
+        assert_eq!(
+            super::super::super::super::super::FILE_READS.with(Cell::get),
+            reads
+        );
+    }
+
+    #[test]
+    fn builder_minimum_resumes_zero_output_js_and_paged_join_at_metadata_minimum() {
+        for native in [
+            TEXT_VIEW_BUILD_NATIVE_MIN,
+            TEXT_VIEW_BUILD_NATIVE_MIN + 1,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+        ] {
+            for mode in ["join", "gaps", "wide"] {
+                let literal = match mode {
+                    "gaps" => format!("'{}{}'", "\\\n".repeat(2500), "x".repeat(257)),
+                    "wide" => format!("'{}'", "\\uD83D\\uDE00".repeat(257)),
+                    _ => "abcd".into(),
+                };
+                let mut fixture = if mode == "wide" {
+                    // Twelve JS surrogate-escape characters, each represented
+                    // by a six-byte outer JSON escape: 72 raw bytes per scalar.
+                    let escaped: String = literal
+                        .bytes()
+                        .map(|byte| format!("\\u{byte:04x}"))
+                        .collect();
+                    Fixture::new(&[format!("\"{escaped}\"")])
+                } else {
+                    make_fixture(&literal)
+                };
+                let parent = whole(&mut fixture);
+                let parents = if mode != "join" {
+                    Vec::new()
+                } else {
+                    vec![parent.clone(); 73]
+                };
+                let request = if mode != "join" {
+                    ViewRequest::JsLiteralDecode {
+                        parent,
+                        quote: Quote::Single,
+                    }
+                } else {
+                    ViewRequest::Join {
+                        record: 0,
+                        producer: 102,
+                        count: 73,
+                        newline: true,
+                    }
+                };
+                let expected = match mode {
+                    "gaps" => "x".repeat(257),
+                    "wide" => "😀".repeat(257),
+                    _ => vec!["abcd"; 73].join("\n"),
+                };
+                let mut gap_progress = false;
+                let mut finished = None;
+                for _ in 0..1024 {
+                    let before = saved_build(&fixture, &request);
+                    let step = budgeted_build(&mut fixture, &request, &parents, native, 24);
+                    assert!(step.work.native_bytes <= native);
+                    assert!(step.work.metadata_rows <= 24);
+                    assert!(step.work.metadata_bytes <= BYTES);
+                    assert!(step.serialized_cursor_bytes <= STATE_BYTES);
+                    let (_, after) = saved_build(&fixture, &request).unwrap();
+                    if let Some((_, before)) = before {
+                        gap_progress |= matches!(before.phase, BuildPhase::Hash)
+                            && before.reader.decoded == after.reader.decoded
+                            && before.reader != after.reader;
+                        assert_ne!(progress_bytes(before), progress_bytes(after));
+                    }
+                    fixture.store = NativeStore::open(&fixture.options).unwrap();
+                    if step.complete {
+                        finished = step.view;
+                        break;
+                    }
+                    assert_eq!(step.outcome, Outcome::Deferred);
+                }
+                let view = finished.expect("every accepted builder boundary must finish");
+                assert_eq!(rendered(&fixture, &view), expected);
+                assert_eq!(
+                    view.receipt.sha256,
+                    <[u8; 32]>::from(Sha256::digest(expected.as_bytes()))
+                );
+                if mode == "gaps" && native == TEXT_VIEW_BUILD_NATIVE_MIN {
+                    assert!(gap_progress);
+                }
+            }
+        }
+    }
     #[test]
     fn whole_fields_and_views_share_classes_in_both_allocation_orders() {
         for view_first in [false, true] {
@@ -1969,6 +2632,7 @@ mod tests {
                             &left,
                             literal,
                             &records,
+                            &membership,
                             &|| false,
                             crate::SESSION_SOURCE_CHUNK_MAX,
                             ROWS,
@@ -2017,6 +2681,7 @@ mod tests {
                         &left,
                         "abc",
                         &records,
+                        &membership,
                         &|| false
                     )
                     .is_err()
@@ -2778,6 +3443,120 @@ mod tests {
             assert_eq!(count, 0);
         }
         assert_eq!(rendered(&fixture, &current), "retained original");
+    }
+    #[test]
+    fn epoch_retirement_precedes_evidence_across_cancellation_and_every_reopen() {
+        for epochs in [1, 65] {
+            let mut fixture = make_fixture("retained original");
+            let current = whole(&mut fixture);
+            let repair = fixture.repairs[0].clone();
+            let obsolete = format_two_namespace(&repair.source).unwrap();
+            {
+                let tx = fixture.store.connection.transaction().unwrap();
+                for record in 0..epochs {
+                    tx.execute(
+                        "INSERT INTO native_original_text_epochs VALUES(?1,?2,1)",
+                        params![obsolete.as_slice(), record],
+                    )
+                    .unwrap();
+                }
+                tx.execute("INSERT INTO native_original_text_views VALUES(?1,1,0,'old','{unknown view',NULL)", params![obsolete.as_slice()]).unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_classes VALUES(?1,1,0,0,zeroblob(32),4)",
+                    params![obsolete.as_slice()],
+                )
+                .unwrap();
+                tx.execute("INSERT INTO native_original_fields VALUES(?1,0,0,0,1,NULL,0,'{unknown field','{unknown fingerprint',NULL,NULL)", params![obsolete.as_slice()]).unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_records VALUES(?1,0,1,'folded')",
+                    params![obsolete.as_slice()],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            native_retirement::enqueue(&fixture.store.connection, repair.original, &repair.source)
+                .unwrap();
+            let count = |fixture: &Fixture, table: &str| -> i64 {
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE original=?1"),
+                        params![obsolete.as_slice()],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            };
+            let evidence = [
+                "native_original_text_views",
+                "native_original_classes",
+                "native_original_fields",
+                "native_original_records",
+            ];
+            let calls = Cell::new(0);
+            let cancel = || {
+                calls.set(calls.get() + 1);
+                calls.get() == 2
+            };
+            let cancelled = native_retirement::advance(
+                &mut fixture.store,
+                &fixture.job,
+                &fixture.witnesses[0],
+                &repair,
+                &fixture.sources.reader(),
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(cancelled.outcome, Outcome::Deferred);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            assert_eq!(count(&fixture, "native_original_text_epochs"), epochs);
+            for table in evidence {
+                assert_eq!(count(&fixture, table), 1);
+            }
+            let mut reclaimed = false;
+            for _ in 0..32 {
+                if !native_retirement::pending(&fixture.store.connection, repair.original).unwrap()
+                {
+                    break;
+                }
+                let step = native_retirement::advance(
+                    &mut fixture.store,
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.cleanup_vm_steps < 4096);
+                assert!(step.work.cleanup_key_bytes <= STATE_BYTES);
+                assert_eq!((step.work.range_requests, step.work.native_bytes), (0, 0));
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                let left = count(&fixture, "native_original_text_epochs");
+                for table in evidence {
+                    if count(&fixture, table) == 0 {
+                        reclaimed = true;
+                        assert_eq!(left, 0, "{table} retired before epochs");
+                    }
+                }
+                if left > 0 {
+                    for table in evidence {
+                        assert_eq!(count(&fixture, table), 1);
+                    }
+                }
+            }
+            assert!(reclaimed);
+            assert!(
+                !native_retirement::pending(&fixture.store.connection, repair.original).unwrap()
+            );
+            assert_eq!(count(&fixture, "native_original_text_epochs"), 0);
+            for table in evidence {
+                assert_eq!(count(&fixture, table), 0);
+            }
+            assert_eq!(rendered(&fixture, &current), "retained original");
+        }
     }
     #[test]
     fn view_cancellation_before_commit_preserves_no_partial_publication() {
