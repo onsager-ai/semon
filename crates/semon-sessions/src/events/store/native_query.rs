@@ -1315,7 +1315,7 @@ fn cleanup_rows(
             return Ok(false);
         }
         let row: Option<CleanupRow> = tx.query_row(
-            "SELECT CASE WHEN octet_length(metadata)+octet_length(identity)+64<=?2 THEN kind END,k0,k1,k2,k3,k4,ordinal,CASE WHEN octet_length(metadata)+octet_length(identity)+64<=?2 THEN identity END,octet_length(metadata)+octet_length(identity)+64 FROM native_query_rows WHERE job=?1 ORDER BY kind,k0,k1,k2,k3,k4,ordinal,identity LIMIT 1",
+            "SELECT CASE WHEN octet_length(metadata)+octet_length(identity)+octet_length(kind)+64<=?2 THEN kind END,k0,k1,k2,k3,k4,ordinal,CASE WHEN octet_length(metadata)+octet_length(identity)+octet_length(kind)+64<=?2 THEN identity END,octet_length(metadata)+octet_length(identity)+octet_length(kind)+64 FROM native_query_rows WHERE job=?1 ORDER BY kind,k0,k1,k2,k3,k4,ordinal,identity LIMIT 1",
             params![job, i64::try_from(*bytes_left).map_err(|_| invalid("cleanup byte allowance invalid"))?],
             |r| Ok(CleanupRow { kind: r.get(0)?, order: [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?], ordinal: r.get(6)?, identity: r.get(7)?, bytes: r.get(8)? }),
         ).optional()?;
@@ -4269,10 +4269,52 @@ mod tests {
     }
 
     #[test]
+    fn native_query_cleanup_guards_large_kind_before_rust_allocation() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        let kind = "k".repeat(2 * BYTES);
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO native_query_rows VALUES(?1,?2,0,0,0,0,0,0,'small','{}')",
+                params![job.id, kind],
+            )
+            .unwrap();
+        assert_eq!(fixture.store.restart(&job).unwrap(), Outcome::Written);
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let (attempt, calls, allocated) =
+            crate::test_allocations::measure(|| fixture.store.cleanup_with_work(&job).unwrap());
+        assert_eq!(attempt.outcome, Outcome::Deferred);
+        assert_eq!(attempt.work.metadata_bytes, 0, "oversize row was admitted");
+        assert_eq!(attempt.work.sql_writes, 1, "oversize row was deleted");
+        assert!(attempt.work.rows() <= ROWS && attempt.connection_vm_steps > 0);
+        assert!(
+            calls > 0 && allocated < 128 * 1024,
+            "kind allocated {allocated} Rust bytes"
+        );
+        assert!(crate::test_allocations::peak_bytes() < 128 * 1024);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT octet_length(kind) FROM native_query_rows WHERE job=?1",
+                    [job.id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            (2 * BYTES) as i64
+        );
+    }
+
+    #[test]
     fn native_query_cleanup_full_byte_row_retires_before_header_without_pending_forever() {
         let mut fixture = Fixture::new(0);
         let mut job = fixture.admitted();
-        let metadata = serde_json::to_string(&"x".repeat(BYTES - 3 - 64 - 2)).unwrap();
+        let metadata =
+            serde_json::to_string(&"x".repeat(BYTES - "max".len() - "slot".len() - 64 - 2))
+                .unwrap();
         fixture
             .store
             .connection
@@ -4281,6 +4323,12 @@ mod tests {
                 params![job.id, metadata],
             )
             .unwrap();
+        assert_eq!(
+            fixture.store.connection.query_row(
+                "SELECT octet_length(metadata)+octet_length(identity)+octet_length(kind)+64 FROM native_query_rows WHERE job=?1",
+                [job.id], |r| r.get::<_, i64>(0),
+            ).unwrap(), BYTES as i64,
+        );
         assert_eq!(fixture.store.restart(&job).unwrap(), Outcome::Written);
         job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
         let attempt = fixture.store.cleanup_with_work(&job).unwrap();
