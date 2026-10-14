@@ -2,6 +2,7 @@
 //! SHA/length only select candidates. A class joins two fields only after the
 //! shared decoder compared all bytes and Records rechecked retained evidence.
 
+use super::native_values::{NativeTextOrder, Pair as TextPair, Value as TextValue, ValueMeter};
 use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -9,7 +10,125 @@ use super::*;
 struct Candidate {
     class: u64,
     record: u64,
-    field: OriginalField,
+    field: Option<OriginalField>,
+    #[serde(default)]
+    view: Option<QualifiedTextView>,
+}
+impl Candidate {
+    fn from_value(class: u64, value: &TextValue) -> Self {
+        match value {
+            TextValue::Whole { record, field, .. } => Self {
+                class,
+                record: *record,
+                field: Some(field.clone()),
+                view: None,
+            },
+            TextValue::View(view) => Self {
+                class,
+                record: view.record(),
+                field: None,
+                view: Some(view.clone()),
+            },
+        }
+    }
+    fn matches(&self, value: &TextValue) -> io::Result<bool> {
+        let current = Self::from_value(self.class, value);
+        Ok(serde_json::to_vec(self).map_err(io::Error::other)?
+            == serde_json::to_vec(&current).map_err(io::Error::other)?)
+    }
+}
+#[derive(Clone, Copy)]
+enum IdentityKey {
+    Whole(u64, u64),
+    View(u64),
+}
+impl IdentityKey {
+    fn params(&self, original: &[u8; 32]) -> io::Result<Vec<rusqlite::types::Value>> {
+        use rusqlite::types::Value;
+        let mut params = vec![Value::Blob(original.to_vec())];
+        match self {
+            Self::Whole(record, ordinal) => {
+                params.push(Value::Integer(seq_u64(*record)?));
+                params.push(Value::Integer(seq_u64(*ordinal)?));
+            }
+            Self::View(view) => params.push(Value::Integer(seq_u64(*view)?)),
+        }
+        Ok(params)
+    }
+}
+fn identity_state(
+    db: &Connection,
+    repair: &Repair,
+    key: &IdentityKey,
+    meter: &mut IdentityMeter,
+) -> io::Result<Option<(i64, Option<String>, i64)>> {
+    let sql = match key {
+        IdentityKey::Whole(..) => {
+            "SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3"
+        }
+        IdentityKey::View(..) => {
+            "SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_view_identities WHERE original=?1 AND view_id=?2"
+        }
+    };
+    let mut query = db.prepare(sql).map_err(io::Error::other)?;
+    let row = query
+        .query_row(
+            rusqlite::params_from_iter(key.params(&repair.original)?),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(io::Error::other)?;
+    meter.statement(&query);
+    Ok(row)
+}
+fn identity_revision(
+    db: &Connection,
+    repair: &Repair,
+    key: &IdentityKey,
+    meter: &mut IdentityMeter,
+) -> io::Result<Option<i64>> {
+    let sql = match key {
+        IdentityKey::Whole(..) => {
+            "SELECT revision FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3"
+        }
+        IdentityKey::View(..) => {
+            "SELECT revision FROM native_original_view_identities WHERE original=?1 AND view_id=?2"
+        }
+    };
+    let mut query = db.prepare(sql).map_err(io::Error::other)?;
+    let row = query
+        .query_row(
+            rusqlite::params_from_iter(key.params(&repair.original)?),
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(io::Error::other)?;
+    meter.statement(&query);
+    Ok(row)
+}
+fn save_identity(
+    db: &Connection,
+    repair: &Repair,
+    key: &IdentityKey,
+    state: &str,
+    meter: &mut IdentityMeter,
+) -> io::Result<()> {
+    let sql = match key {
+        IdentityKey::Whole(..) => {
+            "INSERT INTO native_original_identities VALUES(?1,?2,?3,0,?4) ON CONFLICT(original,record_offset,ordinal) DO UPDATE SET cursor=excluded.cursor,revision=revision+1"
+        }
+        IdentityKey::View(..) => {
+            "INSERT INTO native_original_view_identities VALUES(?1,?2,0,?3) ON CONFLICT(original,view_id) DO UPDATE SET cursor=excluded.cursor,revision=revision+1"
+        }
+    };
+    let mut params = key.params(&repair.original)?;
+    params.push(rusqlite::types::Value::Text(state.to_owned()));
+    let mut query = db.prepare(sql).map_err(io::Error::other)?;
+    query
+        .execute(rusqlite::params_from_iter(params))
+        .map_err(io::Error::other)?;
+    meter.statement(&query);
+    Ok(())
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +161,8 @@ struct Cursor {
     before: Option<u64>,
     candidate: Option<Candidate>,
     compare: Option<Compare>,
+    #[serde(default)]
+    generic: Option<TextPair>,
     complete: bool,
     class: Option<u64>,
     /// Boundary for the descending base range; `before` tracks its exact
@@ -63,6 +184,7 @@ impl Cursor {
             before: None,
             candidate: None,
             compare: None,
+            generic: None,
             complete: false,
             class: None,
             high_water: None,
@@ -119,7 +241,7 @@ pub(crate) struct Representative {
     pub(crate) source: crate::SessionSourceRef,
     pub(crate) class: u64,
     pub(crate) record: u64,
-    pub(crate) field: OriginalField,
+    pub(super) value: TextValue,
     pub(crate) receipt: Receipt,
 }
 
@@ -407,36 +529,18 @@ pub(super) fn representative_at(
             "native text representative Original changed",
         ));
     }
-    let mut query = db.prepare("SELECT record_offset,ordinal FROM native_original_classes WHERE original=?1 AND class=?2").map_err(io::Error::other)?;
-    let (record, ordinal): (i64, i64) = query
-        .query_row(
-            params![repair.original.as_slice(), seq_u64(text.identity())?],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(io::Error::other)?;
-    work.metadata_rows += 1;
-    work.metadata_bytes += 16;
-    let mut meter = IdentityMeter::default();
-    meter.statement(&query);
-    let record = u64::try_from(record).map_err(io::Error::other)?;
-    let (field, receipt) = field_at(
-        db,
-        repair,
-        record,
-        u64::try_from(ordinal).map_err(io::Error::other)?,
-        work,
-        &mut meter,
-    )?;
+    let mut meter = ValueMeter::default();
+    let value = native_class_values::resolve(db, repair, text.identity(), work, &mut meter)?;
     Ok((
         Representative {
             original: repair.original,
             source: repair.source.clone(),
             class: text.identity(),
-            record,
-            field,
-            receipt,
+            record: value.record(),
+            receipt: value.receipt(),
+            value,
         },
-        meter.class_sql_vm_steps,
+        meter.vm,
     ))
 }
 
@@ -507,14 +611,66 @@ impl NativeStore {
         native_allowance: usize,
         metadata_rows_allowance: usize,
     ) -> io::Result<IdentityStep> {
+        self.original_identity_value_step(
+            job,
+            witness,
+            repair,
+            ordinal,
+            None,
+            &|_, _| Ok(true),
+            records,
+            cancelled,
+            native_allowance,
+            metadata_rows_allowance,
+        )
+    }
+    pub(crate) fn original_view_identity_step(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        view: &QualifiedTextView,
+        records: &crate::query_source::Records<'_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<IdentityStep> {
+        self.original_identity_value_step(
+            job,
+            witness,
+            repair,
+            0,
+            Some(view),
+            closure,
+            records,
+            cancelled,
+            native_allowance,
+            metadata_rows_allowance,
+        )
+    }
+
+    fn original_identity_value_step(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        ordinal: u64,
+        view: Option<&QualifiedTextView>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<IdentityStep> {
         let native_allowance = native_allowance.min(crate::SESSION_SOURCE_CHUNK_MAX);
         let metadata_rows_allowance = metadata_rows_allowance.min(ROWS);
         let mut work = RepairWork::default();
         let mut meter = IdentityMeter::default();
-        // At most seven descriptor/candidate reads and four seal writes occur
-        // in one identity transition. Reserve their unchanged bounded envelope
-        // before executing SQL or provider I/O, rather than rejecting after it.
-        if cancelled() || native_allowance == 0 || metadata_rows_allowance < 12 {
+        // Reserve descriptor qualification, typed references and bounded
+        // legacy backfill before source I/O; each complete step stays within
+        // the enclosing record action's remaining work allowance.
+        if cancelled() || native_allowance == 0 || metadata_rows_allowance < 28 {
             return Ok(meter.step(Outcome::Deferred, work, None));
         }
         meter.fence_checks += 1;
@@ -529,29 +685,42 @@ impl NativeStore {
         check_record_view(&self.connection, job, witness, repair).map_err(io::Error::other)?;
         let generation =
             class_generation(&self.connection, &repair.original, &mut work, &mut meter)?;
-        let (field, receipt) = field_at(
-            &self.connection,
-            repair,
-            repair.cursor.record_at,
-            ordinal,
-            &mut work,
-            &mut meter,
-        )?;
-        let mut identity_query = self.connection.prepare("SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3").map_err(io::Error::other)?;
-        let existing_result = identity_query
-            .query_row(
-                params![
-                    repair.original.as_slice(),
-                    seq_u64(repair.cursor.record_at)?,
-                    seq_u64(ordinal)?
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional();
-        meter.statement(&identity_query);
-        drop(identity_query);
-        let existing: Option<(i64, Option<String>, i64)> =
-            existing_result.map_err(io::Error::other)?;
+        if !closure(&self.connection, job.id).map_err(io::Error::other)? {
+            return Ok(meter.step(Outcome::Conflict, work, None));
+        }
+        let value = if let Some(view) = view {
+            if view.original() != repair.original || view.record() != repair.cursor.record_at {
+                return Ok(meter.step(Outcome::Conflict, work, None));
+            }
+            let value = TextValue::View(view.clone());
+            let mut value_meter = ValueMeter::default();
+            let current = value.current(&self.connection, repair, &mut work, &mut value_meter)?;
+            meter.class_sql_vm_steps += value_meter.vm;
+            if !current {
+                return Ok(meter.step(Outcome::Conflict, work, None));
+            }
+            value
+        } else {
+            let (field, receipt) = field_at(
+                &self.connection,
+                repair,
+                repair.cursor.record_at,
+                ordinal,
+                &mut work,
+                &mut meter,
+            )?;
+            TextValue::Whole {
+                record: repair.cursor.record_at,
+                field,
+                receipt,
+            }
+        };
+        let receipt = value.receipt();
+        let key = match view {
+            Some(view) => IdentityKey::View(view.id()),
+            None => IdentityKey::Whole(repair.cursor.record_at, ordinal),
+        };
+        let existing = identity_state(&self.connection, repair, &key, &mut meter)?;
         work.metadata_rows += 1;
         work.metadata_bytes += 8;
         let is_new = existing.is_none();
@@ -571,6 +740,11 @@ impl NativeStore {
             } else {
                 (None, Cursor::new())
             };
+        if cursor.compare.is_some() && cursor.generic.is_some()
+            || cursor.candidate.is_some() != (cursor.compare.is_some() || cursor.generic.is_some())
+        {
+            return Ok(meter.step(Outcome::Conflict, work, None));
+        }
         let cached = cursor.complete;
         // A completed experimental cursor predating durable coverage has no
         // proof that it exhausted appended classes. Keep it explicitly Pending
@@ -580,7 +754,11 @@ impl NativeStore {
             return Ok(meter.step(Outcome::Conflict, work, None));
         }
         let mut allocate = false;
-        if !cursor.complete && cursor.candidate.is_none() && cursor.compare.is_none() {
+        if !cursor.complete
+            && cursor.candidate.is_none()
+            && cursor.compare.is_none()
+            && cursor.generic.is_none()
+        {
             if cursor.range.is_none() && cursor.match_class.is_some() {
                 cursor.class = cursor.match_class.take();
                 cursor.complete = true;
@@ -615,23 +793,43 @@ impl NativeStore {
                 };
                 if let Some((class, record, candidate_ordinal)) = candidate {
                     let record = u64::try_from(record).map_err(io::Error::other)?;
-                    let (candidate, _) = field_at(
+                    let class = u64::try_from(class).map_err(io::Error::other)?;
+                    let mut value_meter = ValueMeter::default();
+                    let candidate_value = native_class_values::resolve(
                         &self.connection,
                         repair,
-                        record,
-                        u64::try_from(candidate_ordinal).map_err(io::Error::other)?,
+                        class,
                         &mut work,
-                        &mut meter,
+                        &mut value_meter,
                     )?;
-                    cursor.compare = Some(Compare::new(
-                        absolute(repair.cursor.record_at, &field)?,
-                        absolute(record, &candidate)?,
-                    )?);
-                    cursor.candidate = Some(Candidate {
-                        class: u64::try_from(class).map_err(io::Error::other)?,
-                        record,
-                        field: candidate,
-                    });
+                    meter.class_sql_vm_steps += value_meter.vm;
+                    if candidate_value.record() != record
+                        || candidate_value.legacy_ordinal()? != candidate_ordinal
+                        || candidate_value.receipt() != receipt
+                    {
+                        return Ok(meter.step(Outcome::Conflict, work, None));
+                    }
+                    match (&value, &candidate_value) {
+                        (
+                            TextValue::Whole {
+                                record: left_record,
+                                field: left,
+                                ..
+                            },
+                            TextValue::Whole {
+                                record: right_record,
+                                field: right,
+                                ..
+                            },
+                        ) => {
+                            cursor.compare = Some(Compare::new(
+                                absolute(*left_record, left)?,
+                                absolute(*right_record, right)?,
+                            )?);
+                        }
+                        _ => cursor.generic = Some(TextPair::new(&value, &candidate_value)?),
+                    }
+                    cursor.candidate = Some(Candidate::from_value(class, &candidate_value));
                 } else if let Some(finished) = cursor.range.take() {
                     cursor.high_water = Some(finished.through);
                     if let Some(pending) = finished
@@ -646,7 +844,8 @@ impl NativeStore {
                 }
             }
         }
-        if let Some(compare) = cursor.compare.as_mut() {
+        let mut observed_candidate = None;
+        if cursor.compare.is_some() || cursor.generic.is_some() {
             let candidate = cursor
                 .candidate
                 .as_ref()
@@ -654,49 +853,130 @@ impl NativeStore {
             let in_newer_range = cursor.range.as_ref().is_some_and(|range| {
                 candidate.class > range.after && candidate.class <= range.through
             });
-            let left_end = absolute(repair.cursor.record_at, &field)?.1;
-            let right_end = absolute(candidate.record, &candidate.field)?.1;
-            let sides =
-                usize::from(compare.left.at < left_end) + usize::from(compare.right.at < right_end);
-            // A JSON scalar can occupy twelve native bytes (a surrogate pair).
-            // Leave enough for each nonempty side; a small exhausted outer
-            // step defers before I/O and retries with a fresh full allowance.
-            if native_allowance < 12 * sides || work.metadata_rows + 4 > metadata_rows_allowance {
-                return Ok(meter.step(Outcome::Deferred, work, None));
+            let mut value_meter = ValueMeter::default();
+            let candidate_value = native_class_values::resolve(
+                &self.connection,
+                repair,
+                candidate.class,
+                &mut work,
+                &mut value_meter,
+            )?;
+            meter.class_sql_vm_steps += value_meter.vm;
+            if !candidate.matches(&candidate_value)? {
+                return Ok(meter.step(Outcome::Conflict, work, None));
             }
-            let left_allowance = if sides == 2 {
-                native_allowance / 2
+            observed_candidate = Some((candidate.class, candidate_value.clone()));
+            let result = if let Some(compare) = cursor.compare.as_mut() {
+                let (left_record, left_field, right_record, right_field) =
+                    match (&value, &candidate_value) {
+                        (
+                            TextValue::Whole {
+                                record: l,
+                                field: lf,
+                                ..
+                            },
+                            TextValue::Whole {
+                                record: r,
+                                field: rf,
+                                ..
+                            },
+                        ) => (*l, lf, *r, rf),
+                        _ => {
+                            return Err(io::Error::other(
+                                "whole identity cursor changed reader kind",
+                            ));
+                        }
+                    };
+                let (left_start, left_end) = absolute(left_record, left_field)?;
+                let (right_start, right_end) = absolute(right_record, right_field)?;
+                if !compare.left.matches_bounds(left_start, left_end)
+                    || !compare.right.matches_bounds(right_start, right_end)
+                {
+                    return Ok(meter.step(Outcome::Conflict, work, None));
+                }
+                let sides = usize::from(compare.left.at < left_end)
+                    + usize::from(compare.right.at < right_end);
+                if native_allowance < 12 * sides
+                    || work.metadata_rows + 32 > metadata_rows_allowance
+                {
+                    return Ok(meter.step(Outcome::Deferred, work, None));
+                }
+                let left_allowance = if sides == 2 {
+                    native_allowance / 2
+                } else {
+                    native_allowance
+                };
+                let left = part(
+                    records,
+                    repair,
+                    compare.left.at,
+                    left_end,
+                    &mut work,
+                    left_allowance,
+                )?;
+                let remaining = native_allowance.saturating_sub(work.native_bytes);
+                let right = part(
+                    records,
+                    repair,
+                    compare.right.at,
+                    right_end,
+                    &mut work,
+                    remaining,
+                )?;
+                compare.step(
+                    left.as_ref().map_or(&[][..], |part| part.bytes.as_ref()),
+                    right.as_ref().map_or(&[][..], |part| part.bytes.as_ref()),
+                    32 * 1024,
+                )?;
+                compare.result
             } else {
-                native_allowance
+                if native_allowance < 292 || work.metadata_rows + 36 > metadata_rows_allowance {
+                    return Ok(meter.step(Outcome::Deferred, work, None));
+                }
+                native_views::anchor_record(records, repair, value.record(), &mut work)?;
+                if candidate_value.record() != value.record() {
+                    native_views::anchor_record(
+                        records,
+                        repair,
+                        candidate_value.record(),
+                        &mut work,
+                    )?;
+                }
+                let compare = cursor
+                    .generic
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("native generic comparison disappeared"))?;
+                let mut value_meter = ValueMeter::default();
+                let remaining = native_allowance.saturating_sub(work.native_bytes);
+                compare.step(
+                    &self.connection,
+                    repair,
+                    &value,
+                    repair,
+                    &candidate_value,
+                    records,
+                    records,
+                    remaining,
+                    metadata_rows_allowance.saturating_sub(work.metadata_rows + 32),
+                    &mut work,
+                    &mut value_meter,
+                )?;
+                meter.class_sql_vm_steps += value_meter.vm;
+                compare.result.map(|result| {
+                    if result == NativeTextOrder::Equal {
+                        Comparison::Equal
+                    } else {
+                        Comparison::Different
+                    }
+                })
             };
-            let left = part(
-                records,
-                repair,
-                compare.left.at,
-                left_end,
-                &mut work,
-                left_allowance,
-            )?;
-            let remaining = native_allowance.saturating_sub(work.native_bytes);
-            let right = part(
-                records,
-                repair,
-                compare.right.at,
-                right_end,
-                &mut work,
-                remaining,
-            )?;
-            compare.step(
-                left.as_ref().map_or(&[][..], |part| part.bytes.as_ref()),
-                right.as_ref().map_or(&[][..], |part| part.bytes.as_ref()),
-                32 * 1024,
-            )?;
-            if let Some(result) = compare.result {
+            if let Some(result) = result {
                 let candidate = cursor
                     .candidate
                     .take()
                     .ok_or_else(|| io::Error::other("native identity candidate disappeared"))?;
                 cursor.compare = None;
+                cursor.generic = None;
                 if result == Comparison::Equal {
                     if in_newer_range {
                         let finished = cursor
@@ -734,7 +1014,8 @@ impl NativeStore {
             }
         }
         if work.range_requests == 0 {
-            if work.metadata_rows + 4 > metadata_rows_allowance {
+            let reserve = if cached { 20 } else { 32 };
+            if work.metadata_rows + reserve > metadata_rows_allowance {
                 return Ok(meter.step(Outcome::Deferred, work, None));
             }
             meter.fence_checks += 1;
@@ -756,28 +1037,55 @@ impl NativeStore {
         meter.fence_checks += 1;
         check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
         meter.fence_checks += 2;
-        let mut current_query = tx
-            .prepare("SELECT revision FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3")
-            .map_err(io::Error::other)?;
-        let current_result = current_query
-            .query_row(
-                params![
-                    repair.original.as_slice(),
-                    seq_u64(repair.cursor.record_at)?,
-                    seq_u64(ordinal)?
-                ],
-                |row| row.get(0),
-            )
-            .optional();
-        meter.statement(&current_query);
-        drop(current_query);
-        let current: Option<i64> = current_result.map_err(io::Error::other)?;
+        let current = identity_revision(&tx, repair, &key, &mut meter)?;
         work.metadata_rows += 1;
         work.metadata_bytes += 8;
         let current_generation = class_generation(&tx, &repair.original, &mut work, &mut meter)?;
         if current != revision || current_generation != generation {
             return Ok(meter.step(Outcome::Conflict, work, None));
         }
+        let mut value_meter = ValueMeter::default();
+        if !value.current(&tx, repair, &mut work, &mut value_meter)?
+            || !closure(&tx, job.id).map_err(io::Error::other)?
+        {
+            return Ok(meter.step(Outcome::Conflict, work, None));
+        }
+        if let Some((class, expected)) = observed_candidate.as_ref() {
+            let current =
+                native_class_values::resolve(&tx, repair, *class, &mut work, &mut value_meter)?;
+            if serde_json::to_vec(&current).map_err(io::Error::other)?
+                != serde_json::to_vec(expected).map_err(io::Error::other)?
+            {
+                return Ok(meter.step(Outcome::Conflict, work, None));
+            }
+        }
+        let qualified_class = if cursor.complete && !allocate {
+            cursor
+                .class
+                .map(|class| {
+                    native_class_values::resolve_with_backfill(
+                        &tx,
+                        repair,
+                        class,
+                        &mut work,
+                        &mut value_meter,
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if !cached || qualified_class.as_ref().is_some_and(|(_, needed)| *needed) {
+            native_class_values::establish(
+                &tx,
+                &repair.original,
+                generation,
+                &mut work,
+                &mut value_meter,
+            )?;
+            native_class_values::backfill(&tx, &repair.original, &mut work, &mut value_meter)?;
+        }
+        meter.class_sql_vm_steps += value_meter.vm;
         if allocate {
             if cursor.range.is_some()
                 || cursor.match_class.is_some()
@@ -795,8 +1103,8 @@ impl NativeStore {
             let result = insert.execute(params![
                 repair.original.as_slice(),
                 class_id,
-                seq_u64(repair.cursor.record_at)?,
-                seq_u64(field.ordinal)?,
+                seq_u64(value.record())?,
+                value.legacy_ordinal()?,
                 receipt.sha256.as_slice(),
                 seq_u64(receipt.decoded_bytes)?
             ]);
@@ -804,32 +1112,24 @@ impl NativeStore {
             result.map_err(io::Error::other)?;
             work.metadata_rows += 1;
             work.metadata_bytes += 64;
+            let mut value_meter = ValueMeter::default();
+            native_class_values::insert(
+                &tx,
+                &repair.original,
+                class,
+                &value,
+                &mut work,
+                &mut value_meter,
+            )?;
+            meter.class_sql_vm_steps += value_meter.vm;
             cursor.class = Some(class);
         }
         let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
         meter.serialized_cursor_bytes = state.len();
         if !cached {
-            let mut update = tx
-                .prepare("INSERT INTO native_original_identities VALUES(?1,?2,?3,0,?4) ON CONFLICT(original,record_offset,ordinal) DO UPDATE SET cursor=excluded.cursor,revision=revision+1")
-                .map_err(io::Error::other)?;
-            let result = update.execute(params![
-                repair.original.as_slice(),
-                seq_u64(repair.cursor.record_at)?,
-                seq_u64(ordinal)?,
-                state
-            ]);
-            meter.statement(&update);
-            result.map_err(io::Error::other)?;
+            save_identity(&tx, repair, &key, &state, &mut meter)?;
             work.metadata_rows += 1;
             work.metadata_bytes += meter.serialized_cursor_bytes;
-        }
-        if work.metadata_rows > metadata_rows_allowance
-            || work.metadata_bytes > BYTES
-            || work.native_bytes > native_allowance
-        {
-            return Err(io::Error::other(
-                "native identity step exceeds bounded work",
-            ));
         }
         let text = if cursor.complete && !legacy_complete {
             let class = cursor
@@ -843,10 +1143,24 @@ impl NativeStore {
                     "qualified identity class is outside its Original",
                 ));
             }
+            if qualified_class.is_none() {
+                let mut value_meter = ValueMeter::default();
+                let _ =
+                    native_class_values::resolve(&tx, repair, class, &mut work, &mut value_meter)?;
+                meter.class_sql_vm_steps += value_meter.vm;
+            }
             Some(OriginalText::qualified(repair.original, class))
         } else {
             None
         };
+        if work.metadata_rows > metadata_rows_allowance
+            || work.metadata_bytes > BYTES
+            || work.native_bytes > native_allowance
+        {
+            return Err(io::Error::other(
+                "native identity step exceeds bounded work",
+            ));
+        }
         if cancelled() {
             return Ok(meter.step(Outcome::Deferred, work, None));
         }
