@@ -583,26 +583,26 @@ pub(super) fn has_rows(db: &Connection, obsolete: &[u8]) -> io::Result<bool> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct Fixture {
+    pub(in super::super) struct Fixture {
         root: PathBuf,
-        options: crate::Options,
-        store: NativeStore,
-        job: Job,
-        witnesses: Vec<SourceWitness>,
+        pub(in super::super) options: crate::Options,
+        pub(in super::super) store: NativeStore,
+        pub(in super::super) job: Job,
+        pub(in super::super) witnesses: Vec<SourceWitness>,
         rows: Vec<CatalogRow>,
-        sources: Arc<crate::query_source::Sources>,
-        bytes: Vec<Vec<u8>>,
-        repairs: Vec<Repair>,
+        pub(in super::super) sources: Arc<crate::query_source::Sources>,
+        pub(in super::super) bytes: Vec<Vec<u8>>,
+        pub(in super::super) repairs: Vec<Repair>,
         texts: Vec<Option<OriginalText>>,
     }
     impl Fixture {
-        fn new(encoded: &[String]) -> Self {
+        pub(in super::super) fn new(encoded: &[String]) -> Self {
             Self::with_overlapping_roots(encoded, false)
         }
         fn with_overlapping_roots(encoded: &[String], overlap: bool) -> Self {
@@ -934,7 +934,7 @@ mod tests {
         serde_json::to_string(value).unwrap()
     }
 
-    struct Provider {
+    pub(in super::super) struct Provider {
         source: crate::SessionSourceRef,
         bytes: Arc<[u8]>,
         calls: AtomicUsize,
@@ -943,7 +943,13 @@ mod tests {
         on_read: Box<dyn Fn(usize) + Send + Sync>,
     }
     impl Provider {
-        fn new(
+        pub(in super::super) fn observed(&self) -> (usize, usize) {
+            (
+                self.calls.load(Ordering::SeqCst),
+                self.read_bytes.load(Ordering::SeqCst),
+            )
+        }
+        pub(in super::super) fn new(
             source: crate::SessionSourceRef,
             bytes: &[u8],
             change_generation_after: Option<usize>,

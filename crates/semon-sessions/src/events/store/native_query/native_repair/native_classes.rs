@@ -209,6 +209,18 @@ fn field_at(
     ))
 }
 
+pub(super) fn qualified_field_at(
+    db: &Connection,
+    repair: &Repair,
+    record: u64,
+    ordinal: u64,
+    work: &mut RepairWork,
+) -> io::Result<(OriginalField, Receipt, i32)> {
+    let mut meter = IdentityMeter::default();
+    let (field, receipt) = field_at(db, repair, record, ordinal, work, &mut meter)?;
+    Ok((field, receipt, meter.class_sql_vm_steps))
+}
+
 /// Load one exact-fingerprint candidate from a bounded class interval. The
 /// descending indexed seek preserves the old latest-first behavior without a
 /// catalog materialization, COUNT, digest-only equality, or whole scan.
