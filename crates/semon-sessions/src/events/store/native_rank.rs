@@ -1348,18 +1348,10 @@ impl NativeStore {
         cancelled: &dyn Fn() -> bool,
         operation: impl FnOnce(&Connection, i64) -> io::Result<T>,
     ) -> io::Result<(Outcome, Option<T>, u64)> {
-        let steps = Arc::new(AtomicU64::new(0));
-        let observed = Arc::clone(&steps);
-        self.connection.progress_handler(
-            1,
-            Some(move || {
-                observed.fetch_add(1, Ordering::Relaxed);
-                false
-            }),
-        );
+        let measurement = native_query::vm_meter::begin(&self.connection);
         let result = self.rank_transaction_body(job, closure, cancelled, operation);
-        self.connection.progress_handler(0, None::<fn() -> bool>);
-        result.map(|(outcome, value)| (outcome, value, steps.load(Ordering::Relaxed)))
+        let steps = measurement.finish(&self.connection);
+        result.map(|(outcome, value)| (outcome, value, steps))
     }
 
     fn rank_transaction_body<T>(

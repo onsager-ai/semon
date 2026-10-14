@@ -12,6 +12,7 @@ pub(crate) mod physical_profile;
 pub(crate) mod point_publication;
 pub(crate) mod source_candidate;
 pub(crate) mod source_roots;
+pub(in crate::events::store) mod vm_meter;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
 pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
 
