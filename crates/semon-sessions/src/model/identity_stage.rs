@@ -3,6 +3,50 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub(crate) mod physical;
+
+const BRIDGE_PREFIX: &str = "bridge:";
+fn atom_prefix(kind: &str) -> Result<&'static str, &'static str> {
+    match kind {
+        "session" | "continued" => Ok(""),
+        "bridge" => Ok(BRIDGE_PREFIX),
+        _ => Err("unsupported native identity link kind"),
+    }
+}
+
+/// The same raw-namespace emitter, for native producers that already own a
+/// parsed string or an equivalent qualified decoded stream. Parts may split
+/// UTF-8 scalars; raw UTF-8 byte order is exactly native String order.
+pub(crate) fn link_atom_part(
+    kind: &str,
+    native: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), &'static str> {
+    if limit == 0 || limit > 64 * 1024 {
+        return Err("invalid native atom part budget");
+    }
+    let prefix = atom_prefix(kind)?.as_bytes();
+    let length = prefix
+        .len()
+        .checked_add(native.len())
+        .ok_or("native atom length overflow")?;
+    if offset > length {
+        return Err("native atom offset exceeds length");
+    }
+    let end = offset.saturating_add(limit).min(length);
+    let mut part = Vec::with_capacity(end - offset);
+    if offset < prefix.len() {
+        part.extend_from_slice(&prefix[offset..end.min(prefix.len())]);
+    }
+    if end > prefix.len() {
+        part.extend_from_slice(
+            &native.as_bytes()[offset.saturating_sub(prefix.len())..end - prefix.len()],
+        );
+    }
+    Ok((part, end == length))
+}
+
 /// The native file comparator is shared with metadata-only physical identity.
 /// Its activity minimum is distinct from the first regular-event time seed.
 pub(crate) fn source_order(
@@ -20,10 +64,9 @@ pub(crate) fn link_atom<'a>(
     kind: &str,
     native: &'a str,
 ) -> Result<std::borrow::Cow<'a, str>, &'static str> {
-    match kind {
-        "session" | "continued" => Ok(std::borrow::Cow::Borrowed(native)),
-        "bridge" => Ok(std::borrow::Cow::Owned(format!("bridge:{native}"))),
-        _ => Err("unsupported native identity link kind"),
+    match atom_prefix(kind)? {
+        "" => Ok(std::borrow::Cow::Borrowed(native)),
+        prefix => Ok(std::borrow::Cow::Owned(format!("{prefix}{native}"))),
     }
 }
 
@@ -145,6 +188,26 @@ impl KeyCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_atom_emission_is_the_complete_native_raw_namespace() {
+        let native = format!("{}🦀end", "x".repeat(65531));
+        for kind in ["session", "continued", "bridge"] {
+            let expected = link_atom(kind, &native).unwrap();
+            let mut actual = Vec::new();
+            let mut offset = 0;
+            loop {
+                let (part, last) = link_atom_part(kind, &native, offset, 65536).unwrap();
+                assert!(part.len() <= 65536);
+                offset += part.len();
+                actual.extend(part);
+                if last {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected.as_bytes());
+        }
+    }
 
     #[test]
     fn native_star_atoms_share_literal_and_phantom_namespace() {

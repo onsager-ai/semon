@@ -8,6 +8,7 @@ use crate::model::{
 
 pub(super) mod candidate_delta;
 mod native_repair;
+pub(crate) mod physical_profile;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
 pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
 
