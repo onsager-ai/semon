@@ -1612,7 +1612,8 @@ mod tests {
             // Unscoped control ownership requires qualified absence in every
             // configured source, including the unchanged first machine.
             for machine in ["first", "second"] {
-                let page = core.respond("GET", "/api/sessions", &format!("machine={machine}"), None);
+                let page =
+                    core.respond("GET", "/api/sessions", &format!("machine={machine}"), None);
                 assert!(
                     matches!(page.status, 200 | 503),
                     "unexpected native publication response: {}",
