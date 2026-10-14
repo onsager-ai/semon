@@ -8,6 +8,7 @@ const BATCH: usize = 30;
 // optional entries belong to this same private schema owner, but may not yet
 // exist in a supported preceding private schema. No source-controlled names.
 const TABLES: &[(&str, &str, bool)] = &[
+    ("native_original_text_epochs", "record_offset", true),
     ("native_original_events", "sequence", false),
     ("native_original_pending", "identity", false),
     ("native_original_tool_ids", "identity,sequence", false),
@@ -65,7 +66,6 @@ const TABLES: &[(&str, &str, bool)] = &[
     ("native_original_classes", "class", false),
     ("native_original_tokens", "record_offset,ordinal", false),
     ("native_original_fields", "record_offset,ordinal", false),
-    ("native_original_text_epochs", "record_offset", true),
     ("native_original_nodes", "record_offset,address", false),
     ("native_original_numbers", "record_offset,address", false),
     ("native_original_records", "record_offset", false),

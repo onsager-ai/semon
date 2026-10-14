@@ -23,6 +23,30 @@ fn result(
         matches,
     }
 }
+
+// The caller owns related-owner/membership semantics. Always run its callback
+// before the native seals: callbacks may themselves replace native evidence.
+fn fences(
+    db: &Connection,
+    options: &crate::Options,
+    job: &Job,
+    witness: &SourceWitness,
+    repair: &Repair,
+    closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+) -> io::Result<bool> {
+    Ok(closure(db, job.id).map_err(io::Error::other)?
+        && crate::native_evidence::query_runtime_generation(options)? == job.spec.runtime
+        && job_current(db, job).map_err(io::Error::other)?
+        && check_source(db, witness).map_err(io::Error::other)?
+        && repair_current(db, repair).map_err(io::Error::other)?
+        && admitted_original(db, job, witness).map_err(io::Error::other)?
+        && repair.cursor.phase == Phase::FoldRecord
+        && fields_ready(db, repair).map_err(io::Error::other)?
+        && record_status(db, repair)
+            .map_err(io::Error::other)?
+            .as_deref()
+            == Some("lexed"))
+}
 impl NativeStore {
     pub(crate) fn original_text_literal_step(
         &mut self,
@@ -32,6 +56,7 @@ impl NativeStore {
         text: &OriginalText,
         literal: &'static str,
         records: &crate::query_source::Records<'_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<native_harness::LiteralStep> {
         self.original_text_literal_step_with_budget(
@@ -41,6 +66,7 @@ impl NativeStore {
             text,
             literal,
             records,
+            closure,
             cancelled,
             crate::SESSION_SOURCE_CHUNK_MAX,
             ROWS,
@@ -54,6 +80,7 @@ impl NativeStore {
         text: &OriginalText,
         literal: &'static str,
         records: &crate::query_source::Records<'_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
         native_allowance: usize,
         metadata_allowance: usize,
@@ -89,7 +116,9 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        if !fences(&tx, &self.options, job, witness, repair, closure)? {
+            return Ok(result(Outcome::Conflict, work, None));
+        }
         let value =
             native_class_values::resolve(&tx, repair, text.identity(), &mut work, &mut meter)?;
         let mut query=tx.prepare("SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_class_literals WHERE original=?1 AND class=?2 AND literal=?3").map_err(io::Error::other)?;
@@ -155,10 +184,20 @@ impl NativeStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io::Error::other)?;
-        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
-        let current_value =
+        if !fences(&tx, &self.options, job, witness, repair, closure)? {
+            return Ok(result(Outcome::Conflict, work, None));
+        }
+        if !value.current(&tx, repair, &mut work, &mut meter)? {
+            return Ok(result(Outcome::Conflict, work, None));
+        }
+        // Cached answers take this path too. The final callback precedes the
+        // owned value/epoch and cursor-CAS checks, and never follows them.
+        if !fences(&tx, &self.options, job, witness, repair, closure)? {
+            return Ok(result(Outcome::Conflict, work, None));
+        }
+        let final_value =
             native_class_values::resolve(&tx, repair, text.identity(), &mut work, &mut meter)?;
-        if !same(&value, &current_value)? {
+        if !same(&value, &final_value)? {
             return Ok(result(Outcome::Conflict, work, None));
         }
         let mut query=tx.prepare("SELECT revision FROM native_original_class_literals WHERE original=?1 AND class=?2 AND literal=?3").map_err(io::Error::other)?;
