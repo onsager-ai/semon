@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
+pub(crate) mod native_event;
 pub(crate) mod native_producer;
 pub(crate) mod store;
 pub(crate) use store::open_regular;
