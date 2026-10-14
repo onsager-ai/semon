@@ -10,7 +10,7 @@ pub(crate) const BYTES: usize = 1024 * 1024;
 const STATE_BYTES: usize = 64 * 1024;
 // Rebuildable private Query metadata is versioned independently from the
 // public native Event Index schema28 and the native parser/custody contract.
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 const SCHEMA_KEY: &str = "native_query_schema";
 
 pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
@@ -3653,6 +3653,15 @@ mod tests {
 
     #[test]
     fn native_query_private_five_reopen_installs_original_schema_without_rebinding_evidence() {
+        private_original_schema_reopen(5);
+    }
+
+    #[test]
+    fn native_query_private_seven_reopen_preserves_original_rows_and_installs_new_tables() {
+        private_original_schema_reopen(7);
+    }
+
+    fn private_original_schema_reopen(previous_version: i64) {
         let mut fixture = Fixture::new(0);
         let source = fixture.source();
         let session_key = fixture.row.key.clone();
@@ -3685,6 +3694,26 @@ mod tests {
                 )
                 .unwrap();
         }
+        if previous_version == 7 {
+            // Preserve every preceding Original table's partial staging rows.
+            // Reopening installs schema, without decoding or qualifying them.
+            fixture
+                .store
+                .connection
+                .execute_batch(
+                    "INSERT INTO native_original_repairs VALUES(X'07',24,'{}',3,'{}');
+                 INSERT INTO native_original_records VALUES(X'07',0,8,'lexed');
+                 INSERT INTO native_original_tokens VALUES(X'07',0,0,'{}');
+                 INSERT INTO native_original_nodes VALUES(X'07',0,0,NULL,NULL,NULL,'{}',8);
+                 INSERT INTO native_original_fields VALUES(X'07',0,1,1,2,0,1,'{}','{}',NULL,NULL);",
+                )
+                .unwrap();
+        }
+        let job = fixture.admitted();
+        let source_header = format!(
+            "{:?}",
+            fixture.store.source_header(&fixture.source()).unwrap()
+        );
         let retained = |db: &Connection| {
             let history: String = db
                 .query_row(
@@ -3717,18 +3746,39 @@ mod tests {
                 .store
                 .connection
                 .execute_batch(
-                    "DROP TABLE native_original_fields; DROP TABLE native_original_nodes;
-                 DROP TABLE native_original_records; DROP TABLE native_original_tokens;
-                 DROP TABLE native_original_repairs;
-                 UPDATE meta SET value='5' WHERE key='native_query_schema';",
+                    "DROP TABLE native_original_numbers; DROP TABLE native_original_members;
+                 DROP TABLE native_original_cleanup;",
                 )
                 .unwrap();
-            assert_eq!(schema_version(&fixture.store.connection).unwrap(), Some(5));
+            if previous_version == 5 {
+                fixture
+                    .store
+                    .connection
+                    .execute_batch(
+                        "DROP TABLE native_original_fields; DROP TABLE native_original_nodes;
+                 DROP TABLE native_original_records; DROP TABLE native_original_tokens;
+                 DROP TABLE native_original_repairs;",
+                    )
+                    .unwrap();
+            }
+            fixture
+                .store
+                .connection
+                .execute(
+                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    params![SCHEMA_KEY, previous_version.to_string()],
+                )
+                .unwrap();
+            assert_eq!(
+                schema_version(&fixture.store.connection).unwrap(),
+                Some(previous_version)
+            );
             assert_eq!(
                 versions(&fixture.store.connection).unwrap(),
                 (28, Some(super::super::super::CACHE_VERSION))
             );
-            assert_eq!(
+            if previous_version == 5 {
+                assert_eq!(
                 fixture
                     .store
                     .connection
@@ -3739,7 +3789,9 @@ mod tests {
                     )
                     .unwrap(),
                 0
-            );
+                );
+            }
+            let snapshot = crate::native_timing::cleanup_tests::snapshot(&fixture.store.connection);
             fixture.store = if via_native_store {
                 NativeStore::open(&fixture.options).unwrap()
             } else {
@@ -3768,11 +3820,15 @@ mod tests {
                 ("native_original_records", "table"),
                 ("native_original_nodes", "table"),
                 ("native_original_fields", "table"),
+                ("native_original_numbers", "table"),
+                ("native_original_members", "table"),
+                ("native_original_cleanup", "table"),
                 ("native_original_node_parent", "index"),
                 ("native_original_node_key", "index"),
                 ("native_original_node_element", "index"),
                 ("native_original_field_candidate", "index"),
                 ("native_original_field_pending", "index"),
+                ("native_original_number_pending", "index"),
             ] {
                 assert!(
                     fixture
@@ -3787,6 +3843,59 @@ mod tests {
                     "missing Original {kind} {name}"
                 );
             }
+            let added = if previous_version == 5 {
+                vec![
+                    "native_original_repairs",
+                    "native_original_tokens",
+                    "native_original_records",
+                    "native_original_nodes",
+                    "native_original_fields",
+                    "native_original_numbers",
+                    "native_original_members",
+                    "native_original_cleanup",
+                ]
+            } else {
+                vec![
+                    "native_original_numbers",
+                    "native_original_members",
+                    "native_original_cleanup",
+                ]
+            };
+            let mut reopened =
+                crate::native_timing::cleanup_tests::snapshot(&fixture.store.connection);
+            for table in &added {
+                assert_eq!(reopened.remove(&format!("main.{table}")), Some(Vec::new()));
+            }
+            reopened
+                .get_mut("main.sqlite_schema")
+                .unwrap()
+                .retain(|row| {
+                    !added
+                        .iter()
+                        .any(|table| row[2] == rusqlite::types::Value::Text((*table).into()))
+                });
+            for row in reopened.get_mut("main.meta").unwrap() {
+                if row[0] == rusqlite::types::Value::Text(SCHEMA_KEY.into()) {
+                    row[1] = rusqlite::types::Value::Text(previous_version.to_string());
+                }
+            }
+            assert_eq!(
+                reopened, snapshot,
+                "private migration changed existing MAIN/TEMP rows or schema"
+            );
+            assert!(fixture.store.recheck(&job).unwrap());
+            let reloaded = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            assert_eq!(
+                (reloaded.id, reloaded.revision, reloaded.cursor),
+                (job.id, job.revision, job.cursor.clone())
+            );
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    fixture.store.source_header(&fixture.source()).unwrap()
+                ),
+                source_header
+            );
             assert_eq!(retained(&fixture.store.connection), before);
             assert_eq!(fixture.source().ledger, source.ledger);
             assert_eq!(
