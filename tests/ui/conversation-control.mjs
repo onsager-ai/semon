@@ -8,12 +8,13 @@ assert.ok(sessionId, 'Native control qualification requires the launched session
 fs.mkdirSync(out, { recursive: true });
 const browser = await chromium.launch();
 const errors = [];
+let page;
 try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   await context.addCookies([
     { name: 'semon_session', value: token, url: base, httpOnly: true, sameSite: 'Strict' },
   ]);
-  const page = await context.newPage();
+  page = await context.newPage();
   page.on('pageerror', (e) => errors.push(String(e)));
   if (mode === 'bootstrap') {
     await page.goto(base);
@@ -55,6 +56,7 @@ try {
   } else {
     await page.goto(base + '/s/codex/' + encodeURIComponent(sessionId) + '?machine=local');
     await page.locator('section[aria-label="Transcript"]').waitFor();
+    await page.getByRole('button', { name: /^(Open Composer|Composer;)/ }).click();
     const panel = page.getByRole('region', { name: 'Conversation controls' });
     await panel
       .getByRole('button', { name: 'Deny', exact: true })
@@ -78,6 +80,7 @@ try {
       .first()
       .click();
     await page.locator('section[aria-label="Transcript"]').waitFor();
+    await page.getByRole('button', { name: /^(Open Composer|Composer;)/ }).click();
     await panel
       .getByRole('button', { name: 'Deny', exact: true })
       .filter({ visible: true })
@@ -99,12 +102,20 @@ try {
         ),
     );
     await page.reload();
+    await page.getByRole('button', { name: /^(Open Composer|Composer;)/ }).click();
     await panel.getByRole('textbox', { name: 'Message to Codex', exact: true }).waitFor();
     assert.deepEqual(errors, []);
     console.log(
       'Native patch denial through typed viewer; responsive screenshots; cookie refresh; resolved cards cannot answer',
     );
   }
+} catch (error) {
+  if (page) {
+    fs.writeFileSync(out + '/failure.html', await page.content());
+    fs.writeFileSync(out + '/page-errors.json', JSON.stringify(errors, null, 2));
+    await page.screenshot({ path: out + '/failure.png', fullPage: true });
+  }
+  throw error;
 } finally {
   await browser.close();
 }
