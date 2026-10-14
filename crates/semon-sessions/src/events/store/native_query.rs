@@ -51,6 +51,8 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(super::native_rank::ORTHOGONAL_SCHEMA)?;
     db.execute_batch(native_repair::SCHEMA)?;
     db.execute_batch(native_repair::COMPARE_SCHEMA)?;
+    db.execute_batch(native_repair::TEXT_VIEW_SCHEMA)?;
+    db.execute_batch(native_repair::OBJECT_SCHEMA)?;
     db.execute_batch(candidate_delta::SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -5682,6 +5684,19 @@ mod tests {
             "native_original_claude_usage_step",
             "native_original_claude_usage",
             "native_original_claude_usage_records",
+            "native_original_text_epochs",
+            "native_original_text_views",
+            "native_original_text_parts",
+            "native_original_view_identities",
+            "native_original_text_boundaries",
+            "native_original_class_values",
+            "native_original_class_literals",
+            "native_original_text_policy",
+            "native_original_object_epochs",
+            "native_original_record_key_maps",
+            "native_original_record_keys",
+            "native_original_objects",
+            "native_original_object_nodes",
             "native_rank_candidate_nodes",
             "native_rank_candidate_bindings",
             "native_rank_candidate_roots",
@@ -5881,6 +5896,19 @@ mod tests {
                 ("native_original_claude_usage_step", "table"),
                 ("native_original_claude_usage", "table"),
                 ("native_original_claude_usage_records", "table"),
+                ("native_original_text_epochs", "table"),
+                ("native_original_text_views", "table"),
+                ("native_original_text_parts", "table"),
+                ("native_original_view_identities", "table"),
+                ("native_original_text_boundaries", "table"),
+                ("native_original_class_values", "table"),
+                ("native_original_class_literals", "table"),
+                ("native_original_text_policy", "table"),
+                ("native_original_object_epochs", "table"),
+                ("native_original_record_key_maps", "table"),
+                ("native_original_record_keys", "table"),
+                ("native_original_objects", "table"),
+                ("native_original_object_nodes", "table"),
                 ("native_rank_candidate_nodes", "table"),
                 ("native_rank_candidate_bindings", "table"),
                 ("native_rank_candidate_roots", "table"),
