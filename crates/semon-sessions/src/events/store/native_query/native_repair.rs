@@ -29,7 +29,8 @@ mod native_object;
 mod native_retirement;
 pub(super) use native_object::SCHEMA as OBJECT_SCHEMA;
 pub(crate) use native_object::{
-    ObjectEntry, ObjectPageCursor, ObjectPageStep, ObjectStep, QualifiedObject,
+    ObjectEntry, ObjectNativeCursor, ObjectNativeStep, ObjectPageCursor, ObjectPageStep,
+    ObjectStep, QualifiedObject,
 };
 mod native_values;
 mod native_views;
