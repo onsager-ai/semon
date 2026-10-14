@@ -38,17 +38,47 @@ pub(crate) struct Entry {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EventTimeCursor {
-    time: i64,
+    first: Option<i64>,
+    cursor: SourceTimeCursor,
 }
 impl EventTimeCursor {
     pub(crate) fn new(first: Option<i64>) -> Self {
         Self {
-            time: first.unwrap_or(i64::MIN),
+            first,
+            cursor: SourceTimeCursor::default(),
         }
     }
     pub(crate) fn push(&mut self, time: Option<i64>) -> i64 {
-        self.time = time.unwrap_or(self.time);
-        self.time
+        self.cursor.push(time).resolve(self.first)
+    }
+}
+
+/// Untimed prefix facts keep a symbolic seed. Appending the first timed event
+/// changes the source scalar, while every previously stored fact stays valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SourceTime {
+    BeforeFirst,
+    Observed(i64),
+}
+impl SourceTime {
+    pub(crate) fn resolve(self, first: Option<i64>) -> i64 {
+        match self {
+            Self::BeforeFirst => first.unwrap_or(i64::MIN),
+            Self::Observed(time) => time,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceTimeCursor {
+    latest: Option<i64>,
+}
+impl SourceTimeCursor {
+    pub(crate) fn push(&mut self, time: Option<i64>) -> SourceTime {
+        self.latest = time.or(self.latest);
+        self.latest
+            .map_or(SourceTime::BeforeFirst, SourceTime::Observed)
     }
 }
 
@@ -294,6 +324,21 @@ pub(crate) fn signal_kind(signal: &events::Signal, tool: Option<String>) -> Sign
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_symbolic_time_prefix_survives_first_timestamp_append() {
+        let mut cursor = SourceTimeCursor::default();
+        let prefix = [cursor.push(None), cursor.push(None)];
+        let before = serde_json::to_value(prefix).unwrap();
+        let mut cursor: SourceTimeCursor =
+            serde_json::from_value(serde_json::to_value(cursor).unwrap()).unwrap();
+        assert!(prefix.iter().all(|time| time.resolve(None) == i64::MIN));
+        assert_eq!(cursor.push(Some(40)), SourceTime::Observed(40));
+        assert_eq!(cursor.push(None), SourceTime::Observed(40));
+        assert_eq!(cursor.push(Some(10)), SourceTime::Observed(10));
+        assert!(prefix.iter().all(|time| time.resolve(Some(40)) == 40));
+        assert_eq!(serde_json::to_value(prefix).unwrap(), before);
+    }
 
     #[test]
     fn native_event_time_cursor_preserves_untimed_prefix_across_restart() {

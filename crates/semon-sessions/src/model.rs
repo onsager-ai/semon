@@ -2058,9 +2058,10 @@ impl<'a> Builder<'a> {
             for (order, file) in session.files.iter().enumerate() {
                 let events = &self.files[*file].summary.events;
                 // Events before a file's first timestamp take that timestamp.
-                let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
+                let mut time =
+                    native_stage::EventTimeCursor::new(events.iter().find_map(|event| event.t));
                 for (at, event) in events.iter().enumerate() {
-                    time = event.t.unwrap_or(time);
+                    let time = time.push(event.t);
                     if copied.contains(&(*file, at)) {
                         continue;
                     }
