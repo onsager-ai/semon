@@ -39,6 +39,16 @@ impl Stream {
     pub(crate) fn complete(&self) -> bool {
         self.at == self.end && self.skip == 0
     }
+    /// A cached continuation must retain the exact qualified descriptor bounds.
+    /// This also validates state when no decoder step will run for a receipt.
+    pub(crate) fn matches_bounds(&self, start: u64, end: u64) -> bool {
+        self.start == start
+            && self.end == end
+            && start <= self.at
+            && self.at <= end
+            && self.skip <= 3
+            && (self.at != end || self.skip == 0)
+    }
     /// Input starts at at and contains only descriptor content, excluding its
     /// quotes. At most max decoded bytes become request-local output, even
     /// when a native identifier or escaped key has arbitrary length.
@@ -243,6 +253,19 @@ mod tests {
     fn encoded(text: &str) -> Vec<u8> {
         let bytes = serde_json::to_vec(text).unwrap();
         bytes[1..bytes.len() - 1].to_vec()
+    }
+    #[test]
+    fn cached_stream_bounds_refuse_truncated_descriptors_and_invalid_skip() {
+        let stream = Stream::new(11, 29).unwrap();
+        assert!(stream.matches_bounds(11, 29));
+        let mut value = serde_json::to_value(&stream).unwrap();
+        value["end"] = 12.into();
+        let short: Stream = serde_json::from_value(value.clone()).unwrap();
+        assert!(!short.matches_bounds(11, 29));
+        value["end"] = 29.into();
+        value["skip"] = 4.into();
+        let invalid: Stream = serde_json::from_value(value).unwrap();
+        assert!(!invalid.matches_bounds(11, 29));
     }
     #[test]
     fn fingerprint_resumes_at_byte_boundaries_without_decoded_tail() {
