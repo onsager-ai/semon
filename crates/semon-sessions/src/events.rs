@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
+pub(crate) mod native_producer;
 pub(crate) mod store;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
@@ -3699,50 +3700,23 @@ fn result_flags(name: Option<&str>, result: Option<&Value>) -> (u8, Option<Strin
 }
 
 fn resolve(summary: &mut FileIndex, id: &str, reply: impl FnOnce(Option<&str>) -> Reply) {
-    let Some(index) = summary.pending.remove(id) else {
-        return;
-    };
-    if let Some(event) = summary.event_mut(index)
-        && event.k == Kind::Tool
-    {
-        event.r = Some(reply(event.n.as_deref()));
-        event.code_mode_open = false;
-    }
+    native_producer::complete(native_producer::resolve(summary, id, reply));
 }
 
 /// Stops unresolved code-mode calls from claiming items in a later turn.
 fn close_code_mode(summary: &mut FileIndex) {
-    for index in summary.pending.values().copied().collect::<Vec<_>>() {
-        if let Some(event) = summary.event_mut(index)
-            && event.k == Kind::Tool
-            && event.code_mode
-        {
-            event.code_mode_open = false;
-        }
-    }
+    native_producer::close_complete(summary);
 }
 
 fn non_code_mode_tool(summary: &FileIndex, id: &str) -> bool {
-    summary.tool_ids.get(id).is_some_and(|indices| {
-        indices.iter().any(|index| {
-            summary
-                .events
-                .get(*index)
-                .is_some_and(|event| event.k == Kind::Tool && !event.code_mode)
-        })
-    })
+    use native_producer::ToolStore;
+    native_producer::complete(summary.latest_tool(id, true, 0)).is_some()
 }
 
 /// The one code-mode call open for item attribution, if exactly one is.
 fn open_code_mode_call(summary: &FileIndex) -> Option<usize> {
-    let mut open = summary.pending.values().copied().filter(|index| {
-        summary
-            .events
-            .get(*index)
-            .is_some_and(|event| event.k == Kind::Tool && event.code_mode && event.code_mode_open)
-    });
-    let first = open.next()?;
-    open.next().is_none().then_some(first)
+    use native_producer::ToolStore;
+    native_producer::complete(summary.unique_open_code_mode())
 }
 
 /// A code-mode script failed: the harness's header, the output's first
@@ -4145,55 +4119,16 @@ fn open_poll(summary: &FileIndex, flags: u8) -> Option<usize> {
 }
 
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
-    if summary.pending.contains_key(id) {
-        resolve(summary, id, |_| Reply {
-            o: offset,
-            t: time,
-            e: code != 0,
-            ..Reply::default()
-        });
-        return;
-    }
-    // A later structured exit code settles an unknown outcome.
-    if let Some(index) = summary
-        .events
-        .iter()
-        .enumerate()
-        .rev()
-        .take(512)
-        .find(|(_, event)| event.k == Kind::Tool && event.id.as_deref() == Some(id))
-        .map(|(index, _)| index)
-        && let Some(reply) = summary.event_mut(index).and_then(|event| event.r.as_mut())
-    {
-        reply.e = code != 0;
-        reply.f &= !UNKNOWN;
-    }
+    native_producer::complete(native_producer::exit_code(summary, id, code, offset, time));
 }
 
 /// Links the plain call `id` to the item at `offset` that completed it.
 fn link_item(summary: &mut FileIndex, id: &str, offset: u64) {
-    let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
-        indices.iter().rev().copied().find(|index| {
-            summary
-                .events
-                .get(*index)
-                .is_some_and(|event| event.k == Kind::Tool && !event.code_mode)
-        })
-    }) else {
-        return;
-    };
-    summary.event_mut(index).expect("event exists").item = Some(offset);
+    native_producer::complete(native_producer::link_item(summary, id, offset));
 }
 
 fn tool_event(summary: &mut FileIndex, event: Event) {
-    if let Some(id) = &event.id {
-        let index = summary.events.len();
-        summary.tool_ids.entry(id.clone()).or_default().push(index);
-        if event.r.is_none() {
-            summary.pending.insert(id.clone(), index);
-        }
-    }
-    summary.events.push(event);
+    native_producer::complete(native_producer::tool_event(summary, event));
 }
 
 /// A completed native connector call is a tool even when no legacy call was
