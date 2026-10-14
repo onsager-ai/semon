@@ -11311,3 +11311,148 @@ fn native_point_owner_reuses_selected_publication_across_unrelated_native_handof
     assert!(store.point_publication_current(&original).unwrap());
     assert_eq!(store.point_publication(&row).unwrap().unwrap(), original);
 }
+
+#[test]
+fn native_copy_horizon_matches_complete_selected_builder_for_cycles_and_all_matches() {
+    let home = Home::new();
+    for (id, continued, modified) in [
+        ("a", vec!["b", "c"], 1),
+        ("b", vec!["a"], 3),
+        ("c", vec![], 2),
+        ("bridge-only", vec![], 3),
+    ] {
+        let mut records = vec![
+            json!({"type":"bridge-session","bridgeSessionId":"shared","sessionId":id}),
+            uuid(
+                assistant(
+                    id,
+                    ts(0, 0),
+                    vec![
+                        text("shared native copy identity"),
+                        tool("copy-call-a", "Test", json!({})),
+                        tool("copy-call-b", "Test", json!({})),
+                    ],
+                ),
+                "same",
+            ),
+            uuid(human(id, ts(0, 2), "unique native identity"), id),
+        ];
+        for target in continued {
+            records.push(json!({"type":"continued-in","continuedInSessionId":target,"sessionId":id,"timestamp":ts(0,3)}));
+        }
+        let path = home.top(id, &records);
+        fs::File::open(path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(modified)),
+            )
+            .unwrap();
+    }
+    let facts = MachineFacts::of(&home.options);
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut texts = Texts::default();
+    let (files, _, _) = scan(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut texts,
+        None,
+        &facts,
+        None,
+    )
+    .unwrap();
+    let mut visibility: BTreeMap<(String, usize), copy_stage::Visibility> = BTreeMap::new();
+    for source in &files {
+        let identities: BTreeSet<_> = source
+            .summary
+            .events
+            .iter()
+            .filter_map(native_copy_identity)
+            .collect();
+        for target in &files {
+            if source.path == target.path || !source.summary.links.continued_in.contains(&target.id)
+            {
+                continue;
+            }
+            for (seq, event) in target.summary.events.iter().enumerate() {
+                if native_copy_identity(event).is_some_and(|id| identities.contains(&id)) {
+                    visibility
+                        .entry((target.id.clone(), seq))
+                        .or_default()
+                        .observe(Some(source.stamp.modified_ns));
+                }
+            }
+        }
+    }
+    for cutoff in [
+        None,
+        Some(-1),
+        Some(0),
+        Some(1000),
+        Some(1001),
+        Some(2000),
+        Some(2001),
+        Some(3000),
+        Some(3001),
+    ] {
+        let selected: Vec<_> = files
+            .iter()
+            .filter(|file| source_modified_in_window(Some(file.stamp.modified_ns), cutoff))
+            .map(|file| SourceFile {
+                revision: file.revision,
+                path: file.path.clone(),
+                stamp: file.stamp,
+                id: file.id.clone(),
+                role: file.role.clone(),
+                summary: Arc::clone(&file.summary),
+                first: file.first,
+                last: file.last,
+                marker: None,
+            })
+            .collect();
+        let proofs = crate::query_source::Sources::capture(
+            &home.options,
+            selected
+                .iter()
+                .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
+        )
+        .unwrap();
+        let records = proofs.reader();
+        let mut builder = Builder::new(
+            (&selected, &records),
+            &mut texts,
+            NOW,
+            "testbox".into(),
+            &facts,
+            &[],
+            &mut cache,
+        );
+        builder.sessions(lineages(&selected), &[], &BTreeSet::new());
+        let expected: BTreeSet<_> = builder
+            .copied_events()
+            .into_iter()
+            .map(|(file, seq)| (selected[file].id.clone(), seq))
+            .collect();
+        let actual: BTreeSet<_> = selected
+            .iter()
+            .flat_map(|file| {
+                file.summary
+                    .events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(seq, _)| {
+                        let key = (file.id.clone(), seq);
+                        (!visibility
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_default()
+                            .visible(cutoff))
+                        .then_some(key)
+                    })
+            })
+            .collect();
+        assert_eq!(actual, expected, "cutoff={cutoff:?}");
+        assert!(!actual.iter().any(|(id, _)| id == "bridge-only"));
+    }
+}
