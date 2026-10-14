@@ -85,6 +85,11 @@ pub(crate) struct TextBoundary {
     epoch: u64,
     decoded: u64,
 }
+impl TextBoundary {
+    pub(crate) fn decoded(&self) -> u64 {
+        self.decoded
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TextScanCursor {
@@ -952,17 +957,16 @@ impl NativeStore {
         let mut visit = |_: &Part,
                          _: u64,
                          _: u64,
-                         value: Option<char>,
+                         _: Option<char>,
                          before: &ReadCursor,
                          after: &ReadCursor|
          -> io::Result<()> {
-            if value.is_some() {
-                for position in [before, after] {
-                    if requested.contains(&position.decoded) {
-                        positions
-                            .entry(position.decoded)
-                            .or_insert_with(|| position.clone());
-                    }
+            // Zero-output native units share a decoded boundary. Keep its
+            // latest qualified raw position so a later marked slice does not
+            // replay a long removed continuation prefix.
+            for position in [before, after] {
+                if requested.contains(&position.decoded) {
+                    positions.insert(position.decoded, position.clone());
                 }
             }
             Ok(())
@@ -2089,6 +2093,166 @@ mod tests {
         }
     }
     #[test]
+    fn typed_class_legacy_reference_backfill_is_bounded_durable_and_cancellable() {
+        let mut fixture = make_fixture("legacy");
+        let ordinal: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT ordinal FROM native_original_classes WHERE class=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        fixture.store.connection.execute_batch("DELETE FROM native_original_class_values; DELETE FROM native_original_text_policy;").unwrap();
+        for class in 2..=33 {
+            fixture.store.connection.execute("INSERT INTO native_original_classes SELECT original,?1,record_offset,ordinal,digest,decoded_bytes FROM native_original_classes WHERE class=1",[class]).unwrap();
+        }
+        let cancelled = fixture
+            .store
+            .original_identity_step(
+                &fixture.job,
+                &fixture.witnesses[0],
+                &fixture.repairs[0],
+                ordinal as u64,
+                &fixture.sources.reader(),
+                &|| true,
+            )
+            .unwrap();
+        assert_eq!(cancelled.outcome, Outcome::Deferred);
+        assert_eq!(cancelled.work.native_bytes, 0);
+        let before: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM native_original_text_policy",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 0);
+        let mut after = 0;
+        for _ in 0..9 {
+            let actual = identity(&mut fixture, None, ordinal as u64);
+            assert_eq!(actual.identity(), 1);
+            let (through, next): (i64, i64) = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT legacy_through,backfilled_through FROM native_original_text_policy",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(through, 33);
+            assert!(next > after);
+            assert!(next - after <= 4);
+            after = next;
+        }
+        assert_eq!(after, 33);
+        let refs: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM native_original_class_values",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(refs, 33);
+    }
+    #[test]
+    fn concurrent_whole_allocation_refuses_a_stale_view_interner_generation() {
+        let encoded = format!(
+            "{},\"t\":{}",
+            serde_json::to_string("abc").unwrap(),
+            serde_json::to_string("def").unwrap()
+        );
+        let mut fixture = Fixture::new(&[encoded]);
+        let parent = whole(&mut fixture);
+        let view = complete(
+            &mut fixture,
+            &ViewRequest::Slice {
+                parent,
+                start: 0,
+                end: 3,
+            },
+            &[],
+        )
+        .unwrap();
+        let ordinal:i64=fixture.store.connection.query_row("SELECT ordinal FROM native_original_fields WHERE original=?1 AND is_key=0 AND decoded_bytes=3 ORDER BY ordinal DESC LIMIT 1",params![fixture.repairs[0].original.as_slice()],|row|row.get(0)).unwrap();
+        let options = fixture.options.clone();
+        let job = fixture.job.clone();
+        let witness = fixture.witnesses[0].clone();
+        let repair = fixture.repairs[0].clone();
+        let sources = fixture.sources.clone();
+        let provider = Provider::new(
+            fixture.repairs[0].source.clone(),
+            &fixture.bytes[0],
+            None,
+            move |call| {
+                if call != 0 {
+                    return;
+                }
+                let mut other = NativeStore::open(&options).unwrap();
+                let step = other
+                    .original_identity_step(
+                        &job,
+                        &witness,
+                        &repair,
+                        ordinal as u64,
+                        &sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Written);
+                assert_eq!(step.text.unwrap().identity(), 2);
+            },
+        );
+        let records = fixture.sources.reader_with(Some((
+            &provider,
+            crate::SessionSourceReadMode::ProviderOnly,
+        )));
+        let step = fixture
+            .store
+            .original_view_identity_step(
+                &fixture.job,
+                &fixture.witnesses[0],
+                &fixture.repairs[0],
+                &view,
+                &records,
+                &|_, _| Ok(true),
+                &|| false,
+                crate::SESSION_SOURCE_CHUNK_MAX,
+                ROWS,
+            )
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Conflict);
+        assert!(step.text.is_none());
+        assert!(step.work.native_bytes > 0);
+        let cursors: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM native_original_view_identities",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursors, 0);
+        drop(records);
+        let actual = identity(&mut fixture, Some(&view), 0);
+        assert_eq!(actual.identity(), 1);
+        let count: i64 = fixture
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+    #[test]
     fn empty_join_requires_a_real_qualified_native_record() {
         let mut fixture = make_fixture("native record");
         let step = step(
@@ -2238,6 +2402,154 @@ mod tests {
             }
             assert!(finished);
         }
+    }
+
+    #[test]
+    fn zero_output_boundaries_keep_latest_qualified_raw_position_for_late_slices() {
+        let literal = format!("'{}selected'", "\\\n".repeat(100_000));
+        let mut fixture = make_fixture(&literal);
+        let parent = whole(&mut fixture);
+        let decoded = complete(
+            &mut fixture,
+            &ViewRequest::JsLiteralDecode {
+                parent,
+                quote: Quote::Single,
+            },
+            &[],
+        )
+        .unwrap();
+        let mut cursor = TextScanCursor::begin(&decoded);
+        let mut marks = Vec::new();
+        for _ in 0..32 {
+            let records = fixture.sources.reader();
+            let step = fixture
+                .store
+                .original_text_scan_step(
+                    &fixture.job,
+                    &fixture.witnesses[0],
+                    &fixture.repairs[0],
+                    &cursor,
+                    &[0, 8],
+                    &records,
+                    &|_, _| Ok(true),
+                    &|| false,
+                    crate::SESSION_SOURCE_CHUNK_MAX,
+                    ROWS,
+                )
+                .unwrap();
+            assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+            marks.extend(step.marks);
+            cursor = step.cursor;
+            if step.complete {
+                break;
+            }
+        }
+        let first = marks
+            .iter()
+            .find(|mark| mark.decoded() == 0)
+            .unwrap()
+            .clone();
+        let last = marks
+            .iter()
+            .find(|mark| mark.decoded() == 8)
+            .unwrap()
+            .clone();
+        let request = ViewRequest::SliceMarked {
+            parent: decoded,
+            start: first,
+            end: last,
+        };
+        let first = step(&mut fixture, &request, &[], &|| false);
+        assert!(
+            first.work.native_bytes <= 8,
+            "marked JS slice replayed its removed prefix: {}",
+            first.work.native_bytes
+        );
+        let view = complete(&mut fixture, &request, &[]).unwrap();
+        assert_eq!(rendered(&fixture, &view), "selected");
+    }
+    #[test]
+    fn ordering_remaining_budget_defers_before_io_and_restarts_long_common_prefix() {
+        let prefix = "é".repeat(1024);
+        let mut fixture = Fixture::new(&[
+            serde_json::to_string(&format!("{prefix}a")).unwrap(),
+            serde_json::to_string(&format!("{prefix}b")).unwrap(),
+        ]);
+        let left = OriginalText::qualified(fixture.repairs[0].original, 1);
+        let right = OriginalText::qualified(fixture.repairs[1].original, 1);
+        for (native, rows) in [(0, 40), (291, 40), (292, 39)] {
+            let records = fixture.sources.reader();
+            let a = ComparisonSource {
+                witness: &fixture.witnesses[0],
+                repair: &fixture.repairs[0],
+                text: &left,
+                records: &records,
+            };
+            let b = ComparisonSource {
+                witness: &fixture.witnesses[1],
+                repair: &fixture.repairs[1],
+                text: &right,
+                records: &records,
+            };
+            let step = fixture
+                .store
+                .original_text_order_step_with_budget(
+                    &fixture.job,
+                    a,
+                    b,
+                    &|_, _| Ok(true),
+                    &|| false,
+                    native,
+                    rows,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            assert_eq!(step.work.native_bytes, 0);
+            assert_eq!(step.work.metadata_rows, 0);
+        }
+        let mut completed = false;
+        let mut deferred = 0;
+        for _ in 0..512 {
+            let records = fixture.sources.reader();
+            let a = ComparisonSource {
+                witness: &fixture.witnesses[0],
+                repair: &fixture.repairs[0],
+                text: &left,
+                records: &records,
+            };
+            let b = ComparisonSource {
+                witness: &fixture.witnesses[1],
+                repair: &fixture.repairs[1],
+                text: &right,
+                records: &records,
+            };
+            let step = fixture
+                .store
+                .original_text_order_step_with_budget(
+                    &fixture.job,
+                    a,
+                    b,
+                    &|_, _| Ok(true),
+                    &|| false,
+                    292,
+                    40,
+                )
+                .unwrap();
+            assert!(step.work.native_bytes <= 292);
+            assert!(step.work.metadata_rows <= 40);
+            assert!(step.work.metadata_bytes <= BYTES);
+            assert!(step.comparison_sql_vm_steps < 4096);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            if let Some(order) = step.order {
+                assert_eq!(order, NativeTextOrder::Less);
+                completed = true;
+                break;
+            }
+            deferred += 1;
+            assert_eq!(step.outcome, Outcome::Deferred);
+        }
+        assert!(completed);
+        assert!(deferred > 1);
     }
 
     fn exact_order(
