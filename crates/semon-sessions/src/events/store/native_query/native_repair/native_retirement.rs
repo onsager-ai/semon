@@ -26,6 +26,8 @@ const TABLES: &[(&str, &str, bool)] = &[
     ("native_original_timestamp", "record_offset,ordinal", true),
     ("native_original_copilot_body", "record_offset", true),
     ("native_original_tag", "record_offset,ordinal", true),
+    ("native_original_copilot_admission", "record_offset", true),
+    ("native_original_header", "field", true),
     (
         "native_original_members",
         "record_offset,parent_offset,name",
