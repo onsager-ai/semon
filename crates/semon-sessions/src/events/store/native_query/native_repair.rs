@@ -15,10 +15,14 @@ use crate::json_string::native_record::{
 
 mod native_classes;
 mod native_events;
+mod native_harness;
 mod native_retirement;
+mod native_source;
 pub(crate) use native_classes::IdentityStep;
 pub(crate) use native_classes::Representative as OriginalTextRepresentative;
 pub(crate) use native_events::Text as OriginalText;
+pub(crate) use native_harness::LiteralStep;
+pub(crate) use native_source::OriginalEventFacts;
 
 pub(crate) const REPAIR_FORMAT: u32 = 3;
 // The pre-format namespace was published with parser 24. Its key must stay
@@ -37,6 +41,48 @@ CREATE TABLE IF NOT EXISTS native_original_identities (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset,ordinal)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_channel_state (
+ original BLOB NOT NULL, channel TEXT NOT NULL, count INTEGER NOT NULL,
+ PRIMARY KEY(original,channel)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_extras (
+ original BLOB NOT NULL, sequence INTEGER NOT NULL, metadata TEXT NOT NULL,
+ PRIMARY KEY(original,sequence)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_signals (
+ original BLOB NOT NULL, sequence INTEGER NOT NULL, kind TEXT NOT NULL,
+ annotates INTEGER NOT NULL, metadata TEXT NOT NULL,
+ PRIMARY KEY(original,sequence)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_signal_kind
+ ON native_original_signals(original,kind,sequence);
+CREATE INDEX IF NOT EXISTS native_original_signal_observation
+ ON native_original_signals(original,sequence) WHERE annotates=0;
+CREATE TABLE IF NOT EXISTS native_original_positions (
+ original BLOB NOT NULL, extra INTEGER NOT NULL, sequence INTEGER NOT NULL,
+ offset BLOB NOT NULL, block INTEGER NOT NULL, time INTEGER,
+ child INTEGER NOT NULL, parent INTEGER,
+ PRIMARY KEY(original,extra,sequence)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_regular_time
+ ON native_original_positions(original,sequence) WHERE extra=0 AND time IS NOT NULL;
+CREATE INDEX IF NOT EXISTS native_original_regular_offset
+ ON native_original_positions(original,offset,sequence) WHERE extra=0;
+CREATE INDEX IF NOT EXISTS native_original_child_order
+ ON native_original_positions(original,parent,offset DESC,block DESC,extra DESC,sequence)
+ WHERE child=1;
+CREATE TABLE IF NOT EXISTS native_original_literal (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+ literal TEXT NOT NULL, revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset,ordinal,literal)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_copilot_started (
+ original BLOB PRIMARY KEY
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_copilot_seen (
+ original BLOB NOT NULL, identity INTEGER NOT NULL,
+ PRIMARY KEY(original,identity)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_event_state (
  original BLOB PRIMARY KEY, event_count INTEGER NOT NULL
@@ -3202,6 +3248,383 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    fn prepared_record_fixture(bytes: &[u8]) -> (Fixture, Repair) {
+        let mut fixture = Fixture::new(bytes);
+        let mut repair = fixture
+            .store
+            .begin_original_repair(
+                &fixture.job,
+                &fixture.source,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        while repair.cursor.phase != Phase::FoldRecord {
+            fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+        }
+        loop {
+            let step = fixture
+                .store
+                .original_fields_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            if step.outcome == Outcome::Written {
+                break;
+            }
+        }
+        (fixture, repair)
+    }
+
+    #[test]
+    fn original_source_primitives_keep_fixed_pages_and_native_child_ties() {
+        use crate::events::native_event::NativeEvent;
+        use crate::events::native_harness::ExtraStore;
+        use crate::events::native_producer::{SignalStore, ToolStore};
+        use crate::events::{Event, Kind, Signal, SignalKind};
+        use crate::model::native_stage::SourceTime;
+        for count in [0usize, 128, 1024, 8192] {
+            let (mut fixture, mut repair) = prepared_record_fixture(b"{}\n");
+            let mut reference = vec![
+                Event {
+                    k: Kind::U,
+                    o: 0,
+                    ..Default::default()
+                },
+                Event {
+                    k: Kind::A,
+                    o: 1,
+                    t: Some(11),
+                    ..Default::default()
+                },
+            ];
+            reference.extend((0..count).map(|index| Event {
+                k: Kind::A,
+                o: 2 + index as u64,
+                t: Some(11),
+                ..Default::default()
+            }));
+            for event in &reference {
+                let tx = fixture.store.connection.transaction().unwrap();
+                let mut events = native_events::Events::new(&tx, repair.original).unwrap();
+                events
+                    .append_event(NativeEvent::<OriginalText> {
+                        k: event.k,
+                        o: event.o,
+                        t: event.t,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                tx.commit().unwrap();
+            }
+            let offset = (1u64 << 63) + 5;
+            let regular = Event {
+                k: Kind::Tool,
+                o: offset,
+                b: 2,
+                parent: Some(0),
+                ..Default::default()
+            };
+            {
+                let tx = fixture.store.connection.transaction().unwrap();
+                let mut events = native_events::Events::new(&tx, repair.original).unwrap();
+                events
+                    .append_event(NativeEvent::<OriginalText> {
+                        k: regular.k,
+                        o: regular.o,
+                        b: regular.b,
+                        parent: regular.parent,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                events
+                    .append_extra(NativeEvent::<OriginalText> {
+                        k: Kind::Operation,
+                        o: offset,
+                        b: 2,
+                        parent: Some(0),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                events
+                    .append_extra(NativeEvent::<OriginalText> {
+                        k: Kind::Tool,
+                        o: offset,
+                        b: 2,
+                        parent: Some(0),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                events
+                    .append_signal(Signal {
+                        k: SignalKind::Compact,
+                        o: 0,
+                        t: None,
+                        at: 0,
+                        n: None,
+                        v: None,
+                    })
+                    .unwrap();
+                tx.commit().unwrap();
+            }
+            reference.push(regular);
+            assert!(
+                fixture
+                    .store
+                    .original_event_facts(&fixture.job, &fixture.source, &repair)
+                    .is_err()
+            );
+            // Simulate the record producer's atomic final seal. Event facts
+            // are still separate from native header/usage/Query qualification.
+            let cursor = next_record_cursor(&repair);
+            assert_eq!(cursor.phase, Phase::Complete);
+            fixture
+                .store
+                .connection
+                .execute(
+                    "UPDATE native_original_records SET status='folded' WHERE original=?1",
+                    params![repair.original.as_slice()],
+                )
+                .unwrap();
+            fixture.store.connection.execute("UPDATE native_original_repairs SET cursor=?2,revision=revision+1 WHERE original=?1",params![repair.original.as_slice(),json(&cursor).unwrap()]).unwrap();
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let (facts, _) = fixture
+                .store
+                .original_event_facts(&fixture.job, &fixture.source, &repair)
+                .unwrap();
+            assert_eq!(
+                (facts.regular, facts.extras, facts.signals),
+                (reference.len(), 2, 1)
+            );
+            assert_eq!(
+                (facts.seed.first_seq, facts.seed.first_ms),
+                (Some(1), Some(11))
+            );
+            let page = fixture
+                .store
+                .original_events_page(&fixture.job, &fixture.source, &repair, false, None, 1)
+                .unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].scalar(), reference[0]);
+            assert_eq!(page.work.decoded_rows, 1);
+            assert!(page.work.metadata_bytes < 4096);
+            assert!(page.work.vm_steps < 128);
+            let (time, _) = fixture
+                .store
+                .original_source_time_at(&fixture.job, &fixture.source, &repair, 0)
+                .unwrap();
+            assert_eq!(time, SourceTime::BeforeFirst);
+            let (time, _) = fixture
+                .store
+                .original_source_time_before_offset(&fixture.job, &fixture.source, &repair, offset)
+                .unwrap();
+            let regular_seq = reference
+                .iter()
+                .rposition(|event| event.o <= offset)
+                .unwrap_or(0);
+            let expected = reference[..=regular_seq]
+                .iter()
+                .rev()
+                .find_map(|event| event.t)
+                .map_or(SourceTime::BeforeFirst, SourceTime::Observed);
+            assert_eq!(time, expected);
+            let (child, work) = fixture
+                .store
+                .original_last_operation(&fixture.job, &fixture.source, &repair, 0)
+                .unwrap();
+            // Independent native iteration: extras first, then regular. Equal
+            // positions keep the first exact winner, including Tool extras.
+            assert_eq!(
+                child,
+                Some((
+                    EventAddress {
+                        extra: true,
+                        seq: 0
+                    },
+                    expected,
+                    (offset, 2)
+                ))
+            );
+            assert!(work.decoded_rows <= 3);
+            assert!(work.vm_steps < 256);
+            assert!(
+                fixture
+                    .store
+                    .original_event_at(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        EventAddress {
+                            extra: false,
+                            seq: usize::MAX
+                        }
+                    )
+                    .unwrap()
+                    .0
+                    .is_none()
+            );
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn native_literal_classification_matches_serde_without_complete_index_loads() {
+        for count in [0usize, 128, 1024, 8192] {
+            for kind in ["session.start", "session.spart"] {
+                let bytes = format!(
+                    "{{\"type\":\"{}\",\"body\":\"{}\"}}\n",
+                    kind.replace('e', "\\u0065"),
+                    "x".repeat(count)
+                )
+                .into_bytes();
+                let native: Value = serde_json::from_slice(&bytes).unwrap();
+                let expected = native["type"].as_str() == Some("session.start");
+                let (mut fixture, repair) = prepared_record_fixture(&bytes);
+                let root = fixture
+                    .store
+                    .original_root(&fixture.job, &fixture.source, &repair)
+                    .unwrap()
+                    .unwrap();
+                let selected = fixture
+                    .store
+                    .original_member_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        root.address,
+                        "type",
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(selected.complete);
+                let ordinal = selected.node.unwrap().ordinal;
+                // Force the hash candidate to match: only exact native bytes
+                // can admit a semantic type, including escaped literal text.
+                fixture.store.connection.execute("UPDATE native_original_fields SET digest=?3 WHERE original=?1 AND record_offset=?2 AND ordinal=?4", params![repair.original.as_slice(), seq_u64(repair.cursor.record_at).unwrap(), Sha256::digest(b"session.start").as_slice(), seq_u64(ordinal).unwrap()]).unwrap();
+                let reads = crate::events::FILE_READS.with(Cell::get);
+                let calls = Cell::new(0);
+                let cancel = || {
+                    calls.set(calls.get() + 1);
+                    calls.get() == 3
+                };
+                let step = fixture
+                    .store
+                    .original_literal_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        ordinal,
+                        "session.start",
+                        &fixture.sources.reader(),
+                        &cancel,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Deferred);
+                let partial: i64 = fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM native_original_literal", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(partial, 0);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                let step = fixture
+                    .store
+                    .original_literal_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        ordinal,
+                        "session.start",
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Written);
+                assert_eq!(step.matches, Some(expected));
+                assert_eq!(step.work.range_requests, 1);
+                assert!(step.work.native_bytes < 128);
+                assert!(step.work.metadata_rows <= 5);
+                assert!(step.work.metadata_bytes < 4096);
+                assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                let cached = fixture
+                    .store
+                    .original_literal_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        ordinal,
+                        "session.start",
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(cached.matches, Some(expected));
+                assert_eq!(
+                    (cached.work.range_requests, cached.work.native_bytes),
+                    (1, 1)
+                );
+                // Even a cached false remains tied to the admitted Current
+                // observation. Mutating the ledger must refuse the answer.
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
+                        params![fixture.source.source.path.to_string_lossy()],
+                    )
+                    .unwrap();
+                assert!(
+                    fixture
+                        .store
+                        .original_literal_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            ordinal,
+                            "session.start",
+                            &fixture.sources.reader(),
+                            &|| false
+                        )
+                        .is_err()
+                );
+            }
+        }
     }
 
     #[test]

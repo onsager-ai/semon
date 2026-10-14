@@ -71,6 +71,36 @@ impl<'a> Events<'a> {
         }
         Ok(())
     }
+    fn position(&self, extra: bool, sequence: usize, event: &NativeEvent<Text>) -> io::Result<()> {
+        let changed = self.db.execute(
+            "INSERT INTO native_original_positions VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(original,extra,sequence) DO UPDATE SET offset=excluded.offset,block=excluded.block,time=excluded.time,child=excluded.child,parent=excluded.parent WHERE offset IS NOT excluded.offset OR block IS NOT excluded.block OR time IS NOT excluded.time OR child IS NOT excluded.child OR parent IS NOT excluded.parent",
+            params![self.original.as_slice(),extra,seq(sequence)?,event.o.to_be_bytes().as_slice(),event.b,event.t,matches!(event.k, Kind::Operation | Kind::Tool) && event.parent.is_some(),event.parent.map(seq).transpose()?],
+        ).map_err(io::Error::other)?;
+        // Reply/closure-only replacements do not rewrite immutable position
+        // facts. The SQL statement remains measured actual VM work in tests.
+        self.account(changed, if changed == 0 { 0 } else { 64 })
+    }
+    fn channel_count(&self, channel: &'static str) -> io::Result<usize> {
+        self.account(1, 8)?;
+        let count: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT count FROM native_original_channel_state WHERE original=?1 AND channel=?2",
+                params![self.original.as_slice(), channel],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        usize::try_from(count.unwrap_or(0)).map_err(io::Error::other)
+    }
+    fn advance_channel(&self, channel: &'static str, sequence: usize) -> io::Result<()> {
+        self.account(1, 40)?;
+        let next = sequence
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("native channel sequence overflow"))?;
+        self.db.execute("INSERT INTO native_original_channel_state VALUES(?1,?2,?3) ON CONFLICT(original,channel) DO UPDATE SET count=excluded.count",params![self.original.as_slice(),channel,seq(next)?]).map_err(io::Error::other)?;
+        Ok(())
+    }
     fn exact_sequence(&self, sql: &str, id: &u64, floor: usize) -> io::Result<Option<usize>> {
         self.account(1, 24)?;
         let sequence: Option<i64> = self
@@ -137,6 +167,7 @@ impl ToolStore for Events<'_> {
     fn replace_event(&mut self, sequence: usize, event: NativeEvent<Text>) -> io::Result<()> {
         self.qualified_event(&event)?;
         let text = bounded_json(&event, STATE_BYTES).map_err(io::Error::other)?;
+        self.position(false, sequence, &event)?;
         self.account(2, text.len() + 32)?;
         self.db.execute("UPDATE native_original_events SET is_tool=?3,identity=?4,code_mode=?5,code_mode_open=?6,metadata=?7 WHERE original=?1 AND sequence=?2",params![self.original.as_slice(),seq(sequence)?,event.k==Kind::Tool,event.id.as_ref().map(|id|seq_u64(id.class)).transpose()?,event.code_mode,event.code_mode_open,text]).map_err(io::Error::other)?;
         // At most one pending identity owns this exact event. A replacement
@@ -153,6 +184,7 @@ impl ToolStore for Events<'_> {
             .checked_add(1)
             .ok_or_else(|| io::Error::other("native event sequence overflow"))?;
         let text = bounded_json(&event, STATE_BYTES).map_err(io::Error::other)?;
+        self.position(false, sequence, &event)?;
         self.account(2, text.len() + 40)?;
         self.db
             .execute(
@@ -253,6 +285,135 @@ impl ToolStore for Events<'_> {
     }
 }
 
+impl crate::events::native_harness::ExtraStore for Events<'_> {
+    fn append_extra(&mut self, event: NativeEvent<Text>) -> io::Result<()> {
+        self.qualified_event(&event)?;
+        let sequence = self.channel_count("extras")?;
+        let text = bounded_json(&event, STATE_BYTES).map_err(io::Error::other)?;
+        self.position(true, sequence, &event)?;
+        self.account(1, text.len() + 40)?;
+        self.db
+            .execute(
+                "INSERT INTO native_original_extras VALUES(?1,?2,?3)",
+                params![self.original.as_slice(), seq(sequence)?, text],
+            )
+            .map_err(io::Error::other)?;
+        self.advance_channel("extras", sequence)
+    }
+}
+impl crate::events::native_producer::SignalStore for Events<'_> {
+    fn last_signal(
+        &self,
+        kind: Option<crate::events::SignalKind>,
+    ) -> io::Result<Option<(usize, crate::events::Signal)>> {
+        let sql = if kind.is_some() {
+            "SELECT sequence,CASE WHEN octet_length(metadata)<=65536 THEN metadata END,octet_length(metadata) FROM native_original_signals WHERE original=?1 AND kind=?2 ORDER BY sequence DESC LIMIT 1"
+        } else {
+            "SELECT sequence,CASE WHEN octet_length(metadata)<=65536 THEN metadata END,octet_length(metadata) FROM native_original_signals WHERE original=?1 AND annotates=0 ORDER BY sequence DESC LIMIT 1"
+        };
+        let row: Option<(i64, Option<String>, i64)> = if let Some(kind) = kind {
+            self.db
+                .query_row(
+                    sql,
+                    params![
+                        self.original.as_slice(),
+                        json(&kind).map_err(io::Error::other)?
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+        } else {
+            self.db
+                .query_row(sql, params![self.original.as_slice()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+        }
+        .map_err(io::Error::other)?;
+        self.account(
+            1,
+            row.as_ref()
+                .map_or(0, |row| usize::try_from(row.2).unwrap_or(BYTES + 1)),
+        )?;
+        row.map(|(sequence, text, _)| {
+            Ok((
+                usize::try_from(sequence).map_err(io::Error::other)?,
+                serde_json::from_str(
+                    text.as_deref()
+                        .ok_or_else(|| io::Error::other("native signal exceeds residency"))?,
+                )
+                .map_err(io::Error::other)?,
+            ))
+        })
+        .transpose()
+    }
+    fn append_signal(&mut self, signal: crate::events::Signal) -> io::Result<()> {
+        let sequence = self.channel_count("signals")?;
+        let text = bounded_json(&signal, STATE_BYTES).map_err(io::Error::other)?;
+        self.account(1, text.len() + 40)?;
+        self.db
+            .execute(
+                "INSERT INTO native_original_signals VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    self.original.as_slice(),
+                    seq(sequence)?,
+                    json(&signal.k).map_err(io::Error::other)?,
+                    signal.k.annotates(),
+                    text
+                ],
+            )
+            .map_err(io::Error::other)?;
+        self.advance_channel("signals", sequence)
+    }
+    fn replace_signal(&mut self, sequence: usize, signal: crate::events::Signal) -> io::Result<()> {
+        let text = bounded_json(&signal, STATE_BYTES).map_err(io::Error::other)?;
+        self.account(1, text.len() + 40)?;
+        if self.db.execute("UPDATE native_original_signals SET kind=?3,annotates=?4,metadata=?5 WHERE original=?1 AND sequence=?2",params![self.original.as_slice(),seq(sequence)?,json(&signal.k).map_err(io::Error::other)?,signal.k.annotates(),text]).map_err(io::Error::other)?!=1 { return Err(io::Error::other("native signal address changed")); }
+        Ok(())
+    }
+}
+
+impl Events<'_> {
+    pub(super) fn initialize_copilot(&mut self) -> io::Result<()> {
+        self.account(1, 32)?;
+        self.db
+            .execute(
+                "INSERT INTO native_original_copilot_started VALUES(?1)",
+                params![self.original.as_slice()],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+}
+impl crate::events::native_harness::CopilotIdentityStore for Events<'_> {
+    fn copilot_started(&self) -> io::Result<bool> {
+        self.account(1, 1)?;
+        self.db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_original_copilot_started WHERE original=?1)",
+                params![self.original.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)
+    }
+    fn copilot_record_seen(&mut self, identity: &Text) -> io::Result<bool> {
+        if identity.original != self.original {
+            return Err(io::Error::other(
+                "native Copilot record identity belongs to another Original",
+            ));
+        }
+        self.account(1, 40)?;
+        Ok(self
+            .db
+            .execute(
+                "INSERT OR IGNORE INTO native_original_copilot_seen VALUES(?1,?2)",
+                params![self.original.as_slice(), seq_u64(identity.class)?],
+            )
+            .map_err(io::Error::other)?
+            == 0)
+    }
+}
+
 impl crate::events::native_harness::CopilotStore for Events<'_> {
     fn tool_occurrence_after(&self, id: &u64, after: Option<usize>) -> io::Result<Option<usize>> {
         // Strict keyset seek, so a resumed ambiguity reset never reloads the
@@ -278,6 +439,59 @@ mod tests {
     use crate::events::native_producer;
 
     #[test]
+    fn copilot_seen_admission_is_durable_and_cancelled_start_does_not_poison_id() {
+        use crate::events::native_harness::{Admission, CopilotIdentityStore, copilot_admit};
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let original = [13; 32];
+        let identity = Text::qualified(original, 1);
+        {
+            let tx = db.transaction().unwrap();
+            let mut events = Events::new(&tx, original).unwrap();
+            assert_eq!(
+                copilot_admit(&mut events, Some(&identity), false, |_| unreachable!()).unwrap(),
+                Admission::BeforeStart
+            );
+            assert_eq!(
+                copilot_admit(&mut events, None, true, |_| unreachable!()).unwrap(),
+                Admission::Gap
+            );
+            assert_eq!(
+                copilot_admit(
+                    &mut events,
+                    Some(&identity),
+                    true,
+                    Events::initialize_copilot
+                )
+                .unwrap(),
+                Admission::Accepted
+            );
+            drop(tx);
+        }
+        {
+            let tx = db.transaction().unwrap();
+            let mut events = Events::new(&tx, original).unwrap();
+            assert!(!events.copilot_started().unwrap());
+            assert_eq!(
+                copilot_admit(
+                    &mut events,
+                    Some(&identity),
+                    true,
+                    Events::initialize_copilot
+                )
+                .unwrap(),
+                Admission::Accepted
+            );
+            tx.commit().unwrap();
+        }
+        let mut events = Events::new(&db, original).unwrap();
+        assert_eq!(
+            copilot_admit(&mut events, Some(&identity), false, |_| unreachable!()).unwrap(),
+            Admission::Duplicate
+        );
+    }
+
+    #[test]
     fn native_turn_boundary_closes_full_64_call_window_in_bounded_substeps() {
         use crate::events::native_harness::{CLOSE_STEP, codex_boundary_step};
         let mut db = Connection::open_in_memory().unwrap();
@@ -292,9 +506,7 @@ mod tests {
                 &mut events,
                 NativeEvent {
                     k: Kind::Tool,
-                    id: Some(Text {
-                        class: class as u64,
-                    }),
+                    id: Some(Text::qualified(original, class as u64)),
                     code_mode: true,
                     code_mode_open: true,
                     ..Default::default()
@@ -337,7 +549,7 @@ mod tests {
             let mut db = Connection::open_in_memory().unwrap();
             db.execute_batch(SCHEMA).unwrap();
             let original = [9; 32];
-            let id = Text { class: 1 };
+            let id = Text::qualified(original, 1);
             // Populate in separate bounded transactions, never one Events
             // adapter whose 64-row accounting could reset between records.
             for _index in 0..count {

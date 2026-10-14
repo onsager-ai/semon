@@ -4,10 +4,29 @@
 //! reset therefore advances through exact indexed occurrences before appending
 //! the new request, rather than admitting a prefix of that request as complete.
 
+pub(crate) mod copilot;
+pub(crate) mod record;
+
 use super::native_event::NativeReply;
 use super::native_producer::ToolStore;
 use super::{DENIED, FileIndex, UNKNOWN};
 use std::convert::Infallible;
+
+pub(crate) trait ExtraStore: ToolStore {
+    fn append_extra(
+        &mut self,
+        event: super::native_event::NativeEvent<Self::Text>,
+    ) -> Result<(), Self::Error>;
+}
+impl ExtraStore for FileIndex {
+    fn append_extra(
+        &mut self,
+        event: super::native_event::NativeEvent<String>,
+    ) -> Result<(), Infallible> {
+        self.extras.push(event.into());
+        Ok(())
+    }
+}
 
 pub(crate) trait CopilotStore: ToolStore {
     /// The first exact native occurrence after an absolute event address.
@@ -18,6 +37,43 @@ pub(crate) trait CopilotStore: ToolStore {
         id: &Self::Identity,
         after: Option<usize>,
     ) -> Result<Option<usize>, Self::Error>;
+}
+
+/// Copilot admission deliberately precedes activity, timestamp observations and
+/// every event action. A non-start record must not poison the seen-id set.
+pub(crate) trait CopilotIdentityStore: ToolStore {
+    fn copilot_started(&self) -> Result<bool, Self::Error>;
+    fn copilot_record_seen(&mut self, identity: &Self::Text) -> Result<bool, Self::Error>;
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Gap,
+    BeforeStart,
+    Duplicate,
+    Accepted,
+}
+/// The field owner filters the native empty id before calling this action.
+/// initialize retains the native version/session metadata at its existing owner.
+pub(crate) fn copilot_admit<S: CopilotIdentityStore>(
+    store: &mut S,
+    identity: Option<&S::Text>,
+    is_start: bool,
+    initialize: impl FnOnce(&mut S) -> Result<(), S::Error>,
+) -> Result<Admission, S::Error> {
+    let Some(identity) = identity else {
+        return Ok(Admission::Gap);
+    };
+    if !store.copilot_started()? {
+        if !is_start {
+            return Ok(Admission::BeforeStart);
+        }
+        initialize(store)?;
+    }
+    Ok(if store.copilot_record_seen(identity)? {
+        Admission::Duplicate
+    } else {
+        Admission::Accepted
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +185,20 @@ pub(crate) fn codex_boundary_step<S: ToolStore>(
     Ok(end)
 }
 
+impl CopilotIdentityStore for FileIndex {
+    fn copilot_started(&self) -> Result<bool, Infallible> {
+        Ok(self.copilot.is_some())
+    }
+    fn copilot_record_seen(&mut self, identity: &String) -> Result<bool, Infallible> {
+        Ok(!self
+            .copilot
+            .as_mut()
+            .expect("initialized")
+            .seen
+            .insert(identity.clone()))
+    }
+}
+
 impl CopilotStore for FileIndex {
     fn tool_occurrence_after(
         &self,
@@ -147,6 +217,48 @@ mod tests {
     use super::*;
     use crate::events::native_producer::{complete, tool_event};
     use crate::events::{Event, Kind, Reply};
+
+    #[test]
+    fn copilot_admission_checks_start_before_remembering_record_identity() {
+        let mut source = FileIndex::default();
+        let identity = "record".to_owned();
+        assert_eq!(
+            complete(copilot_admit(
+                &mut source,
+                Some(&identity),
+                false,
+                |_| unreachable!()
+            )),
+            Admission::BeforeStart
+        );
+        assert!(source.copilot.is_none());
+        assert_eq!(
+            complete(copilot_admit(&mut source, None, true, |_| unreachable!())),
+            Admission::Gap
+        );
+        assert_eq!(
+            complete(copilot_admit(
+                &mut source,
+                Some(&identity),
+                true,
+                |source| {
+                    source.copilot = Some(Default::default());
+                    Ok(())
+                }
+            )),
+            Admission::Accepted
+        );
+        assert_eq!(
+            complete(copilot_admit(
+                &mut source,
+                Some(&identity),
+                true,
+                |_| unreachable!()
+            )),
+            Admission::Duplicate
+        );
+        assert_eq!(source.copilot.as_ref().unwrap().seen.len(), 1);
+    }
 
     #[test]
     fn claude_uuid_suffix_matches_independent_reverse_record_reference() {
