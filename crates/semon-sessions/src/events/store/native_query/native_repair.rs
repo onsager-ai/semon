@@ -13,6 +13,7 @@ use crate::json_string::native_record::{
     Container, Cursor as RecordCursor, Literal, Location, Span, Token,
 };
 
+mod native_activity;
 mod native_admission;
 mod native_classes;
 mod native_compare;
@@ -31,6 +32,7 @@ pub(crate) type ComparisonSource<'a, 'r> = native_compare::ComparisonSource<'a, 
 pub(crate) type TextComparisonStep = native_compare::TextComparisonStep;
 pub(crate) type BodyStep = native_copilot::BodyStep;
 pub(crate) type AdmissionStep = native_admission::AdmissionStep;
+pub(crate) type OriginalActivityFacts = native_activity::OriginalActivityFacts;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -113,6 +115,13 @@ CREATE TABLE IF NOT EXISTS native_original_copilot_admission (
 CREATE TABLE IF NOT EXISTS native_original_header (
  original BLOB NOT NULL, field TEXT NOT NULL, metadata TEXT NOT NULL,
  PRIMARY KEY(original,field)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_activity (
+ original BLOB PRIMARY KEY, first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_busy (
+ original BLOB NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+ PRIMARY KEY(original,start_ms)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_copilot_started (
  original BLOB PRIMARY KEY
@@ -3727,6 +3736,125 @@ mod tests {
                     .0
                     .is_none()
             );
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn indexed_native_activity_preserves_empty_transcript_facts_and_bounded_busy_pages() {
+        for history in [0usize, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(b"{}\n");
+            let mut repair = fixture.qualified_record();
+            let mut expected = Vec::new();
+            for at in 0..history {
+                let start = at as i64 * 1_000_000;
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "INSERT INTO native_original_busy VALUES(?1,?2,?3)",
+                        params![repair.original.as_slice(), start, start + 100],
+                    )
+                    .unwrap();
+                expected.push((start, start + 100));
+            }
+            if history > 0 {
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "INSERT INTO native_original_activity VALUES(?1,0,?2)",
+                        params![
+                            repair.original.as_slice(),
+                            (history - 1) as i64 * 1_000_000 + 100
+                        ],
+                    )
+                    .unwrap();
+            }
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let point = history as i64 * 1_000_000 + 50;
+            let cancelled = fixture
+                .store
+                .original_activity_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    Some(point),
+                    &fixture.sources.reader(),
+                    &|| true,
+                )
+                .unwrap();
+            assert_eq!(cancelled.work.native_bytes, 0);
+            let step = fixture
+                .store
+                .original_activity_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    Some(point),
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            assert!(step.work.metadata_rows <= 7);
+            assert!(step.work.metadata_bytes <= 128);
+            assert_eq!(step.work.native_bytes, 1);
+            expected.push((point, point));
+            // Native activity with no events remains observable; its facts
+            // cannot be inferred from the first/last regular event timestamp.
+            assert!(
+                fixture
+                    .store
+                    .original_activity_facts(&fixture.job, &fixture.source, &repair)
+                    .is_err()
+            );
+            let cursor = next_record_cursor(&repair);
+            fixture
+                .store
+                .connection
+                .execute(
+                    "UPDATE native_original_records SET status='folded' WHERE original=?1",
+                    params![repair.original.as_slice()],
+                )
+                .unwrap();
+            fixture.store.connection.execute("UPDATE native_original_repairs SET cursor=?2,revision=revision+1 WHERE original=?1",params![repair.original.as_slice(),json(&cursor).unwrap()]).unwrap();
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            let (facts, work) = fixture
+                .store
+                .original_activity_facts(&fixture.job, &fixture.source, &repair)
+                .unwrap();
+            assert_eq!(facts.first, Some(if history == 0 { point } else { 0 }));
+            assert_eq!(facts.last, Some(point));
+            assert_eq!(work.decoded_rows, 1);
+            assert!(work.vm_steps > 0 && work.vm_steps < 128);
+            let page = fixture
+                .store
+                .original_busy_page(&fixture.job, &fixture.source, &repair, Some(point - 1), 1)
+                .unwrap();
+            assert_eq!(page.rows, vec![(point, point)]);
+            assert_eq!(page.work.decoded_rows, 1);
+            assert_eq!(page.work.metadata_bytes, 16);
+            assert!(page.work.vm_steps > 0 && page.work.vm_steps < 128);
+            let mut after = None;
+            let mut actual = Vec::new();
+            loop {
+                let page = fixture
+                    .store
+                    .original_busy_page(&fixture.job, &fixture.source, &repair, after, 64)
+                    .unwrap();
+                actual.extend(page.rows);
+                after = page.after;
+                if page.complete {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected);
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
         }
     }
