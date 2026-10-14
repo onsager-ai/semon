@@ -6,9 +6,13 @@ use crate::model::summary::{CatalogRow, CatalogSource};
 pub(crate) const ROWS: usize = 64;
 pub(crate) const BYTES: usize = 1024 * 1024;
 const STATE_BYTES: usize = 64 * 1024;
+fn source_fact_generation(ledger: &Ledger) -> rusqlite::Result<String> {
+    Ok(format!("interval-v2:{}", json(ledger)?))
+}
 #[cfg(test)]
 thread_local! {
     pub(super) static FULL_LINK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BUSY_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DELTA_LINK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1018,8 +1022,8 @@ impl NativeStore {
     pub(crate) fn busy_page(
         &self,
         witness: &SourceWitness,
-        after: Option<usize>,
-    ) -> io::Result<Page<(usize, (i64, i64)), usize>> {
+        after: Option<i64>,
+    ) -> io::Result<Page<(i64, i64), i64>> {
         let tx = self
             .connection
             .unchecked_transaction()
@@ -1037,7 +1041,7 @@ impl NativeStore {
             != witness
                 .ledger
                 .as_ref()
-                .map(json)
+                .map(source_fact_generation)
                 .transpose()
                 .map_err(io::Error::other)?
                 .as_deref()
@@ -1047,26 +1051,22 @@ impl NativeStore {
                 "native busy primitives require bounded repair",
             ));
         }
-        let mut q=tx.prepare("SELECT seq,start,end FROM native_source_busy WHERE file_id=?1 AND seq>?2 ORDER BY seq LIMIT 64").map_err(io::Error::other)?;
-        let output = q
-            .query_map(params![file, after.map(seq_int).unwrap_or(-1)], |r| {
-                Ok((seq_of(r.get(0)?), (r.get(1)?, r.get(2)?)))
+        let comparison = if after.is_some() { ">" } else { ">=" };
+        let mut query=tx.prepare(&format!("SELECT start,end FROM native_source_busy_intervals WHERE file_id=?1 AND start{comparison}?2 ORDER BY start LIMIT 64")).map_err(io::Error::other)?;
+        let output = query
+            .query_map(params![file, after.unwrap_or(i64::MIN)], |r| {
+                Ok((r.get(0)?, r.get(1)?))
             })
             .map_err(io::Error::other)?
-            .collect::<rusqlite::Result<Vec<_>>>()
+            .collect::<rusqlite::Result<Vec<(i64, i64)>>>()
             .map_err(io::Error::other)?;
-        let end = output.last().map(|(seq, _)| *seq).or(after);
-        let remains: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM native_source_busy WHERE file_id=?1 AND seq>?2)",
-                params![file, end.map(seq_int).unwrap_or(-1)],
-                |r| r.get(0),
-            )
-            .map_err(io::Error::other)?;
+        let end = output.last().map(|interval| interval.0).or(after);
+        let comparison = if end.is_some() { ">" } else { ">=" };
+        let remains:bool=tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM native_source_busy_intervals WHERE file_id=?1 AND start{comparison}?2)"),params![file,end.unwrap_or(i64::MIN)],|r|r.get(0)).map_err(io::Error::other)?;
         let work = Work {
             decoded_rows: output.len(),
-            metadata_bytes: output.len() * 24,
-            vm_steps: q.get_status(rusqlite::StatementStatus::VmStep),
+            metadata_bytes: output.len() * 16,
+            vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
         };
         Ok(Page {
             rows: output,
@@ -1444,7 +1444,8 @@ impl NativeStore {
             ));
         }
         let ready: Option<String> = row.get(10).map_err(io::Error::other)?;
-        let primitives_ready = ready.as_deref() == Some(&json(ledger).map_err(io::Error::other)?);
+        let primitives_ready =
+            ready.as_deref() == Some(&source_fact_generation(ledger).map_err(io::Error::other)?);
         let counts = if primitives_ready {
             Some((
                 seq_of(row.get(11).map_err(io::Error::other)?),
@@ -1619,8 +1620,8 @@ impl NativeStore {
     }
 }
 
-/// Writer-owned primitive rows. Append updates the old final busy interval and
-/// the new suffix; directed links are the exact parser delta. Older stores are
+/// Writer-owned primitive rows. Append applies the native clustering delta by
+/// stable interval start; directed links are the exact parser delta. Older stores are
 /// deliberately not marked ready after only a partial append.
 pub(super) fn write_source_facts(
     tx: &Transaction<'_>,
@@ -1634,21 +1635,26 @@ pub(super) fn write_source_facts(
         r.get(0)
     })?;
     let was_ready: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_source_facts WHERE file_id=?1)",
-        [file],
-        |r| r.get(0),
+        "SELECT EXISTS(SELECT 1 FROM native_source_facts WHERE file_id=?1 AND generation LIKE 'interval-v2:%')",[file],|r|r.get(0),
     )?;
-    let start = changes.before_busy.saturating_sub(1).min(index.busy.len());
-    let mut put = tx.prepare_cached(
-        "INSERT OR REPLACE INTO native_source_busy(file_id,seq,start,end) VALUES(?1,?2,?3,?4)",
-    )?;
-    for (seq, (start, end)) in index.busy.iter().enumerate().skip(start) {
-        put.execute(params![file, seq_int(seq), start, end])?;
+    if complete {
+        tx.execute(
+            "DELETE FROM native_source_busy_intervals WHERE file_id=?1",
+            [file],
+        )?;
     }
-    tx.execute(
-        "DELETE FROM native_source_busy WHERE file_id=?1 AND seq>=?2",
-        params![file, seq_int(index.busy.len())],
-    )?;
+    for (start, end) in &changes.busy {
+        #[cfg(test)]
+        BUSY_FACT_VISITS.with(|n| n.set(n.get() + 1));
+        if let Some(end) = end {
+            tx.execute("INSERT INTO native_source_busy_intervals VALUES(?1,?2,?3) ON CONFLICT(file_id,start) DO UPDATE SET end=excluded.end",params![file,start,end])?;
+        } else {
+            tx.execute(
+                "DELETE FROM native_source_busy_intervals WHERE file_id=?1 AND start=?2",
+                params![file, start],
+            )?;
+        }
+    }
     for (kind, id) in &changes.links {
         #[cfg(test)]
         DELTA_LINK_VISITS.with(|n| n.set(n.get() + 1));
@@ -1675,7 +1681,7 @@ pub(super) fn write_source_facts(
             "INSERT OR REPLACE INTO native_source_facts VALUES(?1,?2,?3,?4,?5)",
             params![
                 file,
-                json(ledger)?,
+                source_fact_generation(ledger)?,
                 seq_int(index.events.len()),
                 seq_int(index.extras.len()),
                 seq_int(index.signals.len())
@@ -1871,7 +1877,7 @@ mod tests {
             );
             assert_eq!(
                 fixture.store.busy_page(&source, None).unwrap().rows,
-                vec![(0, (0, 1)), (1, (700_000, 700_001))]
+                vec![(0, 1), (700_000, 700_001)]
             );
             assert_eq!(
                 fixture.store.links_page(&source, None).unwrap().rows,
@@ -2145,11 +2151,7 @@ mod tests {
                 .busy_page(&fixture.source(), None)
                 .unwrap()
                 .rows,
-            vec![
-                (0, (0, 1)),
-                (1, (700_000, 700_011)),
-                (2, (1_400_000, 1_400_001))
-            ]
+            vec![(0, 1), (700_000, 700_011), (1_400_000, 1_400_001)]
         );
         fixture
             .store
@@ -2306,6 +2308,99 @@ mod tests {
         assert!(!fixture.store.recheck(&job).unwrap());
         // Missing current metadata never asserts permission to read an archive
         // body; only the consumer's original-custody resolver can supply it.
+    }
+    #[test]
+    fn native_query_any_order_busy_delta_matches_native_and_has_fixed_growth_work() {
+        for earlier in [0, 128, 1024, 8192] {
+            let fixture = Fixture::new(0);
+            let witness = fixture.source();
+            let ledger = witness.ledger.unwrap();
+            let path = witness.source.path.to_str().unwrap();
+            let mut index = fixture.index.clone();
+            index.busy = (0..=earlier)
+                .map(|n| ((n as i64) * 700_000, (n as i64) * 700_000 + 1))
+                .collect();
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(&tx, path, &ledger, &index, None, None).unwrap();
+            tx.commit().unwrap();
+            for time in [-1000, 350_000, 300_000, 700_000, 1_000_000] {
+                let mut oracle = index.busy.clone();
+                oracle.push((time, time));
+                let oracle = super::super::super::busy_merge(oracle);
+                index.dirty_rows = Some(super::super::super::DirtyRows::begin(&index));
+                super::super::super::activity(&mut index, Some(time));
+                assert_eq!(
+                    index.busy, oracle,
+                    "native busy order earlier={earlier},time={time}"
+                );
+                let changes = index.dirty_rows.take().unwrap();
+                assert!(changes.busy.len() <= 3);
+                BUSY_FACT_VISITS.with(|n| n.set(0));
+                let tx = fixture.store.connection.unchecked_transaction().unwrap();
+                write_source_facts(&tx, path, &ledger, &index, &changes, false).unwrap();
+                tx.commit().unwrap();
+                assert!(BUSY_FACT_VISITS.with(Cell::get) <= 3);
+                let mut actual = Vec::new();
+                let mut after = None;
+                loop {
+                    let page = fixture.store.busy_page(&fixture.source(), after).unwrap();
+                    actual.extend(page.rows);
+                    after = page.after;
+                    if page.complete {
+                        break;
+                    }
+                }
+                assert_eq!(actual, index.busy, "earlier={earlier},time={time}");
+            }
+        }
+    }
+    #[test]
+    fn native_query_old_positional_busy_generation_is_not_qualified_by_partial_append() {
+        let mut fixture = Fixture::new(0);
+        let witness = fixture.source();
+        let ledger = witness.ledger.unwrap();
+        let path = witness.source.path.to_str().unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_source_facts SET generation=?1",
+                [json(&ledger).unwrap()],
+            )
+            .unwrap();
+        fixture
+            .store
+            .connection
+            .execute_batch("DROP TABLE native_source_busy_intervals; PRAGMA user_version=29;")
+            .unwrap();
+        assert!(matches!(
+            init(&mut fixture.store.connection).unwrap(),
+            Init::Ready
+        ));
+        assert!(
+            !fixture
+                .store
+                .source_header(&fixture.source())
+                .unwrap()
+                .unwrap()
+                .primitives_ready
+        );
+        let mut index = fixture.index.clone();
+        index.dirty_rows = Some(super::super::super::DirtyRows::begin(&index));
+        super::super::super::activity(&mut index, Some(-1000));
+        let changes = index.dirty_rows.take().unwrap();
+        let tx = fixture.store.connection.unchecked_transaction().unwrap();
+        write_source_facts(&tx, path, &ledger, &index, &changes, false).unwrap();
+        tx.commit().unwrap();
+        assert!(
+            !fixture
+                .store
+                .source_header(&fixture.source())
+                .unwrap()
+                .unwrap()
+                .primitives_ready
+        );
+        assert!(fixture.store.busy_page(&fixture.source(), None).is_err());
     }
     #[test]
     fn native_query_additive_migration_preserves_main_and_temp_and_public_standalone_schemas() {

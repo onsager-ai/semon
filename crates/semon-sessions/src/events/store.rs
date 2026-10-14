@@ -61,7 +61,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -173,6 +173,12 @@ CREATE TABLE IF NOT EXISTS native_source_busy (
     start INTEGER NOT NULL,
     end INTEGER NOT NULL,
     PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_busy_intervals (
+    file_id INTEGER NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY(file_id,start)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_source_links (
     file_id INTEGER NOT NULL,
@@ -354,6 +360,7 @@ DELETE FROM usage_identity;
 DELETE FROM usage;
 DELETE FROM codex_usage;
 DELETE FROM native_source_busy;
+DELETE FROM native_source_busy_intervals;
 DELETE FROM native_source_links;
 DELETE FROM native_source_facts;
 DELETE FROM files;
@@ -4092,6 +4099,7 @@ impl SqliteStore {
                 "usage",
                 "codex_usage",
                 "native_source_busy",
+                "native_source_busy_intervals",
                 "native_source_links",
                 "native_source_facts",
             ] {
@@ -5462,6 +5470,7 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
         "usage",
         "codex_usage",
         "native_source_busy",
+        "native_source_busy_intervals",
         "native_source_links",
         "native_source_facts",
     ] {
@@ -5531,6 +5540,11 @@ fn write_index_changes_measured(
     // the parser-owned delta and never constructs a discarded full link set.
     let full = changes.is_none().then(|| super::DirtyRows {
         usage: index.usage_by_id.keys().cloned().collect(),
+        busy: index
+            .busy
+            .iter()
+            .map(|(start, end)| (*start, Some(*end)))
+            .collect(),
         links: [
             ("session", &index.links.session_ids),
             ("continued", &index.links.continued_in),

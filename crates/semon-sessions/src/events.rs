@@ -244,7 +244,7 @@ pub(crate) struct DirtyRows {
     pub(crate) before_extras: usize,
     pub(crate) before_signals: usize,
     pub(crate) before_codex_usage: usize,
-    pub(crate) before_busy: usize,
+    pub(crate) busy: BTreeMap<i64, Option<i64>>,
     pub(crate) links: BTreeSet<(String, String)>,
 }
 
@@ -255,7 +255,6 @@ impl DirtyRows {
             before_extras: index.extras.len(),
             before_signals: index.signals.len(),
             before_codex_usage: index.codex_usage_events.len(),
-            before_busy: index.busy.len(),
             ..Self::default()
         }
     }
@@ -280,6 +279,17 @@ impl DirtyRows {
                 .filter(|id| old.usage_by_id.get(*id) != new.usage_by_id.get(*id))
                 .cloned()
                 .collect(),
+            busy: {
+                let old: BTreeMap<_, _> = old.busy.iter().copied().collect();
+                let new: BTreeMap<_, _> = new.busy.iter().copied().collect();
+                old.keys()
+                    .chain(new.keys())
+                    .filter_map(|start| {
+                        (old.get(start) != new.get(start))
+                            .then_some((*start, new.get(start).copied()))
+                    })
+                    .collect()
+            },
             links: [
                 ("session", &old.links.session_ids, &new.links.session_ids),
                 (
@@ -3149,24 +3159,55 @@ pub(crate) fn parse_ms(value: &str) -> Option<i64> {
     Some(seconds * 1000 + millis)
 }
 
+/// The one native clustering decision. A timestamp can affect at most its
+/// predecessor and successor in the already clustered interval list.
+struct BusyUpdate {
+    first: usize,
+    remove: usize,
+    interval: (i64, i64),
+    changed: bool,
+}
+impl BusyUpdate {
+    fn new(busy: &[(i64, i64)], time: i64) -> Self {
+        let position = if busy.last().is_none_or(|last| time >= last.0) {
+            busy.len()
+        } else {
+            busy.partition_point(|interval| interval.0 <= time)
+        };
+        let left = position
+            .checked_sub(1)
+            .filter(|&at| i128::from(time) - i128::from(busy[at].1) <= i128::from(BUSY_GAP_MS));
+        let right = busy.get(position).filter(|interval| {
+            i128::from(interval.0) - i128::from(time) <= i128::from(BUSY_GAP_MS)
+        });
+        let first = left.unwrap_or(position);
+        let remove = usize::from(left.is_some()) + usize::from(right.is_some());
+        let interval = (
+            left.map_or(time, |at| busy[at].0),
+            right.map_or_else(
+                || left.map_or(time, |at| busy[at].1.max(time)),
+                |interval| interval.1.max(time),
+            ),
+        );
+        let changed = remove != 1 || busy[first] != interval;
+        Self {
+            first,
+            remove,
+            interval,
+            changed,
+        }
+    }
+    fn apply(self, busy: &mut Vec<(i64, i64)>) {
+        if self.changed {
+            busy.splice(self.first..self.first + self.remove, [self.interval]);
+        }
+    }
+}
 /// Adds one timestamp to a sorted interval list whose intervals are more than
 /// [`BUSY_GAP_MS`] apart. Clustering per file and merging later is the same
 /// as clustering every stamp of a lineage at once.
 pub(crate) fn busy_add(busy: &mut Vec<(i64, i64)>, time: i64) {
-    if let Some(last) = busy.last_mut()
-        && time >= last.0
-    {
-        if time - last.1 <= BUSY_GAP_MS {
-            last.1 = last.1.max(time);
-            return;
-        }
-        busy.push((time, time));
-        return;
-    }
-    busy.push((time, time));
-    busy.sort_unstable();
-    let merged = busy_merge(std::mem::take(busy));
-    *busy = merged;
+    BusyUpdate::new(busy, time).apply(busy);
 }
 
 /// Merges sorted intervals that are no more than [`BUSY_GAP_MS`] apart.
@@ -4222,7 +4263,20 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
 /// Claude Code lines: `offset` is the line's byte offset.
 fn activity(summary: &mut FileIndex, time: Option<i64>) {
     if let Some(time) = time {
-        busy_add(&mut summary.busy, time);
+        if let Some(dirty) = &mut summary.dirty_rows {
+            let update = BusyUpdate::new(&summary.busy, time);
+            if update.changed {
+                for (start, _) in &summary.busy[update.first..update.first + update.remove] {
+                    dirty.busy.insert(*start, None);
+                }
+                dirty
+                    .busy
+                    .insert(update.interval.0, Some(update.interval.1));
+            }
+            update.apply(&mut summary.busy);
+        } else {
+            busy_add(&mut summary.busy, time);
+        }
         // Earliest and latest, not first and last line: lines aren't always
         // written in time order.
         summary.first = Some(summary.first.map_or(time, |first| first.min(time)));
