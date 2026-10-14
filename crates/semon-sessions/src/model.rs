@@ -5386,13 +5386,17 @@ impl<'a> Builder<'a> {
             };
             facts
                 .observe(range_stage::Leaf {
-                    key: (
-                        0,
-                        0,
-                        u64::try_from(*position).expect("native entry position fits"),
-                        0,
-                        0,
-                    ),
+                    order: range_stage::Order {
+                        key: (
+                            0,
+                            0,
+                            u64::try_from(*position).expect("native entry position fits"),
+                            0,
+                            0,
+                        ),
+                        ordinal: 0,
+                        identity: String::new(),
+                    },
                     entry,
                     found: entry.at.map(|at| event(self.files, at)),
                     outgoing,
