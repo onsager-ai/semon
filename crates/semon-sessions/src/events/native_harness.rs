@@ -5,6 +5,8 @@
 //! the new request, rather than admitting a prefix of that request as complete.
 
 pub(crate) mod copilot;
+pub(crate) mod copilot_admission;
+pub(crate) mod header;
 pub(crate) mod record;
 pub(crate) mod tag;
 pub(crate) mod time;
@@ -47,7 +49,7 @@ pub(crate) trait CopilotIdentityStore: ToolStore {
     fn copilot_started(&self) -> Result<bool, Self::Error>;
     fn copilot_record_seen(&mut self, identity: &Self::Text) -> Result<bool, Self::Error>;
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Admission {
     Gap,
     BeforeStart,

@@ -386,3 +386,13 @@ impl crate::events::native_harness::CopilotStore for Observation<'_, '_> {
         self.read(|s| s.tool_occurrence_after(id, after))
     }
 }
+
+impl crate::events::native_harness::CopilotIdentityStore for Observation<'_, '_> {
+    fn copilot_started(&self) -> io::Result<bool> {
+        use crate::events::native_harness::CopilotIdentityStore;
+        self.read(|s| s.copilot_started())
+    }
+    fn copilot_record_seen(&mut self, _: &OriginalText) -> io::Result<bool> {
+        Err(io::Error::other("native observation cannot write"))
+    }
+}

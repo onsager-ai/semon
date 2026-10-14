@@ -13,6 +13,7 @@ use crate::json_string::native_record::{
     Container, Cursor as RecordCursor, Literal, Location, Span, Token,
 };
 
+mod native_admission;
 mod native_classes;
 mod native_compare;
 mod native_copilot;
@@ -29,6 +30,7 @@ pub(super) use native_compare::SCHEMA as COMPARE_SCHEMA;
 pub(crate) type ComparisonSource<'a, 'r> = native_compare::ComparisonSource<'a, 'r>;
 pub(crate) type TextComparisonStep = native_compare::TextComparisonStep;
 pub(crate) type BodyStep = native_copilot::BodyStep;
+pub(crate) type AdmissionStep = native_admission::AdmissionStep;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -102,6 +104,15 @@ CREATE TABLE IF NOT EXISTS native_original_copilot_body (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_copilot_admission (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_header (
+ original BLOB NOT NULL, field TEXT NOT NULL, metadata TEXT NOT NULL,
+ PRIMARY KEY(original,field)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_copilot_started (
  original BLOB PRIMARY KEY
@@ -3717,6 +3728,130 @@ mod tests {
                     .is_none()
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_copilot_admission_preserves_missing_start_duplicate_and_header_semantics() {
+        use crate::events::native_harness::{Admission, CopilotIdentityStore};
+        for size in [0usize, 128, 1024, 8192, 200_000] {
+            let version = "v".repeat(size);
+            let record = serde_json::json!({"id":"identity","type":"session.start","data":{"copilotVersion":version,"sessionId":"native-session"}});
+            let bytes = format!("{record}\n");
+            let mut fixture = Fixture::new(bytes.as_bytes());
+            let repair = fixture.qualified_record();
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let mut attempts = 0;
+            let identity = loop {
+                attempts += 1;
+                assert!(attempts < 128);
+                let cancelled = fixture
+                    .store
+                    .original_copilot_admission_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| true,
+                    )
+                    .unwrap();
+                assert_eq!(cancelled.outcome, Outcome::Deferred);
+                assert_eq!(cancelled.work.native_bytes, 0);
+                let step = fixture
+                    .store
+                    .original_copilot_admission_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                if let Some(admission) = step.admission {
+                    assert_eq!(admission, Admission::Accepted);
+                    break step.identity.unwrap();
+                }
+            };
+            let expected_version=fixture.store.connection.query_row("SELECT metadata FROM native_original_header WHERE original=?1 AND field='copilot_version'",params![repair.original.as_slice()],|r|r.get::<_,String>(0)).unwrap();
+            let value: crate::events::native_harness::header::Value<OriginalText> =
+                serde_json::from_str(&expected_version).unwrap();
+            let crate::events::native_harness::header::Value::Native(version_ref) = value else {
+                panic!("native version remains an exact field reference")
+            };
+            let representative = fixture
+                .store
+                .original_text_representative(&fixture.job, &fixture.source, &repair, &version_ref)
+                .unwrap();
+            assert_eq!(representative.receipt.decoded_bytes, version.len() as u64);
+            let mut events =
+                native_events::Events::new(&fixture.store.connection, repair.original).unwrap();
+            assert!(events.copilot_started().unwrap());
+            assert!(events.copilot_record_seen(&identity).unwrap());
+            let cached = fixture
+                .store
+                .original_copilot_admission_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(cached.admission, Some(Admission::Accepted));
+            assert_eq!(cached.identity, Some(identity));
+            assert_eq!(cached.work.native_bytes, 1);
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+        for (record, expected) in [
+            (serde_json::json!({"type":"session.start"}), Admission::Gap),
+            (
+                serde_json::json!({"id":"id","type":"user.message"}),
+                Admission::BeforeStart,
+            ),
+        ] {
+            let mut fixture = Fixture::new(format!("{record}\n").as_bytes());
+            let repair = fixture.qualified_record();
+            loop {
+                let step = fixture
+                    .store
+                    .original_copilot_admission_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                if let Some(admission) = step.admission {
+                    assert_eq!(admission, expected);
+                    break;
+                }
+            }
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM native_original_copilot_seen",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM native_original_header", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
         }
     }
 
