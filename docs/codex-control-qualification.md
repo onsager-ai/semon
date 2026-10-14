@@ -87,7 +87,7 @@ npm --prefix tests/ui exec -- playwright install chromium
 /path/to/probe-venv/bin/python tests/spikes/codex-control.py --codex "$NATIVE" --output "$OUT/qualification.json"
 /path/to/probe-venv/bin/python tests/spikes/codex-terminal.py --codex "$NATIVE" --output "$OUT/terminal.json"
 /path/to/probe-venv/bin/python tests/spikes/codex-local.py --codex "$NATIVE" \
-  --semon target/debug/semon --browser tests/ui/local-control.mjs \
+  --semon target/debug/semon --browser tests/ui/conversation-control.mjs \
   --tmux /usr/bin/tmux --output "$OUT/local.json"
 python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
 
@@ -119,3 +119,19 @@ implementation PR. Native fixtures are reproducible evidence, not the complete
 viewer CI aggregate. No existing pixel threshold or baseline is changed; CI
 aggregate status remains a separate merge gate. No deployment or remote control
 activation is performed.
+
+## Native foundation requalification (#380)
+
+The current product probe uses qualified source-selected Catalog identity and
+`/api/session-control`; it asserts that retired `/api/model` returns 404. Browser
+qualification selects the launched native session and its contextual controls.
+The original October 4 probe bytes are retained as `codex-local.probe` beside the
+recorded fixtures; their original SHA-256 remains unchanged in the manifest.
+Those recordings do not qualify the updated native consumer.
+
+A newly launched empty thread has no resumable rollout until its first message.
+The current native identity/control admission must be tested for this bootstrap
+case. Do not seed a transcript, send the initial message through a bypass or
+restore model transport to make the probe pass. A bootstrap refusal is a P0
+release gap, separate from the recalibrated cold-indexing budget. Actual native
+probe/browser outcomes belong to the exact Source/Hub integration receipt.

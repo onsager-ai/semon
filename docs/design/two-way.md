@@ -130,9 +130,9 @@ journal zero peer fields mean unknown, never root authorization.
 
 ## Typed viewer ownership
 
-The existing model transport prepares control data before its coherent model commit.
-One local control owner uses the application effect scope, current page commits and
-existing model poller. It owns write intent/busy/uncertain state; shared screens
+Qualified source-selected native identity gates `/api/session-control`. Partial
+Catalog ownership cannot select a writable native thread. One local control owner
+uses the application effect scope, selected-page commits and native read cadence. It owns write intent/busy/uncertain state; shared screens
 receive a narrow typed view. No extra router, poller, document handler or transcript
 cache is installed. Each capability is exposed individually. Unsupported requests
 show their reason. After uncertain browser delivery, writes stay blocked until an
