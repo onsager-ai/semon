@@ -118,19 +118,20 @@ pub(crate) fn event_entry(
     effective_time: i64,
     reply_time: impl FnOnce(u64) -> i64,
 ) -> (i64, u8, Entry) {
-    let (time, pos, phase) = position(kind, found, last_operation, effective_time, reply_time);
-    (
-        time,
-        phase,
-        Entry {
+    let candidate = super::native_producer::Candidate::regular(
+        super::native_producer::EventInput {
             kind,
-            file,
-            offset: found.o,
-            pos,
-            t: found.t,
-            at: Some((file, seq)),
+            seq,
+            event: found,
+            inherited: SourceTime::Observed(effective_time),
+            operation: last_operation.map(|(time, pos)| (SourceTime::Observed(time), pos)),
+            identity: [0; 32],
+            ordinal: 0,
         },
-    )
+        |offset| SourceTime::Observed(reply_time(offset)),
+    );
+    let (order, entry) = candidate.qualify(file, 0, true, None);
+    (order.key.0, candidate.phase, entry)
 }
 
 pub(crate) fn after_entry(handoff: usize, file: usize, found: &Event) -> Entry {
@@ -145,19 +146,17 @@ pub(crate) fn after_entry(handoff: usize, file: usize, found: &Event) -> Entry {
 }
 
 pub(crate) fn operation_entry(file: usize, found: &Event) -> Entry {
-    let state = match found.r.as_ref() {
+    let candidate =
+        super::native_producer::Candidate::operation(0, found, SourceTime::BeforeFirst, [0; 32], 0);
+    candidate.qualify(file, 0, true, None).1
+}
+
+pub(crate) fn operation_state(found: &Event) -> ToolState {
+    match found.r.as_ref() {
         Some(reply) if reply.e => ToolState::Err,
         Some(reply) if reply.f & events::UNKNOWN != 0 => ToolState::Unknown,
         Some(_) => ToolState::Ok,
         None => ToolState::Pending,
-    };
-    Entry {
-        kind: EntryKind::Operation(state),
-        file,
-        offset: found.o,
-        pos: (found.o, found.b),
-        t: found.t,
-        at: None,
     }
 }
 
@@ -183,6 +182,7 @@ pub(crate) fn event_kind(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn position(
     kind: EntryKind,
     found: &Event,
@@ -190,9 +190,33 @@ pub(crate) fn position(
     effective_time: i64,
     reply_time: impl FnOnce(u64) -> i64,
 ) -> (i64, (u64, u32), u8) {
+    position_time(
+        kind,
+        found,
+        last_operation,
+        effective_time,
+        reply_time,
+        |time| time,
+    )
+}
+
+/// The position rule also accepts symbolic inherited times. Current and
+/// original indexed producers therefore keep a before-first seed unresolved
+/// without introducing another failed/pending operation placement rule.
+pub(crate) fn position_time<T: Copy>(
+    kind: EntryKind,
+    found: &Event,
+    last_operation: Option<(T, (u64, u32))>,
+    effective_time: T,
+    reply_time: impl FnOnce(u64) -> T,
+    observed_time: impl FnOnce(i64) -> T,
+) -> (T, (u64, u32), u8) {
     match (kind, &found.r, last_operation) {
         (EntryKind::Tool(ToolState::Err), Some(reply), Some(_)) => (
-            reply.t.unwrap_or_else(|| reply_time(reply.o)),
+            reply
+                .t
+                .map(observed_time)
+                .unwrap_or_else(|| reply_time(reply.o)),
             (reply.o, reply.b),
             1,
         ),

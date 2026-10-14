@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod description_stage;
 pub(crate) mod identity_stage;
+pub(crate) mod native_producer;
 pub(crate) mod native_stage;
 pub(crate) mod range_stage;
 pub(crate) mod relation_stage;
@@ -5385,8 +5386,9 @@ impl<'a> Builder<'a> {
                 }
                 _ => None,
             };
-            facts
-                .observe(range_stage::Leaf {
+            native_producer::Candidate::observe(
+                &mut facts,
+                range_stage::Leaf {
                     order: range_stage::Order {
                         key: (
                             0,
@@ -5403,8 +5405,9 @@ impl<'a> Builder<'a> {
                     outgoing,
                     boundary: false,
                     count: 0,
-                })
-                .expect("native member count fits");
+                },
+            )
+            .expect("native member count fits");
         }
         facts.end.finish(
             start.map(|handoff| {
