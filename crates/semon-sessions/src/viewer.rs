@@ -6640,6 +6640,46 @@ mod tests {
             assert_eq!(page.status, 200);
             assert_eq!(body_of(&page)["completeness"]["state"], "partial");
             assert_eq!(pool.running(), 1);
+            let identity =
+                crate::session_catalog_identity(&fixture.options, "fixture", "selected-00000")
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                identity.owner_qualification,
+                crate::CatalogOwnerQualification::Provisional
+            );
+            assert!(identity.native_id.is_none());
+            assert!(
+                crate::source_projection_ready(
+                    &fixture.options,
+                    "claude",
+                    "projects/project/selected-00000.jsonl",
+                )
+                .unwrap()
+                .is_none(),
+                "partial browsing cannot authorize archive eviction"
+            );
+            let options = fixture.options.clone();
+            let focused = Instant::now();
+            let answer = at_once("focused native Query while history is held", move || {
+                crate::Query::with_machines(vec![("fixture".into(), options)])
+                    .call_selected(
+                        "fixture",
+                        "selected-00000",
+                        "read_transcript",
+                        &json!({"id":"selected-00000","limit":1}),
+                        None,
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                    )
+                    .unwrap()
+            });
+            assert!(answer.to_string().contains("selected first page"));
+            assert_eq!(pool.running(), 1);
+            eprintln!(
+                "progressive-focused-query unrelated={unrelated} elapsed_us={} response_bytes={} background_running=1 completeness=partial owner_qualification=provisional",
+                focused.elapsed().as_micros(),
+                answer.to_string().len()
+            );
             drop(release);
             // Historical ingestion scales with inventory size. Its bounded
             // steps commit Index offsets and partial Catalog publications while

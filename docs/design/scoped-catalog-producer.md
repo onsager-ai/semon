@@ -6,6 +6,9 @@ reuse it. The producer opens the existing SQLite Event Index without restoring
 historical FileIndexes. Raw remains authoritative for native content and facts
 retain their independent source-selection and runtime authority.
 
+First-release budgets and measurement semantics are defined in the
+[native foundation performance contract](native-foundation-performance.md).
+
 ## Durable source revisions
 
 Receiver writes use `SessionSourceWrite` before changing Raw and complete it after
@@ -119,8 +122,8 @@ Broad discovery is reserved for initial ingestion or failed closure/repair.
 Recovery records its reason and resumes bounded discovery and prior-current-path
 keyset pages, including disappeared sources that disk enumeration cannot find.
 Supported disappearance, replacement, inventory and runtime changes ordinarily
-use source revisions. The compatibility producer remains available when a scoped
-store is unavailable, with its original conservative semantics.
+use source revisions. Unavailable scoped stores retain conservative repair/refusal semantics; they
+do not authorize a second compatibility model.
 
 ## Native Codex relocation
 
@@ -160,8 +163,9 @@ baseline and 38,068 KiB for that rerun. Filesystem output accounting was higher
 for the new implementation, so these results do not establish improved cold-write
 amplification. A subsequent Hub cold run with cohort posting removal completed
 0, 256 and 2,048 unrelated sessions in 24, 826 and 6,894 ms, respectively. The
-existing 10-second completion assertion remains unchanged; these individual
-samples do not establish a production or contention latency guarantee.
+former 10-second completion assertion has been superseded by the provisional
+30-second complete-indexing gate; these individual samples do not establish a
+production or contention latency guarantee.
 
 Five trusted appends to 4 MiB and 16 MiB sources parsed five records and performed
 no full-prefix rehash. Logical reads were 133,754 and 128,312 bytes; source SHA
@@ -182,7 +186,8 @@ Oversized semantic components use durable source indexing, complete owner identi
 
 A relationship batch may also advance a selected Claude companion when the shared matching observation covers its entire physical owner and every eligible native candidate. Qualification, retention of all incident edges and cursor advancement share the existing publication CAS. Candidate inspection uses one shared 64-event budget; partial companion observations remain pending. A Current native key reused by a different harness preserves the original retained owner, harness and recipes independently. Explicit retained-history identity reads select that original owner only with a qualified header and source cohort; list filters and ordering continue to use Current. Unsupported original headers and raw recipes retain custody without becoming qualified. A selected-owner transfer that exceeds 64 recipe rows or 1 MiB refuses the transaction rather than truncating old custody; this does not change normal same-harness history composition.
 
-Schema 26 adds compact derived search memberships without changing native ledgers, recipes or source authority. A source/gram row carries independent nullable Current and retained-history ordering timestamps, with separate partial ordering indexes; zero remains a valid timestamp. Format 2 reads both the existing postings and compact memberships. The additive upgrade promotes the supported search-format marker without rebuilding legacy history or changing completeness and backfill flags. Normal publication replaces only its bounded selected keys; an update to one scope preserves the other scope before removing the selected legacy representation. Each old scope is qualified against the existing 1,024-gram budget, and a compact owner is first checked against their combined bound. Mixed representation for one key fails closed. Search merges the two indexed representations under one 513-position lookahead and the existing 512-candidate and 2 MiB verification budgets. Scope counts, documents, coverage, filters, ordering and continuation semantics remain independent and unchanged. This storage change addresses measured search page-cache spills; its performance remains unqualified until the exact final Source/Hub pair passes the original 10-second cold-start gate.
+Schema 26 adds compact derived search memberships without changing native ledgers, recipes or source authority. A source/gram row carries independent nullable Current and retained-history ordering timestamps, with separate partial ordering indexes; zero remains a valid timestamp. Format 2 reads both the existing postings and compact memberships. The additive upgrade promotes the supported search-format marker without rebuilding legacy history or changing completeness and backfill flags. Normal publication replaces only its bounded selected keys; an update to one scope preserves the other scope before removing the selected legacy representation. Each old scope is qualified against the existing 1,024-gram budget, and a compact owner is first checked against their combined bound. Mixed representation for one key fails closed. Search merges the two indexed representations under one 513-position lookahead and the existing 512-candidate and 2 MiB verification budgets. Scope counts, documents, coverage, filters, ordering and continuation semantics remain independent and unchanged. This storage change addresses measured search page-cache spills; its performance remains unqualified until the exact final Source/Hub pair passes the provisional 30-second complete-indexing gate. The original 10-second
+result remains a nonblocking optimization benchmark.
 
 Initial source discovery requires total
 inventory metadata work. One selected Index load can grow with that session's
