@@ -3144,6 +3144,102 @@ mod tests {
         }
     }
     #[test]
+    fn native_rank_apply_cursor_retains_predecessor_inputs_before_first_resume() {
+        use super::super::native_rank::ApplyInput;
+        let mut fixture = Fixture::new(0);
+        let mut previous = fixture.admitted();
+        let empty = serde_json::to_string(&crate::model::range_stage::Facts::default()).unwrap();
+        let one = serde_json::to_string(&crate::model::range_stage::Facts {
+            count: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_, root) = fixture
+            .store
+            .rank_guard(
+                &previous,
+                &one,
+                &empty,
+                &[(0, true)],
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        let root = root.unwrap().0;
+        previous = fixture
+            .store
+            .reload(&previous.spec.view_key)
+            .unwrap()
+            .unwrap();
+        let (_, identity) = fixture
+            .store
+            .rank_guard(&previous, &empty, &empty, &[], &|_, _| Ok(true), &|| false)
+            .unwrap();
+        let identity = identity.unwrap().0;
+        previous = fixture
+            .store
+            .reload(&previous.spec.view_key)
+            .unwrap()
+            .unwrap();
+        let spec = JobSpec {
+            view_key: "next-publication".into(),
+            ..fixture.spec()
+        };
+        let next = fixture.store.begin(&spec).unwrap();
+        let source = fixture.source();
+        let owner = fixture.store.owner_witness(&fixture.row).unwrap();
+        fixture
+            .store
+            .admit(&next, &[source], &[owner], "same-qualified-native-prefix")
+            .unwrap();
+        let next = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        fixture
+            .store
+            .rank_begin_apply(
+                &next,
+                ApplyInput {
+                    cursor: "native-append",
+                    version: "native-range-v1",
+                    identity: &identity,
+                    left: &root,
+                    right: &root,
+                },
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        fixture.store.restart(&previous).unwrap();
+        while let Some(previous) = fixture.store.reload(&previous.spec.view_key).unwrap() {
+            fixture.store.cleanup(&previous).unwrap();
+        }
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let mut next = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        loop {
+            let advance = fixture
+                .store
+                .rank_advance_apply(
+                    &next,
+                    "native-append",
+                    &|a, b| {
+                        let mut facts: crate::model::range_stage::Facts =
+                            serde_json::from_str(a).map_err(io::Error::other)?;
+                        facts
+                            .append(serde_json::from_str(b).map_err(io::Error::other)?)
+                            .map_err(io::Error::other)?;
+                        serde_json::to_string(&facts).map_err(io::Error::other)
+                    },
+                    &|_, _| Ok(true),
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(advance.outcome, Outcome::Written);
+            if advance.complete.is_some() {
+                break;
+            }
+            next = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        }
+    }
+    #[test]
     fn native_query_all_admitted_owners_and_new_closure_are_fenced() {
         let mut fixture = Fixture::new(0);
         let mut related = fixture.row.clone();
