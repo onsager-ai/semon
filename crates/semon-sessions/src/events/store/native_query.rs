@@ -1,7 +1,10 @@
 //! Content-free, resumable native producer storage. This module orders and
 //! fences facts; the native model alone decides entries, turns and slots.
 use super::*;
-use crate::model::summary::{CatalogRow, CatalogSource};
+use crate::model::{
+    native_stage::SourceTime,
+    summary::{CatalogRow, CatalogSource},
+};
 
 mod native_repair;
 
@@ -10,7 +13,8 @@ pub(crate) const BYTES: usize = 1024 * 1024;
 const STATE_BYTES: usize = 64 * 1024;
 // Rebuildable private Query metadata is versioned independently from the
 // public native Event Index schema28 and the native parser/custody contract.
-pub(super) const SCHEMA_VERSION: i64 = 8;
+// Install both Original repair metadata and the cross-channel child index.
+pub(super) const SCHEMA_VERSION: i64 = 9;
 const SCHEMA_KEY: &str = "native_query_schema";
 
 pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
@@ -53,12 +57,17 @@ fn source_fact_generation(ledger: &Ledger) -> rusqlite::Result<String> {
 fn source_order_generation(ledger: &Ledger) -> rusqlite::Result<String> {
     Ok(format!("order-v2:{}", json(ledger)?))
 }
+fn source_operation_generation(ledger: &Ledger) -> rusqlite::Result<String> {
+    Ok(format!("operation-v2:{}", json(ledger)?))
+}
 #[cfg(test)]
 thread_local! {
     pub(super) static FULL_LINK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BUSY_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DELTA_LINK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ORDER_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OPERATION_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OPERATION_FACT_CUT_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) const SCHEMA: &str = "
@@ -106,6 +115,27 @@ CREATE TABLE IF NOT EXISTS native_source_event_positions (
     file_id INTEGER NOT NULL, seq INTEGER NOT NULL, o INTEGER NOT NULL,
     PRIMARY KEY(file_id,o,seq), UNIQUE(file_id,seq)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_child_operations (
+    file_id INTEGER NOT NULL,
+    parent INTEGER NOT NULL,
+    extra INTEGER NOT NULL CHECK(extra IN (0,1)),
+    seq INTEGER NOT NULL,
+    offset_key BLOB NOT NULL CHECK(length(offset_key)=8),
+    block INTEGER NOT NULL,
+    time INTEGER,
+    PRIMARY KEY(file_id,parent,extra,seq),
+    UNIQUE(file_id,extra,seq)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_source_child_operation_parent
+    ON native_source_child_operations(file_id,parent,offset_key DESC,block DESC,extra DESC,seq ASC);
+CREATE TABLE IF NOT EXISTS native_source_child_operation_facts (
+    file_id INTEGER PRIMARY KEY,
+    generation TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS native_source_child_operation_cleanup AFTER DELETE ON files BEGIN
+ DELETE FROM native_source_child_operations WHERE file_id=OLD.file_id;
+ DELETE FROM native_source_child_operation_facts WHERE file_id=OLD.file_id;
+END;
 CREATE TABLE IF NOT EXISTS native_catalog_owner_versions (
  session_key TEXT NOT NULL, scope TEXT NOT NULL, generation INTEGER NOT NULL,
  PRIMARY KEY(session_key,scope)
@@ -166,11 +196,22 @@ CREATE INDEX IF NOT EXISTS native_query_row_identity ON native_query_rows(job,ki
 
 #[derive(Clone, Debug)]
 pub(crate) struct SourceWitness {
+    /// Immutable Original catalog source proof identity.
     pub(crate) source: CatalogSource,
+    /// Separately captured Current ledger; it can be absent or newer than `source`.
     pub(crate) ledger: Option<Ledger>,
+    /// Current catalog invalidation observation at capture time.
     pub(crate) claim: Option<i64>,
+    /// Current archive marker observation at capture time.
     pub(crate) archive: Option<String>,
+    /// Current source-mutation evidence at capture time.
     pub(crate) mutation: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EventAddress {
+    pub(crate) extra: bool,
+    pub(crate) seq: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -364,17 +405,14 @@ fn source_matches(source: &CatalogSource, ledger: &Ledger) -> bool {
         && source.prefix_sha256 == ledger.prefix
         && source.tail_sha256 == ledger.tail
 }
-fn capture_source(db: &Connection, source: &CatalogSource) -> rusqlite::Result<SourceWitness> {
+fn capture_source_observation(
+    db: &Connection,
+    source: &CatalogSource,
+) -> rusqlite::Result<SourceWitness> {
     if source.path.to_str().is_none() {
         return Err(invalid("native source path is not portable"));
     }
     let ledger = ledger_row(db, &source.path.to_string_lossy())?.map(|(_, ledger)| ledger);
-    if ledger
-        .as_ref()
-        .is_some_and(|ledger| !source_matches(source, ledger))
-    {
-        return Err(invalid("native source generation changed"));
-    }
     let path = source.path.to_string_lossy();
     let mutation: Option<Option<String>> = db.query_row("SELECT CASE WHEN octet_length(evidence)<=65536 THEN evidence END FROM session_source_mutations WHERE source_path=?1", [&*path], |r| r.get(0)).optional()?;
     if matches!(mutation, Some(None)) {
@@ -396,15 +434,228 @@ fn capture_source(db: &Connection, source: &CatalogSource) -> rusqlite::Result<S
         mutation: mutation.flatten(),
     })
 }
+fn capture_source(db: &Connection, source: &CatalogSource) -> rusqlite::Result<SourceWitness> {
+    let witness = capture_source_observation(db, source)?;
+    if witness
+        .ledger
+        .as_ref()
+        .is_some_and(|ledger| !source_matches(source, ledger))
+    {
+        return Err(invalid("native source generation changed"));
+    }
+    Ok(witness)
+}
 fn check_source(db: &Connection, expected: &SourceWitness) -> rusqlite::Result<bool> {
     if !private_current(db)? {
         return Ok(false);
     }
-    let actual = capture_source(db, &expected.source)?;
+    let actual = capture_source_observation(db, &expected.source)?;
     Ok(actual.ledger == expected.ledger
         && actual.claim == expected.claim
         && actual.archive == expected.archive
         && actual.mutation == expected.mutation)
+}
+fn current_file_if_present(
+    db: &Connection,
+    witness: &SourceWitness,
+) -> rusqlite::Result<Option<i64>> {
+    if !check_source(db, witness)? {
+        return Err(invalid("native source witness changed"));
+    }
+    let Some((file, ledger)) = ledger_row(db, witness.source.path.to_string_lossy().as_ref())?
+    else {
+        return Ok(None);
+    };
+    if !source_matches(&witness.source, &ledger) {
+        return Err(invalid(
+            "native Current source does not match original identity",
+        ));
+    }
+    Ok(Some(file))
+}
+fn current_file(db: &Connection, witness: &SourceWitness) -> rusqlite::Result<i64> {
+    current_file_if_present(db, witness)?.ok_or_else(|| invalid("native Current source is absent"))
+}
+fn sequence_sql(value: usize) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|_| invalid("native sequence exceeds SQLite integer range"))
+}
+fn offset_sql_bits(value: u64) -> rusqlite::Result<i64> {
+    const SIGN_BIT: u64 = 1 << 63;
+    if value < SIGN_BIT {
+        return i64::try_from(value).map_err(|_| invalid("native offset exceeds SQLite range"));
+    }
+    let low_bits = i64::try_from(value - SIGN_BIT)
+        .map_err(|_| invalid("native offset exceeds SQLite integer width"))?;
+    i64::MIN
+        .checked_add(low_bits)
+        .ok_or_else(|| invalid("native offset exceeds SQLite integer width"))
+}
+fn add_work(total: &mut Work, part: Work) -> io::Result<()> {
+    total.decoded_rows = total
+        .decoded_rows
+        .checked_add(part.decoded_rows)
+        .ok_or_else(|| io::Error::other("native work row count overflow"))?;
+    total.metadata_bytes = total
+        .metadata_bytes
+        .checked_add(part.metadata_bytes)
+        .ok_or_else(|| io::Error::other("native work byte count overflow"))?;
+    total.vm_steps = total
+        .vm_steps
+        .checked_add(part.vm_steps)
+        .ok_or_else(|| io::Error::other("native work VM step count overflow"))?;
+    Ok(())
+}
+fn order_ready(db: &Connection, file: i64, ledger: &Ledger) -> io::Result<Work> {
+    let expected = source_order_generation(ledger).map_err(io::Error::other)?;
+    let mut query = db
+        .prepare("SELECT generation FROM native_source_order_facts WHERE file_id=?1")
+        .map_err(io::Error::other)?;
+    let generation: Option<String> = query
+        .query_row([file], |row| row.get(0))
+        .optional()
+        .map_err(io::Error::other)?;
+    let work = Work {
+        decoded_rows: if generation.is_some() { 1 } else { 0 },
+        metadata_bytes: generation.as_ref().map_or(0, String::len),
+        vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
+        ..Work::default()
+    };
+    if generation.as_deref() != Some(expected.as_str()) {
+        return Err(io::Error::other(
+            "native time primitives require bounded repair",
+        ));
+    }
+    Ok(work)
+}
+fn child_operations_ready(db: &Connection, file: i64, ledger: &Ledger) -> io::Result<Work> {
+    let expected = source_operation_generation(ledger).map_err(io::Error::other)?;
+    let mut query = db
+        .prepare("SELECT generation FROM native_source_child_operation_facts WHERE file_id=?1")
+        .map_err(io::Error::other)?;
+    let generation: Option<String> = query
+        .query_row([file], |row| row.get(0))
+        .optional()
+        .map_err(io::Error::other)?;
+    let work = Work {
+        decoded_rows: if generation.is_some() { 1 } else { 0 },
+        metadata_bytes: generation.as_ref().map_or(0, String::len),
+        vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
+        ..Work::default()
+    };
+    if generation.as_deref() != Some(expected.as_str()) {
+        return Err(io::Error::other(
+            "native child operation primitives require bounded repair",
+        ));
+    }
+    Ok(work)
+}
+fn source_time_at_index(
+    db: &Connection,
+    file: i64,
+    regular_seq: usize,
+) -> io::Result<(SourceTime, Work)> {
+    let seq = sequence_sql(regular_seq).map_err(io::Error::other)?;
+    let mut query = db
+        .prepare("SELECT t FROM native_source_event_times WHERE file_id=?1 AND seq<=?2 ORDER BY seq DESC LIMIT 1")
+        .map_err(io::Error::other)?;
+    let time: Option<i64> = query
+        .query_row(params![file, seq], |row| row.get(0))
+        .optional()
+        .map_err(io::Error::other)?;
+    let work = Work {
+        decoded_rows: if time.is_some() { 1 } else { 0 },
+        metadata_bytes: if time.is_some() {
+            std::mem::size_of::<i64>()
+        } else {
+            0
+        },
+        vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
+    };
+    Ok((
+        time.map_or(SourceTime::BeforeFirst, SourceTime::Observed),
+        work,
+    ))
+}
+fn sequence_before_offset_index(
+    db: &Connection,
+    file: i64,
+    offset: u64,
+) -> io::Result<(Option<usize>, Work)> {
+    let encoded = offset_sql_bits(offset).map_err(io::Error::other)?;
+    let mut work = Work::default();
+    let sequence = if offset < (1 << 63) {
+        let mut query = db
+            .prepare("SELECT seq FROM native_source_event_positions WHERE file_id=?1 AND o>=0 AND o<=?2 ORDER BY o DESC,seq DESC LIMIT 1")
+            .map_err(io::Error::other)?;
+        let seq: Option<i64> = query
+            .query_row(params![file, encoded], |row| row.get(0))
+            .optional()
+            .map_err(io::Error::other)?;
+        work.vm_steps = query.get_status(rusqlite::StatementStatus::VmStep);
+        if seq.is_some() {
+            work.decoded_rows = 1;
+            work.metadata_bytes = std::mem::size_of::<i64>();
+        }
+        seq
+    } else {
+        let mut high = db
+            .prepare("SELECT seq FROM native_source_event_positions WHERE file_id=?1 AND o<0 AND o<=?2 ORDER BY o DESC,seq DESC LIMIT 1")
+            .map_err(io::Error::other)?;
+        let high_seq: Option<i64> = high
+            .query_row(params![file, encoded], |row| row.get(0))
+            .optional()
+            .map_err(io::Error::other)?;
+        add_work(
+            &mut work,
+            Work {
+                decoded_rows: if high_seq.is_some() { 1 } else { 0 },
+                metadata_bytes: if high_seq.is_some() {
+                    std::mem::size_of::<i64>()
+                } else {
+                    0
+                },
+                vm_steps: high.get_status(rusqlite::StatementStatus::VmStep),
+            },
+        )?;
+        if high_seq.is_some() {
+            high_seq
+        } else {
+            let mut low = db
+                .prepare("SELECT seq FROM native_source_event_positions WHERE file_id=?1 AND o>=0 ORDER BY o DESC,seq DESC LIMIT 1")
+                .map_err(io::Error::other)?;
+            let low_seq: Option<i64> = low
+                .query_row([file], |row| row.get(0))
+                .optional()
+                .map_err(io::Error::other)?;
+            add_work(
+                &mut work,
+                Work {
+                    decoded_rows: if low_seq.is_some() { 1 } else { 0 },
+                    metadata_bytes: if low_seq.is_some() {
+                        std::mem::size_of::<i64>()
+                    } else {
+                        0
+                    },
+                    vm_steps: low.get_status(rusqlite::StatementStatus::VmStep),
+                },
+            )?;
+            low_seq
+        }
+    };
+    let sequence = sequence
+        .map(|seq| usize::try_from(seq).map_err(|_| io::Error::other("native sequence is invalid")))
+        .transpose()?;
+    Ok((sequence, work))
+}
+fn source_time_before_offset_index(
+    db: &Connection,
+    file: i64,
+    offset: u64,
+) -> io::Result<(SourceTime, Work)> {
+    let (seq, mut work) = sequence_before_offset_index(db, file, offset)?;
+    let (time, time_work) = source_time_at_index(db, file, seq.unwrap_or(0))?;
+    add_work(&mut work, time_work)?;
+    Ok((time, work))
 }
 pub(super) fn pending(db: &Connection) -> rusqlite::Result<bool> {
     db.query_row(
@@ -1136,21 +1387,7 @@ fn witnesses_current(db: &Connection, job: i64) -> rusqlite::Result<bool> {
 
 impl NativeStore {
     fn selected_file(&self, witness: &SourceWitness) -> io::Result<i64> {
-        if !check_source(&self.connection, witness).map_err(io::Error::other)? {
-            return Err(io::Error::other("native source witness changed"));
-        }
-        ledger_row(
-            &self.connection,
-            witness.source.path.to_string_lossy().as_ref(),
-        )
-        .map_err(io::Error::other)?
-        .map(|(file, _)| file)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "native facts require original-source repair",
-            )
-        })
+        current_file(&self.connection, witness).map_err(io::Error::other)
     }
     pub(crate) fn signals_page(
         &self,
@@ -1663,12 +1900,7 @@ impl NativeStore {
         })
     }
     pub(crate) fn source_witness(&self, source: &CatalogSource) -> io::Result<SourceWitness> {
-        if crate::native_evidence::catalog_input(&source.path, &self.options).is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "native source is outside configured roots",
-            ));
-        }
+        self.admit_configured_source(source)?;
         let tx = self
             .connection
             .unchecked_transaction()
@@ -1677,6 +1909,32 @@ impl NativeStore {
             return Err(io::Error::other("native store version changed"));
         }
         capture_source(&tx, source).map_err(io::Error::other)
+    }
+    /// Captures an immutable original source identity and the separate Current
+    /// ledger/proof observations. Current row readers still require that the
+    /// observed ledger match this original identity.
+    pub(crate) fn original_source_witness(
+        &self,
+        source: &CatalogSource,
+    ) -> io::Result<SourceWitness> {
+        self.admit_configured_source(source)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        if !private_current(&tx).map_err(io::Error::other)? {
+            return Err(io::Error::other("native store version changed"));
+        }
+        capture_source_observation(&tx, source).map_err(io::Error::other)
+    }
+    fn admit_configured_source(&self, source: &CatalogSource) -> io::Result<()> {
+        if crate::native_evidence::catalog_input(&source.path, &self.options).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "native source is outside configured roots",
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn owner_witness(&self, row: &CatalogRow) -> io::Result<OwnerWitness> {
         let tx = self
@@ -1721,21 +1979,19 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        if !check_source(&tx, witness).map_err(io::Error::other)? {
-            return Err(io::Error::other("native source witness changed"));
-        }
-        let Some(ledger) = &witness.ledger else {
+        let Some(file) = current_file_if_present(&tx, witness).map_err(io::Error::other)? else {
             return Ok(None);
+        };
+        let Some(ledger) = &witness.ledger else {
+            return Err(io::Error::other("native Current source is absent"));
         };
         let length = "COALESCE(octet_length(entrypoint),0)+COALESCE(octet_length(title),0)+COALESCE(octet_length(agent_name),0)+COALESCE(octet_length(last_model),0)+COALESCE(octet_length(cwd),0)+COALESCE(octet_length(branch),0)";
         let columns = guard_columns(
             "entrypoint,title,agent_name,last_model,failed,first_ms,last_ms,cwd,branch",
             length,
         );
-        let mut q = tx.prepare(&format!("SELECT {columns},{length},(SELECT generation FROM native_source_facts WHERE file_id=files.file_id),(SELECT events FROM native_source_facts WHERE file_id=files.file_id),(SELECT extras FROM native_source_facts WHERE file_id=files.file_id),(SELECT signals FROM native_source_facts WHERE file_id=files.file_id),(SELECT generation FROM native_source_order_facts WHERE file_id=files.file_id),(SELECT first_seq FROM native_source_order_facts WHERE file_id=files.file_id),(SELECT first_ms FROM native_source_order_facts WHERE file_id=files.file_id) FROM files WHERE path=?1")).map_err(io::Error::other)?;
-        let mut rows = q
-            .query([witness.source.path.to_string_lossy().as_ref()])
-            .map_err(io::Error::other)?;
+        let mut q = tx.prepare(&format!("SELECT {columns},{length},(SELECT generation FROM native_source_facts WHERE file_id=files.file_id),(SELECT events FROM native_source_facts WHERE file_id=files.file_id),(SELECT extras FROM native_source_facts WHERE file_id=files.file_id),(SELECT signals FROM native_source_facts WHERE file_id=files.file_id),(SELECT generation FROM native_source_order_facts WHERE file_id=files.file_id),(SELECT first_seq FROM native_source_order_facts WHERE file_id=files.file_id),(SELECT first_ms FROM native_source_order_facts WHERE file_id=files.file_id) FROM files WHERE file_id=?1")).map_err(io::Error::other)?;
+        let mut rows = q.query([file]).map_err(io::Error::other)?;
         let Some(row) = rows.next().map_err(io::Error::other)? else {
             return Ok(None);
         };
@@ -1830,6 +2086,124 @@ impl NativeStore {
         Ok((present, work))
     }
 
+    /// Returns the latest native regular timestamp at or before `regular_seq`.
+    /// An untimed prefix stays symbolic even when a later row has a timestamp.
+    pub(crate) fn source_time_at(
+        &self,
+        witness: &SourceWitness,
+        regular_seq: usize,
+    ) -> io::Result<(SourceTime, Work)> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        let file = current_file(&tx, witness).map_err(io::Error::other)?;
+        let ledger = witness
+            .ledger
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native Current source is absent"))?;
+        let mut work = order_ready(&tx, file, ledger)?;
+        let (time, read) = source_time_at_index(&tx, file, regular_seq)?;
+        add_work(&mut work, read)?;
+        Ok((time, work))
+    }
+
+    /// Resolves the regular event at the native offset predecessor, with seq0
+    /// as the parser's partition-point fallback, then applies the shared time
+    /// rule without decoding an Event or walking prior history.
+    pub(crate) fn source_time_before_offset(
+        &self,
+        witness: &SourceWitness,
+        offset: u64,
+    ) -> io::Result<(SourceTime, Work)> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        let file = current_file(&tx, witness).map_err(io::Error::other)?;
+        let ledger = witness
+            .ledger
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native Current source is absent"))?;
+        let mut work = order_ready(&tx, file, ledger)?;
+        let (time, read) = source_time_before_offset_index(&tx, file, offset)?;
+        add_work(&mut work, read)?;
+        Ok((time, work))
+    }
+
+    /// Returns the last indexed Operation or Tool child for one regular parent.
+    /// Equal placements preserve extras before regular events and the first
+    /// sequence within each channel, matching the complete model iterator.
+    pub(crate) fn last_operation(
+        &self,
+        witness: &SourceWitness,
+        parent_seq: usize,
+    ) -> io::Result<(Option<(EventAddress, SourceTime, (u64, u32))>, Work)> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        let file = current_file(&tx, witness).map_err(io::Error::other)?;
+        let ledger = witness
+            .ledger
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native Current source is absent"))?;
+        let parent = sequence_sql(parent_seq).map_err(io::Error::other)?;
+        let mut work = child_operations_ready(&tx, file, ledger)?;
+        let mut query = tx
+            .prepare("SELECT extra,seq,offset_key,block,time FROM native_source_child_operations WHERE file_id=?1 AND parent=?2 ORDER BY offset_key DESC,block DESC,extra DESC,seq ASC LIMIT 1")
+            .map_err(io::Error::other)?;
+        let found: Option<(bool, i64, Vec<u8>, i64, Option<i64>)> = query
+            .query_row(params![file, parent], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .optional()
+            .map_err(io::Error::other)?;
+        add_work(
+            &mut work,
+            Work {
+                decoded_rows: if found.is_some() { 1 } else { 0 },
+                metadata_bytes: found.as_ref().map_or(0, |(_, _, _, _, time)| {
+                    32 + if time.is_some() {
+                        std::mem::size_of::<i64>()
+                    } else {
+                        0
+                    }
+                }),
+                vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
+            },
+        )?;
+        let Some((extra, seq, offset_key, block, explicit_time)) = found else {
+            return Ok((None, work));
+        };
+        let seq = usize::try_from(seq)
+            .map_err(|_| io::Error::other("native operation seq is invalid"))?;
+        let offset_key: [u8; 8] = offset_key
+            .try_into()
+            .map_err(|_| io::Error::other("native operation offset is invalid"))?;
+        let offset = u64::from_be_bytes(offset_key);
+        let block = u32::try_from(block)
+            .map_err(|_| io::Error::other("native operation block is invalid"))?;
+        let time = if let Some(time) = explicit_time {
+            SourceTime::Observed(time)
+        } else {
+            add_work(&mut work, order_ready(&tx, file, ledger)?)?;
+            let (time, read) = source_time_before_offset_index(&tx, file, offset)?;
+            add_work(&mut work, read)?;
+            time
+        };
+        Ok((
+            Some((EventAddress { extra, seq }, time, (offset, block))),
+            work,
+        ))
+    }
+
     pub(crate) fn events_page(
         &self,
         witness: &SourceWitness,
@@ -1840,18 +2214,7 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        if !check_source(&tx, witness).map_err(io::Error::other)? {
-            return Err(io::Error::other("native event witness changed"));
-        }
-        let file = ledger_row(&tx, witness.source.path.to_string_lossy().as_ref())
-            .map_err(io::Error::other)?
-            .map(|(id, _)| id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "native event facts need original-source repair",
-                )
-            })?;
+        let file = current_file(&tx, witness).map_err(io::Error::other)?;
         let length = "192+COALESCE(octet_length(k),0)+COALESCE(octet_length(id),0)+COALESCE(octet_length(n),0)+COALESCE(octet_length(y),0)+COALESCE(octet_length(reply_m),0)+COALESCE(octet_length(peer_sock),0)+COALESCE(octet_length(peer_start),0)+COALESCE(octet_length(u),0)";
         let columns = guard_columns(EVENT_COLUMNS, length);
         let mut q = tx.prepare(&format!("SELECT {columns},{length} FROM events WHERE file_id=?1 AND extra=?2 AND seq>?3 ORDER BY seq LIMIT 64")).map_err(io::Error::other)?;
@@ -1915,31 +2278,14 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        let file = self.selected_file(witness)?;
-        let ready: Option<String> = tx
-            .query_row(
-                "SELECT generation FROM native_source_order_facts WHERE file_id=?1",
-                [file],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(io::Error::other)?;
-        let expected = witness
+        let file = current_file(&tx, witness).map_err(io::Error::other)?;
+        let ledger = witness
             .ledger
             .as_ref()
-            .map(source_order_generation)
-            .transpose()
-            .map_err(io::Error::other)?;
-        if ready.is_none() || ready != expected {
-            return Err(io::Error::other(
-                "native offset primitives require bounded repair",
-            ));
-        }
-        let seq: Option<i64> = tx.query_row(
-            "SELECT seq FROM native_source_event_positions WHERE file_id=?1 AND o<=?2 ORDER BY o DESC,seq DESC LIMIT 1",
-            params![file, offset as i64], |r| r.get(0),
-        ).optional().map_err(io::Error::other)?;
-        let seq = seq.unwrap_or(0);
+            .ok_or_else(|| io::Error::other("native Current source is absent"))?;
+        let _ready = order_ready(&tx, file, ledger)?;
+        let (seq, _) = sequence_before_offset_index(&tx, file, offset)?;
+        let seq = sequence_sql(seq.unwrap_or(0)).map_err(io::Error::other)?;
         let length = "192+COALESCE(octet_length(k),0)+COALESCE(octet_length(id),0)+COALESCE(octet_length(n),0)+COALESCE(octet_length(y),0)+COALESCE(octet_length(reply_m),0)+COALESCE(octet_length(peer_sock),0)+COALESCE(octet_length(peer_start),0)+COALESCE(octet_length(u),0)";
         let columns = guard_columns(EVENT_COLUMNS, length);
         let mut query = tx
@@ -1969,13 +2315,10 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        if !check_source(&tx, witness).map_err(io::Error::other)? {
-            return Err(io::Error::other("native event witness changed"));
-        }
-        let file = ledger_row(&tx, witness.source.path.to_string_lossy().as_ref())
-            .map_err(io::Error::other)?
-            .map(|(id, _)| id);
-        let Some(file) = file else { return Ok(None) };
+        let Some(file) = current_file_if_present(&tx, witness).map_err(io::Error::other)? else {
+            return Ok(None);
+        };
+        let seq = sequence_sql(seq).map_err(io::Error::other)?;
         let length = "192+COALESCE(octet_length(k),0)+COALESCE(octet_length(id),0)+COALESCE(octet_length(n),0)+COALESCE(octet_length(y),0)+COALESCE(octet_length(reply_m),0)+COALESCE(octet_length(peer_sock),0)+COALESCE(octet_length(peer_start),0)+COALESCE(octet_length(u),0)";
         let columns = guard_columns(EVENT_COLUMNS, length);
         let mut q = tx
@@ -1984,7 +2327,7 @@ impl NativeStore {
             ))
             .map_err(io::Error::other)?;
         let mut rows = q
-            .query(params![file, extra, seq_int(seq)])
+            .query(params![file, extra, seq])
             .map_err(io::Error::other)?;
         let Some(row) = rows.next().map_err(io::Error::other)? else {
             return Ok(None);
@@ -2071,6 +2414,7 @@ pub(super) fn write_source_facts(
         )?;
     }
     write_order_facts(tx, file, ledger, index, changes, complete, expected)?;
+    write_operation_facts(tx, file, ledger, index, changes, complete, expected)?;
     Ok(())
 }
 
@@ -2160,6 +2504,82 @@ fn write_order_facts(
             )
             .optional()?;
         tx.execute("INSERT INTO native_source_order_facts VALUES(?1,?2,?3,?4) ON CONFLICT(file_id) DO UPDATE SET generation=excluded.generation,first_seq=excluded.first_seq,first_ms=excluded.first_ms",params![file,source_order_generation(ledger)?,first.map(|p|p.0),first.map(|p|p.1)])?;
+    }
+    Ok(())
+}
+
+/// Child rows have their own generation footer. A migrated store with no
+/// normalized rows stays pending until a complete publication repairs it;
+/// qualified appends and cuts then touch only DirtyRows' two-channel delta.
+fn write_operation_facts(
+    tx: &Transaction<'_>,
+    file: i64,
+    ledger: &Ledger,
+    index: &FileIndex,
+    changes: &super::super::DirtyRows,
+    complete: bool,
+    expected: Option<&Ledger>,
+) -> rusqlite::Result<()> {
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT generation FROM native_source_child_operation_facts WHERE file_id=?1",
+            [file],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let qualified = complete
+        || old.is_some() && old == expected.map(source_operation_generation).transpose()?;
+    if complete {
+        tx.execute(
+            "DELETE FROM native_source_child_operations WHERE file_id=?1",
+            [file],
+        )?;
+    }
+    for (extra, before, touched, events) in [
+        (true, changes.before_extras, &changes.extras, &index.extras),
+        (false, changes.before_events, &changes.events, &index.events),
+    ] {
+        changed(
+            before,
+            touched,
+            events,
+            |seq, event| {
+                #[cfg(test)]
+                OPERATION_FACT_VISITS.with(|count| count.set(count.get() + 1));
+                let seq = sequence_sql(seq)?;
+                tx.execute(
+                    "DELETE FROM native_source_child_operations WHERE file_id=?1 AND extra=?2 AND seq=?3",
+                    params![file, extra, seq],
+                )?;
+                if matches!(
+                    event.k,
+                    crate::events::Kind::Operation | crate::events::Kind::Tool
+                ) && let Some(parent) = event.parent
+                {
+                    let parent = sequence_sql(parent)?;
+                    tx.execute(
+                        "INSERT INTO native_source_child_operations(file_id,parent,extra,seq,offset_key,block,time) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                        params![file,parent,extra,seq,event.o.to_be_bytes().as_slice(),i64::from(event.b),event.t],
+                    )?;
+                }
+                Ok(())
+            },
+            |cut| {
+                let _removed = tx.execute(
+                    "DELETE FROM native_source_child_operations WHERE file_id=?1 AND extra=?2 AND seq>=?3",
+                    params![file, extra, sequence_sql(cut)?],
+                )?;
+                #[cfg(test)]
+                OPERATION_FACT_CUT_ROWS.with(|count| count.set(count.get() + _removed));
+                Ok(())
+            },
+        )?;
+    }
+    if qualified {
+        tx.execute(
+            "INSERT INTO native_source_child_operation_facts VALUES(?1,?2) ON CONFLICT(file_id) DO UPDATE SET generation=excluded.generation",
+            params![file, source_operation_generation(ledger)?],
+        )?;
     }
     Ok(())
 }
@@ -2266,6 +2686,74 @@ mod tests {
                 store,
             }
         }
+        fn new_codex(records: &[Value]) -> (Self, crate::inputs::Input) {
+            let mut fixture = Self::new(0);
+            fixture.options.all = true;
+            fixture.options.proc_root = fixture.root.join("proc");
+            let path = fixture
+                .options
+                .codex_home
+                .join("sessions/2026/10/15/rollout-code-mode-fixture.jsonl");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut bytes = Vec::new();
+            for record in records {
+                bytes.extend(serde_json::to_vec(record).unwrap());
+                bytes.push(b'\n');
+            }
+            let ledger = write_generation(&path, &bytes);
+            let mut parsed_cache = crate::events::EventCache::default();
+            let mut dirty = false;
+            let index = crate::events::scan_file(&path, "codex", &mut parsed_cache, &mut dirty)
+                .unwrap()
+                .as_ref()
+                .clone();
+            assert!(dirty);
+            let source = ledger.source(&path, "codex-code-mode-fixture");
+            let row: CatalogRow = serde_json::from_value(serde_json::json!({
+                "key":"codex-code-mode-fixture",
+                "name":"Codex code mode fixture",
+                "harness":"codex",
+                "kind":"session",
+                "native_ids":["codex-code-mode-fixture"],
+                "parent":null,
+                "parent_source":null,
+                "repo":null,
+                "branch":null,
+                "model":"test",
+                "effort":null,
+                "start":0,
+                "last":0,
+                "tokens":[0.0,0.0,0.0],
+                "cost":crate::pricing::Cost::default(),
+                "sources":[source]
+            }))
+            .unwrap();
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(&tx, path.to_str().unwrap(), &ledger, &index, None, None).unwrap();
+            tx.commit().unwrap();
+            fixture
+                .store
+                .connection
+                .execute(
+                    "INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES(?1,?2,?3,?4)",
+                    params![row.key, row.last.unwrap(), row.harness, json(&row).unwrap()],
+                )
+                .unwrap();
+            let relative = path
+                .strip_prefix(&fixture.options.codex_home)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            fixture.index = index;
+            fixture.row = row;
+            (
+                fixture,
+                crate::inputs::Input {
+                    root: crate::inputs::InputRoot::Codex,
+                    path: relative,
+                },
+            )
+        }
         fn source(&self) -> SourceWitness {
             self.store.source_witness(&self.row.sources[0]).unwrap()
         }
@@ -2290,6 +2778,82 @@ mod tests {
             );
             self.store.reload(&spec.view_key).unwrap().unwrap()
         }
+        fn write_full_index(&self, index: &FileIndex) {
+            let witness = self.source();
+            let ledger = witness.ledger.unwrap();
+            let tx = self.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(
+                &tx,
+                witness.source.path.to_str().unwrap(),
+                &ledger,
+                index,
+                None,
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        fn write_delta_index(&self, previous: &FileIndex, index: &FileIndex) {
+            let witness = self.source();
+            let ledger = witness.ledger.unwrap();
+            let changes = super::super::super::DirtyRows::between(previous, index);
+            let tx = self.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(
+                &tx,
+                witness.source.path.to_str().unwrap(),
+                &ledger,
+                index,
+                Some(&changes),
+                Some(&ledger),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+    fn write_generation(path: &Path, bytes: &[u8]) -> Ledger {
+        fs::write(path, bytes).unwrap();
+        Ledger {
+            stat: Stat::of(path).unwrap(),
+            offset: u64::try_from(bytes.len()).unwrap(),
+            prefix: Sha256::digest(bytes).into(),
+            tail: Sha256::digest(&bytes[bytes.len().saturating_sub(4096)..]).into(),
+        }
+    }
+    fn install_current_ledger(connection: &Connection, path: &Path, ledger: &Ledger) {
+        connection
+            .execute(
+                "UPDATE files SET dev=?1,ino=?2,size=?3,mtime_ns=?4,ctime_ns=?5,resume_at=?6,head_sha256=?7,tail_sha256=?8 WHERE path=?9",
+                params![
+                    int(ledger.stat.dev),
+                    int(ledger.stat.ino),
+                    int(ledger.stat.size),
+                    ledger.stat.modified_ns.to_be_bytes(),
+                    ledger.stat.changed_ns.map(i128::to_be_bytes),
+                    int(ledger.offset),
+                    ledger.prefix,
+                    ledger.tail,
+                    path.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    fn complete_time_at(events: &[Event], seq: usize) -> SourceTime {
+        events
+            .iter()
+            .take(seq.saturating_add(1))
+            .rev()
+            .find_map(|event| event.t.map(SourceTime::Observed))
+            .unwrap_or(SourceTime::BeforeFirst)
+    }
+    fn complete_time_before_offset(events: &[Event], offset: u64) -> SourceTime {
+        let seq = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.o <= offset)
+            .max_by_key(|(seq, event)| (event.o, *seq))
+            .map(|(seq, _)| seq)
+            .unwrap_or(0);
+        complete_time_at(events, seq)
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -2373,6 +2937,963 @@ mod tests {
             "tail SQL work grew: {steps:?}"
         );
     }
+
+    #[test]
+    fn native_query_source_time_primitives_match_indexed_predecessor_contract() {
+        let fixture = Fixture::new(3);
+        let mut index = fixture.index.clone();
+        for (seq, (offset, time)) in [(4, None), (8, Some(100)), (8, None), (16, Some(-20))]
+            .into_iter()
+            .enumerate()
+        {
+            index.events[seq].o = offset;
+            index.events[seq].t = time;
+        }
+        let high_offset = (1u64 << 63) + 5;
+        index.events.push(Event {
+            o: high_offset,
+            t: Some(-30),
+            ..Event::default()
+        });
+        fixture.write_full_index(&index);
+        let witness = fixture.source();
+        let original_witness = fixture
+            .store
+            .original_source_witness(&fixture.row.sources[0])
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .source_header(&original_witness)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fixture.store.event_at(&original_witness, false, 0).unwrap(),
+            Some(index.events[0].clone())
+        );
+        assert_eq!(
+            fixture
+                .store
+                .source_time_at(&original_witness, 0)
+                .unwrap()
+                .0,
+            SourceTime::BeforeFirst
+        );
+
+        for seq in 0..=index.events.len() {
+            let (actual, work) = fixture.store.source_time_at(&witness, seq).unwrap();
+            assert_eq!(actual, complete_time_at(&index.events, seq));
+            assert!(work.decoded_rows <= 2);
+            assert!(
+                work.metadata_bytes
+                    <= source_order_generation(witness.ledger.as_ref().unwrap())
+                        .unwrap()
+                        .len()
+                        + std::mem::size_of::<i64>()
+            );
+        }
+        assert_eq!(
+            fixture.store.source_time_at(&witness, 0).unwrap().0,
+            SourceTime::BeforeFirst,
+            "a later first timestamp must not seed an earlier sequence"
+        );
+
+        for offset in [0, 4, 8, 15, 16, (1u64 << 63) + 4, high_offset, u64::MAX] {
+            let (actual, work) = fixture
+                .store
+                .source_time_before_offset(&witness, offset)
+                .unwrap();
+            assert_eq!(actual, complete_time_before_offset(&index.events, offset));
+            assert!(work.decoded_rows <= 3);
+            assert!(
+                work.metadata_bytes
+                    <= source_order_generation(witness.ledger.as_ref().unwrap())
+                        .unwrap()
+                        .len()
+                        + 2 * std::mem::size_of::<i64>()
+            );
+        }
+        assert_eq!(
+            fixture
+                .store
+                .event_before_offset(&witness, high_offset)
+                .unwrap(),
+            Some((index.events.len() - 1, index.events.last().unwrap().clone()))
+        );
+        assert_eq!(
+            fixture
+                .store
+                .source_time_before_offset(&witness, 8)
+                .unwrap()
+                .0,
+            SourceTime::Observed(100),
+            "equal regular positions select the highest native sequence"
+        );
+        if usize::BITS > 63 {
+            assert!(fixture.store.source_time_at(&witness, usize::MAX).is_err());
+            assert!(fixture.store.event_at(&witness, false, usize::MAX).is_err());
+            assert!(fixture.store.last_operation(&witness, usize::MAX).is_err());
+        }
+
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_source_order_facts SET generation='order-v1:stale'",
+                [],
+            )
+            .unwrap();
+        assert!(fixture.store.source_time_at(&witness, 0).is_err());
+        assert!(
+            fixture
+                .store
+                .source_time_before_offset(&witness, 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_query_source_time_lookup_work_stays_fixed_across_history_growth() {
+        let mut at_steps = Vec::new();
+        let mut offset_steps = Vec::new();
+        for events_after_prefix in [0, 128, 1024, 8192] {
+            let fixture = Fixture::new(events_after_prefix);
+            let mut index = fixture.index.clone();
+            for (seq, event) in index.events.iter_mut().enumerate() {
+                event.o = u64::try_from((seq + 1) * 4).unwrap();
+                event.t = (seq != 0).then(|| i64::try_from(seq).unwrap());
+            }
+            fixture.write_full_index(&index);
+            let witness = fixture.source();
+            let reads = super::super::super::FILE_READS.with(Cell::get);
+            let (at, at_work) = fixture.store.source_time_at(&witness, 0).unwrap();
+            let (before, offset_work) = fixture
+                .store
+                .source_time_before_offset(&witness, 0)
+                .unwrap();
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+            assert_eq!(at, SourceTime::BeforeFirst);
+            assert_eq!(before, SourceTime::BeforeFirst);
+            let ready_bytes = source_order_generation(witness.ledger.as_ref().unwrap())
+                .unwrap()
+                .len();
+            assert_eq!(
+                (at_work.decoded_rows, at_work.metadata_bytes),
+                (1, ready_bytes)
+            );
+            assert_eq!(
+                (offset_work.decoded_rows, offset_work.metadata_bytes),
+                (1, ready_bytes)
+            );
+            let time_rows: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_event_times",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let position_rows: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_event_positions",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(time_rows, i64::try_from(events_after_prefix).unwrap());
+            assert_eq!(
+                position_rows,
+                i64::try_from(events_after_prefix + 1).unwrap()
+            );
+            at_steps.push(at_work.vm_steps);
+            offset_steps.push(offset_work.vm_steps);
+        }
+        assert!(at_steps.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(offset_steps.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn native_query_original_witness_admits_archive_but_refuses_current_reads() {
+        let mut fixture = Fixture::new(0);
+        let original = fixture.row.sources[0].clone();
+        let path = original.path.clone();
+        let current = write_generation(&path, b"newer current generation\n");
+        install_current_ledger(&fixture.store.connection, &path, &current);
+        let archive_key = archive_index_key(path.to_str().unwrap());
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,'archived-original-v1')",
+                [&archive_key],
+            )
+            .unwrap();
+
+        assert!(fixture.store.source_witness(&original).is_err());
+        let witness = fixture.store.original_source_witness(&original).unwrap();
+        assert_eq!(witness.source, original);
+        assert_eq!(witness.ledger.as_ref(), Some(&current));
+        assert_eq!(witness.archive.as_deref(), Some("archived-original-v1"));
+        assert!(fixture.store.source_header(&witness).is_err());
+        assert!(fixture.store.events_page(&witness, false, None).is_err());
+        assert!(fixture.store.event_at(&witness, false, 0).is_err());
+        assert!(fixture.store.event_before_offset(&witness, 0).is_err());
+        assert!(
+            fixture
+                .store
+                .source_has_copy_identity(&witness, "native-0")
+                .is_err()
+        );
+        assert!(fixture.store.source_time_at(&witness, 0).is_err());
+        assert!(
+            fixture
+                .store
+                .source_time_before_offset(&witness, 0)
+                .is_err()
+        );
+        assert!(fixture.store.last_operation(&witness, 0).is_err());
+        assert!(fixture.store.signals_page(&witness, None).is_err());
+        assert!(fixture.store.usage_page(&witness, None).is_err());
+        assert!(fixture.store.identities_page(&witness, None).is_err());
+        assert!(fixture.store.links_page(&witness, None).is_err());
+        assert!(fixture.store.busy_page(&witness, None).is_err());
+
+        let mut outside = original.clone();
+        outside.path = fixture.root.join("outside.jsonl");
+        assert_eq!(
+            fixture
+                .store
+                .original_source_witness(&outside)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let spec = fixture.spec();
+        let created = fixture.store.begin(&spec).unwrap();
+        let owner = fixture.store.owner_witness(&fixture.row).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .admit(&created, &[witness], &[owner], "original-complete")
+                .unwrap(),
+            Outcome::Written
+        );
+        let job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        assert!(fixture.store.recheck(&job).unwrap());
+        assert_eq!(
+            fixture
+                .store
+                .admitted_sources_page(&job, None)
+                .unwrap()
+                .rows[0]
+                .source,
+            original
+        );
+
+        let changed = write_generation(&path, b"changed current generation after admission\n");
+        install_current_ledger(&fixture.store.connection, &path, &changed);
+        assert!(!fixture.store.recheck(&job).unwrap());
+        assert_eq!(
+            fixture
+                .store
+                .checkpoint(
+                    &job,
+                    "slots",
+                    "changed-original",
+                    &serde_json::json!({}),
+                    &[],
+                    &|| false,
+                )
+                .unwrap(),
+            Outcome::Conflict
+        );
+    }
+
+    #[test]
+    fn native_query_last_child_preserves_complete_model_channel_and_sequence_ties() {
+        use crate::model::{
+            ToolState,
+            native_producer::{Candidate, EventInput},
+            native_stage::EntryKind,
+        };
+
+        let fixture = Fixture::new(0);
+        let mut index = fixture.index.clone();
+        index.events[0] = Event {
+            k: Kind::Tool,
+            o: 0,
+            t: Some(7),
+            code_mode: true,
+            code_mode_open: true,
+            ..Event::default()
+        };
+        index.events.push(Event {
+            k: Kind::Tool,
+            parent: Some(0),
+            o: 6,
+            b: 1,
+            t: Some(-100),
+            ..Event::default()
+        });
+        index.extras = vec![
+            Event {
+                k: Kind::Operation,
+                parent: Some(0),
+                o: 4,
+                t: Some(50),
+                ..Event::default()
+            },
+            Event {
+                k: Kind::Operation,
+                parent: Some(0),
+                o: 6,
+                t: Some(-5),
+                ..Event::default()
+            },
+            Event {
+                k: Kind::Operation,
+                parent: Some(0),
+                o: 6,
+                b: 1,
+                ..Event::default()
+            },
+            Event {
+                k: Kind::Tool,
+                parent: Some(0),
+                o: 6,
+                b: 1,
+                t: Some(-101),
+                ..Event::default()
+            },
+        ];
+        fixture.write_full_index(&index);
+        let witness = fixture.source();
+        let (actual, work) = fixture.store.last_operation(&witness, 0).unwrap();
+        let expected = (
+            EventAddress {
+                extra: true,
+                seq: 2,
+            },
+            SourceTime::Observed(-100),
+            (6, 1),
+        );
+        assert_eq!(actual, Some(expected));
+        assert_eq!(work.decoded_rows, 5);
+        assert_eq!(
+            work.metadata_bytes,
+            source_operation_generation(witness.ledger.as_ref().unwrap())
+                .unwrap()
+                .len()
+                + 40
+                + source_order_generation(witness.ledger.as_ref().unwrap())
+                    .unwrap()
+                    .len()
+                + 2 * std::mem::size_of::<i64>()
+        );
+        assert_eq!(fixture.store.last_operation(&witness, 9).unwrap().0, None);
+
+        let failed = Event {
+            k: Kind::Tool,
+            o: 1,
+            t: Some(90),
+            r: Some(crate::events::Reply {
+                o: 40,
+                b: 2,
+                t: Some(-12),
+                e: true,
+                ..crate::events::Reply::default()
+            }),
+            ..Event::default()
+        };
+        let candidate = Candidate::regular(
+            EventInput {
+                seq: 0,
+                event: &failed,
+                kind: EntryKind::Tool(ToolState::Err),
+                inherited: SourceTime::Observed(90),
+                operation: Some((expected.1, expected.2)),
+                identity: [0; 32],
+                ordinal: 0,
+            },
+            |_| SourceTime::BeforeFirst,
+        );
+        assert_eq!(candidate.time, SourceTime::Observed(-12));
+        assert_eq!(candidate.entry.pos, (40, 2));
+        assert_eq!(candidate.phase, 1);
+        assert!(candidate.has_operations);
+
+        let pending = Event { r: None, ..failed };
+        let pending_candidate = Candidate::regular(
+            EventInput {
+                seq: 0,
+                event: &pending,
+                kind: EntryKind::Tool(ToolState::Pending),
+                inherited: SourceTime::BeforeFirst,
+                operation: Some((expected.1, expected.2)),
+                identity: [0; 32],
+                ordinal: 0,
+            },
+            |_| SourceTime::BeforeFirst,
+        );
+        assert_eq!(pending_candidate.time, SourceTime::Observed(-100));
+        assert_eq!(pending_candidate.entry.pos, (6, 1));
+        assert_eq!(pending_candidate.phase, 2);
+    }
+
+    #[test]
+    fn native_query_codex_children_match_independent_complete_builder_slots() {
+        let record = |kind: &str, timestamp: Option<&str>, payload: Value| {
+            let mut value = serde_json::json!({"type":kind,"payload":payload});
+            if let Some(timestamp) = timestamp {
+                value["timestamp"] = serde_json::json!(timestamp);
+            }
+            value
+        };
+        let records = vec![
+            record(
+                "session_meta",
+                Some("2026-10-15T00:00:00Z"),
+                serde_json::json!({"id":"codex-code-mode-fixture","cwd":"/tmp/fixture","originator":"codex_exec"}),
+            ),
+            record(
+                "response_item",
+                Some("2026-10-15T00:00:10Z"),
+                serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"fixture request"}]}),
+            ),
+            record(
+                "response_item",
+                Some("2026-10-15T00:00:30Z"),
+                serde_json::json!({"type":"custom_tool_call","name":"exec","call_id":"pending-wrapper","input":"const result = await tools.lookup({});"}),
+            ),
+            record(
+                "event_msg",
+                None,
+                serde_json::json!({"type":"item_completed","item":{"type":"CommandExecution","id":"pending-item"}}),
+            ),
+            record(
+                "response_item",
+                Some("2026-10-15T00:00:32Z"),
+                serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"pending sentinel"}]}),
+            ),
+            record(
+                "event_msg",
+                Some("2026-10-15T00:00:29Z"),
+                serde_json::json!({"type":"item_completed","item":{"type":"McpToolCall","id":"pending-mcp","namespace":"fixture","tool":"lookup","success":true,"result":{"content":[]}}}),
+            ),
+            record(
+                "event_msg",
+                Some("2026-10-15T00:00:33Z"),
+                serde_json::json!({"type":"task_complete"}),
+            ),
+            record(
+                "response_item",
+                Some("2026-10-15T00:00:34Z"),
+                serde_json::json!({"type":"custom_tool_call","name":"exec","call_id":"failed-wrapper","input":"const result = await tools.lookup({});"}),
+            ),
+            record(
+                "event_msg",
+                Some("2026-10-15T00:00:35Z"),
+                serde_json::json!({"type":"item_completed","item":{"type":"McpToolCall","id":"failed-mcp","namespace":"fixture","tool":"lookup","success":true,"result":{"content":[]}}}),
+            ),
+            record(
+                "event_msg",
+                Some("2026-10-15T00:00:36Z"),
+                serde_json::json!({"type":"item_completed","item":{"type":"CommandExecution","id":"failed-item","exit_code":0}}),
+            ),
+            record(
+                "response_item",
+                Some("2026-10-15T00:00:37Z"),
+                serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"failed sentinel"}]}),
+            ),
+            record(
+                "response_item",
+                Some("2026-10-15T00:00:38Z"),
+                serde_json::json!({"type":"custom_tool_call_output","call_id":"failed-wrapper","output":[{"text":"Script error: fixture failure"}]}),
+            ),
+        ];
+        let (mut fixture, input) = Fixture::new_codex(&records);
+        let mut index = fixture.index.clone();
+        let pending_parent = index
+            .events
+            .iter()
+            .position(|event| event.id.as_deref() == Some("pending-wrapper"))
+            .unwrap();
+        let pending_child = index
+            .events
+            .iter()
+            .position(|event| event.id.as_deref() == Some("pending-mcp"))
+            .unwrap();
+        let pending_operation = index
+            .extras
+            .iter()
+            .position(|event| event.k == Kind::Operation && event.parent == Some(pending_parent))
+            .unwrap();
+        let pending_position = (index.events[pending_child].o, index.events[pending_child].b);
+        // The native parser produced each channel independently. Alias their
+        // indexed placement to exercise the complete builder's exact tie rule.
+        index.extras[pending_operation].o = pending_position.0;
+        index.extras[pending_operation].b = pending_position.1;
+        fixture.index = index.clone();
+        fixture.write_full_index(&index);
+
+        let witness = fixture.source();
+        assert_eq!(
+            fixture
+                .store
+                .last_operation(&witness, pending_parent)
+                .unwrap()
+                .0,
+            Some((
+                EventAddress {
+                    extra: true,
+                    seq: pending_operation,
+                },
+                SourceTime::Observed(crate::events::parse_ms("2026-10-15T00:00:29Z").unwrap()),
+                pending_position,
+            )),
+            "equal placement keeps the extras Operation before the regular MCP Tool; its untimed child inherits the backward regular timestamp"
+        );
+
+        let failed_parent = index
+            .events
+            .iter()
+            .position(|event| event.id.as_deref() == Some("failed-wrapper"))
+            .unwrap();
+        let failed_child = index
+            .events
+            .iter()
+            .position(|event| event.id.as_deref() == Some("failed-mcp"))
+            .unwrap();
+        let failed_operation = index
+            .extras
+            .iter()
+            .position(|event| event.k == Kind::Operation && event.parent == Some(failed_parent))
+            .unwrap();
+        let failed_position = (
+            index.extras[failed_operation].o,
+            index.extras[failed_operation].b,
+        );
+        assert_eq!(
+            fixture
+                .store
+                .last_operation(&witness, failed_parent)
+                .unwrap()
+                .0,
+            Some((
+                EventAddress {
+                    extra: true,
+                    seq: failed_operation,
+                },
+                SourceTime::Observed(crate::events::parse_ms("2026-10-15T00:00:36Z").unwrap()),
+                failed_position,
+            ))
+        );
+        let failed_reply = index.events[failed_parent].r.as_ref().unwrap();
+        assert_eq!(
+            failed_reply.t,
+            Some(crate::events::parse_ms("2026-10-15T00:00:38Z").unwrap())
+        );
+        assert!(failed_reply.o > index.events[failed_child].o);
+
+        let native_ids = fixture.row.native_ids.iter().cloned().collect();
+        let mut selected = crate::events::EventCache::from_selected(
+            &fixture.store.connection,
+            &fixture.row.sources,
+            &native_ids,
+        )
+        .unwrap();
+        let built = crate::model::build_sources(
+            &fixture.options,
+            &mut selected,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::events::parse_ms("2026-10-15T00:01:00Z").unwrap(),
+            Some(std::slice::from_ref(&input)),
+        )
+        .unwrap();
+        let transcript = &built.tx[&fixture.row.key];
+        let pending_wrapper_offset = index.events[pending_parent].o;
+        let pending_child_offset = index.events[pending_child].o;
+        let pending_sentinel_offset = index
+            .events
+            .iter()
+            .find(|event| {
+                event.k == Kind::A
+                    && event.t == Some(crate::events::parse_ms("2026-10-15T00:00:32Z").unwrap())
+            })
+            .unwrap()
+            .o;
+        let failed_wrapper_offset = index.events[failed_parent].o;
+        let failed_child_offset = index.events[failed_child].o;
+        let failed_sentinel_offset = index
+            .events
+            .iter()
+            .find(|event| {
+                event.k == Kind::A
+                    && event.t == Some(crate::events::parse_ms("2026-10-15T00:00:37Z").unwrap())
+            })
+            .unwrap()
+            .o;
+        let slot_position = |offset, matches: fn(&crate::model::SlotKind) -> bool| {
+            transcript
+                .slots
+                .iter()
+                .position(|slot| slot.offset == offset && matches(&slot.kind))
+                .unwrap()
+        };
+        let exec = |kind: &crate::model::SlotKind| matches!(kind, crate::model::SlotKind::Tool { name, .. } if name == "exec");
+        let lookup = |kind: &crate::model::SlotKind| matches!(kind, crate::model::SlotKind::Tool { name, .. } if name == "fixture.lookup");
+        let assistant = |kind: &crate::model::SlotKind| matches!(kind, crate::model::SlotKind::A);
+        let pending_wrapper_slot = slot_position(pending_wrapper_offset, exec);
+        let pending_child_slot = slot_position(pending_child_offset, lookup);
+        let pending_sentinel_slot = slot_position(pending_sentinel_offset, assistant);
+        assert!(
+            pending_sentinel_slot < pending_child_slot && pending_child_slot < pending_wrapper_slot
+        );
+        assert!(matches!(
+            &transcript.slots[pending_wrapper_slot].kind,
+            crate::model::SlotKind::Tool {
+                shown: crate::model::Shown::Unfinished | crate::model::Shown::Live,
+                ..
+            }
+        ));
+
+        let failed_wrapper_slot = slot_position(failed_wrapper_offset, exec);
+        let failed_child_slot = slot_position(failed_child_offset, lookup);
+        let failed_sentinel_slot = slot_position(failed_sentinel_offset, assistant);
+        assert!(
+            failed_child_slot < failed_sentinel_slot && failed_sentinel_slot < failed_wrapper_slot
+        );
+        assert!(matches!(
+            &transcript.slots[failed_wrapper_slot].kind,
+            crate::model::SlotKind::Tool {
+                shown: crate::model::Shown::Err,
+                reply: Some(reply),
+                ..
+            } if reply.o == failed_reply.o && reply.t == failed_reply.t
+        ));
+    }
+
+    #[test]
+    fn native_query_last_child_lookup_and_two_channel_deltas_stay_fixed_at_growth() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let mut lookup_steps = Vec::new();
+        let mut append_steps = Vec::new();
+        for children in [0, 128, 1024, 8192] {
+            let fixture = Fixture::new(8192);
+            let mut index = fixture.index.clone();
+            index.events[0].k = Kind::Tool;
+            index.events[0].code_mode = true;
+            index.events[0].code_mode_open = true;
+            for seq in 1..=children {
+                index.events[seq] = Event {
+                    k: Kind::Tool,
+                    parent: Some(0),
+                    o: u64::try_from(seq * 8).unwrap(),
+                    t: Some(-i64::try_from(seq).unwrap()),
+                    id: Some(format!("regular-{seq}")),
+                    ..Event::default()
+                };
+            }
+            index.extras = (0..children)
+                .map(|seq| Event {
+                    k: if seq % 2 == 0 {
+                        Kind::Operation
+                    } else {
+                        Kind::Tool
+                    },
+                    parent: Some(0),
+                    o: u64::try_from(seq + 1).unwrap(),
+                    t: Some(-i64::try_from(seq).unwrap()),
+                    ..Event::default()
+                })
+                .collect();
+            OPERATION_FACT_VISITS.with(|count| count.set(0));
+            fixture.write_full_index(&index);
+            assert_eq!(
+                OPERATION_FACT_VISITS.with(Cell::get),
+                index.events.len() + index.extras.len()
+            );
+            let witness = fixture.source();
+            let file = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT file_id FROM files WHERE path=?1",
+                    [witness.source.path.to_str().unwrap()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            let rows: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_child_operations WHERE file_id=?1",
+                    [file],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, i64::try_from(children * 2).unwrap());
+            if children == 0 {
+                assert!(
+                    fixture
+                        .store
+                        .last_operation(&witness, 0)
+                        .unwrap()
+                        .0
+                        .is_none()
+                );
+            }
+
+            let previous = index.clone();
+            index.events.push(Event {
+                k: Kind::Tool,
+                parent: Some(0),
+                o: u64::try_from(100_000 + children).unwrap(),
+                t: Some(-100_000),
+                ..Event::default()
+            });
+            index.extras.push(Event {
+                k: Kind::Tool,
+                parent: Some(0),
+                o: u64::try_from(200_000 + children).unwrap(),
+                t: Some(-100_000),
+                ..Event::default()
+            });
+            let changes = super::super::super::DirtyRows::between(&previous, &index);
+            OPERATION_FACT_VISITS.with(|count| count.set(0));
+            OPERATION_FACT_CUT_ROWS.with(|count| count.set(0));
+            let measured = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&measured);
+            fixture.store.connection.progress_handler(
+                1,
+                Some(move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let ledger = witness.ledger.as_ref().unwrap();
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_source_facts(
+                &tx,
+                witness.source.path.to_str().unwrap(),
+                ledger,
+                &index,
+                &changes,
+                false,
+                Some(ledger),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            fixture
+                .store
+                .connection
+                .progress_handler(0, None::<fn() -> bool>);
+            append_steps.push(measured.load(Ordering::Relaxed));
+            assert_eq!(OPERATION_FACT_VISITS.with(Cell::get), 2);
+            assert_eq!(OPERATION_FACT_CUT_ROWS.with(Cell::get), 0);
+
+            // A scalar child lookup does not decode or retain a complete FileIndex.
+            let reads = super::super::super::FILE_READS.with(Cell::get);
+            let (last, work) = fixture.store.last_operation(&witness, 0).unwrap();
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+            assert_eq!(
+                last,
+                Some((
+                    EventAddress {
+                        extra: true,
+                        seq: children,
+                    },
+                    SourceTime::Observed(-100_000),
+                    (u64::try_from(200_000 + children).unwrap(), 0)
+                ))
+            );
+            assert_eq!(work.decoded_rows, 2);
+            assert_eq!(
+                work.metadata_bytes,
+                source_operation_generation(ledger).unwrap().len() + 40
+            );
+            lookup_steps.push(work.vm_steps);
+
+            let before_cut = index.clone();
+            index.events.pop();
+            index.extras.pop();
+            let cut = super::super::super::DirtyRows::between(&before_cut, &index);
+            OPERATION_FACT_VISITS.with(|count| count.set(0));
+            OPERATION_FACT_CUT_ROWS.with(|count| count.set(0));
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_source_facts(
+                &tx,
+                witness.source.path.to_str().unwrap(),
+                ledger,
+                &index,
+                &cut,
+                false,
+                Some(ledger),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert_eq!(OPERATION_FACT_VISITS.with(Cell::get), 0);
+            assert_eq!(OPERATION_FACT_CUT_ROWS.with(Cell::get), 2);
+            let rows: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_source_child_operations WHERE file_id=?1",
+                    [file],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, i64::try_from(children * 2).unwrap());
+
+            if children > 0 {
+                let before_replace = index.clone();
+                index.extras[children - 1] = Event {
+                    k: Kind::Operation,
+                    parent: Some(1),
+                    o: u64::try_from(300_000 + children).unwrap(),
+                    t: Some(42),
+                    ..Event::default()
+                };
+                index.events[children] = Event {
+                    k: Kind::Tool,
+                    parent: Some(1),
+                    o: u64::try_from(400_000 + children).unwrap(),
+                    t: Some(42),
+                    ..Event::default()
+                };
+                let replacement = super::super::super::DirtyRows::between(&before_replace, &index);
+                assert_eq!(
+                    replacement.extras.iter().copied().collect::<Vec<_>>(),
+                    vec![children - 1]
+                );
+                assert_eq!(
+                    replacement.events.iter().copied().collect::<Vec<_>>(),
+                    vec![children]
+                );
+                OPERATION_FACT_VISITS.with(|count| count.set(0));
+                fixture.write_delta_index(&before_replace, &index);
+                assert_eq!(OPERATION_FACT_VISITS.with(Cell::get), 2);
+                let parent_zero = if children > 1 {
+                    Some((
+                        EventAddress {
+                            extra: false,
+                            seq: children - 1,
+                        },
+                        SourceTime::Observed(-i64::try_from(children - 1).unwrap()),
+                        (u64::try_from((children - 1) * 8).unwrap(), 0),
+                    ))
+                } else {
+                    None
+                };
+                assert_eq!(
+                    fixture.store.last_operation(&witness, 0).unwrap().0,
+                    parent_zero
+                );
+                assert_eq!(
+                    fixture.store.last_operation(&witness, 1).unwrap().0,
+                    Some((
+                        EventAddress {
+                            extra: false,
+                            seq: children,
+                        },
+                        SourceTime::Observed(42),
+                        (u64::try_from(400_000 + children).unwrap(), 0)
+                    ))
+                );
+            }
+        }
+        assert!(lookup_steps.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(append_steps.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn native_query_old_child_footer_stays_pending_until_complete_repair() {
+        let mut fixture = Fixture::new(0);
+        let mut index = fixture.index.clone();
+        index.extras = vec![Event {
+            k: Kind::Operation,
+            parent: Some(0),
+            o: 4,
+            t: Some(9),
+            ..Event::default()
+        }];
+        fixture.write_full_index(&index);
+        let witness = fixture.source();
+        assert!(
+            fixture
+                .store
+                .last_operation(&witness, 0)
+                .unwrap()
+                .0
+                .is_some()
+        );
+
+        fixture
+            .store
+            .connection
+            .execute_batch(
+                "UPDATE native_source_child_operation_facts SET generation=replace(generation,'operation-v2:','operation-v1:'); UPDATE meta SET value='6' WHERE key='native_query_schema';",
+            )
+            .unwrap();
+        assert!(matches!(
+            init(&mut fixture.store.connection).unwrap(),
+            Init::Ready
+        ));
+        assert!(fixture.store.last_operation(&witness, 0).is_err());
+
+        let previous = index.clone();
+        index.extras.push(Event {
+            k: Kind::Operation,
+            parent: Some(0),
+            o: 6,
+            t: Some(10),
+            ..Event::default()
+        });
+        fixture.write_delta_index(&previous, &index);
+        assert!(fixture.store.last_operation(&witness, 0).is_err());
+
+        fixture.write_full_index(&index);
+        assert_eq!(
+            fixture.store.last_operation(&witness, 0).unwrap().0,
+            Some((
+                EventAddress {
+                    extra: true,
+                    seq: 1,
+                },
+                SourceTime::Observed(10),
+                (6, 0),
+            ))
+        );
+        fixture
+            .store
+            .connection
+            .execute(
+                "DELETE FROM files WHERE path=?1",
+                [witness.source.path.to_str().unwrap()],
+            )
+            .unwrap();
+        let remaining: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM native_source_child_operations)+(SELECT count(*) FROM native_source_child_operation_facts)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
     #[test]
     fn native_query_checkpoint_cancellation_reopen_and_atomic_ready_pointer() {
         let mut fixture = Fixture::new(128);
@@ -3433,11 +4954,13 @@ mod tests {
     fn native_query_retired_ledger_witness_keeps_archive_and_custody_fences() {
         let mut fixture = Fixture::new(0);
         let path = fixture.row.sources[0].path.to_str().unwrap().to_owned();
+        let present = fixture.source();
         fixture
             .store
             .connection
             .execute("DELETE FROM files WHERE path=?1", [&path])
             .unwrap();
+        assert!(fixture.store.event_at(&present, false, 0).is_err());
         let archive_key = archive_index_key(&path);
         fixture
             .store
@@ -3451,6 +4974,40 @@ mod tests {
         assert!(source.ledger.is_none());
         assert_eq!(source.archive.as_deref(), Some("retained-marker-one"));
         assert!(fixture.store.source_header(&source).unwrap().is_none());
+        assert!(fixture.store.events_page(&source, false, None).is_err());
+        assert_eq!(fixture.store.event_at(&source, false, 0).unwrap(), None);
+        assert_eq!(
+            fixture.store.event_at(&source, false, usize::MAX).unwrap(),
+            None
+        );
+        assert!(fixture.store.event_before_offset(&source, 0).is_err());
+        assert!(fixture.store.source_time_at(&source, 0).is_err());
+        assert!(fixture.store.source_time_before_offset(&source, 0).is_err());
+        assert!(fixture.store.last_operation(&source, 0).is_err());
+
+        fixture.write_full_index(&fixture.index);
+        assert!(fixture.store.event_at(&source, false, 0).is_err());
+        assert!(fixture.store.source_header(&source).is_err());
+        fixture
+            .store
+            .connection
+            .execute("DELETE FROM files WHERE path=?1", [&path])
+            .unwrap();
+        let mutation_source = fixture.source();
+        assert_eq!(
+            fixture.store.event_at(&mutation_source, false, 0).unwrap(),
+            None
+        );
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,'changed after capture')",
+                [&path],
+            )
+            .unwrap();
+        assert!(fixture.store.event_at(&mutation_source, false, 0).is_err());
+
         let job = fixture.admitted();
         assert!(fixture.store.recheck(&job).unwrap());
         fixture
@@ -3643,6 +5200,16 @@ mod tests {
             standalone
                 .query_row(
                     "SELECT count(*) FROM sqlite_schema WHERE name='meta'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            standalone
+                .query_row(
+                    "SELECT (SELECT count(*) FROM sqlite_schema WHERE name IN ('native_source_child_operations','native_source_child_operation_facts','native_source_child_operation_parent'))+(SELECT count(*) FROM sqlite_temp_schema WHERE name IN ('native_source_child_operations','native_source_child_operation_facts','native_source_child_operation_parent'))",
                     [],
                     |r| r.get::<_, i64>(0)
                 )
