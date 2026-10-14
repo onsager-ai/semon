@@ -655,15 +655,15 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-fn parse_rfc3339(value: &str) -> Option<u64> {
-    let date = value.get(..10)?;
-    let time = value.get(11..19)?;
-    let year: i64 = date.get(..4)?.parse().ok()?;
-    let month: i64 = date.get(5..7)?.parse().ok()?;
-    let day: i64 = date.get(8..10)?.parse().ok()?;
-    let hour: i64 = time.get(..2)?.parse().ok()?;
-    let minute: i64 = time.get(3..5)?.parse().ok()?;
-    let second: i64 = time.get(6..8)?.parse().ok()?;
+pub(crate) fn native_time_from_parts(
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    offset: i64,
+) -> Option<u64> {
     if !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || hour > 23
@@ -672,23 +672,15 @@ fn parse_rfc3339(value: &str) -> Option<u64> {
     {
         return None;
     }
-    let tail = value.get(19..)?;
-    let zone = tail.find(['Z', '+', '-'])?;
-    let offset = match tail.as_bytes().get(zone)? {
-        b'Z' => 0,
-        sign => {
-            let tz = tail.get(zone + 1..)?;
-            let hours: i64 = tz.get(..2)?.parse().ok()?;
-            let minutes: i64 = tz.get(3..5)?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            (hours * 3600 + minutes * 60) * if *sign == b'+' { 1 } else { -1 }
-        }
-    };
     (days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offset)
         .try_into()
         .ok()
+}
+
+fn parse_rfc3339(value: &str) -> Option<u64> {
+    let mut cursor = events::native_harness::time::Cursor::default();
+    cursor.push(value.as_bytes());
+    cursor.seconds()
 }
 
 fn make_tree(

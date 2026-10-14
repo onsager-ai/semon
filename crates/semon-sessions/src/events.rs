@@ -3127,20 +3127,9 @@ pub(crate) struct Links {
 
 /// Parses an RFC 3339 timestamp to epoch milliseconds.
 pub(crate) fn parse_ms(value: &str) -> Option<i64> {
-    let seconds = i64::try_from(crate::parse_rfc3339(value)?).ok()?;
-    let fraction = value.get(19..).and_then(|tail| tail.strip_prefix('.'));
-    let millis = fraction
-        .map(|digits| {
-            let digits: String = digits
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .chain("000".chars())
-                .take(3)
-                .collect();
-            digits.parse::<i64>().unwrap_or(0)
-        })
-        .unwrap_or(0);
-    Some(seconds * 1000 + millis)
+    let mut cursor = native_harness::time::Cursor::default();
+    cursor.push(value.as_bytes());
+    cursor.millis()
 }
 
 /// The one native clustering decision. A timestamp can affect at most its
