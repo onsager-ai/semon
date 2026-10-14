@@ -1814,6 +1814,49 @@ impl NativeStore {
             .map_err(io::Error::other)?;
         job_current(&tx, job).map_err(io::Error::other)
     }
+    /// Fence a composition of separately snapshotted native range reads. The
+    /// callback also covers newly joining relationship owners, then another
+    /// owned-witness check catches mutations during that callback. No read
+    /// snapshot spans the callback. Runtime filesystem work remains separate
+    /// from the returned actual SQLite VM count.
+    pub(crate) fn recheck_closure(
+        &self,
+        job: &Job,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<(Outcome, u64)> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+        let steps = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&steps);
+        self.connection.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let result = (|| {
+            if cancelled() {
+                return Ok(Outcome::Deferred);
+            }
+            let current = job.phase == "ready"
+                && self.recheck(job)?
+                && closure(&self.connection, job.id).map_err(io::Error::other)?
+                && self.recheck(job)?;
+            if cancelled() {
+                return Ok(Outcome::Deferred);
+            }
+            if !current {
+                return Ok(Outcome::Conflict);
+            }
+            Ok(Outcome::Written)
+        })();
+        self.connection.progress_handler(0, None::<fn() -> bool>);
+        result.map(|outcome| (outcome, steps.load(Ordering::Relaxed)))
+    }
     pub(crate) fn links_page(
         &self,
         witness: &SourceWitness,
@@ -1956,6 +1999,28 @@ impl NativeStore {
     }
 }
 impl NativeStore {
+    /// Foreground metadata reads share the native private contract without
+    /// creating a store, migrating it or admitting producer work.
+    pub(crate) fn open_read(options: &crate::Options) -> io::Result<Self> {
+        let connection = Connection::open_with_flags(
+            super::super::EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(io::Error::other)?;
+        connection
+            .busy_timeout(Duration::from_millis(100))
+            .map_err(io::Error::other)?;
+        if !private_current(&connection).map_err(io::Error::other)? {
+            return Err(io::Error::other(
+                "native private producer schema requires repair",
+            ));
+        }
+        Ok(Self {
+            connection,
+            options: options.clone(),
+        })
+    }
+
     /// Scoped initialization never calls read_file or restores a selected Index.
     pub(crate) fn open(options: &crate::Options) -> io::Result<Self> {
         let (store, _) = SqliteStore::attempt_scoped(
@@ -1979,6 +2044,9 @@ impl NativeStore {
             return Err(io::Error::other("native store version changed"));
         }
         capture_source(&tx, source).map_err(io::Error::other)
+    }
+    pub(crate) fn source_witness_current(&self, witness: &SourceWitness) -> io::Result<bool> {
+        check_source(&self.connection, witness).map_err(io::Error::other)
     }
     /// Captures an immutable original source identity and the separate Current
     /// ledger/proof observations. Current row readers still require that the
@@ -2111,6 +2179,29 @@ impl NativeStore {
             counts,
             time_seed,
         }))
+    }
+
+    /// Scalar native ordering evidence. The native lineage comparator needs
+    /// continuation emptiness, never the complete growing link set.
+    pub(crate) fn source_continued_empty(&self, witness: &SourceWitness) -> io::Result<bool> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        let file = current_file(&tx, witness).map_err(io::Error::other)?;
+        let ledger = witness
+            .ledger
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native source is absent"))?;
+        let generation = source_fact_generation(ledger).map_err(io::Error::other)?;
+        let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM native_source_facts WHERE file_id=?1 AND generation=?2)",params![file,generation],|row|row.get(0)).map_err(io::Error::other)?;
+        if !current {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "native lineage facts need bounded repair",
+            ));
+        }
+        tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_source_links WHERE file_id=?1 AND kind='continued')",[file],|row|row.get(0)).map_err(io::Error::other)
     }
 
     /// Exact native record identity, including UUID precedence, is normalized
@@ -6247,6 +6338,171 @@ mod tests {
             }
             assert_eq!(delta.counts, (0, 0, 0));
             assert!(!delta.reset);
+        }
+    }
+
+    #[test]
+    fn native_candidate_delta_link_changes_and_archive_removal_preserve_custody() {
+        for archived in [false, true] {
+            let fixture = Fixture::new(128);
+            let source = fixture.source();
+            let ledger = source.ledger.as_ref().unwrap();
+            let old = fixture.index.clone();
+            let mut new = old.clone();
+            new.links.continued_in.remove("next");
+            new.links.session_ids.insert("next".into());
+            new.links.bridges.insert("literal:bridge".into());
+            let prior: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT max(change_id) FROM native_candidate_changes",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            fixture.write_delta_index(&old, &new);
+            let current = fixture.source();
+            let change = fixture
+                .store
+                .candidate_changes_page(&current, Some(prior))
+                .unwrap()
+                .rows
+                .remove(0);
+            let links = fixture
+                .store
+                .candidate_interests_page(&current, change.id, None)
+                .unwrap();
+            assert_eq!(links.rows.len(), 3);
+            assert!(links.rows.iter().all(|interest| interest.channel == 3));
+            let observed: std::collections::BTreeMap<_, _> = links
+                .rows
+                .iter()
+                .map(|interest| {
+                    let before = interest.before.as_ref().unwrap();
+                    let after = interest.after.as_ref().unwrap();
+                    (
+                        (before[0].as_str().unwrap(), before[1].as_str().unwrap()),
+                        (before[2].as_bool().unwrap(), after[2].as_bool().unwrap()),
+                    )
+                })
+                .collect();
+            assert_eq!(observed[&("continued", "next")], (true, false));
+            assert_eq!(observed[&("session", "next")], (false, true));
+            assert_eq!(observed[&("bridge", "literal:bridge")], (false, true));
+            let marker = ArchivedIndex {
+                version: 1,
+                parser_version: CACHE_VERSION,
+                source: crate::SessionSourceRef {
+                    root: "claude".into(),
+                    path: "projects/p/chosen.jsonl".into(),
+                    native_id: "chosen".into(),
+                    offset: ledger.offset,
+                    prefix_sha256: ledger.prefix,
+                    tail_sha256: ledger.tail,
+                },
+                stat: ledger.stat.clone(),
+                projection_version: 1,
+                projection_generation: "retained-query-witness".into(),
+                native_header_sha256: None,
+                source_chunks_sha256: None,
+                parent_marker_sha256: None,
+                launch_calls_sha256: None,
+            };
+            let marker = json(&marker).unwrap();
+            if archived {
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "INSERT INTO meta VALUES(?1,?2)",
+                        params![
+                            archive_index_key(source.source.path.to_str().unwrap()),
+                            marker
+                        ],
+                    )
+                    .unwrap();
+            }
+            let (mut writer, _) = SqliteStore::attempt_scoped(
+                &super::super::super::EventCache::path(&fixture.options.cache),
+                None,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("removal fixture: {error}"));
+            assert_eq!(
+                writer
+                    .remove(&[(
+                        source.source.path.to_string_lossy().into_owned(),
+                        Some(ledger.clone())
+                    )])
+                    .unwrap(),
+                Outcome::Written
+            );
+            let current = fixture
+                .store
+                .original_source_witness(&source.source)
+                .unwrap();
+            let changes = fixture
+                .store
+                .candidate_changes_page(&current, Some(change.id))
+                .unwrap();
+            assert_eq!(changes.rows.len(), 1);
+            let removed = &changes.rows[0];
+            assert!(removed.reset && removed.generation.is_none());
+            assert_eq!(
+                removed.before_generation,
+                Some(source_fact_generation(ledger).unwrap())
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .candidate_interests_page(&current, removed.id, None)
+                    .unwrap()
+                    .rows
+                    .len(),
+                3
+            );
+            let rows: usize = fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, if archived { 130 } else { 0 });
+            assert_eq!(
+                fs::read(&source.source.path).unwrap(),
+                b"fixture\n".repeat(129)
+            );
+            if archived {
+                let retained: String = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT value FROM meta WHERE key=?1",
+                        [archive_index_key(source.source.path.to_str().unwrap())],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(retained, marker);
+            }
+            // The already-removed observation creates no new delta or archive
+            // mutation, and keeps the actual original bytes untouched.
+            assert_eq!(
+                writer
+                    .remove(&[(
+                        source.source.path.to_string_lossy().into_owned(),
+                        Some(ledger.clone())
+                    )])
+                    .unwrap(),
+                Outcome::Written
+            );
+            assert!(
+                fixture
+                    .store
+                    .candidate_changes_page(&current, Some(removed.id))
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
         }
     }
 

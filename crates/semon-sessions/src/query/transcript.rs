@@ -695,8 +695,17 @@ fn read_inner(
         return virtual_read(options, key, args, provider, mode, now);
     };
     let physical = if search.is_none() {
-        crate::overview_repair::physical_identity::resolve(&tx, options, key, now)
+        match crate::overview_repair::physical_identity::resolve(&tx, options, key, requested, now)
             .map_err(unavailable)?
+        {
+            Some(crate::overview_repair::physical_identity::Resolution::Known(identity)) => {
+                Some(identity)
+            }
+            Some(crate::overview_repair::physical_identity::Resolution::Unknown) => {
+                return Err(QueryError::unknown_session(requested));
+            }
+            None => None,
+        }
     } else {
         None
     };
@@ -1150,6 +1159,18 @@ fn read_inner(
                 return Err(unavailable("Native query relationship publication changed"));
             }
         }
+        snapshot.commit().map_err(unavailable)?;
+        // A WAL writer can change the closure while all checks in a held
+        // snapshot still see the old generation. Qualify after releasing it.
+        physical_unchanged(&db, options, physical.as_ref())?;
+        unchanged(
+            &db,
+            key,
+            history.is_some(),
+            &text,
+            headers,
+            &slot_generation,
+        )?;
         if served != key {
             summary["id"] = json!(served);
         }
@@ -1391,5 +1412,14 @@ fn read_inner(
             "Native transcript observation changed during this read",
         ));
     }
+    physical_unchanged(&db, options, physical.as_ref())?;
+    unchanged(
+        &db,
+        key,
+        history.is_some(),
+        &text,
+        headers,
+        &slot_generation,
+    )?;
     Ok(Some(answer))
 }

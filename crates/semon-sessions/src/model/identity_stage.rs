@@ -3,6 +3,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The native file comparator is shared with metadata-only physical identity.
+/// Its activity minimum is distinct from the first regular-event time seed.
+pub(crate) fn source_order(
+    first: Option<i64>,
+    continued_empty: bool,
+    id: &str,
+) -> (i64, bool, &str) {
+    (first.unwrap_or(i64::MAX), continued_empty, id)
+}
+
 pub(crate) trait UnionParents {
     type Error;
     fn parent(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
