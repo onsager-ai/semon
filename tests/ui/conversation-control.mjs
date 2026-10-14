@@ -25,7 +25,8 @@ try {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ colorScheme: 'dark' });
     const closeMenu = page.getByRole('button', { name: 'Close menu', exact: true });
-    if (await closeMenu.isVisible()) await closeMenu.click();
+    await page.keyboard.press('Escape');
+    await closeMenu.waitFor({ state: 'hidden' });
     await page.screenshot({ path: out + '/launch-phone-dark.png', fullPage: true });
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
