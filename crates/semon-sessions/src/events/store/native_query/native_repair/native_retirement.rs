@@ -18,6 +18,14 @@ const TABLES: &[(&str, &str, bool)] = &[
     ("native_original_positions", "extra,sequence", true),
     ("native_original_copilot_started", "original", true),
     ("native_original_copilot_seen", "identity", true),
+    ("native_original_harness", "record_offset", true),
+    ("native_original_claude_usage_step", "record_offset", true),
+    (
+        "native_original_claude_usage_records",
+        "identity,uuid",
+        true,
+    ),
+    ("native_original_claude_usage", "identity", true),
     (
         "native_original_literal",
         "record_offset,ordinal,literal",
