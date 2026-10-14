@@ -23,6 +23,7 @@ import { HARNESSES, I } from './registry';
 import { runningToolLabel } from '../domain/toolNames';
 import { ago, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
 import type { EffectScope } from './effects';
+import type { ControlView } from '../lib/control';
 
 interface Selection {
   source_key: string;
@@ -189,6 +190,8 @@ interface OverviewHost {
   route(): string;
   selectedMachine(): string | null;
   admin(): { label: string; href: string } | null;
+  observeLaunchControl?(value: unknown): void;
+  launchControl?(): ControlView | undefined;
   machine(key: string): void;
   chrome(): void;
   panelOpened(panel: { destroy(): void }): void;
@@ -661,6 +664,7 @@ export function createOverviewPages(host: OverviewHost) {
       host.root,
       {
         observation: error ?? undefined,
+        control: host.launchControl?.(),
         waiting: home.totals.waiting - (home.inbox.length - inbox.length),
         working: home.totals.working,
         up: home.machines.filter((machine) => machine.up).length,
@@ -1300,6 +1304,7 @@ export function createOverviewPages(host: OverviewHost) {
             }
           }
         }
+        if (route === 'home') host.observeLaunchControl?.(object(value).launch_control ?? null);
         home = next;
         homeSource = route === 'machine' ? host.selectedMachine() : null;
         recentRows = next.recent;

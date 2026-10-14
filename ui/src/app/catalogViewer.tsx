@@ -557,9 +557,15 @@ export function createCatalogViewer(
       overview.allRecent(key, false);
     },
   });
+  let launchControl = false;
   const control = createLocalControl(scope, () => {
-    if (!active) return;
-    updateSessionControl(active.root, controlFor(active));
+    if (active) {
+      launchControl = false;
+      updateSessionControl(active.root, controlFor(active));
+    } else if (launchControl && navigation.route.v === 'home') {
+      overview.draw();
+      void overview.refresh();
+    }
   });
   function controlFor(view: SelectedView): ControlView | undefined {
     const identity = selection.selectedIdentity();
@@ -697,6 +703,21 @@ export function createCatalogViewer(
     route: () => (viewerHost?.nativePage ? 'home' : navigation.route.v),
     selectedMachine: () => (navigation.route.v === 'machine' ? navigation.route.id : null),
     admin: () => standaloneAdmin,
+    observeLaunchControl(value) {
+      if (viewerHost || navigation.route.v !== 'home') return;
+      const next = control.prepare(value);
+      if (next?.launch) {
+        launchControl = true;
+        control.adopt(next);
+      } else if (launchControl && !control.view()?.busy && !control.view()?.uncertain) {
+        launchControl = false;
+        control.adopt(null);
+      }
+    },
+    launchControl: () =>
+      !viewerHost && launchControl && navigation.route.v === 'home'
+        ? control.view(undefined, 'local:' + control.view()?.snapshot.thread)
+        : undefined,
     machine(key) {
       history.pushState(
         null,

@@ -254,3 +254,46 @@ test('drafts retain qualified identity through absent control and recovery', () 
   assert.equal(owner.view('native', 'source-one:native').draft, 'retained');
   owner.destroy();
 });
+
+test('launch observations grant only first input and mark its exact command', async () => {
+  const owner = createLocalControl(
+    { request: () => new AbortController(), releaseRequest: () => {} },
+    () => {},
+  );
+  const launch = {
+    ...model(),
+    launch: true,
+    activeTurn: null,
+    capabilities: {
+      input: true,
+      steer: false,
+      interrupt: false,
+      commandApproval: false,
+      fileApproval: false,
+      questions: false,
+    },
+  };
+  owner.adopt(owner.prepare(launch));
+  for (const key of ['steer', 'interrupt', 'commandApproval', 'fileApproval', 'questions'])
+    assert.throws(() =>
+      owner.prepare({ ...launch, capabilities: { ...launch.capabilities, [key]: true } }),
+    );
+  assert.throws(() => owner.prepare({ ...launch, activeTurn: 'existing-turn' }));
+  assert.throws(() => owner.prepare({ ...launch, launch: false }));
+  const oldFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (_url, options) => {
+      const command = JSON.parse(options.body);
+      assert.equal(command.launch, true);
+      assert.equal(command.activeTurn, null);
+      return {
+        ok: true,
+        json: async () => ({ snapshot: { actions: { [command.id]: { delivery: 'accepted' } } } }),
+      };
+    };
+    assert.equal(await owner.view('native').send('Initial input'), true);
+  } finally {
+    globalThis.fetch = oldFetch;
+    owner.destroy();
+  }
+});

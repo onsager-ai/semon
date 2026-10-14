@@ -147,50 +147,38 @@ def main():
             assert request("GET", "/?t=" + token, headers={})[0] == 403
             assert request("GET", "/?t=" + token)[0] == 200
             assert request("GET", "/api/model")[0] == 404
-            # The disposable launch manifest identifies the native owner; only
-            # a qualified Catalog identity may expose its control snapshot.
+            # Launch authority creates history; it supplies neither Catalog
+            # ownership nor approval capabilities.
             tid = json.loads((state / "session.json").read_text())["thread"]
             selection = urlencode({"machine": "local", "sid": tid})
-            report["cases"]["native_bootstrap"] = {"thread": tid, "qualified": False}
+            identity_status, initial_identity = request("GET", "/api/session-identity?" + selection)
+            assert identity_status == 404, (identity_status, initial_identity)
+            assert request("GET", "/api/session-control?" + selection)[1]["control"] is None
+            assert not list((state / "home" / "sessions").rglob("*.jsonl"))
+            _, home = request("GET", "/api/viewer/home")
+            launch = home["launch_control"]
+            assert launch["launch"] is True and launch["thread"] == tid, launch
+            assert launch["capabilities"] == dict(input=True, steer=False, interrupt=False,
+                commandApproval=False, fileApproval=False, questions=False), launch
+            report["cases"]["native_bootstrap"] = {
+                "thread": tid, "initial_identity_status": identity_status,
+                "initial_catalog_control": None, "initial_native_rollout_count": 0,
+                "launch_input_only": True,
+            }
 
             def snap():
                 def selected_control():
                     status, result = request("GET", "/api/session-control?" + selection)
                     assert status == 200, (status, result)
                     snapshot = result.get("control")
-                    report["cases"]["native_bootstrap"]["last_control"] = snapshot
+                    if snapshot is None:
+                        status, home = request("GET", "/api/viewer/home")
+                        assert status == 200, (status, home)
+                        snapshot = home.get("launch_control")
                     if snapshot is not None:
                         assert snapshot["thread"] == tid, snapshot
                     return snapshot
-
                 return until(selected_control)
-
-            try:
-                snap()
-            except TimeoutError:
-                status, identity = request("GET", "/api/session-identity?" + selection)
-                report["cases"]["native_bootstrap"].update(
-                    identity_status=status,
-                    identity_response=identity,
-                    native_rollout_count=sum(1 for _ in (state / "home" / "sessions").rglob("*.jsonl")),
-                )
-                raise AssertionError(
-                    "Empty launched native thread has no qualified Catalog/control bootstrap; "
-                    "first-message usability remains a release blocker"
-                ) from None
-            status, identity = request("GET", "/api/session-identity?" + selection)
-            assert status == 200, (status, identity)
-            identity = identity["identity"]
-            assert identity["source_key"] == "local", identity
-            assert identity["harness"] == "codex", identity
-            assert identity["native_id"] == tid, identity
-            assert identity["owner_qualification"] == "qualified", identity
-            report["cases"]["native_bootstrap"]["qualified"] = True
-            report["cases"]["native_read_contract"] = {
-                "retired_model_status": 404,
-                "qualified_selected_identity": identity,
-                "session_control_thread": tid,
-            }
 
             def target(op, **extra):
                 snapshot = snap()
@@ -201,6 +189,7 @@ def main():
                     generation=snapshot["generation"],
                     activeTurn=snapshot["activeTurn"],
                     expires=int(time.time() * 1000) + 25000,
+                    **({"launch": True} if snapshot.get("launch") else {}),
                     **extra,
                 )
             send = lambda text: request(
@@ -244,9 +233,33 @@ def main():
             )
             clients.append(c)
             tid = snap()["thread"]
-            assert send("LOCAL_INPUT")[0] == 200
+            if a.browser:
+                browser = subprocess.run([
+                    "node", str(a.browser.resolve()), f"http://127.0.0.1:{port}",
+                    cookie.split("=", 1)[1], str(a.output.parent / "native-launch-browser"),
+                    tid, "bootstrap",
+                ], capture_output=True, text=True, timeout=60)
+                assert browser.returncode == 0, browser.stdout + browser.stderr
+                report["cases"]["native_bootstrap"]["browser"] = browser.stdout
+            else:
+                first = send("LOCAL_INPUT")
+                assert first[0] == 200, first
+            _, home = request("GET", "/api/viewer/home")
+            assert home["launch_control"] is None, "launch authority survived first input"
             until(lambda: snap()["activeTurn"] is None)
             until(lambda: c.rpc("thread/resume", {"threadId": tid}).get("result"))
+            status, identity = request("GET", "/api/session-identity?" + selection)
+            assert status == 200, (status, identity)
+            identity = identity["identity"]
+            assert identity["source_key"] == "local" and identity["harness"] == "codex", identity
+            assert identity["native_id"] == tid and identity["owner_qualification"] == "qualified", identity
+            report["cases"]["native_read_contract"] = {
+                "retired_model_status": 404, "qualified_selected_identity": identity,
+                "session_control_thread": tid,
+            }
+            replay = dict(cmd, id=uuid.uuid4().hex, text="MUST_NOT_APPEAR")
+            assert request("POST", "/api/control", replay)[0] == 409
+            report["cases"]["native_bootstrap"]["creation_withdrawn"] = True
             stale = target("send", text="MUST_NOT_APPEAR")
             stale["activeTurn"] = "stale"
             assert request("POST", "/api/control", stale)[0] == 409

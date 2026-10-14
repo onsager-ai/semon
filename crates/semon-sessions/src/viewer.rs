@@ -630,7 +630,7 @@ impl Viewer {
             *used = true;
         }
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
-        let reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
+        let mut reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
             let mut bytes = Vec::new();
             let body = request
                 .as_reader()
@@ -686,6 +686,22 @@ impl Viewer {
             self.core
                 .respond("GET", path, query, if_none_match.as_deref())
         };
+        if path == "/api/viewer/home" && reply.status == 200 && self.control.is_some() {
+            let mut body: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+            if body.is_object() {
+                body["launch_control"] = self
+                    .control
+                    .as_ref()
+                    .and_then(|control| {
+                        control
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .launch_snapshot()
+                    })
+                    .unwrap_or(Value::Null);
+                reply = control_reply(200, body);
+            }
+        }
         respond(request, reply, set_cookie.then_some(&self.token));
     }
     fn control_write(&self, request: &mut Request) -> ViewerReply {
@@ -734,7 +750,17 @@ impl Viewer {
             peer_uid: 0,
         };
         match driver.command(&value, source) {
-            Ok(receipt) => control_reply(200, receipt),
+            Ok(mut receipt) => {
+                let id = value["id"].as_str().unwrap_or("");
+                // Confirm only this operation's native acceptance; the receipt
+                // grants no control identity or unrelated operation history.
+                let actions = driver
+                    .operation_receipt(id)
+                    .map(|action| serde_json::Map::from_iter([(id.to_owned(), action)]))
+                    .unwrap_or_default();
+                receipt["snapshot"] = serde_json::json!({"actions":actions});
+                control_reply(200, receipt)
+            }
             Err(error) => control_reply(409, serde_json::json!({"error":error.to_string()})),
         }
     }

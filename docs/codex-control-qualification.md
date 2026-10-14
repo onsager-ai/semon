@@ -135,3 +135,12 @@ case. Do not seed a transcript, send the initial message through a bypass or
 restore model transport to make the probe pass. A bootstrap refusal is a P0
 release gap, separate from the recalibrated cold-indexing budget. Actual native
 probe/browser outcomes belong to the exact Source/Hub integration receipt.
+
+The current bootstrap repair uses the confined launcher's empty native-thread
+receipt for one initial input through the existing Home control component. The
+native probe requires identity 404, null Catalog control and zero rollouts before
+that input; the browser must send the actual first message and confirm its exact
+acceptance receipt. Creation authority must then withdraw, a real rollout must
+publish through the ordinary producer, and selected identity/control must qualify
+before the original native operation/security cases continue. Passing fixture
+checks alone does not qualify this repair; record the exact native/browser run.
