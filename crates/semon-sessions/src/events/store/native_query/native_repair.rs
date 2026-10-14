@@ -2432,26 +2432,77 @@ mod tests {
         }
         fn identity(&mut self, repair: &Repair, ordinal: u64) -> OriginalText {
             loop {
-                let step = self
-                    .store
-                    .original_identity_step(
-                        &self.job,
-                        &self.source,
-                        repair,
-                        ordinal,
-                        &self.sources.reader(),
-                        &|| false,
-                    )
-                    .unwrap();
+                let step = self.identity_once(repair, ordinal, &|| false);
                 assert!(step.work.metadata_rows <= ROWS);
                 assert!(step.work.metadata_bytes <= BYTES);
                 assert!(step.work.range_requests <= 2);
                 assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                assert!(step.class_sql_vm_steps <= 4096);
+                assert!(step.serialized_cursor_bytes <= STATE_BYTES);
                 if let Some(text) = step.text {
                     return text;
                 }
-                self.store = NativeStore::open(&self.options).unwrap();
             }
+        }
+        fn identity_once(
+            &mut self,
+            repair: &Repair,
+            ordinal: u64,
+            cancelled: &dyn Fn() -> bool,
+        ) -> IdentityStep {
+            let step = self
+                .store
+                .original_identity_step(
+                    &self.job,
+                    &self.source,
+                    repair,
+                    ordinal,
+                    &self.sources.reader(),
+                    cancelled,
+                )
+                .unwrap();
+            assert!(step.work.metadata_rows <= ROWS);
+            assert!(step.work.metadata_bytes <= BYTES);
+            assert!(step.work.range_requests <= 2);
+            assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+            assert!(step.class_sql_vm_steps <= 4096);
+            assert!(step.serialized_cursor_bytes <= STATE_BYTES);
+            assert!(step.fence_checks <= 16);
+            assert!(step.records_finish_calls <= 1);
+            self.store = NativeStore::open(&self.options).unwrap();
+            step
+        }
+        fn identity_with_provider(
+            &mut self,
+            repair: &Repair,
+            ordinal: u64,
+            provider: &dyn crate::SessionSourceReader,
+        ) -> io::Result<IdentityStep> {
+            let result = {
+                let records = self
+                    .sources
+                    .reader_with(Some((provider, crate::SessionSourceReadMode::ProviderOnly)));
+                self.store.original_identity_step(
+                    &self.job,
+                    &self.source,
+                    repair,
+                    ordinal,
+                    &records,
+                    &|| false,
+                )
+            };
+            if let Ok(step) = &result {
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.range_requests <= 2);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                assert!(step.class_sql_vm_steps <= 4096);
+                assert!(step.serialized_cursor_bytes <= STATE_BYTES);
+                assert!(step.fence_checks <= 16);
+                assert!(step.records_finish_calls <= 1);
+            }
+            self.store = NativeStore::open(&self.options).unwrap();
+            result
         }
         fn new(bytes: &[u8]) -> Self {
             let root = std::env::temp_dir().join(format!(
@@ -2565,6 +2616,117 @@ mod tests {
         }
     }
 
+    struct InterleavingReader {
+        source: crate::SessionSourceRef,
+        bytes: std::sync::Arc<[u8]>,
+        calls: std::sync::atomic::AtomicUsize,
+        bytes_read: std::sync::atomic::AtomicUsize,
+        change_generation_after: Option<usize>,
+        on_read: Box<dyn Fn(usize) + Send + Sync>,
+    }
+    impl InterleavingReader {
+        fn new(
+            source: crate::SessionSourceRef,
+            bytes: &[u8],
+            change_generation_after: Option<usize>,
+            on_read: impl Fn(usize) + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                source,
+                bytes: std::sync::Arc::from(bytes),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                bytes_read: std::sync::atomic::AtomicUsize::new(0),
+                change_generation_after,
+                on_read: Box::new(on_read),
+            }
+        }
+    }
+    impl crate::SessionSourceReader for InterleavingReader {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            _expected_generation: Option<&str>,
+            offset: u64,
+            max_bytes: usize,
+        ) -> io::Result<crate::SessionSourceRange> {
+            if source != &self.source {
+                return Err(io::Error::other("test source reference changed"));
+            }
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let start = usize::try_from(offset).map_err(io::Error::other)?;
+            if start >= self.bytes.len() || max_bytes == 0 {
+                return Err(io::Error::other("test provider range is outside source"));
+            }
+            let end = start.saturating_add(max_bytes).min(self.bytes.len());
+            let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(&self.bytes[start..end]);
+            (self.on_read)(call);
+            self.bytes_read
+                .fetch_add(bytes.len(), std::sync::atomic::Ordering::SeqCst);
+            let generation = if self
+                .change_generation_after
+                .is_some_and(|first| call > first)
+            {
+                "test-generation-2"
+            } else {
+                "test-generation-1"
+            };
+            Ok(crate::SessionSourceRange {
+                generation: generation.to_owned(),
+                length: self.bytes.len() as u64,
+                offset,
+                bytes,
+                cached: false,
+            })
+        }
+    }
+
+    fn identity_cursor(fixture: &Fixture, repair: &Repair, ordinal: u64) -> Option<(i64, Value)> {
+        let row: Option<(i64, String)> = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT revision,cursor FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3",
+                params![
+                    repair.original.as_slice(),
+                    repair.cursor.record_at as i64,
+                    ordinal as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        row.map(|(revision, state)| (revision, serde_json::from_str(&state).unwrap()))
+    }
+
+    fn force_class_fingerprint(fixture: &Fixture, repair: &Repair, class: u64, ordinal: u64) {
+        let (digest, decoded_bytes): (Vec<u8>, i64) = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT digest,decoded_bytes FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND ordinal=?3",
+                params![
+                    repair.original.as_slice(),
+                    repair.cursor.record_at as i64,
+                    ordinal as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_original_classes SET digest=?3,decoded_bytes=?4 WHERE original=?1 AND class=?2",
+                params![
+                    repair.original.as_slice(),
+                    class as i64,
+                    digest,
+                    decoded_bytes
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn exact_original_classes_match_independent_native_strings_and_refuse_hash_collisions() {
         for size in [0, 128, 1024, 8192, 100_000] {
@@ -2655,6 +2817,515 @@ mod tests {
                 reads
             );
         }
+    }
+
+    #[test]
+    fn native_identity_rechecks_newer_classes_after_a_durable_collision_rejection() {
+        let bytes = b"{\"a\":\"wrong\",\"b\":\"equal\",\"c\":\"equal\"}\n";
+        let oracle: Value = serde_json::from_slice(bytes).unwrap();
+        assert_ne!(oracle["a"], oracle["b"]);
+        assert_eq!(oracle["b"], oracle["c"]);
+
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let a = fixture.member(&repair, "a");
+        let b = fixture.member(&repair, "b");
+        let c = fixture.member(&repair, "c");
+        let class1 = fixture.identity(&repair, a.ordinal);
+        assert_eq!(class1.identity(), 1);
+        force_class_fingerprint(&fixture, &repair, class1.identity(), b.ordinal);
+
+        let rejected = fixture.identity_once(&repair, b.ordinal, &|| false);
+        assert_eq!(rejected.outcome, Outcome::Deferred);
+        assert!(rejected.text.is_none());
+        let (_, state) = identity_cursor(&fixture, &repair, b.ordinal).unwrap();
+        assert_eq!(state["before"], 1);
+        assert!(state["candidate"].is_null());
+        assert!(state["compare"].is_null());
+        assert_eq!(state["complete"], false);
+
+        // This allocation runs through the production interner. Class 1 has
+        // the same forced fingerprint, but its native bytes are unequal.
+        let class2 = fixture.identity(&repair, c.ordinal);
+        assert_eq!(class2.identity(), 2);
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let resumed = fixture.identity(&repair, b.ordinal);
+        assert_eq!(resumed, class2);
+        assert_eq!(resumed.identity(), 2);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn native_identity_ranges_preserve_long_compare_and_coalesce_later_insertions() {
+        let prefix = "q".repeat(40_000);
+        let a_value = format!("{prefix}a");
+        let b_value = format!("{prefix}b");
+        let c_value = format!("{prefix}c");
+        let encoded_a = serde_json::to_string(&a_value).unwrap();
+        let encoded_b = serde_json::to_string(&b_value).unwrap();
+        let encoded_c = serde_json::to_string(&c_value).unwrap();
+        let bytes = format!(
+            "{{\"a\":{encoded_a},\"b\":{encoded_b},\"c\":{encoded_c},\"d\":{encoded_b}}}\n"
+        );
+        let oracle: Value = serde_json::from_slice(bytes.as_bytes()).unwrap();
+        assert_ne!(oracle["a"], oracle["b"]);
+        assert_ne!(oracle["c"], oracle["b"]);
+        assert_eq!(oracle["b"], oracle["d"]);
+
+        let mut fixture = Fixture::new(bytes.as_bytes());
+        let repair = fixture.qualified_record();
+        let a = fixture.member(&repair, "a");
+        let b = fixture.member(&repair, "b");
+        let c = fixture.member(&repair, "c");
+        let d = fixture.member(&repair, "d");
+        let reads = super::super::super::super::FILE_READS.with(Cell::get);
+
+        let class1 = fixture.identity(&repair, a.ordinal);
+        assert_eq!(class1.identity(), 1);
+        force_class_fingerprint(&fixture, &repair, class1.identity(), b.ordinal);
+
+        // B has an incomplete content comparison persisted before class 2 is
+        // allocated by C.
+        let first_b = fixture.identity_once(&repair, b.ordinal, &|| false);
+        assert_eq!(first_b.outcome, Outcome::Deferred);
+        let (_, state) = identity_cursor(&fixture, &repair, b.ordinal).unwrap();
+        assert_eq!(state["candidate"]["class"], 1);
+        assert!(state["compare"]["compared"].as_u64().unwrap() > 0);
+        assert!(state["compare"]["result"].is_null());
+        assert!(first_b.serialized_cursor_bytes < 4096);
+
+        let class2 = fixture.identity(&repair, c.ordinal);
+        assert_eq!(class2.identity(), 2);
+        force_class_fingerprint(&fixture, &repair, class2.identity(), b.ordinal);
+
+        // B finishes rejecting class 1, then starts the newer [1,2] range.
+        let rejected1 = fixture.identity_once(&repair, b.ordinal, &|| false);
+        assert_eq!(rejected1.outcome, Outcome::Deferred);
+        let (_, state) = identity_cursor(&fixture, &repair, b.ordinal).unwrap();
+        assert_eq!(state["before"], 1);
+        assert_eq!(state["range"]["after"], 1);
+        assert_eq!(state["range"]["through"], 2);
+
+        // Pause while B is comparing class 2. D exact-compares classes 2 and
+        // 1, then allocates equal class 3. B must queue (2,3] and visit it.
+        let comparing2 = fixture.identity_once(&repair, b.ordinal, &|| false);
+        assert_eq!(comparing2.outcome, Outcome::Deferred);
+        let (_, state) = identity_cursor(&fixture, &repair, b.ordinal).unwrap();
+        assert_eq!(state["candidate"]["class"], 2);
+        assert!(state["compare"]["compared"].as_u64().unwrap() > 0);
+        let class3 = fixture.identity(&repair, d.ordinal);
+        assert_eq!(class3.identity(), 3);
+
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let resumed = fixture.identity(&repair, b.ordinal);
+        assert_eq!(resumed, class3);
+        assert_eq!(resumed.identity(), 3);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            super::super::super::super::FILE_READS.with(Cell::get),
+            reads
+        );
+    }
+
+    #[test]
+    fn native_identity_old_incomplete_cursor_restarts_with_defaulted_search_coverage() {
+        let bytes = b"{\"a\":\"wrong\",\"b\":\"equal\",\"c\":\"equal\"}\n";
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let a = fixture.member(&repair, "a");
+        let b = fixture.member(&repair, "b");
+        let c = fixture.member(&repair, "c");
+        let class1 = fixture.identity(&repair, a.ordinal);
+        force_class_fingerprint(&fixture, &repair, class1.identity(), b.ordinal);
+        let rejected = fixture.identity_once(&repair, b.ordinal, &|| false);
+        assert!(rejected.text.is_none());
+
+        let (revision, mut legacy) = identity_cursor(&fixture, &repair, b.ordinal).unwrap();
+        for field in ["high_water", "range", "match_class"] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_original_identities SET cursor=?4 WHERE original=?1 AND record_offset=?2 AND ordinal=?3",
+                params![
+                    repair.original.as_slice(),
+                    repair.cursor.record_at as i64,
+                    b.ordinal as i64,
+                    legacy.to_string()
+                ],
+            )
+            .unwrap();
+
+        let class2 = fixture.identity(&repair, c.ordinal);
+        assert_eq!(class2.identity(), 2);
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let resumed = fixture.identity(&repair, b.ordinal);
+        assert_eq!(resumed, class2);
+        assert_eq!(resumed.identity(), 2);
+        assert_eq!(
+            identity_cursor(&fixture, &repair, b.ordinal).unwrap().0,
+            revision + 1
+        );
+    }
+
+    #[test]
+    fn native_identity_old_completed_cursor_remains_explicitly_pending() {
+        let bytes = b"{\"a\":\"same\"}\n";
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let a = fixture.member(&repair, "a");
+        let class = fixture.identity(&repair, a.ordinal);
+        assert_eq!(class.identity(), 1);
+
+        let (revision, mut legacy) = identity_cursor(&fixture, &repair, a.ordinal).unwrap();
+        assert_eq!(legacy["complete"], true);
+        for field in ["high_water", "range", "match_class"] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_original_identities SET cursor=?4 WHERE original=?1 AND record_offset=?2 AND ordinal=?3",
+                params![
+                    repair.original.as_slice(),
+                    repair.cursor.record_at as i64,
+                    a.ordinal as i64,
+                    legacy.to_string()
+                ],
+            )
+            .unwrap();
+
+        let pending = fixture.identity_once(&repair, a.ordinal, &|| false);
+        assert_eq!(pending.outcome, Outcome::Deferred);
+        assert!(pending.text.is_none());
+        assert_eq!(pending.records_finish_calls, 1);
+        assert_eq!(
+            identity_cursor(&fixture, &repair, a.ordinal).unwrap().0,
+            revision
+        );
+    }
+
+    #[test]
+    fn native_identity_cancellation_before_and_after_cursor_commit_reopens_safely() {
+        let prefix = "r".repeat(40_000);
+        let bytes = format!(
+            "{{\"a\":{},\"b\":{}}}\n",
+            serde_json::to_string(&format!("{prefix}a")).unwrap(),
+            serde_json::to_string(&format!("{prefix}b")).unwrap()
+        );
+        let mut fixture = Fixture::new(bytes.as_bytes());
+        let repair = fixture.qualified_record();
+        let a = fixture.member(&repair, "a");
+        let b = fixture.member(&repair, "b");
+        let class1 = fixture.identity(&repair, a.ordinal);
+        force_class_fingerprint(&fixture, &repair, class1.identity(), b.ordinal);
+
+        let calls = Cell::new(0);
+        let before_commit = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 3
+        };
+        let cancelled = fixture.identity_once(&repair, b.ordinal, &before_commit);
+        assert_eq!(cancelled.outcome, Outcome::Deferred);
+        assert!(identity_cursor(&fixture, &repair, b.ordinal).is_none());
+
+        // A non-cancelled attempt commits an incomplete Compare. Cancellation
+        // on the next call must leave that committed cursor byte-for-byte intact.
+        let progress = fixture.identity_once(&repair, b.ordinal, &|| false);
+        assert_eq!(progress.outcome, Outcome::Deferred);
+        let committed = identity_cursor(&fixture, &repair, b.ordinal).unwrap();
+        assert!(committed.1["compare"]["compared"].as_u64().unwrap() > 0);
+        let after_commit = fixture.identity_once(&repair, b.ordinal, &|| true);
+        assert_eq!(after_commit.outcome, Outcome::Deferred);
+        assert_eq!(
+            identity_cursor(&fixture, &repair, b.ordinal).unwrap(),
+            committed
+        );
+
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let resumed = fixture.identity(&repair, b.ordinal);
+        assert_eq!(resumed.identity(), 2);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn native_identity_cached_handle_and_vm_work_stay_bounded_with_class_history() {
+        let bytes = b"{\"a\":\"cached\",\"b\":\"other\"}\n";
+        for history in [0usize, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(bytes);
+            let repair = fixture.qualified_record();
+            let a = fixture.member(&repair, "a");
+            let b = fixture.member(&repair, "b");
+            let canonical = fixture.identity(&repair, a.ordinal);
+            assert_eq!(canonical.identity(), 1);
+            if history > 0 {
+                let (digest, decoded_bytes): (Vec<u8>, i64) = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT digest,decoded_bytes FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND ordinal=?3",
+                        params![
+                            repair.original.as_slice(),
+                            repair.cursor.record_at as i64,
+                            b.ordinal as i64
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "WITH RECURSIVE prior(class) AS (SELECT 2 UNION ALL SELECT class+1 FROM prior WHERE class<?1) INSERT INTO native_original_classes SELECT ?2,class,?3,?4,?5,?6 FROM prior",
+                        params![
+                            history as i64 + 1,
+                            repair.original.as_slice(),
+                            repair.cursor.record_at as i64,
+                            b.ordinal as i64,
+                            digest,
+                            decoded_bytes
+                        ],
+                    )
+                    .unwrap();
+            }
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            let cached = fixture.identity_once(&repair, a.ordinal, &|| false);
+            assert_eq!(cached.text, Some(canonical));
+            assert!(cached.class_sql_vm_steps > 0);
+            assert!(cached.class_sql_vm_steps < 256);
+            assert!(cached.serialized_cursor_bytes <= STATE_BYTES);
+            assert!(cached.work.metadata_rows <= ROWS);
+            assert!(cached.work.metadata_bytes <= BYTES);
+            assert!(cached.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+        }
+    }
+
+    #[test]
+    fn native_identity_source_generation_change_during_provider_io_stays_unavailable() {
+        let bytes = b"{\"a\":\"target\",\"b\":\"other\"}\n";
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let target = fixture.member(&repair, "a");
+        let provider = InterleavingReader::new(repair.source.clone(), bytes, Some(0), |_| {});
+        let file_reads = super::super::super::super::FILE_READS.with(Cell::get);
+
+        let result = fixture.identity_with_provider(&repair, target.ordinal, &provider);
+        assert!(result.is_err());
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            provider
+                .bytes_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+            bytes.len() * 2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_identities",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            super::super::super::super::FILE_READS.with(Cell::get),
+            file_reads
+        );
+    }
+
+    #[test]
+    fn native_identity_publication_change_during_provider_io_stays_unavailable() {
+        let bytes = b"{\"a\":\"target\",\"b\":\"other\"}\n";
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let target = fixture.member(&repair, "a");
+        let cache_path = super::super::super::super::EventCache::path(&fixture.options.cache);
+        let job = fixture.job.id;
+        let path = fixture.source.source.path.to_string_lossy().into_owned();
+        let provider = InterleavingReader::new(repair.source.clone(), bytes, None, move |call| {
+            if call == 0 {
+                let db = rusqlite::Connection::open(&cache_path).unwrap();
+                assert_eq!(
+                    db.execute(
+                        "UPDATE native_query_sources SET metadata='{}' WHERE job=?1 AND path=?2",
+                        params![job, path]
+                    )
+                    .unwrap(),
+                    1
+                );
+            }
+        });
+
+        let result = fixture.identity_with_provider(&repair, target.ordinal, &provider);
+        assert!(result.is_err());
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            provider
+                .bytes_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+            bytes.len() * 2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_identities",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn native_identity_runtime_change_during_provider_io_returns_conflict() {
+        let bytes = b"{\"a\":\"target\",\"b\":\"other\"}\n";
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let target = fixture.member(&repair, "a");
+        let runtime_path = fixture.options.claude_json.clone();
+        let provider = InterleavingReader::new(repair.source.clone(), bytes, None, move |call| {
+            if call == 0 {
+                std::fs::write(&runtime_path, b"{\"changed\":true}").unwrap();
+            }
+        });
+
+        let step = fixture
+            .identity_with_provider(&repair, target.ordinal, &provider)
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Conflict);
+        assert_eq!(step.fence_checks, 5);
+        assert_eq!(step.records_finish_calls, 1);
+        assert_eq!(step.work.range_requests, 1);
+        assert_eq!(step.work.native_bytes, 1);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            provider
+                .bytes_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+            bytes.len() * 2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_identities",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn native_identity_class_generation_change_during_provider_io_cannot_allocate() {
+        let bytes = b"{\"a\":\"target\",\"b\":\"other\"}\n";
+        let mut fixture = Fixture::new(bytes);
+        let repair = fixture.qualified_record();
+        let target = fixture.member(&repair, "a");
+        let other = fixture.member(&repair, "b");
+        let (digest, decoded_bytes): (Vec<u8>, i64) = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT digest,decoded_bytes FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND ordinal=?3",
+                params![
+                    repair.original.as_slice(),
+                    repair.cursor.record_at as i64,
+                    other.ordinal as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let cache_path = super::super::super::super::EventCache::path(&fixture.options.cache);
+        let original = repair.original;
+        let record = repair.cursor.record_at as i64;
+        let ordinal = other.ordinal as i64;
+        let provider = InterleavingReader::new(repair.source.clone(), bytes, None, move |call| {
+            if call == 0 {
+                let db = rusqlite::Connection::open(&cache_path).unwrap();
+                db.execute(
+                    "INSERT INTO native_original_classes VALUES(?1,1,?2,?3,?4,?5)",
+                    params![original.as_slice(), record, ordinal, digest, decoded_bytes],
+                )
+                .unwrap();
+            }
+        });
+
+        let step = fixture
+            .identity_with_provider(&repair, target.ordinal, &provider)
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Conflict);
+        assert_eq!(step.fence_checks, 8);
+        assert_eq!(step.records_finish_calls, 1);
+        assert_eq!(step.work.range_requests, 1);
+        assert_eq!(step.work.native_bytes, 1);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            provider
+                .bytes_read
+                .load(std::sync::atomic::Ordering::SeqCst),
+            bytes.len() * 2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_identities",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
