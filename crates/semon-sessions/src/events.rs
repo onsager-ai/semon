@@ -4029,84 +4029,12 @@ fn yielded_session(output: Option<&Value>) -> Option<String> {
 /// operations of its own, or one that failed, stays a step of its own, but
 /// the chunk it printed of an open command is still that command's output.
 fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, offset: u64) {
-    let Some(event) = summary.events.get(index) else {
-        return;
-    };
-    let (call_offset, flags, linked) = (event.o, event.script, event.poll);
-    let failed = event.r.as_ref().is_some_and(|reply| reply.e);
-    let operations = summary
-        .extras
-        .iter()
-        .rev()
-        .take_while(|extra| extra.o > call_offset)
-        .any(|extra| extra.k == Kind::Operation && extra.parent == Some(index));
-    let session = yielded_session(output);
-    // A poll of an open command, by the session id its output names.
-    let known = session
-        .as_ref()
-        .filter(|_| flags & STDIN != 0)
-        .and_then(|session| summary.yields.get(session).copied())
-        .filter(|start| *start < index);
-    if operations || failed {
-        summary.event_mut(index).expect("event exists").poll = None;
-        if let Some(start) = known {
-            push_poll(summary, start, offset);
-        }
-        return;
-    }
-    // The command's completion arrived while this poll ran: its last poll.
-    let ended_here = linked.filter(|start| {
-        summary
-            .events
-            .get(*start)
-            .and_then(|found| found.y.as_ref())
-            .and_then(|yielded| yielded.done.as_ref())
-            .is_some_and(|done| done.o > call_offset)
-    });
-    let start = match session {
-        None => ended_here,
-        Some(_) if known.is_some() => known,
-        Some(_) if ended_here.is_some() => ended_here,
-        // A command these logs haven't seen yet: a new start, whether this
-        // script started it or polls one started where these logs can't
-        // see.
-        Some(session) => {
-            if summary.yields.len() >= YIELDS_MAX
-                && !summary.yields.contains_key(&session)
-                && let Some(oldest) = summary
-                    .yields
-                    .iter()
-                    .min_by_key(|(_, start)| **start)
-                    .map(|(session, _)| session.clone())
-            {
-                summary.yields.remove(&oldest);
-            }
-            summary.yields.insert(session, index);
-            summary.event_mut(index).expect("event exists").poll = None;
-            summary.event_mut(index).expect("event exists").y = Some(Box::default());
-            return;
-        }
-    };
-    let Some(start) = start.filter(|start| *start < index) else {
-        summary.event_mut(index).expect("event exists").poll = None;
-        return;
-    };
-    summary.event_mut(index).expect("event exists").poll = Some(start);
-    push_poll(summary, start, offset);
-}
-
-/// Adds a poll's output line to the yielded command it polled, up to
-/// [`POLLS_MAX`]; past that the command's output is marked cut.
-fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
-    if let Some(found) = summary.event_mut(start)
-        && let Some(yielded) = found.y.as_mut()
-    {
-        if yielded.polls.len() < POLLS_MAX {
-            yielded.polls.push(offset);
-        } else {
-            yielded.cut = true;
-        }
-    }
+    native_producer::complete(native_producer::fold_yield(
+        summary,
+        index,
+        yielded_session(output),
+        offset,
+    ));
 }
 
 /// The yielded command a poll that hasn't answered yet is taken to poll:
