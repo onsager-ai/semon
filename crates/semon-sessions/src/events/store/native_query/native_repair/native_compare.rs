@@ -24,7 +24,7 @@ pub(crate) struct ComparisonSource<'a, 'r> {
     pub(crate) records: &'a crate::query_source::Records<'r>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct TextComparisonStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
@@ -578,6 +578,7 @@ pub(super) fn has_rows(db: &Connection, obsolete: &[u8]) -> io::Result<bool> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Fixture {
@@ -615,7 +616,7 @@ mod tests {
                 None,
                 true,
             )
-            .unwrap();
+            .unwrap_or_else(|error| panic!("comparison fixture store must open: {error}"));
             let mut rows = Vec::new();
             let mut proofs = Vec::new();
             let mut bytes = Vec::new();
