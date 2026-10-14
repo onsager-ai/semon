@@ -253,11 +253,143 @@ impl ToolStore for Events<'_> {
     }
 }
 
+impl crate::events::native_harness::CopilotStore for Events<'_> {
+    fn tool_occurrence_after(&self, id: &u64, after: Option<usize>) -> io::Result<Option<usize>> {
+        // Strict keyset seek, so a resumed ambiguity reset never reloads the
+        // preceding occurrences and never uses a matching-subset rank.
+        let floor = after.map(seq).transpose()?.unwrap_or(-1);
+        self.account(1, 24)?;
+        let sequence: Option<i64> = self.db.query_row(
+            "SELECT sequence FROM native_original_tool_ids WHERE original=?1 AND identity=?2 AND sequence>?3 ORDER BY sequence LIMIT 1",
+            params![self.original.as_slice(), seq_u64(*id)?, floor],
+            |row| row.get(0),
+        ).optional().map_err(io::Error::other)?;
+        sequence
+            .map(usize::try_from)
+            .transpose()
+            .map_err(io::Error::other)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::native_event::NativeReply;
     use crate::events::native_producer;
+
+    #[test]
+    fn copilot_ambiguity_reset_is_indexed_resumable_and_matches_native_reference() {
+        use crate::events::native_harness::{
+            Reset, copilot_completion_target, copilot_reset_reply_step,
+        };
+        for count in [0usize, 1, 128, 1024, 8192] {
+            let mut db = Connection::open_in_memory().unwrap();
+            db.execute_batch(SCHEMA).unwrap();
+            let original = [9; 32];
+            let id = Text { class: 1 };
+            // Populate in separate bounded transactions, never one Events
+            // adapter whose 64-row accounting could reset between records.
+            for _index in 0..count {
+                let tx = db.transaction().unwrap();
+                let mut events = Events::new(&tx, original).unwrap();
+                events
+                    .append_event(NativeEvent {
+                        k: Kind::A,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                native_producer::tool_event(
+                    &mut events,
+                    NativeEvent {
+                        k: Kind::Tool,
+                        id: Some(id.clone()),
+                        r: Some(NativeReply {
+                            e: true,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            if count == 0 {
+                Events::new(&db, original).unwrap();
+            }
+            let vm = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = vm.clone();
+            db.progress_handler(
+                1,
+                Some(move || {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    false
+                }),
+            );
+            let reads = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let mut after = None;
+            let mut reset = 0;
+            loop {
+                vm.store(0, std::sync::atomic::Ordering::Relaxed);
+                let tx = db.transaction().unwrap();
+                let mut events = Events::new(&tx, original).unwrap();
+                // Cancellation before cursor seal rolls back the event update.
+                let outcome = copilot_reset_reply_step(&mut events, &1, after).unwrap();
+                let work = events.work();
+                assert!(work.metadata_rows <= 5);
+                assert!(work.metadata_bytes < 4096);
+                assert!(vm.load(std::sync::atomic::Ordering::Relaxed) < 512);
+                assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
+                drop(tx);
+                if let Reset::Progress(sequence) = outcome {
+                    let events = Events::new(&db, original).unwrap();
+                    assert!(events.event(sequence).unwrap().unwrap().r.is_some());
+                }
+                let tx = db.transaction().unwrap();
+                let mut events = Events::new(&tx, original).unwrap();
+                let outcome = copilot_reset_reply_step(&mut events, &1, after).unwrap();
+                match outcome {
+                    Reset::Complete => {
+                        tx.commit().unwrap();
+                        break;
+                    }
+                    Reset::Progress(sequence) => {
+                        assert_eq!(sequence, reset * 2 + 1);
+                        after = Some(sequence);
+                        reset += 1;
+                        tx.commit().unwrap();
+                    }
+                }
+            }
+            db.progress_handler(0, None::<fn() -> bool>);
+            // Independent legacy reference: every indexed historical request
+            // with the repeated id loses its reply; non-tool rows remain intact.
+            let mut rows = db.prepare("SELECT sequence,metadata FROM native_original_events WHERE original=?1 ORDER BY sequence").unwrap();
+            for row in rows
+                .query_map(params![original.as_slice()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+            {
+                let (sequence, metadata) = row.unwrap();
+                let event: NativeEvent<Text> = serde_json::from_str(&metadata).unwrap();
+                assert_eq!(
+                    event.k,
+                    if sequence % 2 == 0 {
+                        Kind::A
+                    } else {
+                        Kind::Tool
+                    }
+                );
+                assert!(event.r.is_none());
+            }
+            assert_eq!(reset, count);
+            let events = Events::new(&db, original).unwrap();
+            assert_eq!(
+                copilot_completion_target(&events, &1).unwrap(),
+                (count == 1).then_some(1)
+            );
+        }
+    }
 
     #[test]
     fn standalone_private_schema_supports_point_native_transitions() {
