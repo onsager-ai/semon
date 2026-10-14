@@ -4702,6 +4702,89 @@ fn physical_namespace_with_several_survivors_preserves_literal_owner_and_fixed_p
 }
 
 #[test]
+fn physical_unknown_decision_fences_native_metadata_and_released_snapshot() {
+    for stage in [0, 1] {
+        for change_owner in [false, true] {
+            let mut home = Home::new("physical-negative-fence");
+            home.options.all = false;
+            home.options.since = Duration::from_secs(6 * 3600);
+            home.top(
+                "same-id",
+                &[human("same-id", iso(NOW - 3600_000), "selected")],
+            );
+            home.lines(
+                "codex/sessions/2026/09/24/rollout-same-id.jsonl",
+                &[
+                    codex_line(
+                        iso(NOW - 86_400_000),
+                        "session_meta",
+                        json!({"id":"same-id"}),
+                    ),
+                    codex_line(
+                        iso(NOW - 86_399_000),
+                        "event_msg",
+                        json!({"type":"user_message","message":"omitted"}),
+                    ),
+                ],
+            );
+            let selected = home
+                .options
+                .claude_home
+                .join("projects/-work-proj/same-id.jsonl");
+            fs::File::open(&selected)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - 3600_000) as u64),
+                ))
+                .unwrap();
+            fs::File::open(
+                home.options
+                    .codex_home
+                    .join("sessions/2026/09/24/rollout-same-id.jsonl"),
+            )
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_millis((NOW - 86_400_000) as u64),
+            ))
+            .unwrap();
+            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            crate::model::observe_catalog(
+                &home.options,
+                &mut cache,
+                &mut false,
+                &mut crate::model::Texts::default(),
+                NOW,
+            )
+            .unwrap();
+            let cache_path = crate::events::EventCache::path(&home.options.cache);
+            crate::overview_repair::physical_identity::AFTER_IDENTITY.with(|hook| {
+                *hook.borrow_mut() = Some((stage, Box::new(move || {
+                    if change_owner {
+                        let db = rusqlite::Connection::open(cache_path).unwrap();
+                        assert!(db.execute("UPDATE session_slot_projections SET generation=generation||'-changed'", []).unwrap() > 0);
+                    } else {
+                        use std::io::Write;
+                        writeln!(fs::OpenOptions::new().append(true).open(selected).unwrap(), "{{}}").unwrap();
+                    }
+                })));
+            });
+            let result = home.query().call_at(
+                "read_transcript",
+                &json!({"id":"claude:same-id","turn":"bad-turn","limit":1}),
+                NOW,
+            );
+            crate::overview_repair::physical_identity::AFTER_IDENTITY
+                .with(|hook| assert!(hook.borrow().is_none(), "race did not run"));
+            assert_eq!(
+                result.unwrap_err().code,
+                "io",
+                "stage={stage}, owner={change_owner}"
+            );
+        }
+    }
+}
+
+#[test]
 fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_changes() {
     let mut home = Home::new("ordinary-native-alias");
     home.options.all = false;
