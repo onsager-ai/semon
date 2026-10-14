@@ -18,11 +18,13 @@ mod native_events;
 mod native_harness;
 mod native_retirement;
 mod native_source;
+mod native_time;
 pub(crate) use native_classes::IdentityStep;
 pub(crate) use native_classes::Representative as OriginalTextRepresentative;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
+pub(crate) use native_time::TimestampStep;
 
 pub(crate) const REPAIR_FORMAT: u32 = 3;
 // The pre-format namespace was published with parser 24. Its key must stay
@@ -76,6 +78,11 @@ CREATE TABLE IF NOT EXISTS native_original_literal (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
  literal TEXT NOT NULL, revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset,ordinal,literal)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_timestamp (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset,ordinal)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_copilot_started (
  original BLOB PRIMARY KEY
@@ -3610,6 +3617,95 @@ mod tests {
                     .is_none()
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_timestamp_is_bounded_resumable_and_equals_the_native_producer() {
+        for size in [0usize, 128, 1024, 8192, 200_000] {
+            let value = format!("2026-10-15T-1:-2:-3.12{}+01:-1ignored", "λ".repeat(size));
+            let bytes = format!(
+                "{{\"timestamp\":{},\"padding\":{}}}\n",
+                serde_json::to_string(&value)
+                    .unwrap()
+                    .replace('λ', "\\u03bb"),
+                serde_json::to_string(&"x".repeat(size)).unwrap()
+            );
+            let mut fixture = Fixture::new(bytes.as_bytes());
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let repair = fixture.qualified_record();
+            let node = fixture.member(&repair, "timestamp");
+            let cancelled = fixture
+                .store
+                .original_timestamp_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    node.ordinal,
+                    &fixture.sources.reader(),
+                    &|| true,
+                )
+                .unwrap();
+            assert_eq!(cancelled.outcome, Outcome::Deferred);
+            assert_eq!(cancelled.work.native_bytes, 0);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                assert!(attempts < 256);
+                let step = fixture
+                    .store
+                    .original_timestamp_step_with_budget(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        node.ordinal,
+                        &fixture.sources.reader(),
+                        &|| false,
+                        crate::SESSION_SOURCE_CHUNK_MAX - 2,
+                        4,
+                    )
+                    .unwrap();
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX - 2);
+                assert!(step.work.metadata_rows <= 4);
+                assert!(step.work.metadata_bytes < 16 * 1024);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                if step.complete {
+                    assert_eq!(step.outcome, Outcome::Written);
+                    assert_eq!(step.millis, crate::events::parse_ms(&value));
+                    break;
+                }
+            }
+            let cached = fixture
+                .store
+                .original_timestamp_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    node.ordinal,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            assert!(cached.complete);
+            assert_eq!(cached.work.native_bytes, 1);
+            assert_eq!(cached.work.range_requests, 1);
+            assert!(cached.work.metadata_rows <= 2);
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+            let mut changed = fixture.source.clone();
+            changed.claim = Some(changed.claim.unwrap_or(0) + 1);
+            assert!(
+                fixture
+                    .store
+                    .original_timestamp_step(
+                        &fixture.job,
+                        &changed,
+                        &repair,
+                        node.ordinal,
+                        &fixture.sources.reader(),
+                        &|| false
+                    )
+                    .is_err()
+            );
         }
     }
 
