@@ -5827,3 +5827,73 @@ fn selected_late_search_scans_content_without_eager_index_or_slot_preparation() 
     );
     assert!(scans[1].2 <= 1024);
 }
+
+#[test]
+fn shared_virtual_and_unsent_owners_preserve_complete_native_results() {
+    let home = Home::new("shared-virtual-owners");
+    for (sid, minute) in [("first", 1), ("second", 2)] {
+        let sent = format!("sent-{sid}");
+        let lost = format!("lost-{sid}");
+        home.top(sid,&[
+            human(sid,ts(1,0),"send turn"),
+            assistant(sid,ts(1,minute),vec![
+                tool(&sent,"SendMessage",json!({"to":"remote","message":format!("send from {sid}")})),
+                tool(&lost,"SendMessage",json!({"to":"missing","message":format!("failed from {sid}")})),
+            ]),
+            json!({"type":"user","sessionId":sid,"timestamp":ts(1,minute),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":sent,"content":"sent"}]},"toolUseResult":{"success":true,"message":"sent"}}),
+            json!({"type":"user","sessionId":sid,"timestamp":ts(1,minute),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":lost,"content":"missing"}]},"toolUseResult":{"success":false,"message":"missing"}}),
+        ]);
+    }
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(cache);
+    let mut oracle = Query::from_sources(admitted(home.options.clone()));
+    let listing = oracle.call_at("list_sessions", &json!({}), NOW).unwrap();
+    let stub = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "stub")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for key in [&stub, "unsent:missing"] {
+        let cases = [
+            ("get_session", json!({"id":key})),
+            ("read_transcript", json!({"id":key,"limit":10})),
+            ("read_transcript", json!({"id":key,"before":1,"limit":1})),
+            ("read_transcript", json!({"id":key,"after":1,"limit":1})),
+            ("read_transcript", json!({"id":key,"turn":"absent"})),
+        ];
+        for (tool, args) in cases {
+            let expected = oracle.call_at(tool, &args, NOW);
+            let mut query = Query::from_sources(admitted(home.options.clone()));
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let actual = query.call_selected_at(
+                "local",
+                key,
+                tool,
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            );
+            eprintln!(
+                "shared virtual key={key} tool={tool} full_index_loads={}",
+                crate::events::FILE_READS.with(std::cell::Cell::get) - loads
+            );
+            assert_eq!(
+                actual, expected,
+                "shared owners changed complete {tool} {args}"
+            );
+        }
+    }
+}

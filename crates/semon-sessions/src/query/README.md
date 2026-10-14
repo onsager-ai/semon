@@ -381,7 +381,7 @@ metadata, preserving links needed by retained turns. Membership is resolved befo
 turn anchors, so an excluded session still reports `unknown_session`. Detail reads
 resolve only returned prompt/handoff fields and finish only touched byte sources.
 The private physical owner also publishes ordered virtual/unsent handoff recipes.
-Full-window virtual pages retain the NoActivity slot, absolute positions and union
+Single-owner full-window virtual pages retain the NoActivity slot, absolute positions and union
 aliases without preparing the physical transcript. Virtual details keep the 8 MiB
 response metadata bound.
 
@@ -407,8 +407,10 @@ pages rather than the complete selected vector.
 **The implementation blocker remains open.** Physical scan windows that omit
 sources can change canonical aliases, inherited spawn turns, skipped-parent
 semantics and transcript ranks. They still use selected native preparation.
-Clipped virtual histories, unqualified composite retained histories and older
-publications without private Query recipes also retain that resolver. These are
+Shared-owner and clipped virtual histories, unqualified composite retained histories and older
+publications without private Query recipes also retain that resolver. A shared
+virtual transcript must not expose only its first physical owner's sends; the
+independent native aggregate oracle checks every owner and page anchor. These are
 remaining migrations, not supported performance limitations. No complete
 selected-preparation fallback has been relabeled as focused behavior.
 
