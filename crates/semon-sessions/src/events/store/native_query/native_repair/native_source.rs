@@ -1,5 +1,8 @@
 //! Qualified Original event primitives. This exposes only fully folded source
 //! metadata; source header/usage ownership remains a separate native witness.
+//! Work measures the selected primitive statements (including all counts).
+//! Job/source/publication fence SQL is the controller's relationship-work scope,
+//! not hidden preparation of the selected source transcript.
 
 use super::*;
 use crate::events::native_event::NativeEvent;
@@ -91,14 +94,18 @@ impl NativeStore {
             .unchecked_transaction()
             .map_err(io::Error::other)?;
         source_ready(&tx, job, witness, repair)?;
-        let regular:i64=tx.query_row("SELECT coalesce((SELECT event_count FROM native_original_event_state WHERE original=?1),0)",params![repair.original.as_slice()],|row|row.get(0)).map_err(io::Error::other)?;
+        let mut regular_query=tx.prepare("SELECT coalesce((SELECT event_count FROM native_original_event_state WHERE original=?1),0)").map_err(io::Error::other)?;
+        let regular: i64 = regular_query
+            .query_row(params![repair.original.as_slice()], |row| row.get(0))
+            .map_err(io::Error::other)?;
+        let regular_vm = regular_query.get_status(rusqlite::StatementStatus::VmStep);
         let mut query=tx.prepare("SELECT channel,count FROM native_original_channel_state WHERE original=?1 ORDER BY channel LIMIT 2").map_err(io::Error::other)?;
         let mut extras = 0;
         let mut signals = 0;
         let mut work = Work {
             decoded_rows: 1,
             metadata_bytes: 8,
-            vm_steps: 0,
+            vm_steps: regular_vm,
         };
         let mut rows = query
             .query(params![repair.original.as_slice()])

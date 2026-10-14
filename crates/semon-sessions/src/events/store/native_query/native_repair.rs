@@ -3420,7 +3420,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let reads = crate::events::FILE_READS.with(Cell::get);
-            let (facts, _) = fixture
+            let (facts, facts_work) = fixture
                 .store
                 .original_event_facts(&fixture.job, &fixture.source, &repair)
                 .unwrap();
@@ -3432,6 +3432,10 @@ mod tests {
                 (facts.seed.first_seq, facts.seed.first_ms),
                 (Some(1), Some(11))
             );
+            assert_eq!(facts_work.decoded_rows, 4);
+            assert!(facts_work.metadata_bytes < 128);
+            assert!(facts_work.vm_steps > 0 && facts_work.vm_steps < 256);
+
             let page = fixture
                 .store
                 .original_events_page(&fixture.job, &fixture.source, &repair, false, None, 1)
