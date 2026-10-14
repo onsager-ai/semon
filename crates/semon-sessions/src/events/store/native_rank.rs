@@ -15,7 +15,7 @@ use std::sync::{
 mod candidate_tree;
 pub(crate) use candidate_tree::{
     CandidateBounds, CandidateDirection, CandidateLeaf, CandidatePoint, CandidateRead,
-    CandidateReadOutcome, CandidateRoot, CandidateStep, CandidateWork,
+    CandidateReadOutcome, CandidateRoot, CandidateStep, CandidateWork, SourceNeighborStep,
 };
 /// The candidate-tree schema is exported separately so the private schema
 /// owner can register it with its version bump. Public Trace schema is not
