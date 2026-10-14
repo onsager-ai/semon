@@ -272,6 +272,12 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
         let Some(current) = rows.get(projection.key.as_str()).copied() else {
             continue;
         };
+        // A completed cross-harness original is immutable custody even if a
+        // later Current publication reuses its original harness again.
+        let original: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_catalog h JOIN meta m ON m.key=?2 WHERE h.session_key=?1)",params![current.key,format!("history_original_header:{}",current.key)],|row|row.get(0))?;
+        if original {
+            continue;
+        }
         let old_text = catalog(tx, &current.key)?.or(tx
             .query_row(
                 "SELECT metadata FROM session_catalog WHERE session_key=?1",
@@ -582,6 +588,46 @@ mod tests {
             assert!(done);
             assert_eq!(slots(&db), original);
         }
+    }
+    #[test]
+    fn completed_original_is_immutable_when_current_reuses_its_harness() {
+        let (mut db, mut current, original) = fixture(65, 0);
+        while !step(&mut db, &current) {}
+        let metadata = catalog(&db, &current.key).unwrap();
+        let header: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='history_original_header:old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        current.name = "New Current with original harness".into();
+        let tx = db.transaction().unwrap();
+        publish(
+            &tx,
+            &Publication {
+                rows: &[current.clone()],
+                transcripts: Some(&[crate::slot_projection::Projection {
+                    key: current.key.clone(),
+                    slots: Vec::new(),
+                    repair: false,
+                }]),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(catalog(&db, &current.key).unwrap(), metadata);
+        assert_eq!(slots(&db), original);
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='history_original_header:old'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            header
+        );
+        assert!(!qualified(&db, &current).unwrap());
     }
     #[test]
     fn custody_preserves_unsupported_original_slot_addresses() {

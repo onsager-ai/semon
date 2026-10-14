@@ -178,3 +178,9 @@ parts in `session_history_slot_parts`, without whole-value concatenation; its
 history remains unavailable to ordinary recipe readers. Source references,
 generations and existing archive markers are retained unchanged. This is
 custody preservation, never a grant of control or new eviction authority.
+
+Schema 27 adds the custody-part table through the storage owner's additive
+migration. It leaves the parser version, original rows, headers and archive
+markers unchanged; older schema-26 writers refuse the newer store. The migration
+regression compares every existing MAIN/TEMP row and schema object before and
+after opening the previous schema.
