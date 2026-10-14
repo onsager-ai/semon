@@ -5,7 +5,10 @@
 
 use super::*;
 use crate::SessionSourceReader;
-use crate::json_string::native_identity::{Fingerprint, Receipt};
+use crate::json_string::native_identity::{Compare, Comparison, Fingerprint, Receipt};
+use crate::json_string::native_number::{
+    Cursor as NumberCursor, Qualification as NumberQualification,
+};
 use crate::json_string::native_record::{
     Container, Cursor as RecordCursor, Literal, Location, Span, Token,
 };
@@ -25,6 +28,18 @@ CREATE TABLE IF NOT EXISTS native_original_records (
  status TEXT NOT NULL CHECK(status IN ('lexed','gap','folded')),
  PRIMARY KEY(original,record_offset)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_members (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, parent_offset INTEGER NOT NULL,
+ name TEXT NOT NULL, revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset,parent_offset,name)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_numbers (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, address INTEGER NOT NULL,
+ start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL, cursor TEXT NOT NULL, receipt TEXT,
+ PRIMARY KEY(original,record_offset,address)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_number_pending
+ ON native_original_numbers(original,record_offset,address) WHERE receipt IS NULL;
 CREATE TABLE IF NOT EXISTS native_original_nodes (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL, address INTEGER NOT NULL,
  parent_offset INTEGER, key_start INTEGER, element_index INTEGER,
@@ -75,6 +90,7 @@ struct Cursor {
     fields_after: Option<u64>,
     fields_registered: bool,
     node_stack: Vec<(u64, Container)>,
+    native_invalid: bool,
 }
 impl Cursor {
     fn new() -> Self {
@@ -88,6 +104,7 @@ impl Cursor {
             fields_after: None,
             fields_registered: false,
             node_stack: Vec::new(),
+            native_invalid: false,
         }
     }
 }
@@ -139,6 +156,34 @@ pub(crate) enum OriginalValue {
     Literal { span: Span, kind: Literal },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemberCursor {
+    before: Option<u64>,
+    candidate: Option<OriginalField>,
+    compare: Option<Compare>,
+    complete: bool,
+    key: Option<OriginalField>,
+}
+impl MemberCursor {
+    fn new() -> Self {
+        Self {
+            before: None,
+            candidate: None,
+            compare: None,
+            complete: false,
+            key: None,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct MemberStep {
+    pub(crate) outcome: Outcome,
+    pub(crate) work: RepairWork,
+    pub(crate) complete: bool,
+    pub(crate) node: Option<OriginalNode>,
+}
+
 fn reference(
     records: &crate::query_source::Records<'_>,
     witness: &SourceWitness,
@@ -176,11 +221,26 @@ fn repair_current(db: &Connection, repair: &Repair) -> rusqlite::Result<bool> {
     .optional()
     .map(|value| value == Some(true))
 }
+fn record_status(db: &Connection, repair: &Repair) -> rusqlite::Result<Option<String>> {
+    db.query_row(
+        "SELECT status FROM native_original_records WHERE original=?1 AND record_offset=?2",
+        params![
+            repair.original.as_slice(),
+            i64::try_from(repair.cursor.record_at).map_err(|_| rusqlite::Error::InvalidQuery)?
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+}
 fn fields_ready(db: &Connection, repair: &Repair) -> rusqlite::Result<bool> {
-    if !repair.cursor.fields_registered {
+    let status = record_status(db, repair)?;
+    if status.as_deref() == Some("gap") {
+        return Ok(true);
+    }
+    if status.as_deref() != Some("lexed") || !repair.cursor.fields_registered {
         return Ok(false);
     }
-    db.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND digest IS NULL)",params![repair.original.as_slice(),i64::try_from(repair.cursor.record_at).map_err(|_|rusqlite::Error::InvalidQuery)?],|row|row.get(0))
+    db.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND digest IS NULL) AND NOT EXISTS(SELECT 1 FROM native_original_numbers WHERE original=?1 AND record_offset=?2 AND receipt IS NULL)",params![repair.original.as_slice(),i64::try_from(repair.cursor.record_at).map_err(|_|rusqlite::Error::InvalidQuery)?],|row|row.get(0))
 }
 
 fn check_record_view(
@@ -195,6 +255,7 @@ fn check_record_view(
         || !admitted_original(db, job, witness)?
         || repair.cursor.phase != Phase::FoldRecord
         || !fields_ready(db, repair)?
+        || record_status(db, repair)?.as_deref() != Some("lexed")
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -217,6 +278,479 @@ fn admitted_original(
 }
 
 impl NativeStore {
+    fn original_number_step(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<RepairStep> {
+        let mut work = RepairWork::default();
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        if !repair.cursor.fields_registered {
+            return Err(io::Error::other(
+                "native number qualification lacks record nodes",
+            ));
+        }
+        let mut numeric = None;
+        let mut invalid = repair.cursor.native_invalid;
+        if !invalid {
+            let pending:Option<(i64,i64,i64,Option<String>,i64)>=self.connection.query_row("SELECT address,start_offset,end_offset,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_numbers WHERE original=?1 AND record_offset=?2 AND receipt IS NULL ORDER BY address LIMIT 1",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional().map_err(io::Error::other)?;
+            let Some((address, start, end, state, size)) = pending else {
+                return Ok(RepairStep {
+                    outcome: Outcome::Written,
+                    work,
+                });
+            };
+            work.metadata_rows = 1;
+            work.metadata_bytes = usize::try_from(size).map_err(io::Error::other)?;
+            let start = u64::try_from(start).map_err(io::Error::other)?;
+            let end = u64::try_from(end).map_err(io::Error::other)?;
+            let mut cursor: NumberCursor =
+                serde_json::from_str(state.as_deref().ok_or_else(|| {
+                    io::Error::other("native number cursor exceeds metadata budget")
+                })?)
+                .map_err(io::Error::other)?;
+            if start > end || cursor.at < start || cursor.at > end || end > record_length(repair)? {
+                return Err(io::Error::other(
+                    "native number descriptor is outside its record",
+                ));
+            }
+            let remaining = end - cursor.at;
+            if remaining > 0 {
+                let at = repair
+                    .cursor
+                    .record_at
+                    .checked_add(cursor.at)
+                    .ok_or_else(|| io::Error::other("native number offset overflow"))?;
+                let maximum =
+                    usize::try_from(remaining.min(crate::SESSION_SOURCE_CHUNK_MAX as u64))
+                        .map_err(io::Error::other)?;
+                let part = records.read_range(
+                    &repair.source,
+                    repair
+                        .cursor
+                        .pin
+                        .as_ref()
+                        .map(|pin| pin.generation.as_str()),
+                    at,
+                    maximum,
+                )?;
+                work.range_requests = 1;
+                work.native_bytes = part.bytes.len();
+                let pin = repair.cursor.pin.as_ref().ok_or_else(|| {
+                    io::Error::other("native number lacks Original consumed-prefix pin")
+                })?;
+                if part.offset != at
+                    || part.bytes.is_empty()
+                    || part.bytes.len() > maximum
+                    || part.generation != pin.generation
+                    || part.length != pin.length
+                {
+                    return Err(io::Error::other("native number source generation changed"));
+                }
+                cursor.step(&part.bytes, crate::SESSION_SOURCE_CHUNK_MAX)?;
+            } else {
+                cursor.step(&[], 1)?;
+            }
+            invalid = cursor.result == Some(NumberQualification::Invalid);
+            let text = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
+            let receipt = cursor
+                .result
+                .map(|value| bounded_json(&value, STATE_BYTES))
+                .transpose()
+                .map_err(io::Error::other)?;
+            work.metadata_rows += 1;
+            work.metadata_bytes += text.len() + receipt.as_ref().map_or(0, String::len);
+            numeric = Some((address, text, receipt));
+        }
+        if work.range_requests == 0 {
+            verify_member_anchor(records, repair, &mut work)?
+        }
+        records.finish()?;
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        work.metadata_rows += 1 + usize::from(invalid);
+        work.metadata_bytes += 64;
+        if work.metadata_rows > ROWS || work.metadata_bytes > BYTES {
+            return Err(io::Error::other(
+                "native number step exceeds metadata budget",
+            ));
+        }
+        if !self.runtime_current(&job.spec)? {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        if !job_current(&tx, job).map_err(io::Error::other)?
+            || !check_source(&tx, witness).map_err(io::Error::other)?
+            || !repair_current(&tx, repair).map_err(io::Error::other)?
+            || !admitted_original(&tx, job, witness).map_err(io::Error::other)?
+        {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        if let Some((address, cursor, receipt)) = numeric {
+            tx.execute("UPDATE native_original_numbers SET cursor=?4,receipt=?5 WHERE original=?1 AND record_offset=?2 AND address=?3 AND receipt IS NULL",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,address,cursor,receipt]).map_err(io::Error::other)?;
+        }
+        if invalid {
+            tx.execute("UPDATE native_original_records SET status='gap' WHERE original=?1 AND record_offset=?2 AND status='lexed'",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?]).map_err(io::Error::other)?;
+        }
+        tx.execute(
+            "UPDATE native_original_repairs SET revision=revision+1 WHERE original=?1",
+            params![repair.original.as_slice()],
+        )
+        .map_err(io::Error::other)?;
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        tx.commit().map_err(io::Error::other)?;
+        Ok(RepairStep {
+            outcome: Outcome::Deferred,
+            work,
+        })
+    }
+
+    pub(crate) fn original_number(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        address: u64,
+    ) -> io::Result<Option<crate::json_string::native_number::NativeNumber>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("native number runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        let receipt:Option<Option<String>>=tx.query_row("SELECT CASE WHEN octet_length(receipt)<=65536 THEN receipt END FROM native_original_numbers WHERE original=?1 AND record_offset=?2 AND address=?3",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(address)?],|row|row.get(0)).optional().map_err(io::Error::other)?;
+        receipt
+            .map(|receipt| {
+                match serde_json::from_str(
+                    receipt.as_deref().ok_or_else(|| {
+                        io::Error::other("native number receipt is not qualified")
+                    })?,
+                )
+                .map_err(io::Error::other)?
+                {
+                    NumberQualification::Finite(number) => Ok(number),
+                    NumberQualification::Invalid => {
+                        Err(io::Error::other("native number belongs to a gap record"))
+                    }
+                }
+            })
+            .transpose()
+    }
+
+    pub(crate) fn original_root(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+    ) -> io::Result<Option<OriginalNode>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("original root runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        let address:Option<i64>=tx.query_row("SELECT address FROM native_original_nodes WHERE original=?1 AND record_offset=?2 AND parent_offset IS NULL ORDER BY address LIMIT 1",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?],|row|row.get(0)).optional().map_err(io::Error::other)?;
+        drop(tx);
+        address
+            .map(|address| {
+                self.original_node(
+                    job,
+                    witness,
+                    repair,
+                    u64::try_from(address).map_err(io::Error::other)?,
+                )
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// One bounded native member selection step. name is an existing producer
+    /// field literal, never arbitrary source text. Newest candidate keys must
+    /// match complete canonical native bytes before they own a logical field;
+    /// rejected digest collisions advance durably to the previous candidate.
+    pub(crate) fn original_member_step(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        parent: u64,
+        name: &'static str,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<MemberStep> {
+        // This is a producer API literal bound, not a bound on supported keys.
+        // Arbitrary native keys remain complete descriptor/hash candidates.
+        if name.len() > 128
+            || name
+                .bytes()
+                .any(|byte| byte < 0x20 || byte == b'"' || byte == b'\\' || byte >= 0x80)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native member name must be a bounded producer literal",
+            ));
+        }
+        let mut work = RepairWork::default();
+        if cancelled() {
+            return Ok(MemberStep {
+                outcome: Outcome::Deferred,
+                work,
+                complete: false,
+                node: None,
+            });
+        }
+        if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
+            return Ok(MemberStep {
+                outcome: Outcome::Conflict,
+                work,
+                complete: false,
+                node: None,
+            });
+        }
+        check_record_view(&self.connection, job, witness, repair).map_err(io::Error::other)?;
+        let existing:Option<(i64,Option<String>,i64)>=self.connection.query_row("SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_members WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND name=?4",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,name],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(io::Error::other)?;
+        let (revision, mut cursor) = if let Some((revision, text, size)) = existing {
+            work.metadata_rows += 1;
+            work.metadata_bytes += usize::try_from(size).map_err(io::Error::other)?;
+            (
+                Some(revision),
+                serde_json::from_str::<MemberCursor>(text.as_deref().ok_or_else(|| {
+                    io::Error::other("native member cursor exceeds metadata budget")
+                })?)
+                .map_err(io::Error::other)?,
+            )
+        } else {
+            (None, MemberCursor::new())
+        };
+        if cursor.complete {
+            verify_member_anchor(records, repair, &mut work)?;
+            records.finish()?;
+            if !self.runtime_current(&job.spec)? {
+                return Ok(MemberStep {
+                    outcome: Outcome::Conflict,
+                    work,
+                    complete: false,
+                    node: None,
+                });
+            }
+            check_record_view(&self.connection, job, witness, repair).map_err(io::Error::other)?;
+            let node = cursor
+                .key
+                .as_ref()
+                .map(|key| self.original_value_by_key(job, witness, repair, key))
+                .transpose()?
+                .flatten();
+            if cursor.key.is_some() && node.is_none() {
+                return Err(io::Error::other(
+                    "native member value descriptor is missing",
+                ));
+            }
+            return Ok(MemberStep {
+                outcome: Outcome::Written,
+                work,
+                complete: true,
+                node,
+            });
+        }
+        if cursor.candidate.is_none() {
+            let receipt = Receipt {
+                decoded_bytes: name.len() as u64,
+                sha256: Sha256::digest(name.as_bytes()).into(),
+            };
+            let candidate:Option<(Option<String>,i64)>=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END,octet_length(metadata) FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND is_key=1 AND digest=?4 AND decoded_bytes=?5 AND ordinal<?6 ORDER BY ordinal DESC LIMIT 1",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,receipt.sha256.as_slice(),seq_u64(receipt.decoded_bytes)?,cursor.before.map(seq_u64).transpose()?.unwrap_or(i64::MAX)],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(io::Error::other)?;
+            if let Some((text, size)) = candidate {
+                work.metadata_rows += 1;
+                work.metadata_bytes += usize::try_from(size).map_err(io::Error::other)?;
+                let field: OriginalField =
+                    serde_json::from_str(text.as_deref().ok_or_else(|| {
+                        io::Error::other("native member candidate exceeds metadata budget")
+                    })?)
+                    .map_err(io::Error::other)?;
+                if !field.key
+                    || field.location.parent != Some(parent)
+                    || field.span.end > record_length(repair)?
+                {
+                    return Err(io::Error::other(
+                        "native member candidate descriptor disagrees",
+                    ));
+                }
+                cursor.compare = Some(Compare::new(
+                    (field.span.start, field.span.end),
+                    (0, name.len() as u64),
+                )?);
+                cursor.candidate = Some(field);
+            } else {
+                cursor.complete = true
+            }
+        }
+        if let Some(compare) = cursor.compare.as_mut() {
+            let remaining = compare.left.clone();
+            let field = cursor
+                .candidate
+                .as_ref()
+                .ok_or_else(|| io::Error::other("native member comparison lacks a candidate"))?;
+            let left = field
+                .span
+                .end
+                .checked_sub(remaining.at)
+                .ok_or_else(|| io::Error::other("native member comparison exceeds field"))?;
+            let mut native = None;
+            if left > 0 {
+                let at = repair
+                    .cursor
+                    .record_at
+                    .checked_add(remaining.at)
+                    .ok_or_else(|| io::Error::other("native member source offset overflow"))?;
+                let maximum = usize::try_from(left.min(crate::SESSION_SOURCE_CHUNK_MAX as u64))
+                    .map_err(io::Error::other)?;
+                let part = records.read_range(
+                    &repair.source,
+                    repair
+                        .cursor
+                        .pin
+                        .as_ref()
+                        .map(|pin| pin.generation.as_str()),
+                    at,
+                    maximum,
+                )?;
+                work.range_requests += 1;
+                work.native_bytes += part.bytes.len();
+                let pin = repair.cursor.pin.as_ref().ok_or_else(|| {
+                    io::Error::other("native member lacks Original consumed-prefix pin")
+                })?;
+                if part.offset != at
+                    || part.bytes.is_empty()
+                    || part.bytes.len() > maximum
+                    || part.generation != pin.generation
+                    || part.length != pin.length
+                {
+                    return Err(io::Error::other("native member source generation changed"));
+                }
+                native = Some(part);
+            }
+            let right = usize::try_from(compare.right.at).map_err(io::Error::other)?;
+            compare.step(
+                native.as_ref().map_or(&[][..], |part| part.bytes.as_ref()),
+                name.as_bytes()
+                    .get(right..)
+                    .ok_or_else(|| io::Error::other("native member literal cursor changed"))?,
+                1024,
+            )?;
+            if let Some(result) = compare.result {
+                cursor.before = Some(field.ordinal);
+                if result == Comparison::Equal {
+                    cursor.key = Some(field.clone());
+                    cursor.complete = true
+                }
+                cursor.candidate = None;
+                cursor.compare = None;
+            }
+        }
+        if work.range_requests == 0 {
+            verify_member_anchor(records, repair, &mut work)?
+        }
+        records.finish()?;
+        if cancelled() {
+            return Ok(MemberStep {
+                outcome: Outcome::Deferred,
+                work,
+                complete: false,
+                node: None,
+            });
+        }
+        let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
+        work.metadata_rows += 1;
+        work.metadata_bytes += state.len();
+        if work.metadata_rows > ROWS || work.metadata_bytes > BYTES {
+            return Err(io::Error::other(
+                "native member step exceeds metadata budget",
+            ));
+        }
+        if !self.runtime_current(&job.spec)? {
+            return Ok(MemberStep {
+                outcome: Outcome::Conflict,
+                work,
+                complete: false,
+                node: None,
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
+        let current:Option<i64>=tx.query_row("SELECT revision FROM native_original_members WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND name=?4",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,name],|row|row.get(0)).optional().map_err(io::Error::other)?;
+        if current != revision {
+            return Ok(MemberStep {
+                outcome: Outcome::Conflict,
+                work,
+                complete: false,
+                node: None,
+            });
+        }
+        tx.execute("INSERT INTO native_original_members VALUES(?1,?2,?3,?4,0,?5) ON CONFLICT(original,record_offset,parent_offset,name) DO UPDATE SET revision=revision+1,cursor=excluded.cursor",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,name,state]).map_err(io::Error::other)?;
+        if cancelled() {
+            return Ok(MemberStep {
+                outcome: Outcome::Deferred,
+                work,
+                complete: false,
+                node: None,
+            });
+        }
+        tx.commit().map_err(io::Error::other)?;
+        let node = cursor
+            .key
+            .as_ref()
+            .map(|key| self.original_value_by_key(job, witness, repair, key))
+            .transpose()?
+            .flatten();
+        if cursor.key.is_some() && node.is_none() {
+            return Err(io::Error::other(
+                "native member value descriptor is missing",
+            ));
+        }
+        Ok(MemberStep {
+            outcome: if cursor.complete {
+                Outcome::Written
+            } else {
+                Outcome::Deferred
+            },
+            work,
+            complete: cursor.complete,
+            node,
+        })
+    }
+
     /// Point access by physical field address. Selecting a logical object key
     /// first requires the native last-key exact-comparison protocol; this API
     /// does not convert candidate hashes into semantic ownership.
@@ -392,6 +926,10 @@ impl NativeStore {
             || !admitted_original(&tx, job, witness).map_err(io::Error::other)?
             || repair.cursor.phase != Phase::FoldRecord
             || !fields_ready(&tx, repair).map_err(io::Error::other)?
+            || record_status(&tx, repair)
+                .map_err(io::Error::other)?
+                .as_deref()
+                != Some("lexed")
         {
             return Err(io::Error::other("original field generation changed"));
         }
@@ -483,6 +1021,19 @@ impl NativeStore {
                 work,
             });
         }
+        if record_status(&self.connection, repair)
+            .map_err(io::Error::other)?
+            .as_deref()
+            == Some("gap")
+        {
+            return Ok(RepairStep {
+                outcome: Outcome::Written,
+                work,
+            });
+        }
+        if repair.cursor.fields_registered && repair.cursor.native_invalid {
+            return self.original_number_step(job, witness, repair, records, cancelled);
+        }
         if !repair.cursor.fields_registered {
             let page = self.original_tokens_page_limit(
                 job,
@@ -496,11 +1047,17 @@ impl NativeStore {
             let mut fields = Vec::new();
             let mut nodes = Vec::new();
             let mut closes = Vec::new();
+            let mut numbers = Vec::new();
             let mut cursor = repair.cursor.clone();
             for (ordinal, token) in page.rows {
                 let node = match token {
                     Token::Begin { at, kind, location } => {
                         cursor.node_stack.push((at, kind));
+                        if cursor.node_stack.len() >= 128
+                            || (location.parent.is_none() && kind != Container::Object)
+                        {
+                            cursor.native_invalid = true
+                        }
                         Some(OriginalNode {
                             ordinal,
                             address: at,
@@ -554,6 +1111,18 @@ impl NativeStore {
                     _ => None,
                 };
                 if let Some(node) = node {
+                    if node.location.parent.is_none()
+                        && !matches!(node.value, OriginalValue::Object)
+                    {
+                        cursor.native_invalid = true
+                    }
+                    if let OriginalValue::Number(span) = &node.value {
+                        let number = NumberCursor::new(span.start, span.end)?;
+                        let state = bounded_json(&number, STATE_BYTES).map_err(io::Error::other)?;
+                        work.metadata_rows += 1;
+                        work.metadata_bytes += state.len() + 64;
+                        numbers.push((node.address, *span, state));
+                    }
                     let text = bounded_json(&node, STATE_BYTES).map_err(io::Error::other)?;
                     work.metadata_rows += 1;
                     work.metadata_bytes += text.len() + 64;
@@ -659,6 +1228,20 @@ impl NativeStore {
                     ));
                 }
             }
+            for (address, span, state) in numbers {
+                tx.execute(
+                    "INSERT INTO native_original_numbers VALUES(?1,?2,?3,?4,?5,?6,NULL)",
+                    params![
+                        repair.original.as_slice(),
+                        seq_u64(repair.cursor.record_at)?,
+                        seq_u64(address)?,
+                        seq_u64(span.start)?,
+                        seq_u64(span.end)?,
+                        state
+                    ],
+                )
+                .map_err(io::Error::other)?;
+            }
             for (field, text, state) in fields {
                 tx.execute("INSERT INTO native_original_fields VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,NULL)",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(field.ordinal)?,seq_u64(field.span.start)?,seq_u64(field.span.end)?,field.location.parent.map(seq_u64).transpose()?,field.key,text,state]).map_err(io::Error::other)?;
             }
@@ -677,10 +1260,7 @@ impl NativeStore {
         }
         let pending:Option<(i64,i64,i64,Option<String>,i64)>=self.connection.query_row("SELECT ordinal,start_offset,end_offset,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND digest IS NULL ORDER BY ordinal LIMIT 1",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional().map_err(io::Error::other)?;
         let Some((ordinal, start, end, state, size)) = pending else {
-            return Ok(RepairStep {
-                outcome: Outcome::Written,
-                work,
-            });
+            return self.original_number_step(job, witness, repair, records, cancelled);
         };
         work.metadata_rows = 1;
         work.metadata_bytes = usize::try_from(size).map_err(io::Error::other)?;
@@ -1025,6 +1605,7 @@ impl NativeStore {
         cursor.fields_after = None;
         cursor.fields_registered = false;
         cursor.node_stack.clear();
+        cursor.native_invalid = false;
         cursor.phase = if cursor.source_at == repair.source.offset {
             Phase::Complete
         } else {
@@ -1387,6 +1968,34 @@ impl NativeStore {
         })
     }
 }
+fn verify_member_anchor(
+    records: &crate::query_source::Records<'_>,
+    repair: &Repair,
+    work: &mut RepairWork,
+) -> io::Result<()> {
+    let pin = repair
+        .cursor
+        .pin
+        .as_ref()
+        .ok_or_else(|| io::Error::other("native member lacks Original consumed-prefix pin"))?;
+    let part = records.read_range(
+        &repair.source,
+        Some(&pin.generation),
+        repair.cursor.record_at,
+        1,
+    )?;
+    work.range_requests += 1;
+    work.native_bytes += part.bytes.len();
+    if part.offset != repair.cursor.record_at
+        || part.bytes.len() != 1
+        || part.generation != pin.generation
+        || part.length != pin.length
+    {
+        return Err(io::Error::other("native member source authority changed"));
+    }
+    Ok(())
+}
+
 fn record_length(repair: &Repair) -> io::Result<u64> {
     repair
         .cursor
@@ -1873,6 +2482,281 @@ mod tests {
                 after = page.after;
             }
             assert_eq!(observed, count);
+            assert_eq!(
+                super::super::super::super::FILE_READS.with(Cell::get),
+                reads
+            );
+        }
+    }
+
+    #[test]
+    fn original_member_resumes_false_digest_candidate_and_selects_native_last_key() {
+        let bytes = b"  {\"text\":\"first\",\"t\\u0065xt\":\"last\",\"fext\":\"collision\"}\n";
+        let oracle: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(oracle["text"], "last");
+        let mut fixture = Fixture::new(bytes);
+        let mut repair = fixture
+            .store
+            .begin_original_repair(
+                &fixture.job,
+                &fixture.source,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        while repair.cursor.phase != Phase::FoldRecord {
+            fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+        }
+        loop {
+            let step = fixture
+                .store
+                .original_fields_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            if step.outcome == Outcome::Written {
+                break;
+            }
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+        }
+        let root = fixture
+            .store
+            .original_root(&fixture.job, &fixture.source, &repair)
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.address, 2);
+        assert!(matches!(root.value, OriginalValue::Object));
+        // Simulate a cryptographic candidate collision. The actual field
+        // bytes still differ and must be rejected by the native comparison.
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_original_fields SET digest=?1 WHERE is_key=1 AND digest=?2",
+                params![
+                    Sha256::digest(b"text").as_slice(),
+                    Sha256::digest(b"fext").as_slice()
+                ],
+            )
+            .unwrap();
+        let step = fixture
+            .store
+            .original_member_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                root.address,
+                "text",
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Deferred);
+        assert!(!step.complete);
+        assert!(step.node.is_none());
+        assert!(step.work.range_requests <= 1);
+        assert!(step.work.metadata_rows <= ROWS);
+        assert!(step.work.metadata_bytes <= BYTES);
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let step = fixture
+            .store
+            .original_member_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                root.address,
+                "text",
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Written);
+        assert!(step.complete);
+        let OriginalValue::String(span) = step.node.unwrap().value else {
+            panic!("last native member must be a string")
+        };
+        assert_eq!(&bytes[span.start as usize..span.end as usize], b"last");
+        let cached = fixture
+            .store
+            .original_member_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                root.address,
+                "text",
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert!(cached.complete);
+        assert_eq!(cached.work.range_requests, 1);
+        let missing = fixture
+            .store
+            .original_member_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                root.address,
+                "missing",
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert!(missing.complete);
+        assert!(missing.node.is_none());
+        assert_eq!(missing.work.range_requests, 1);
+    }
+
+    #[test]
+    fn original_ignored_numbers_and_recursion_keep_complete_native_gap_semantics() {
+        let mut cases = vec![
+            format!(
+                "{{\"type\":\"assistant\",\"ignored\":1{}e-1000000}}\n",
+                "0".repeat(1_000_000)
+            ),
+            format!(
+                "{{\"type\":\"assistant\",\"ignored\":0.{}1}}\n",
+                "0".repeat(1_000_000)
+            ),
+            "{\"type\":\"assistant\",\"ignored\":1e309}\n".into(),
+            "{\"type\":\"assistant\",\"ignored\":1e-2147483648}\n".into(),
+            "{\"type\":\"assistant\",\"ignored\":-0}\n".into(),
+        ];
+        for depth in [0, 126, 127, 128] {
+            cases.push(format!(
+                "{{\"type\":\"assistant\",\"ignored\":{}0{}}}\n",
+                "[".repeat(depth),
+                "]".repeat(depth)
+            ));
+        }
+        for text in cases {
+            let oracle = serde_json::from_str::<Value>(&text);
+            let mut fixture = Fixture::new(text.as_bytes());
+            let reads = super::super::super::super::FILE_READS.with(Cell::get);
+            let mut repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            while repair.cursor.phase != Phase::FoldRecord {
+                let step = fixture
+                    .store
+                    .original_lex_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            loop {
+                let step = fixture
+                    .store
+                    .original_fields_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                if step.outcome == Outcome::Written {
+                    break;
+                }
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            let status = record_status(&fixture.store.connection, &repair).unwrap();
+            assert_eq!(status.as_deref() == Some("lexed"), oracle.is_ok());
+            if let Ok(value) = oracle
+                && value["ignored"].is_number()
+            {
+                let root = fixture
+                    .store
+                    .original_root(&fixture.job, &fixture.source, &repair)
+                    .unwrap()
+                    .unwrap();
+                let selected = fixture
+                    .store
+                    .original_member_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        root.address,
+                        "ignored",
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(selected.complete);
+                let node = selected.node.unwrap();
+                let native = fixture
+                    .store
+                    .original_number(&fixture.job, &fixture.source, &repair, node.address)
+                    .unwrap()
+                    .unwrap()
+                    .number();
+                let expected = value["ignored"].as_number().unwrap();
+                assert_eq!(native.as_i64(), expected.as_i64());
+                assert_eq!(native.as_u64(), expected.as_u64());
+                assert_eq!(
+                    native.as_f64().map(f64::to_bits),
+                    expected.as_f64().map(f64::to_bits)
+                );
+            }
             assert_eq!(
                 super::super::super::super::FILE_READS.with(Cell::get),
                 reads
