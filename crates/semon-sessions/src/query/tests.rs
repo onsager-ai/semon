@@ -4580,13 +4580,13 @@ fn physical_namespace_with_several_survivors_preserves_literal_owner_and_fixed_p
         home.options.since = Duration::from_secs(6 * 3600);
         let mut records = vec![human(
             "same-id",
-            iso(NOW - 4 * 3600_000),
+            iso(NOW - 4 * 3_600_000),
             "selected Claude owner",
         )];
         for index in 0..history {
             let mut record = assistant(
                 "same-id",
-                iso(NOW - 3 * 3600_000 + index as i64),
+                iso(NOW - 3 * 3_600_000 + index as i64),
                 vec![text("native reply")],
             );
             record["uuid"] = json!(format!("native-reply-{index}"));
@@ -4597,7 +4597,7 @@ fn physical_namespace_with_several_survivors_preserves_literal_owner_and_fixed_p
             "claude:same-id",
             &[human(
                 "claude:same-id",
-                iso(NOW - 2 * 3600_000),
+                iso(NOW - 2 * 3_600_000),
                 "selected literal owner",
             )],
         );
@@ -4627,7 +4627,7 @@ fn physical_namespace_with_several_survivors_preserves_literal_owner_and_fixed_p
             fs::File::open(path)
                 .unwrap()
                 .set_times(fs::FileTimes::new().set_modified(
-                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - 3600_000) as u64),
+                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - 3_600_000) as u64),
                 ))
                 .unwrap();
         }
@@ -4710,7 +4710,7 @@ fn physical_unknown_decision_fences_native_metadata_and_released_snapshot() {
             home.options.since = Duration::from_secs(6 * 3600);
             home.top(
                 "same-id",
-                &[human("same-id", iso(NOW - 3600_000), "selected")],
+                &[human("same-id", iso(NOW - 3_600_000), "selected")],
             );
             home.lines(
                 "codex/sessions/2026/09/24/rollout-same-id.jsonl",
@@ -4734,7 +4734,7 @@ fn physical_unknown_decision_fences_native_metadata_and_released_snapshot() {
             fs::File::open(&selected)
                 .unwrap()
                 .set_times(fs::FileTimes::new().set_modified(
-                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - 3600_000) as u64),
+                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - 3_600_000) as u64),
                 ))
                 .unwrap();
             fs::File::open(
@@ -5002,9 +5002,15 @@ fn physical_collision_identity_copied_usage_requires_native_reduction() {
     let db =
         rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
     assert!(
-        crate::overview_repair::physical_identity::resolve(&db, &options, ":claude:same", NOW)
-            .unwrap()
-            .is_none()
+        crate::overview_repair::physical_identity::resolve(
+            &db,
+            &options,
+            ":claude:same",
+            "same",
+            NOW
+        )
+        .unwrap()
+        .is_none()
     );
     assert_eq!(home.query().call_at("get_session", &args, NOW), expected);
 }
