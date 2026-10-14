@@ -242,12 +242,11 @@ fn native_turn_alias(turn: &str, from: &str, to: &str, row: &CatalogRow) -> Opti
     if !row.native_ids.iter().any(|id| id == file) {
         return None;
     }
-    Some(crate::model::turn_stage::turn_id(
-        to,
-        file,
-        offset.parse().ok()?,
-        None,
-    ))
+    let offset = offset.parse().ok()?;
+    if crate::model::turn_stage::turn_id(from, file, offset, None) != turn {
+        return None;
+    }
+    Some(crate::model::turn_stage::turn_id(to, file, offset, None))
 }
 
 fn remap_turn(turn: &mut Value, from: &str, to: &str, row: &CatalogRow) {
