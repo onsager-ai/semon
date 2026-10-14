@@ -150,3 +150,31 @@ compilation reported 174616–174984 KiB peak process RSS across both variants.
 The first page still indexed only 64 sources with unrelated history present.
 These local samples qualify reduced compilation overhead; they neither prove the
 CI contention gate passes nor establish a production latency or memory bound.
+
+
+## Paged original custody on cross-harness key replacement
+
+A replacement harness advances original-custody transfer in the existing Event
+Index publication owner. One attempt copies at most 64 recipes and 1 MiB of
+recipe bytes. Private checkpoints retain the original Catalog/header witness,
+slot cursor, partial-byte cursor, copied count and qualification state. Current
+and its durable source claims remain pending while a transfer is incomplete.
+`Deferred` is progress, distinct from a generation conflict; the worker releases
+prepared Index payloads and resumes through its ordinary publication queue.
+
+Partial recipes have no History Catalog row or qualified projection header.
+Cancellation before commit rolls back the step; process replacement resumes its
+committed cursor. Each attempt first checks the ordinary parser, publication,
+source membership, ledger and source-revision fences. A changed original
+Catalog/header witness causes bounded cleanup of private staged rows before a
+new copy starts. Unrelated publication can proceed between steps. Final History
+metadata and the replacement Current publish under the existing transaction.
+A batch with several replacement owners checkpoints at most one owner per step.
+
+Supported recipes retain their exact bytes and slot order. Unsupported original
+headers retain their exact nullable header separately and remain incomplete.
+An unsupported individual recipe larger than 1 MiB is retained in ordered byte
+parts in `session_history_slot_parts`, without whole-value concatenation; its
+history remains unavailable to ordinary recipe readers. Source references,
+generations and existing archive markers are retained unchanged. This is
+custody preservation, never a grant of control or new eviction authority.

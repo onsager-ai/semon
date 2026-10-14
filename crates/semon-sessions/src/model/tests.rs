@@ -10746,11 +10746,10 @@ fn staged_native_key_long_reserved_prefix_chain_matches_shared_identity_oracle()
 fn different_harness_current_preserves_unsupported_original_history_custody() {
     let home = Home::new();
     let native = "unsupported-original";
-    home.codex(
-        native,
-        json!({}),
-        &[codex_user(ts(19, 0), "Original retained native body")],
-    );
+    let mut original_records = vec![codex_user(ts(19, 0), "Original retained native body")];
+    original_records
+        .extend((0..130).map(|n| codex_reply(ts(19, 0), &format!("Original retained reply {n}"))));
+    home.codex(native, json!({}), &original_records);
     let drain = |options: &Options| {
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         for _ in 0..128 {

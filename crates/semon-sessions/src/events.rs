@@ -930,6 +930,9 @@ pub(crate) enum Outcome {
     /// The ledger row wasn't the one the change was based on: another
     /// process moved the file on first. Nothing was written.
     Conflict,
+    /// A bounded original-custody checkpoint committed. Current publication and
+    /// its durable source claims remain pending for the next producer step.
+    Deferred,
     /// Another version of Semon rebuilt the store for its own parser or
     /// schema. Nothing was written.
     Stale,
@@ -1951,7 +1954,7 @@ impl EventCache {
                 }
                 Ok(generation)
             }
-            Outcome::Conflict | Outcome::Stale => Err(io::Error::new(
+            Outcome::Deferred | Outcome::Conflict | Outcome::Stale => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "native Catalog publication generation changed",
             )),
@@ -2250,7 +2253,7 @@ impl EventCache {
             .as_mut()
             .map(|store| store.remove_files(&self.gone));
         match removed {
-            Some(Ok(Outcome::Written | Outcome::Conflict)) => self.gone.clear(),
+            Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) => self.gone.clear(),
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error),
             None => {}
@@ -2276,7 +2279,9 @@ impl EventCache {
                         self.lose_store(&"another version of semon rebuilt it");
                     }
                     Some(Err(error)) => self.store_failed(&error),
-                    Some(Ok(Outcome::Written | Outcome::Conflict)) | None => return None,
+                    Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) | None => {
+                        return None;
+                    }
                 }
             }
             Some(Err(error)) => self.store_failed(&error),
@@ -2365,7 +2370,7 @@ impl EventCache {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
             }
-            Some(Ok(Outcome::Conflict)) => return true,
+            Some(Ok(Outcome::Conflict | Outcome::Deferred)) => return true,
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error),
             None => {}
