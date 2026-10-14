@@ -475,6 +475,12 @@ impl NativeEvidence {
             };
             discovery.pids.extend(prepared.pids.iter().copied());
             let (outcome, _) = cache.publish_partial_catalog_fenced(&prepared)?;
+            if outcome == crate::events::Outcome::Deferred {
+                cache.end_scan();
+                cache.release_published_indexes();
+                work.texts.release_published_derivations();
+                return Ok(CatalogPreparation::Pending);
+            }
             if outcome != crate::events::Outcome::Written {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -617,6 +623,12 @@ impl NativeEvidence {
         } else {
             (cache.record_semantic_batch(&batch, &prepared)?, None)
         };
+        if outcome == crate::events::Outcome::Deferred {
+            cache.end_scan();
+            cache.release_published_indexes();
+            work.texts.release_published_derivations();
+            return Ok(true);
+        }
         if outcome != crate::events::Outcome::Written {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -1021,6 +1033,13 @@ impl NativeEvidence {
                         work.pending_sources = audit_pending || sources_pending;
                         return Ok(!work.pending_sources);
                     }
+                    Some((crate::events::Outcome::Deferred, _)) => {
+                        cache.end_scan();
+                        cache.release_published_indexes();
+                        work.texts.release_published_derivations();
+                        work.pending_sources = true;
+                        return Ok(false);
+                    }
                     Some(_) => {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -1104,6 +1123,13 @@ impl NativeEvidence {
                             work.texts.release_published_derivations();
                             work.pending_sources = !cache.pending_catalog_sources(1)?.is_empty();
                             return Ok(!work.pending_sources);
+                        }
+                        Some((crate::events::Outcome::Deferred, _)) => {
+                            cache.end_scan();
+                            cache.release_published_indexes();
+                            work.texts.release_published_derivations();
+                            work.pending_sources = true;
+                            return Ok(false);
                         }
                         Some(_) => {
                             return Err(io::Error::new(

@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS session_history_slots (
  session_key TEXT NOT NULL, slot INTEGER NOT NULL, metadata TEXT NOT NULL,
  PRIMARY KEY(session_key,slot)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS session_history_slot_parts (
+ session_key TEXT NOT NULL, slot INTEGER NOT NULL, part INTEGER NOT NULL, bytes BLOB NOT NULL,
+ PRIMARY KEY(session_key,slot,part)
+) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_history_slots_turn ON session_history_slots(session_key,json_extract(metadata,'$.turn'),slot);
 ";
 
@@ -61,11 +65,21 @@ pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::
     }))
 }
 
-fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite::Result<()> {
-    // Existing History is original custody, including unsupported versions or
-    // incomplete recipes. A Current replacement cannot overwrite that state.
+// Transfer checkpoints are private producer work. Neither a History catalog row
+// nor a projection header is visible until every original byte has been copied.
+// Current remains the custody owner throughout an interrupted transfer.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Transfer {
+    witness: String,
+    last: i64,
+    copied: usize,
+    partial: i64,
+    complete: bool,
+}
+
+fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite::Result<bool> {
     if catalog(tx, &old.key)?.is_some() {
-        return Ok(());
+        return Ok(true);
     }
     let mut history = old.clone();
     history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
@@ -76,52 +90,109 @@ fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite
     ).optional()?;
     let metadata = encode(&history)?;
     let original_header = encode(&header)?;
-    let mut bytes = metadata.len().saturating_add(original_header.len());
-    // Reuse the semantic metadata page's 64-row/1MiB budget for this
-    // selected-owner custody transfer. Refuse oversized original state before
-    // any Current overwrite; never truncate it or certify a partial copy.
-    if bytes > 1048576 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let mut saved = Vec::new();
-    let mut recipes = tx.prepare("SELECT slot,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_slots WHERE session_key=?1 ORDER BY slot LIMIT 65")?;
-    for recipe in recipes.query_map([&old.key], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
-    })? {
-        let (slot, recipe) = recipe?;
-        let recipe = recipe.ok_or(rusqlite::Error::InvalidQuery)?;
-        bytes = bytes.saturating_add(recipe.len());
-        if saved.len() == 64 || bytes > 1048576 {
-            return Err(rusqlite::Error::InvalidQuery);
+    let witness = format!(
+        "{:x}",
+        Sha256::digest(encode(&(&metadata, &original_header))?.as_bytes())
+    );
+    let marker = format!("history_transfer:{}", old.key);
+    let saved: Option<String> = tx
+        .query_row("SELECT value FROM meta WHERE key=?1", [&marker], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let prior = saved.as_deref().map(decode::<Transfer>).transpose()?;
+    if prior.as_ref().is_some_and(|prior| prior.witness != witness) {
+        // Another fenced publication changed the original. Discard only private
+        // staged rows, in bounded batches; never combine generations.
+        let removed = tx.execute("DELETE FROM session_history_slots WHERE session_key=?1 AND slot IN (SELECT slot FROM session_history_slots WHERE session_key=?1 ORDER BY slot LIMIT 64)", [&old.key])?;
+        let parts = tx.execute("DELETE FROM session_history_slot_parts WHERE session_key=?1 AND (slot,part) IN (SELECT slot,part FROM session_history_slot_parts WHERE session_key=?1 ORDER BY slot,part LIMIT 64)", [&old.key])?;
+        if removed == 0 && parts == 0 {
+            tx.execute("DELETE FROM meta WHERE key=?1", [&marker])?;
         }
-        saved.push((slot, recipe));
+        return Ok(false);
     }
-    drop(recipes);
-    let mut complete = header.as_ref().is_some_and(|(_, version, recorded, _)| {
-        *version == VERSION
-            && !old.sources.is_empty()
-            && old.sources.len() <= 64
-            && recorded.is_some()
-            && crate::retention::source_generation(&old.sources)
-                .ok()
-                .as_ref()
-                == recorded.as_ref()
+    let mut transfer = prior.unwrap_or_else(|| Transfer {
+        witness,
+        last: -1,
+        copied: 0,
+        partial: 0,
+        complete: header
+            .as_ref()
+            .is_some_and(|(_, version, recorded, total)| {
+                *version == VERSION
+                    && *total >= 0
+                    && !old.sources.is_empty()
+                    && old.sources.len() <= 64
+                    && recorded.is_some()
+                    && crate::retention::source_generation(&old.sources)
+                        .ok()
+                        .as_ref()
+                        == recorded.as_ref()
+            }),
     });
-    complete &= header.as_ref().is_some_and(|(_, _, _, total)| {
-        *total >= 0 && usize::try_from(*total).ok() == Some(saved.len())
-    });
-    if complete {
-        let paths: BTreeSet<_> = old.sources.iter().map(|source| &source.path).collect();
-        for (_, recipe) in &saved {
-            let qualified = decode::<SavedSlot>(recipe)
-                .ok()
-                .is_some_and(|slot| slot.source_paths().iter().all(|path| paths.contains(*path)));
-            if !qualified {
-                complete = false;
+    let paths: BTreeSet<_> = old.sources.iter().map(|source| &source.path).collect();
+    let mut bytes = 0usize;
+    let mut processed = 0;
+    while processed < 64 && bytes < 1048576 {
+        let next: Option<(i64, i64)> = tx.query_row(
+            "SELECT slot,octet_length(metadata) FROM session_slots WHERE session_key=?1 AND slot>?2 ORDER BY slot LIMIT 1",
+            params![old.key, transfer.last], |row|Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?;
+        let Some((slot, length)) = next else { break };
+        let offset = transfer.partial;
+        let take = length.saturating_sub(offset).min((1048576 - bytes) as i64);
+        if length > 1048576 {
+            // Unsupported oversized values stay in ordered byte parts. No
+            // concatenation or whole-value decode can grow with their length.
+            // Their original header stays incomplete; ordinary readers refuse.
+            tx.execute("INSERT INTO session_history_slot_parts(session_key,slot,part,bytes) SELECT session_key,slot,?3,substr(CAST(metadata AS BLOB),?3+1,?4) FROM session_slots WHERE session_key=?1 AND slot=?2", params![old.key,slot,offset,take])?;
+            transfer.complete = false;
+        } else {
+            if length as usize > 1048576 - bytes {
                 break;
             }
+            tx.execute("INSERT INTO session_history_slots(session_key,slot,metadata) SELECT session_key,slot,metadata FROM session_slots WHERE session_key=?1 AND slot=?2", params![old.key,slot])?;
         }
+        bytes += take as usize;
+        processed += 1;
+        if offset + take != length {
+            transfer.partial += take;
+            break;
+        }
+        transfer.partial = 0;
+        transfer.complete &= usize::try_from(slot).ok() == Some(transfer.copied);
+        if transfer.complete {
+            if length > 1048576 {
+                transfer.complete = false;
+            } else {
+                let text: String = tx.query_row(
+                    "SELECT metadata FROM session_history_slots WHERE session_key=?1 AND slot=?2",
+                    params![old.key, slot],
+                    |row| row.get(0),
+                )?;
+                transfer.complete &= decode::<SavedSlot>(&text).ok().is_some_and(|slot| {
+                    slot.source_paths().iter().all(|path| paths.contains(*path))
+                });
+            }
+        }
+        transfer.last = slot;
+        transfer.copied += 1;
     }
+    let more: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_slots WHERE session_key=?1 AND slot>?2)",
+        params![old.key, transfer.last],
+        |row| row.get(0),
+    )?;
+    if more {
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![marker, encode(&transfer)?],
+        )?;
+        return Ok(false);
+    }
+    transfer.complete &= header
+        .as_ref()
+        .is_some_and(|(_, _, _, total)| usize::try_from(*total).ok() == Some(transfer.copied));
     tx.execute(
         "INSERT INTO session_history_catalog(session_key,metadata) VALUES(?1,?2)",
         params![old.key, metadata],
@@ -134,21 +205,52 @@ fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite
         ],
     )?;
     if let Some((generation, version, sources, total)) = header {
-        // History's hash column is non-nullable. Preserve the exact original
-        // nullable header separately; an absent hash remains explicitly
-        // incomplete and can never qualify as a fresh V5 observation.
-        tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6)",params![old.key,generation,sources.unwrap_or_default(),version,total,!complete])?;
+        tx.execute("INSERT INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6)",params![old.key,generation,sources.unwrap_or_default(),version,total,!transfer.complete])?;
     }
-    let mut put = tx
-        .prepare("INSERT INTO session_history_slots(session_key,slot,metadata) VALUES(?1,?2,?3)")?;
-    for (slot, recipe) in saved {
-        put.execute(params![old.key, slot, recipe])?;
-    }
+    tx.execute("DELETE FROM meta WHERE key=?1", [marker])?;
     tx.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')",
         [format!("overview_needed:{}", old.key)],
     )?;
-    Ok(())
+    Ok(true)
+}
+
+/// One bounded custody step per replacement owner, after publication/source CAS
+/// checks and before any Current mutation. False must commit only this private
+/// progress and leave the caller's durable publication intent pending.
+pub(crate) fn preserve_replacements(
+    tx: &Transaction<'_>,
+    publication: &Publication<'_>,
+) -> rusqlite::Result<bool> {
+    let mut advanced = false;
+    for row in publication.rows {
+        let retained: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+            [&row.key],
+            |record| record.get(0),
+        )?;
+        if retained {
+            continue;
+        }
+        let old: Option<String> = tx
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key=?1 AND harness!=?2",
+                params![row.key, row.harness],
+                |record| record.get(0),
+            )
+            .optional()?;
+        if let Some(old) = old {
+            if advanced {
+                return Ok(false);
+            }
+            let old: CatalogRow = decode(&old)?;
+            if !preserve_original_harness(tx, &old)? {
+                return Ok(false);
+            }
+            advanced = true;
+        }
+    }
+    Ok(true)
 }
 
 /// Must run inside the same source/membership/revision-CAS transaction, before
@@ -184,7 +286,8 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
             for source in &old.sources {
                 tx.execute("INSERT INTO session_catalog_sources(session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'retained',?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='retained'",params![old.key,old.harness,source.native_id,source.path.to_string_lossy()])?;
             }
-            preserve_original_harness(tx, old)?;
+            // The owning publication transaction completed custody preflight.
+            debug_assert!(catalog(tx, &old.key)?.is_some());
             continue;
         }
         // A reused viewer key does not join two native harness identities.
@@ -200,6 +303,14 @@ pub(crate) fn publish(tx: &Transaction<'_>, publication: &Publication<'_>) -> ru
             }
         }
         if missing.is_empty() {
+            tx.execute(
+                "DELETE FROM meta WHERE key=?1",
+                [format!("history_transfer:{}", current.key)],
+            )?;
+            tx.execute(
+                "DELETE FROM session_history_slot_parts WHERE session_key=?1",
+                [&current.key],
+            )?;
             // The normal case reuses the existing current projection rather
             // than duplicating every transcript in a second persistent table.
             tx.execute(
@@ -354,4 +465,153 @@ fn encode(value: &impl serde::Serialize) -> rusqlite::Result<String> {
 }
 fn decode<T: serde::de::DeserializeOwned>(value: &str) -> rusqlite::Result<T> {
     serde_json::from_str(value).map_err(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(recipes: usize, padding: usize) -> (Connection, CatalogRow, Vec<(i64, String)>) {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE session_slot_projections(session_key TEXT PRIMARY KEY,generation TEXT,version INTEGER,source_generation TEXT,total INTEGER); CREATE TABLE session_slots(session_key TEXT,slot INTEGER,metadata TEXT,PRIMARY KEY(session_key,slot)) WITHOUT ROWID;").unwrap();
+        let old: CatalogRow = serde_json::from_value(serde_json::json!({"key":"old","name":"original","harness":"codex","kind":"session","native_ids":["old"],"parent":null,"parent_source":null,"repo":null,"branch":null,"model":"","effort":null,"start":null,"last":null,"tokens":[0,0,0],"cost":serde_json::to_value(crate::pricing::Cost::default()).unwrap(),"sources":[]})).unwrap();
+        db.execute(
+            "INSERT INTO session_slot_projections VALUES('old','original-generation',4,NULL,?1)",
+            [recipes as i64],
+        )
+        .unwrap();
+        let mut saved = Vec::new();
+        for n in 0..recipes {
+            // Unsupported originals are still custody, including arbitrary UTF-8.
+            let text = serde_json::json!({"original":n,"padding":"水".repeat(padding)}).to_string();
+            db.execute(
+                "INSERT INTO session_slots VALUES('old',?1,?2)",
+                params![n as i64, text],
+            )
+            .unwrap();
+            saved.push((n as i64, text));
+        }
+        (db, old, saved)
+    }
+    fn step(db: &mut Connection, old: &CatalogRow) -> bool {
+        let tx = db.transaction().unwrap();
+        let done = preserve_original_harness(&tx, old).unwrap();
+        tx.commit().unwrap();
+        done
+    }
+    fn slots(db: &Connection) -> Vec<(i64, String)> {
+        db.prepare("SELECT slot,metadata FROM session_history_slots UNION ALL SELECT slot,CAST(group_concat(bytes,'') AS TEXT) FROM (SELECT slot,bytes FROM session_history_slot_parts ORDER BY slot,part) GROUP BY slot ORDER BY slot").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+    #[test]
+    fn custody_pages_resume_without_exposing_partial_history() {
+        for count in [63, 64, 65, 1025] {
+            let (mut db, old, original) = fixture(count, 0);
+            let mut steps = 0;
+            loop {
+                let before = slots(&db).len();
+                let done = step(&mut db, &old);
+                steps += 1;
+                assert!(slots(&db).len() - before <= 64);
+                if done {
+                    break;
+                }
+                assert!(catalog(&db, &old.key).unwrap().is_none());
+                assert!(!qualified(&db, &old).unwrap());
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM session_history_projections",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+                // A new connection/process needs only this durable checkpoint.
+                assert!(db.is_autocommit());
+                assert!(steps <= count.div_ceil(64));
+            }
+            assert_eq!(steps, count.div_ceil(64));
+            assert_eq!(slots(&db), original);
+            assert!(step(&mut db, &old));
+            assert_eq!(slots(&db), original);
+            let incomplete: bool = db
+                .query_row(
+                    "SELECT incomplete FROM session_history_projections",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(incomplete, "unsupported originals gained authority");
+            assert_eq!(
+                db.query_row(
+                    "SELECT value FROM meta WHERE key='history_original_header:old'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                encode(&Some((
+                    "original-generation",
+                    4,
+                    Option::<String>::None,
+                    count
+                )))
+                .unwrap()
+            );
+        }
+    }
+    #[test]
+    fn custody_byte_pages_preserve_utf8_and_oversized_unsupported_recipes() {
+        for padding in [349510, 349520, 800000] {
+            let (mut db, old, original) = fixture(3, padding);
+            let mut done = false;
+            for _ in 0..16 {
+                let before:i64=db.query_row("SELECT coalesce((SELECT sum(octet_length(metadata)) FROM session_history_slots),0)+coalesce((SELECT sum(length(bytes)) FROM session_history_slot_parts),0)",[],|r|r.get(0)).unwrap();
+                done = step(&mut db, &old);
+                let after:i64=db.query_row("SELECT coalesce((SELECT sum(octet_length(metadata)) FROM session_history_slots),0)+coalesce((SELECT sum(length(bytes)) FROM session_history_slot_parts),0)",[],|r|r.get(0)).unwrap();
+                assert!(after - before <= 1048576);
+                if done {
+                    break;
+                }
+                assert!(catalog(&db, &old.key).unwrap().is_none());
+            }
+            assert!(done);
+            assert_eq!(slots(&db), original);
+        }
+    }
+    #[test]
+    fn custody_rollback_and_changed_original_restart_cleanly() {
+        let (mut db, mut old, original) = fixture(130, 0);
+        {
+            let tx = db.transaction().unwrap();
+            assert!(!preserve_original_harness(&tx, &old).unwrap());
+            // Cancellation/failure before commit rolls back rows and checkpoint.
+        }
+        assert!(slots(&db).is_empty());
+        assert!(!step(&mut db, &old));
+        old.name = "changed original generation".into();
+        db.execute(
+            "UPDATE session_slot_projections SET generation='replacement-generation'",
+            [],
+        )
+        .unwrap();
+        assert!(!step(&mut db, &old));
+        assert!(slots(&db).is_empty());
+        assert!(!step(&mut db, &old)); // retire stale checkpoint
+        assert!(!step(&mut db, &old));
+        assert!(!step(&mut db, &old));
+        assert!(step(&mut db, &old));
+        assert_eq!(slots(&db), original);
+        let saved: CatalogRow = decode(&catalog(&db, &old.key).unwrap().unwrap()).unwrap();
+        assert_eq!(saved.name, old.name);
+        assert_eq!(
+            db.query_row(
+                "SELECT generation FROM session_history_projections",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "replacement-generation"
+        );
+    }
 }

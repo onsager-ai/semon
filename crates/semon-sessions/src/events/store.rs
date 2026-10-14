@@ -3254,6 +3254,12 @@ impl SqliteStore {
                 }
             }
             stage("fences", &transaction);
+            if !crate::history_projection::preserve_replacements(&transaction, publication)
+                .map_err(failure)?
+            {
+                transaction.commit().map_err(failure)?;
+                return Ok(Outcome::Deferred);
+            }
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             stage("history", &transaction);
             let mut metadata_measurements =
@@ -7333,6 +7339,179 @@ mod tests {
             );
             drop(batch);
             drop(legacy);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn catalog_original_transfer_progresses_across_restart_and_unrelated_publication() {
+        use std::io::Write;
+        for count in [63usize, 64, 65, 257] {
+            let root = scratch("catalog-paged-original");
+            let (options, _, _) = catalog_native_fixture(&root, 2, true);
+            let key = "native-cx-01";
+            let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
+            let original_path = options.codex_home.join(relative);
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&original_path)
+                .unwrap();
+            // The fixture starts with exactly two native transcript entries.
+            for n in 2..count {
+                writeln!(file,"{}",serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original native record {n}")}]}})).unwrap();
+            }
+            drop(file);
+            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+            assert!((0..128).any(|_| {
+                evidence
+                    .refresh_catalog(
+                        &mut crate::viewer::lock(&evidence.work),
+                        CATALOG_FIXTURE_NOW,
+                    )
+                    .unwrap()
+            }));
+            evidence.retire();
+            drop(evidence);
+            let proof = crate::session_source_proof(&options, "codex", relative)
+                .unwrap()
+                .unwrap();
+            let ready = crate::source_projection_ready(&options, "codex", relative)
+                .unwrap()
+                .unwrap();
+            crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+            let original =
+                Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+            let expected = catalog_recipes(&original, "session_slots", key);
+            assert_eq!(expected.len(), count);
+            let marker: String = original
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [archive_index_key(original_path.to_str().unwrap())],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            drop(original);
+            fs::remove_file(&original_path).unwrap();
+            let replacement = options
+                .claude_home
+                .join(format!("projects/-work-proj/{key}.jsonl"));
+            fs::write(&replacement,serde_json::json!({"type":"user","uuid":"replacement","sessionId":key,"timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"Replacement Current"}}).to_string()+"\n").unwrap();
+            let (rows, projections) = catalog_fixture_projection(&options);
+            let (mut store, legacy) = catalog_pair(&options);
+            drop(legacy);
+            let mut steps = 0;
+            loop {
+                let before = catalog_recipes(&store.connection, "session_history_slots", key).len();
+                let outcome =
+                    catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+                        .unwrap()
+                        .0;
+                steps += 1;
+                let copied = catalog_recipes(&store.connection, "session_history_slots", key).len();
+                assert!(copied - before <= 64);
+                if outcome == Outcome::Written {
+                    break;
+                }
+                assert_eq!(outcome, Outcome::Deferred);
+                assert!(
+                    crate::history_projection::catalog(&store.connection, key)
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row(
+                            "SELECT harness FROM session_catalog WHERE session_key=?1",
+                            [key],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "codex"
+                );
+                // Stale publication generations cannot advance the transfer.
+                let snapshot = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+                let outcome = store
+                    .publish_catalog_with_writer(
+                        &crate::slot_projection::Publication {
+                            rows: &rows,
+                            transcripts: Some(&projections),
+                        },
+                        Some("stale-publication"),
+                        None,
+                        false,
+                        None,
+                        CatalogWriter::Auto,
+                    )
+                    .unwrap()
+                    .0;
+                assert_eq!(outcome, Outcome::Conflict);
+                assert_eq!(
+                    crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                    snapshot
+                );
+                let other = rows.iter().find(|row| row.key == "native-cl-00").unwrap();
+                let other_projection = projections
+                    .iter()
+                    .find(|projection| projection.key == other.key)
+                    .unwrap();
+                assert_eq!(
+                    catalog_write(
+                        &mut store,
+                        std::slice::from_ref(other),
+                        std::slice::from_ref(other_projection),
+                        true,
+                        CatalogWriter::Auto
+                    )
+                    .unwrap()
+                    .0,
+                    Outcome::Written,
+                    "unrelated publication was blocked by selected custody"
+                );
+                let path = store.path.clone();
+                drop(store);
+                store = match SqliteStore::attempt_scoped(&path, None, true) {
+                    Ok((store, _)) => store,
+                    Err(error) => panic!("reopen transfer store: {error}"),
+                };
+                assert!(steps <= count.div_ceil(64));
+            }
+            assert_eq!(steps, count.div_ceil(64));
+            assert_eq!(
+                catalog_recipes(&store.connection, "session_history_slots", key),
+                expected
+            );
+            let history: crate::model::summary::CatalogRow = serde_json::from_str(
+                &crate::history_projection::catalog(&store.connection, key)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(history.harness, "codex");
+            assert!(crate::history_projection::qualified(&store.connection, &history).unwrap());
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT value FROM meta WHERE key=?1",
+                        [archive_index_key(original_path.to_str().unwrap())],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                marker
+            );
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT harness FROM session_catalog WHERE session_key=?1",
+                        [key],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "claude"
+            );
+            drop(store);
             fs::remove_dir_all(root).unwrap();
         }
     }
