@@ -79,6 +79,7 @@ pub(in crate::events::store) fn capture(
     if !private_current(tx)? {
         return Err(invalid("native candidate producer schema changed"));
     }
+    super::physical_profile::capture_revision(tx, path, changes, index)?;
     let counts = index.map_or((0, 0, 0), |index| {
         (index.events.len(), index.extras.len(), index.signals.len())
     });
