@@ -119,15 +119,28 @@ impl EndFacts {
         to_you: Option<ToYou>,
         completed_at: Option<i64>,
     ) {
-        self.has_handoff |= handoff;
-        if let Some(content) = content {
-            self.has_assistant |= matches!(content, Content::Assistant);
-            self.last_content = Some(content);
+        self.append(Self {
+            has_handoff: handoff,
+            has_assistant: matches!(content, Some(Content::Assistant)),
+            last_content: content,
+            last_to_you: to_you,
+            completed_at,
+        });
+    }
+
+    /// Concatenate adjacent native entry ranges in transcript order. The
+    /// result is identical to observing every entry, so an indexed range tree
+    /// can answer a group end without decoding all of its member events.
+    pub(crate) fn append(&mut self, later: Self) {
+        self.has_handoff |= later.has_handoff;
+        self.has_assistant |= later.has_assistant;
+        if later.last_content.is_some() {
+            self.last_content = later.last_content;
         }
-        if to_you.is_some() {
-            self.last_to_you = to_you;
+        if later.last_to_you.is_some() {
+            self.last_to_you = later.last_to_you;
         }
-        self.completed_at = self.completed_at.max(completed_at);
+        self.completed_at = self.completed_at.max(later.completed_at);
     }
 
     pub(crate) fn finish(
@@ -215,6 +228,66 @@ impl EndFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_turn_ranges_combine_in_order_across_tree_shapes() {
+        let mut whole = EndFacts::default();
+        let mut ranges = Vec::new();
+        for position in 0..1024 {
+            let content = match position % 4 {
+                0 => Some(Content::Assistant),
+                1 => Some(Content::Tool {
+                    state: ToolState::Unknown,
+                }),
+                2 => Some(Content::Operation {
+                    state: ToolState::Err,
+                }),
+                _ => None,
+            };
+            let to_you = (position == 100).then(|| ToYou {
+                id: "handoff".into(),
+                waiting: false,
+            });
+            whole.push(
+                content.clone(),
+                position % 7 == 0,
+                to_you.clone(),
+                Some(position),
+            );
+            let mut range = EndFacts::default();
+            range.push(content, position % 7 == 0, to_you, Some(position));
+            ranges.push(range);
+        }
+        while ranges.len() > 1 {
+            ranges = ranges
+                .chunks(2)
+                .map(|pair| {
+                    let mut result = pair[0].clone();
+                    if let Some(later) = pair.get(1) {
+                        result.append(later.clone());
+                    }
+                    serde_json::from_value(serde_json::to_value(result).unwrap()).unwrap()
+                })
+                .collect();
+        }
+        assert_eq!(
+            serde_json::to_value(&whole).unwrap(),
+            serde_json::to_value(&ranges[0]).unwrap()
+        );
+        for (waiting, state, last) in [
+            (None, "idle", false),
+            (None, "work", true),
+            (Some("permission prompt"), "wait", true),
+        ] {
+            assert_eq!(
+                serde_json::to_value(whole.finish(None, true, last, waiting, state, || false))
+                    .unwrap(),
+                serde_json::to_value(ranges[0].finish(None, true, last, waiting, state, || false))
+                    .unwrap()
+            );
+        }
+        assert!(serde_json::to_string(&whole).unwrap().len() < 512);
+    }
 
     #[test]
     fn native_turn_end_survives_page_and_process_boundaries() {
