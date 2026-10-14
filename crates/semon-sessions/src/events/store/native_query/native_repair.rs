@@ -27,6 +27,7 @@ mod native_record_source;
 mod native_record_time;
 mod native_retirement;
 mod native_views;
+mod native_values;
 pub(super) use native_views::SCHEMA as TEXT_VIEW_SCHEMA;
 pub(crate) use native_views::{
     QualifiedTextView, TextBoundary, TextScanCursor, TextScanStep, ViewRequest, ViewStep,

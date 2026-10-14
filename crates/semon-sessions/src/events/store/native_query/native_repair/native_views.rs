@@ -58,6 +58,12 @@ impl QualifiedTextView {
     pub(crate) fn original(&self) -> [u8; 32] {
         self.original
     }
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+    pub(super) fn record(&self) -> u64 {
+        self.record
+    }
     pub(crate) fn receipt(&self) -> Receipt {
         self.receipt
     }
@@ -179,6 +185,20 @@ pub(super) struct ReadCursor {
     skip: u8,
     pub(super) decoded: u64,
 }
+impl ReadCursor {
+    pub(super) fn valid_for(&self, view: &QualifiedTextView) -> bool {
+        self.page <= view.pages
+            && self.part <= PAGE_PARTS
+            && self.skip <= 3
+            && self.decoded <= view.receipt.decoded_bytes
+            && (self.page != view.pages || self.part == 0 && self.at.is_none() && self.skip == 0)
+    }
+    pub(super) fn complete_for(&self, view: &QualifiedTextView) -> bool {
+        self.valid_for(view)
+            && self.page == view.pages
+            && self.decoded == view.receipt.decoded_bytes
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 enum BuildPhase {
@@ -222,6 +242,7 @@ pub(super) struct ViewMeter {
     pub(super) vm: i32,
     pub(super) leaves: usize,
     pub(super) decoded: usize,
+    pub(super) peak_native: usize,
 }
 impl ViewMeter {
     fn statement(&mut self, statement: &rusqlite::Statement<'_>) {
@@ -520,6 +541,7 @@ pub(super) fn read_chunk(
                             records.read_range(&repair.source, Some(&pin.generation), at, take)?;
                         work.native_bytes += part.bytes.len();
                         work.range_requests += 1;
+                        meter.peak_native = meter.peak_native.max(part.bytes.len());
                         if part.offset != at
                             || part.bytes.is_empty()
                             || part.bytes.len() > take
@@ -1761,6 +1783,135 @@ mod tests {
             }
         }
         panic!("bounded view reader failed to finish")
+    }
+
+    fn exact_order(
+        fixture: &Fixture,
+        left: &QualifiedTextView,
+        right: &QualifiedTextView,
+    ) -> super::super::native_values::NativeTextOrder {
+        use super::super::native_values::{Pair, Value, ValueMeter};
+        let l = Value::View(left.clone());
+        let r = Value::View(right.clone());
+        let mut pair = Pair::new(&l, &r).unwrap();
+        for _ in 0..8192 {
+            let records = fixture.sources.reader();
+            let mut work = RepairWork::default();
+            let mut meter = ValueMeter::default();
+            assert!(pair.matches(&l, &r).unwrap());
+            assert!(
+                pair.step(
+                    &fixture.store.connection,
+                    &fixture.repairs[0],
+                    &l,
+                    &fixture.repairs[0],
+                    &r,
+                    &records,
+                    crate::SESSION_SOURCE_CHUNK_MAX,
+                    ROWS,
+                    &mut work,
+                    &mut meter
+                )
+                .unwrap()
+            );
+            records.finish().unwrap();
+            assert!(work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+            assert!(work.metadata_rows <= ROWS);
+            assert!(meter.peak_native <= 64 * 1024);
+            assert!(meter.peak_decoded <= 3 * 32 * 1024);
+            let bytes = serde_json::to_vec(&pair).unwrap();
+            assert!(bytes.len() < STATE_BYTES);
+            pair = serde_json::from_slice(&bytes).unwrap();
+            assert!(pair.matches(&l, &r).unwrap());
+            if let Some(order) = pair.result {
+                return order;
+            }
+        }
+        panic!("generic text ordering failed to make progress")
+    }
+    #[test]
+    fn generic_view_order_matches_native_string_order_including_equal_transforms() {
+        use super::super::native_values::NativeTextOrder;
+        let mut fixture = make_fixture("a\0é中😀z");
+        let parent = whole(&mut fixture);
+        let mut views = Vec::new();
+        for (start, end) in [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (2, 4),
+            (4, 7),
+            (7, 11),
+            (11, 12),
+            (0, 12),
+        ] {
+            views.push(
+                complete(
+                    &mut fixture,
+                    &ViewRequest::Slice {
+                        parent: parent.clone(),
+                        start,
+                        end,
+                    },
+                    &[],
+                )
+                .unwrap(),
+            );
+        }
+        for left in &views {
+            for right in &views {
+                let expected = rendered(&fixture, left).cmp(&rendered(&fixture, right));
+                assert_eq!(
+                    exact_order(&fixture, left, right),
+                    NativeTextOrder::from(expected)
+                );
+            }
+        }
+        let empty = complete(
+            &mut fixture,
+            &ViewRequest::Join {
+                record: 0,
+                producer: 91,
+                count: 0,
+                newline: false,
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            exact_order(&fixture, &empty, &views[0]),
+            NativeTextOrder::Equal
+        );
+        let mut fixture = make_fixture(&format!("'{}abc'", "\\\n".repeat(100_000)));
+        let parent = whole(&mut fixture);
+        let decoded = complete(
+            &mut fixture,
+            &ViewRequest::JsLiteralDecode {
+                parent: parent.clone(),
+                quote: Quote::Single,
+            },
+            &[],
+        )
+        .unwrap();
+        let length = parent.receipt.decoded_bytes;
+        let plain = complete(
+            &mut fixture,
+            &ViewRequest::Slice {
+                parent,
+                start: length - 4,
+                end: length - 1,
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            exact_order(&fixture, &decoded, &plain),
+            NativeTextOrder::Equal
+        );
+        assert_eq!(
+            exact_order(&fixture, &plain, &decoded),
+            NativeTextOrder::Equal
+        );
     }
 
     #[test]
