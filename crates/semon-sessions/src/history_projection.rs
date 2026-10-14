@@ -71,7 +71,7 @@ pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Transfer {
     witness: String,
-    last: i64,
+    last: Option<i64>,
     copied: usize,
     partial: i64,
     complete: bool,
@@ -113,7 +113,7 @@ fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite
     }
     let mut transfer = prior.unwrap_or_else(|| Transfer {
         witness,
-        last: -1,
+        last: None,
         copied: 0,
         partial: 0,
         complete: header
@@ -134,9 +134,10 @@ fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite
     let mut bytes = 0usize;
     let mut processed = 0;
     while processed < 64 && bytes < 1048576 {
+        let comparison = if transfer.last.is_some() { ">" } else { ">=" };
         let next: Option<(i64, i64)> = tx.query_row(
-            "SELECT slot,octet_length(metadata) FROM session_slots WHERE session_key=?1 AND slot>?2 ORDER BY slot LIMIT 1",
-            params![old.key, transfer.last], |row|Ok((row.get(0)?,row.get(1)?)),
+            &format!("SELECT slot,octet_length(metadata) FROM session_slots WHERE session_key=?1 AND slot{comparison}?2 ORDER BY slot LIMIT 1"),
+            params![old.key, transfer.last.unwrap_or(i64::MIN)], |row|Ok((row.get(0)?,row.get(1)?)),
         ).optional()?;
         let Some((slot, length)) = next else { break };
         let offset = transfer.partial;
@@ -175,12 +176,15 @@ fn preserve_original_harness(tx: &Transaction<'_>, old: &CatalogRow) -> rusqlite
                 });
             }
         }
-        transfer.last = slot;
+        transfer.last = Some(slot);
         transfer.copied += 1;
     }
+    let comparison = if transfer.last.is_some() { ">" } else { ">=" };
     let more: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_slots WHERE session_key=?1 AND slot>?2)",
-        params![old.key, transfer.last],
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM session_slots WHERE session_key=?1 AND slot{comparison}?2)"
+        ),
+        params![old.key, transfer.last.unwrap_or(i64::MIN)],
         |row| row.get(0),
     )?;
     if more {
@@ -578,6 +582,16 @@ mod tests {
             assert!(done);
             assert_eq!(slots(&db), original);
         }
+    }
+    #[test]
+    fn custody_preserves_unsupported_original_slot_addresses() {
+        let (mut db, old, mut original) = fixture(65, 0);
+        db.execute("UPDATE session_slots SET slot=?1 WHERE slot=0", [i64::MIN])
+            .unwrap();
+        original[0].0 = i64::MIN;
+        assert!(!step(&mut db, &old));
+        assert!(step(&mut db, &old));
+        assert_eq!(slots(&db), original);
     }
     #[test]
     fn custody_rollback_and_changed_original_restart_cleanly() {
