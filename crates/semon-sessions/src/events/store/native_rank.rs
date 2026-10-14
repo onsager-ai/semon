@@ -22,6 +22,9 @@ pub(crate) use candidate_tree::{
 /// involved.
 pub(super) const CANDIDATE_TREE_SCHEMA: &str = candidate_tree::SCHEMA;
 
+pub(crate) mod orthogonal;
+pub(super) const ORTHOGONAL_SCHEMA: &str = orthogonal::SCHEMA;
+
 const NODE_BYTES: usize = 64 * 1024;
 const STEP_BYTES: usize = native_query::BYTES;
 const STEP_ROWS: usize = native_query::ROWS;
@@ -54,15 +57,18 @@ pub(super) fn cleanup(
     bytes: &mut usize,
 ) -> rusqlite::Result<(usize, bool)> {
     let (mut used, tree_complete) = candidate_tree::cleanup(db, job, budget, bytes)?;
-    if !tree_complete {
+    if !tree_complete || used >= budget {
         return Ok((used, false));
     }
-    if used >= budget {
+    let (orthogonal_removed, orthogonal_complete) =
+        orthogonal::cleanup(db, job, budget - used, bytes)?;
+    used += orthogonal_removed;
+    if !orthogonal_complete || used >= budget {
         return Ok((used, false));
     }
     let mut q = db.prepare("SELECT identity,octet_length(metadata)+octet_length(identity) FROM native_rank_memos WHERE job=?1 ORDER BY identity LIMIT ?2")?;
     let records = q
-        .query_map(params![job, budget as i64], |r| {
+        .query_map(params![job, (budget - used) as i64], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
