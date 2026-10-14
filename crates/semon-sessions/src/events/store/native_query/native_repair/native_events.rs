@@ -421,6 +421,41 @@ impl crate::events::native_harness::CopilotIdentityStore for Events<'_> {
     }
 }
 
+impl crate::events::native_harness::header::Store for Events<'_> {
+    fn initialize_copilot(
+        &mut self,
+        version: Option<Text>,
+        session: Option<Text>,
+    ) -> io::Result<()> {
+        use crate::events::native_harness::header::{Field, Value};
+        for (field, text) in [
+            (Field::CopilotVersion, version),
+            (Field::CopilotSession, session),
+        ] {
+            if text
+                .as_ref()
+                .is_some_and(|text| text.original() != self.original)
+            {
+                return Err(io::Error::other(
+                    "native header text belongs to a different Original",
+                ));
+            }
+            let value = text.map(Value::Native).unwrap_or(Value::Empty);
+            let value = bounded_json(&value, STATE_BYTES).map_err(io::Error::other)?;
+            self.account(1, value.len())?;
+            self.db.execute("INSERT INTO native_original_header VALUES(?1,?2,?3) ON CONFLICT(original,field) DO UPDATE SET metadata=excluded.metadata",params![self.original.as_slice(),field.key(),value]).map_err(io::Error::other)?;
+        }
+        self.account(1, 32)?;
+        self.db
+            .execute(
+                "INSERT INTO native_original_copilot_started VALUES(?1)",
+                params![self.original.as_slice()],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+}
+
 impl crate::events::native_harness::CopilotStore for Events<'_> {
     fn tool_occurrence_after(&self, id: &u64, after: Option<usize>) -> io::Result<Option<usize>> {
         // Strict keyset seek, so a resumed ambiguity reset never reloads the

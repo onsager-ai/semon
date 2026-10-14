@@ -4856,23 +4856,22 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
 
 /// Native Copilot records preserve exact physical event and call identities.
 pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
-    let identity = field(record, "id")
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned);
-    let data = &record["data"];
-    match native_producer::complete(native_harness::copilot_admit(
-        summary,
-        identity.as_ref(),
-        field(record, "type") == Some("session.start"),
-        |summary| {
-            summary.copilot = Some(crate::copilot::Index {
-                version: field(data, "copilotVersion").unwrap_or("").to_owned(),
-                session_id: field(data, "sessionId").unwrap_or("").to_owned(),
-                ..Default::default()
-            });
-            Ok(())
-        },
-    )) {
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut admission = native_harness::copilot_admission::Cursor::default();
+    while admission.result().is_none() {
+        let prepared = native_producer::complete(native_harness::copilot_admission::prepare(
+            &mut source,
+            summary,
+            &admission,
+        ));
+        native_producer::complete(native_harness::copilot_admission::apply(
+            summary,
+            &mut admission,
+            prepared,
+        ));
+    }
+    let (admitted, identity) = admission.result().expect("completed native admission");
+    match admitted {
         native_harness::Admission::Gap => {
             gap(summary, offset);
             return;
@@ -4880,7 +4879,8 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
         native_harness::Admission::BeforeStart | native_harness::Admission::Duplicate => return,
         native_harness::Admission::Accepted => {}
     }
-    let identity = identity.as_deref().expect("admitted native identity");
+    let identity = identity.expect("admitted native identity").as_str();
+    let data = &record["data"];
     let time = record_time(record);
     if let Some(timestamp) = field(record, "timestamp")
         && time.is_some()
