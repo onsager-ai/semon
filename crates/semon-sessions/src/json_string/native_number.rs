@@ -3,9 +3,9 @@
 //! equivalent spelling back to serde_json::Number for the final conversion.
 //! Do not implement a second float converter or retain numeric source text.
 //!
-//! Native provenance: serde_json 1.0.150, default non-float_roundtrip numeric
+//! Native provenance: serde_json 1.0.151, default non-float_roundtrip numeric
 //! paths parse_integer/parse_decimal/parse_exponent/parse_long_integer in
-//! https://github.com/serde-rs/json/blob/v1.0.150/src/de.rs . The independent
+//! https://github.com/serde-rs/json/blob/v1.0.151/src/de.rs . The independent
 //! oracle below must change with any dependency numeric policy/feature change.
 
 use super::{JSON_STRING_CHUNK_DECODED_MAX, invalid, native_record::Number};

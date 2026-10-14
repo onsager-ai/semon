@@ -13,7 +13,15 @@ use crate::json_string::native_record::{
     Container, Cursor as RecordCursor, Literal, Location, Span, Token,
 };
 
+pub(crate) const REPAIR_FORMAT: u32 = 2;
+// The pre-format namespace was published with parser 24. Its key must stay
+// frozen even when the complete native producer later advances CACHE_VERSION.
+const PREVIOUS_REPAIR_PARSER: u32 = 24;
+
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_original_cleanup (
+ original BLOB PRIMARY KEY, obsolete BLOB NOT NULL, table_index INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_repairs (
  original BLOB PRIMARY KEY, parser INTEGER NOT NULL, source TEXT NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL
@@ -121,6 +129,9 @@ pub(crate) struct RepairWork {
     pub(crate) native_bytes: usize,
     pub(crate) metadata_rows: usize,
     pub(crate) metadata_bytes: usize,
+    /// Actual statement VM work of obsolete-format key selection and deletion.
+    /// Other producer phases retain their own instrumentation obligations.
+    pub(crate) cleanup_vm_steps: i32,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct RepairStep {
@@ -203,11 +214,20 @@ fn reference(
 }
 fn namespace(source: &crate::SessionSourceRef) -> io::Result<[u8; 32]> {
     let mut digest = Sha256::new();
-    digest.update(b"native-original-derived-v1\0");
+    digest.update(b"native-original-derived\0");
+    digest.update(REPAIR_FORMAT.to_be_bytes());
     digest.update(super::super::super::CACHE_VERSION.to_be_bytes());
     digest.update(serde_json::to_vec(source).map_err(io::Error::other)?);
     Ok(digest.finalize().into())
 }
+fn previous_namespace(source: &crate::SessionSourceRef) -> io::Result<[u8; 32]> {
+    let mut digest = Sha256::new();
+    digest.update(b"native-original-derived-v1\0");
+    digest.update(PREVIOUS_REPAIR_PARSER.to_be_bytes());
+    digest.update(serde_json::to_vec(source).map_err(io::Error::other)?);
+    Ok(digest.finalize().into())
+}
+
 fn repair_current(db: &Connection, repair: &Repair) -> rusqlite::Result<bool> {
     db.query_row(
         "SELECT revision=?2 AND parser=?3 FROM native_original_repairs WHERE original=?1",
@@ -237,7 +257,10 @@ fn fields_ready(db: &Connection, repair: &Repair) -> rusqlite::Result<bool> {
     if status.as_deref() == Some("gap") {
         return Ok(true);
     }
-    if status.as_deref() != Some("lexed") || !repair.cursor.fields_registered {
+    if status.as_deref() != Some("lexed")
+        || !repair.cursor.fields_registered
+        || repair.cursor.native_invalid
+    {
         return Ok(false);
     }
     db.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND digest IS NULL) AND NOT EXISTS(SELECT 1 FROM native_original_numbers WHERE original=?1 AND record_offset=?2 AND receipt IS NULL)",params![repair.original.as_slice(),i64::try_from(repair.cursor.record_at).map_err(|_|rusqlite::Error::InvalidQuery)?],|row|row.get(0))
@@ -278,6 +301,165 @@ fn admitted_original(
 }
 
 impl NativeStore {
+    /// Retire only this same Original's obsolete derived-format rows. Unknown
+    /// old cursor JSON is never decoded and never becomes reader authority.
+    /// At most 30 small primary keys are read/deleted plus one cursor update;
+    /// original logs, archives, ledgers, custody and Trace rows are untouched.
+    pub(crate) fn original_cleanup_step(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<RepairStep> {
+        // Every entry has an Original-prefix primary key and contains only
+        // derived producer metadata. Fixed table identifiers cannot originate
+        // from source text or a stored previous-format cursor.
+        const TABLES: &[(&str, &str)] = &[
+            ("native_original_tokens", "record_offset,ordinal"),
+            ("native_original_fields", "record_offset,ordinal"),
+            ("native_original_nodes", "record_offset,address"),
+            ("native_original_numbers", "record_offset,address"),
+            (
+                "native_original_members",
+                "record_offset,parent_offset,name",
+            ),
+            ("native_original_records", "record_offset"),
+            ("native_original_repairs", "original"),
+        ];
+        let mut work = RepairWork::default();
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        if !job_current(&tx, job).map_err(io::Error::other)?
+            || !check_source(&tx, witness).map_err(io::Error::other)?
+            || !repair_current(&tx, repair).map_err(io::Error::other)?
+            || !admitted_original(&tx, job, witness).map_err(io::Error::other)?
+        {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        let marker: Option<(Vec<u8>, i64)> = tx
+            .query_row(
+                "SELECT obsolete,table_index FROM native_original_cleanup WHERE original=?1",
+                params![repair.original.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        let Some((obsolete, table)) = marker else {
+            return Ok(RepairStep {
+                outcome: Outcome::Written,
+                work,
+            });
+        };
+        work.metadata_rows = 1;
+        work.metadata_bytes = 40;
+        if obsolete.as_slice() != previous_namespace(&repair.source)?.as_slice()
+            || obsolete.as_slice() == repair.original.as_slice()
+            || table < 0
+        {
+            return Err(io::Error::other(
+                "obsolete Original repair identity disagrees",
+            ));
+        }
+        let index = usize::try_from(table).map_err(io::Error::other)?;
+        if index >= TABLES.len() {
+            return Ok(RepairStep {
+                outcome: Outcome::Written,
+                work,
+            });
+        }
+        let (table_name, columns) = TABLES[index];
+        let sql = format!(
+            "SELECT {columns} FROM {table_name} WHERE original=?1 ORDER BY {columns} LIMIT 30"
+        );
+        let mut query = tx.prepare(&sql).map_err(io::Error::other)?;
+        let count = columns.split(',').count();
+        let mut values = query
+            .query(params![obsolete.as_slice()])
+            .map_err(io::Error::other)?;
+        let mut keys = Vec::new();
+        while let Some(row) = values.next().map_err(io::Error::other)? {
+            let mut key = Vec::new();
+            for column in 0..count {
+                let value = row.get_ref(column).map_err(io::Error::other)?;
+                let bytes = match value {
+                    rusqlite::types::ValueRef::Integer(_) => 8,
+                    rusqlite::types::ValueRef::Text(value)
+                    | rusqlite::types::ValueRef::Blob(value) => value.len(),
+                    _ => return Err(io::Error::other("obsolete Original key has invalid type")),
+                };
+                if bytes > 128 || work.metadata_bytes + bytes > BYTES {
+                    return Err(io::Error::other(
+                        "obsolete Original key exceeds derived budget",
+                    ));
+                }
+                work.metadata_bytes += bytes;
+                key.push(rusqlite::types::Value::try_from(value).map_err(io::Error::other)?);
+            }
+            keys.push(key);
+            work.metadata_rows += 1;
+        }
+        drop(values);
+        work.cleanup_vm_steps += query.get_status(rusqlite::StatementStatus::VmStep);
+        drop(query);
+        let predicates = columns
+            .split(',')
+            .enumerate()
+            .map(|(index, column)| format!("{column}=?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let delete_sql = format!("DELETE FROM {table_name} WHERE original=?1 AND {predicates}");
+        let mut remove = tx.prepare(&delete_sql).map_err(io::Error::other)?;
+        for key in &keys {
+            let mut args = Vec::with_capacity(key.len() + 1);
+            args.push(rusqlite::types::Value::Blob(obsolete.clone()));
+            args.extend(key.iter().cloned());
+            remove
+                .execute(rusqlite::params_from_iter(args))
+                .map_err(io::Error::other)?;
+            work.metadata_rows += 1;
+        }
+        work.cleanup_vm_steps += remove.get_status(rusqlite::StatementStatus::VmStep);
+        drop(remove);
+        let next = if keys.len() < 30 { index + 1 } else { index };
+        tx.execute(
+            "UPDATE native_original_cleanup SET table_index=?2 WHERE original=?1",
+            params![repair.original.as_slice(), next as i64],
+        )
+        .map_err(io::Error::other)?;
+        work.metadata_rows += 1;
+        work.metadata_bytes += 8;
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        tx.commit().map_err(io::Error::other)?;
+        Ok(RepairStep {
+            outcome: Outcome::Deferred,
+            work,
+        })
+    }
+
     fn original_number_step(
         &mut self,
         job: &Job,
@@ -1397,6 +1579,8 @@ impl NativeStore {
             return Ok(None);
         }
         let text = json(&source).map_err(io::Error::other)?;
+        let obsolete = previous_namespace(&source)?;
+        tx.execute("INSERT OR IGNORE INTO native_original_cleanup SELECT ?1,?2,0 WHERE EXISTS(SELECT 1 FROM native_original_repairs WHERE original=?2)",params![original.as_slice(),obsolete.as_slice()]).map_err(io::Error::other)?;
         let cursor = bounded_json(&Cursor::new(), STATE_BYTES).map_err(io::Error::other)?;
         tx.execute(
             "INSERT OR IGNORE INTO native_original_repairs VALUES(?1,?2,?3,0,?4)",
@@ -1657,6 +1841,10 @@ impl NativeStore {
                 outcome: Outcome::Conflict,
                 work,
             });
+        }
+        let obsolete_pending:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM native_original_cleanup WHERE original=?1 AND table_index<7)",params![repair.original.as_slice()],|row|row.get(0)).map_err(io::Error::other)?;
+        if obsolete_pending {
+            return self.original_cleanup_step(job, witness, repair, records, cancelled);
         }
         if matches!(repair.cursor.phase, Phase::FoldRecord | Phase::Complete) {
             return Ok(RepairStep {
@@ -2131,6 +2319,356 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn native_invalid_intermediate_record_is_unreadable_after_cancel_and_reopen() {
+        for bytes in [
+            b"[]\n".to_vec(),
+            format!("{}{{}}{}\n", "{\"x\":".repeat(127), "}".repeat(127)).into_bytes(),
+        ] {
+            let mut fixture = Fixture::new(&bytes);
+            let mut repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            while repair.cursor.phase != Phase::FoldRecord {
+                fixture
+                    .store
+                    .original_lex_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            while !repair.cursor.fields_registered {
+                fixture
+                    .store
+                    .original_fields_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(repair.cursor.native_invalid);
+            assert_eq!(
+                record_status(&fixture.store.connection, &repair)
+                    .unwrap()
+                    .as_deref(),
+                Some("lexed")
+            );
+            assert!(!fields_ready(&fixture.store.connection, &repair).unwrap());
+            assert!(
+                fixture
+                    .store
+                    .original_root(&fixture.job, &fixture.source, &repair)
+                    .is_err()
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .finish_original_record(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &|_, _, _| panic!("invalid record reached native completion"),
+                        &|| false
+                    )
+                    .unwrap(),
+                Outcome::Conflict
+            );
+            let calls = Cell::new(0);
+            let cancelled = || {
+                calls.set(calls.get() + 1);
+                calls.get() == 4
+            };
+            let step = fixture
+                .store
+                .original_fields_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &cancelled,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            assert!(!fields_ready(&fixture.store.connection, &repair).unwrap());
+            assert!(
+                fixture
+                    .store
+                    .original_root(&fixture.job, &fixture.source, &repair)
+                    .is_err()
+            );
+            fixture
+                .store
+                .original_fields_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record_status(&fixture.store.connection, &repair)
+                    .unwrap()
+                    .as_deref(),
+                Some("gap")
+            );
+            assert!(fields_ready(&fixture.store.connection, &repair).unwrap());
+            assert!(
+                fixture
+                    .store
+                    .original_root(&fixture.job, &fixture.source, &repair)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_cursor_restarts_and_cleanup_resumes_in_bounded_lex_steps() {
+        for size in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(b"{}\n");
+            let reference = reference(&fixture.sources.reader(), &fixture.source).unwrap();
+            let old = previous_namespace(&reference).unwrap();
+            let current = namespace(&reference).unwrap();
+            assert_ne!(old, current);
+            // This is the earlier fa56540d cursor shape, without the required
+            // native_invalid member. It must never be decoded during restart.
+            let mut cursor = serde_json::to_value(Cursor::new()).unwrap();
+            cursor.as_object_mut().unwrap().remove("native_invalid");
+            assert!(serde_json::from_value::<Cursor>(cursor.clone()).is_err());
+            fixture
+                .store
+                .connection
+                .execute(
+                    "INSERT INTO native_original_repairs VALUES(?1,?2,?3,7,?4)",
+                    params![
+                        old.as_slice(),
+                        PREVIOUS_REPAIR_PARSER,
+                        json(&reference).unwrap(),
+                        cursor.to_string()
+                    ],
+                )
+                .unwrap();
+            {
+                let tx = fixture.store.connection.transaction().unwrap();
+                for ordinal in 0..size + 1 {
+                    tx.execute(
+                        "INSERT INTO native_original_tokens VALUES(?1,0,?2,'{}')",
+                        params![old.as_slice(), ordinal],
+                    )
+                    .unwrap();
+                }
+                tx.execute("INSERT INTO native_original_fields VALUES(?1,0,0,0,1,NULL,0,'{}','{}',NULL,NULL)",params![old.as_slice()]).unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_nodes VALUES(?1,0,0,NULL,NULL,NULL,'{}',1)",
+                    params![old.as_slice()],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_numbers VALUES(?1,0,0,0,1,'{}',NULL)",
+                    params![old.as_slice()],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_members VALUES(?1,0,0,'type',0,'{}')",
+                    params![old.as_slice()],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_records VALUES(?1,0,3,'lexed')",
+                    params![old.as_slice()],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            let reads = super::super::super::super::FILE_READS.with(Cell::get);
+            let mut repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(repair.original, current);
+            assert_eq!(repair.revision, 0);
+            assert_eq!(repair.cursor.source_at, 0);
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT cursor FROM native_original_repairs WHERE original=?1",
+                        params![old.as_slice()],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                cursor.to_string()
+            );
+            let calls = Cell::new(0);
+            let cancelled = || {
+                calls.set(calls.get() + 1);
+                calls.get() == 3
+            };
+            let cancelled_step = fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &cancelled,
+                )
+                .unwrap();
+            assert_eq!(cancelled_step.outcome, Outcome::Deferred);
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM native_original_tokens WHERE original=?1",
+                        params![old.as_slice()],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                i64::from(size) + 1
+            );
+            let mut attempts = 0;
+            loop {
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+                let pending: i64 = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT table_index FROM native_original_cleanup WHERE original=?1",
+                        params![current.as_slice()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if pending == 7 {
+                    break;
+                }
+                let step = fixture
+                    .store
+                    .original_lex_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Deferred);
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.cleanup_vm_steps < 4096);
+                assert_eq!(step.work.native_bytes, 0);
+                assert_eq!(step.work.range_requests, 0);
+                assert_eq!(repair.cursor.source_at, 0);
+                attempts += 1;
+                assert!(attempts < size / 30 + 16);
+            }
+            for table in [
+                "native_original_tokens",
+                "native_original_fields",
+                "native_original_nodes",
+                "native_original_numbers",
+                "native_original_members",
+                "native_original_records",
+                "native_original_repairs",
+            ] {
+                assert_eq!(
+                    fixture
+                        .store
+                        .connection
+                        .query_row(
+                            &format!("SELECT count(*) FROM {table} WHERE original=?1"),
+                            params![old.as_slice()],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+            }
+            assert_eq!(fs::read(&fixture.source.source.path).unwrap(), b"{}\n");
+            assert!(check_source(&fixture.store.connection, &fixture.source).unwrap());
+            assert!(job_current(&fixture.store.connection, &fixture.job).unwrap());
+            assert_eq!(
+                super::super::super::super::FILE_READS.with(Cell::get),
+                reads
+            );
+            fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            assert_eq!(repair.cursor.phase, Phase::FoldRecord);
         }
     }
 
