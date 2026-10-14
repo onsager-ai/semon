@@ -86,7 +86,7 @@ struct Frame {
     index: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum Number {
+pub(super) enum Number {
     Sign,
     Zero,
     Integer,
@@ -97,13 +97,13 @@ enum Number {
     ExponentDigits,
 }
 impl Number {
-    fn complete(self) -> bool {
+    pub(super) fn complete(self) -> bool {
         matches!(
             self,
             Self::Zero | Self::Integer | Self::Fraction | Self::ExponentDigits
         )
     }
-    fn next(self, byte: u8) -> io::Result<Option<Self>> {
+    pub(super) fn next(self, byte: u8) -> io::Result<Option<Self>> {
         let next = match (self, byte) {
             (Self::Sign, b'0') => Self::Zero,
             (Self::Sign, b'1'..=b'9') => Self::Integer,
