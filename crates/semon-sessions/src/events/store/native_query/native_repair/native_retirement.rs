@@ -9,6 +9,22 @@ const BATCH: usize = 30;
 // exist in a supported preceding private schema. No source-controlled names.
 const TABLES: &[(&str, &str, bool)] = &[
     ("native_original_text_epochs", "record_offset", true),
+    (
+        "native_original_object_nodes",
+        "record_offset,object_address,class",
+        true,
+    ),
+    (
+        "native_original_objects",
+        "record_offset,object_address",
+        true,
+    ),
+    (
+        "native_original_record_keys",
+        "record_offset,parent_offset,ordinal",
+        true,
+    ),
+    ("native_original_record_key_maps", "record_offset", true),
     ("native_original_events", "sequence", false),
     ("native_original_pending", "identity", false),
     ("native_original_tool_ids", "identity,sequence", false),
@@ -67,6 +83,7 @@ const TABLES: &[(&str, &str, bool)] = &[
     ("native_original_tokens", "record_offset,ordinal", false),
     ("native_original_fields", "record_offset,ordinal", false),
     ("native_original_nodes", "record_offset,address", false),
+    ("native_original_object_epochs", "record_offset", true),
     ("native_original_numbers", "record_offset,address", false),
     ("native_original_records", "record_offset", false),
     ("native_original_cleanup", "original", false),

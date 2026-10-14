@@ -343,6 +343,65 @@ pub(super) fn qualified_field_at(
     Ok((field, receipt, meter.class_sql_vm_steps))
 }
 
+/// Read an already qualified whole-field membership without replaying the
+/// interner or interpreting its class as an ordering key. Experimental cursors
+/// without durable coverage remain Pending; the typed resolver owns all
+/// representative policy/sentinel/legacy validation.
+pub(super) fn qualified_identity_at(
+    db: &Connection,
+    repair: &Repair,
+    record: u64,
+    ordinal: u64,
+    work: &mut RepairWork,
+) -> io::Result<(Option<OriginalText>, i32)> {
+    let mut meter = IdentityMeter::default();
+    let old = identity_state(db, repair, &IdentityKey::Whole(record, ordinal), &mut meter)?;
+    work.metadata_rows += 1;
+    let Some((revision, state, size)) = old else {
+        return Ok((None, meter.class_sql_vm_steps));
+    };
+    let size = usize::try_from(size).map_err(io::Error::other)?;
+    if revision < 0 || size > STATE_BYTES {
+        return Err(io::Error::other(
+            "qualified field identity exceeds residency",
+        ));
+    }
+    work.metadata_bytes += size + 16;
+    let cursor: Cursor = serde_json::from_str(
+        state
+            .as_deref()
+            .ok_or_else(|| io::Error::other("qualified field identity exceeds residency"))?,
+    )
+    .map_err(io::Error::other)?;
+    if !cursor.complete || cursor.high_water.is_none() {
+        return Ok((None, meter.class_sql_vm_steps));
+    }
+    if cursor.compare.is_some() && cursor.generic.is_some()
+        || cursor.candidate.is_some() != (cursor.compare.is_some() || cursor.generic.is_some())
+    {
+        return Err(io::Error::other(
+            "qualified field identity comparison state changed",
+        ));
+    }
+    let class = cursor
+        .class
+        .filter(|class| *class > 0)
+        .ok_or_else(|| io::Error::other("qualified field identity lacks class"))?;
+    let (_, receipt) = field_at(db, repair, record, ordinal, work, &mut meter)?;
+    let mut value_meter = ValueMeter::default();
+    let value = native_class_values::resolve(db, repair, class, work, &mut value_meter)?;
+    meter.class_sql_vm_steps += value_meter.vm;
+    if value.receipt() != receipt {
+        return Err(io::Error::other(
+            "qualified field identity differs from representative receipt",
+        ));
+    }
+    Ok((
+        Some(OriginalText::qualified(repair.original, class)),
+        meter.class_sql_vm_steps,
+    ))
+}
+
 /// Load one exact-fingerprint candidate from a bounded class interval. The
 /// descending indexed seek preserves the old latest-first behavior without a
 /// catalog materialization, COUNT, digest-only equality, or whole scan.
