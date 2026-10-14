@@ -3090,6 +3090,8 @@ impl SqliteStore {
         let mut search_observation = None;
         let producer =
             crate::native_timing::enabled().then(|| crate::native_timing::id(&self.path));
+        let mut commit_boundary =
+            crate::native_timing::CatalogCommitBoundary::new(producer.is_some(), &self.path);
         let mut write_activity = crate::native_timing::WriteActivity::new(
             producer.is_some(),
             &self.path,
@@ -3693,6 +3695,7 @@ impl SqliteStore {
                     .map_err(failure)?;
             }
             stage("slots", &transaction);
+            commit_boundary.capture(&transaction);
             for scope in ["current", "retained_history"] {
                 let incomplete: i64 = transaction
                     .query_row(
@@ -3759,7 +3762,13 @@ impl SqliteStore {
             let commit_before = search_observation
                 .as_ref()
                 .map(|_| crate::native_timing::ProbeSample::read(&transaction));
+            // In simultaneous test-only modes, the old before-probe belongs
+            // to tail and the old after-probe to postcommit. Neither sample is
+            // inside the new actual-COMMIT clock or counter window. Hub's
+            // production publisher has no traversal probes.
+            commit_boundary.capture(&transaction);
             transaction.commit().map_err(failure)?;
+            commit_boundary.capture(&self.connection);
             #[cfg(test)]
             if let Some(before) = commit_before {
                 let after = crate::native_timing::ProbeSample::read(&self.connection);
@@ -3788,6 +3797,10 @@ impl SqliteStore {
         self.connection
             .busy_timeout(BUSY_TIMEOUT)
             .map_err(failure)?;
+        if matches!(&result, Ok(Outcome::Written)) {
+            commit_boundary.capture(&self.connection);
+            commit_boundary.committed();
+        }
         result.map(|outcome| (outcome, published))
     }
 
@@ -6575,15 +6588,229 @@ mod tests {
         projections: &[crate::slot_projection::Projection],
         scoped: bool,
     ) {
+        let before = crate::model::now_ms();
+        let recording = crate::native_timing::catalog_commit_tests::recording(false);
         let left = catalog_write(batch, rows, projections, scoped, CatalogWriter::Auto).unwrap();
+        let left_state =
+            catalog_commit_success_state(&batch.connection, before, crate::model::now_ms());
+        crate::native_timing::catalog_commit_tests::assert_written(false);
+        drop(recording);
+        let before = crate::model::now_ms();
+        let recording = crate::native_timing::catalog_commit_tests::recording(true);
         let right =
             catalog_write(legacy, rows, projections, scoped, CatalogWriter::Legacy).unwrap();
+        let right_state =
+            catalog_commit_success_state(&legacy.connection, before, crate::model::now_ms());
+        crate::native_timing::catalog_commit_tests::assert_written(true);
+        drop(recording);
         assert_eq!(left, right, "exact committed collection generation");
         assert_eq!(left.0, Outcome::Written);
+        assert_eq!(
+            left_state, right_state,
+            "full MAIN/TEMP rows and schemas; only the validated observation clock is excluded"
+        );
         assert_eq!(
             catalog_comparable_state(&batch.connection),
             catalog_comparable_state(&legacy.connection)
         );
+    }
+
+    fn catalog_commit_success_state(
+        connection: &Connection,
+        before_ms: i64,
+        after_ms: i64,
+    ) -> CatalogState {
+        let mut state = crate::native_timing::cleanup_tests::snapshot(connection);
+        let meta = state.get_mut("main.meta").unwrap();
+        let clock = meta
+            .iter()
+            .filter(|row| row[0] == rusqlite::types::Value::Text("catalog_observed_at".into()))
+            .collect::<Vec<_>>();
+        assert_eq!(clock.len(), 1);
+        let rusqlite::types::Value::Text(value) = &clock[0][1] else {
+            panic!("observation clock must be decimal text")
+        };
+        assert!(!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
+        let millis = value.parse::<i64>().unwrap();
+        assert!(
+            (before_ms..=after_ms).contains(&millis),
+            "actual publication clock outside test-side bounds"
+        );
+        // Separate successful commits have independent wall clocks. Every
+        // other row and schema remains exact; rollback never uses this filter.
+        meta.retain(|row| row[0] != rusqlite::types::Value::Text("catalog_observed_at".into()));
+        state
+    }
+
+    #[test]
+    fn catalog_commit_boundaries_match_real_publisher_with_diagnostics_on_and_off() {
+        let root = scratch("catalog-commit-boundary-parity");
+        let (options, mut rows, projections) = catalog_native_fixture(&root, 4, false);
+        let (mut disabled, mut enabled) = catalog_pair(&options);
+        for scoped in [false, true] {
+            rows[0].name.push_str(" replacement");
+            let mut outcomes = Vec::new();
+            let mut states = Vec::new();
+            for (store, timing) in [(&mut disabled, false), (&mut enabled, true)] {
+                store.connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS boundary_temp(value TEXT); INSERT INTO boundary_temp VALUES('preserved');").unwrap();
+                let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+                let before = crate::model::now_ms();
+                outcomes.push(
+                    catalog_write(store, &rows, &projections, scoped, CatalogWriter::Auto).unwrap(),
+                );
+                states.push(catalog_commit_success_state(
+                    &store.connection,
+                    before,
+                    crate::model::now_ms(),
+                ));
+                crate::native_timing::catalog_commit_tests::assert_written(timing);
+                drop(recording);
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+            assert_eq!(outcomes[0].0, Outcome::Written);
+            assert_eq!(states[0], states[1]);
+        }
+        drop(disabled);
+        drop(enabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_commit_boundaries_match_real_semantic_publication() {
+        use crate::model::relation_stage::Phase;
+        let root = scratch("catalog-commit-boundary-semantic");
+        let (options, rows, _) = catalog_native_fixture(&root, 4, false);
+        let (mut disabled, mut enabled) = catalog_pair(&options);
+        let paths = rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .map(|source| source.path.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+        let mut outcomes = Vec::new();
+        let mut states = Vec::new();
+        for (store, timing) in [(&mut disabled, false), (&mut enabled, true)] {
+            let scoped_options = crate::Options {
+                cache: store.path.with_extension("json"),
+                ..options.clone()
+            };
+            let mut cache = crate::events::EventCache::open_scoped(&scoped_options.cache).unwrap();
+            let stage_before = crate::model::now_ms();
+            assert_eq!(
+                store.semantic_begin(&paths, &runtime).unwrap(),
+                Outcome::Written
+            );
+            let mut written = Vec::new();
+            let mut publication_states = Vec::new();
+            let mut finished = false;
+            for _ in 0..128 {
+                let batch = store
+                    .semantic_next(64)
+                    .unwrap()
+                    .expect("active real semantic fixture");
+                if batch.paths.is_empty() {
+                    if batch.phase == Phase::Publication {
+                        assert_eq!(
+                            store.semantic_finish(batch.epoch).unwrap(),
+                            Outcome::Written
+                        );
+                        finished = true;
+                        break;
+                    }
+                    continue;
+                }
+                let mut selected = batch.paths.iter().cloned().collect::<BTreeSet<_>>();
+                if batch.phase == Phase::Relations {
+                    selected.extend(batch.context.parent_paths(&batch.paths));
+                    selected.extend(batch.context.companions.iter().cloned());
+                }
+                let inputs = selected
+                    .iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(Path::new(path), &scoped_options)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let prepared = match batch.phase {
+                    Phase::Indexing => crate::model::prepare_semantic_index_sources(
+                        &scoped_options,
+                        &mut cache,
+                        &inputs,
+                        CATALOG_FIXTURE_NOW,
+                    ),
+                    Phase::Identity => crate::model::prepare_semantic_identity_sources(
+                        &scoped_options,
+                        &mut cache,
+                        &inputs,
+                        &batch.context,
+                        CATALOG_FIXTURE_NOW,
+                    ),
+                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(
+                        &scoped_options,
+                        &mut cache,
+                        &inputs,
+                        &batch.context,
+                        batch.phase == Phase::Relations,
+                        CATALOG_FIXTURE_NOW,
+                    ),
+                }
+                .unwrap();
+                if batch.phase == Phase::Publication {
+                    let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+                    let before = crate::model::now_ms();
+                    let outcome = store.publish_semantic_catalog(&batch, &prepared).unwrap();
+                    assert_eq!(outcome.0, Outcome::Written);
+                    written.push(outcome);
+                    publication_states.push(catalog_commit_success_state(
+                        &store.connection,
+                        before,
+                        crate::model::now_ms(),
+                    ));
+                    crate::native_timing::catalog_commit_tests::assert_written(timing);
+                    drop(recording);
+                    cache.publish_session_descriptions();
+                } else {
+                    assert_eq!(
+                        store.semantic_record(&batch, &prepared).unwrap(),
+                        Outcome::Written
+                    );
+                }
+                cache.end_scan();
+                cache.release_published_indexes();
+            }
+            assert!(
+                finished && !written.is_empty(),
+                "real stage must publish and complete"
+            );
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM catalog_semantic_stage", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            publication_states.push(catalog_commit_success_state(
+                &store.connection,
+                stage_before,
+                crate::model::now_ms(),
+            ));
+            outcomes.push(written);
+            states.push(publication_states);
+        }
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "exact semantic outcomes and generations"
+        );
+        assert_eq!(
+            states[0], states[1],
+            "full MAIN/TEMP semantic publication parity"
+        );
+        drop(disabled);
+        drop(enabled);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6783,6 +7010,8 @@ mod tests {
             (&mut legacy, CatalogWriter::Legacy),
         ] {
             let before = catalog_state(&store.connection);
+            let raw_before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+            let recording = crate::native_timing::catalog_commit_tests::recording(true);
             assert_eq!(
                 catalog_write(store, &stale_sources, &projections, false, writer).unwrap(),
                 (Outcome::Conflict, None)
@@ -6809,6 +7038,12 @@ mod tests {
                 before,
                 "source and generation CAS must precede reordered helpers"
             );
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                raw_before
+            );
+            crate::native_timing::catalog_commit_tests::assert_uncommitted();
+            drop(recording);
         }
         for row in &mut rows {
             row.name.push_str(" replacement");
@@ -6856,6 +7091,8 @@ mod tests {
             ] {
                 let before = catalog_state(&store.connection);
                 store.connection.execute_batch(&failure).unwrap();
+                let raw_before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+                let recording = crate::native_timing::catalog_commit_tests::recording(true);
                 assert!(
                     catalog_write(store, &rows, &projections, false, writer).is_err(),
                     "injected complete publisher failure must propagate"
@@ -6865,6 +7102,12 @@ mod tests {
                     before,
                     "overview/trace/feed/source/slot/generation/claims escaped rollback"
                 );
+                assert_eq!(
+                    crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                    raw_before
+                );
+                crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                drop(recording);
                 store
                     .connection
                     .execute_batch("DROP TRIGGER publisher_failure")
@@ -6885,6 +7128,104 @@ mod tests {
         );
         drop(batch);
         drop(legacy);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_commit_boundary_stale_claims_and_real_commit_failure_emit_no_aggregate() {
+        let root = scratch("catalog-commit-boundary-failures");
+        let (options, rows, projections) = catalog_native_fixture(&root, 4, false);
+        let (mut disabled, mut enabled) = catalog_pair(&options);
+        for (store, timing) in [(&mut disabled, false), (&mut enabled, true)] {
+            let publication = crate::slot_projection::Publication {
+                rows: &rows,
+                transcripts: Some(&projections),
+            };
+            let claims = rows
+                .iter()
+                .flat_map(|row| &row.sources)
+                .map(|source| (source.path.to_string_lossy().into_owned(), Some(-1)))
+                .collect::<Vec<_>>();
+            let raw = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+            let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+            assert_eq!(
+                store
+                    .publish_catalog_with_writer(
+                        &publication,
+                        None,
+                        Some(&claims),
+                        false,
+                        None,
+                        CatalogWriter::Auto
+                    )
+                    .unwrap(),
+                (Outcome::Conflict, None)
+            );
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                raw
+            );
+            crate::native_timing::catalog_commit_tests::assert_uncommitted();
+            assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
+            drop(recording);
+
+            store
+                .connection
+                .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+                .unwrap();
+            let raw = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+            let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+            assert_eq!(
+                catalog_write(store, &rows, &projections, false, CatalogWriter::Auto).unwrap(),
+                (Outcome::Stale, None)
+            );
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                raw
+            );
+            crate::native_timing::catalog_commit_tests::assert_uncommitted();
+            assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
+            drop(recording);
+            store
+                .connection
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .unwrap();
+
+            // Enable FK checks before BEGIN; the late trigger's invalid insert
+            // is deferred, so all publisher DML reaches the pre-COMMIT capture.
+            // Default rusqlite Transaction drop rolls back a failed COMMIT.
+            store.connection.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE boundary_parent(id INTEGER PRIMARY KEY); CREATE TABLE boundary_child(parent INTEGER REFERENCES boundary_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TEMP TABLE boundary_temp(value TEXT); INSERT INTO boundary_temp VALUES('preserved'); CREATE TEMP TRIGGER boundary_late_dml AFTER INSERT ON main.meta WHEN NEW.key='catalog_completeness' BEGIN INSERT INTO boundary_child VALUES(1); INSERT INTO boundary_temp VALUES('late-dml'); END;").unwrap();
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            let raw = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+            let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+            let error =
+                catalog_write(store, &rows, &projections, false, CatalogWriter::Auto).unwrap_err();
+            assert!(
+                error.to_string().contains("FOREIGN KEY constraint failed"),
+                "expected genuine deferred COMMIT FK error: {error}"
+            );
+            assert_eq!(
+                crate::native_timing::catalog_commit_tests::counts(),
+                if timing { (2, 7) } else { (0, 0) },
+                "DML completed, but successful-COMMIT capture was not reached"
+            );
+            assert!(store.connection.is_autocommit());
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                raw,
+                "all raw MAIN/TEMP rows and schemas restored without clock exclusions"
+            );
+            crate::native_timing::catalog_commit_tests::assert_uncommitted();
+            drop(recording);
+        }
+        drop(disabled);
+        drop(enabled);
         fs::remove_dir_all(root).unwrap();
     }
 
