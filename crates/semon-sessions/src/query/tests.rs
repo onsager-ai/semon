@@ -4740,6 +4740,64 @@ fn physical_collision_fixture(earlier: usize) -> Home {
 }
 
 #[test]
+fn physical_collision_identity_copied_usage_requires_native_reduction() {
+    let mut home = Home::new("physical-collision-copied-usage");
+    home.options.all = false;
+    home.options.since = Duration::from_secs(6 * 3600);
+    for id in ["same", "claude:same"] {
+        let mut usage = assistant(id, ts(1, 2), vec![text("copied reply")]);
+        usage["uuid"] = json!("copied-native-record");
+        usage["message"]["id"] = json!("copied-api-message");
+        home.top(id, &[human(id, ts(1, 1), "prompt"), usage]);
+    }
+    let codex = home.lines(
+        "codex/sessions/2026/09/24/rollout-same.jsonl",
+        &[codex_line(ts(1, 0), "session_meta", json!({"id":"same"}))],
+    );
+    for path in [
+        codex,
+        home.options
+            .claude_home
+            .join("projects/-work-proj/claude:same.jsonl"),
+    ] {
+        fs::File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_millis((NOW - 86400000) as u64),
+            ))
+            .unwrap();
+    }
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(cache);
+    let options = Options {
+        scan_window: true,
+        ..home.options.clone()
+    };
+    let mut native = Query::from_sources(admitted(options.clone()));
+    let args = json!({"id":"same"});
+    let expected = native.call_at("get_session", &args, NOW);
+    let summary = &expected.as_ref().unwrap()["session"];
+    assert!(summary["claude_usage"].is_null());
+    assert_eq!(summary["tokens"]["input"], 1000);
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    assert!(
+        crate::overview_repair::physical_identity::resolve(&db, &options, ":claude:same", NOW)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(home.query().call_at("get_session", &args, NOW), expected);
+}
+
+#[test]
 fn physical_collision_identity_paging_stays_indexed_as_selected_history_grows() {
     for earlier in [0, 128, 1024, 8192] {
         let home = physical_collision_fixture(earlier);
@@ -4752,12 +4810,15 @@ fn physical_collision_identity_paging_stays_indexed_as_selected_history_grows() 
             .call_at("get_session", &json!({"id":"same"}), NOW)
             .unwrap();
         let turn = session["session"]["turns"][0]["id"].clone();
+        let (turn_prefix, turn_offset) = turn.as_str().unwrap().rsplit_once(':').unwrap();
         for args in [
             json!({"id":"same","limit":1}),
             json!({"id":"same","limit":1,"after":0}),
             json!({"id":"same","limit":1,"before":1}),
             json!({"id":"same","limit":1,"turn":turn}),
             json!({"id":"same","turn":"missing"}),
+            json!({"id":"same","turn":format!("{turn_prefix}:0{turn_offset}")}),
+            json!({"id":"same","turn":format!("{turn_prefix}:+{turn_offset}")}),
         ] {
             let expected = native.call_at("read_transcript", &args, NOW);
             let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -4842,7 +4903,7 @@ impl crate::SessionSourceReader for ChangingPhysicalDependency {
                     fs::FileTimes::new()
                         .set_modified(std::time::UNIX_EPOCH + Duration::from_millis(NOW as u64)),
                 )?;
-            } else {
+            } else if self.fault == 1 {
                 let db = rusqlite::Connection::open(&self.index).unwrap();
                 let text: String = db
                     .query_row(
@@ -4861,6 +4922,13 @@ impl crate::SessionSourceReader for ChangingPhysicalDependency {
                     [header],
                 )
                 .unwrap();
+            } else {
+                let db = rusqlite::Connection::open(&self.index).unwrap();
+                db.execute(
+                    "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",
+                    [],
+                )
+                .unwrap();
             }
         }
         Ok(bytes)
@@ -4869,7 +4937,7 @@ impl crate::SessionSourceReader for ChangingPhysicalDependency {
 
 #[test]
 fn physical_collision_identity_rechecks_omitted_dependencies_after_io() {
-    for fault in [0, 1] {
+    for fault in [0, 1, 2] {
         let home = physical_collision_fixture(8);
         let options = Options {
             scan_window: true,

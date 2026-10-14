@@ -41,6 +41,9 @@ pub(crate) struct Identity {
 
 impl Identity {
     pub(crate) fn unchanged(&self, db: &Connection, options: &Options) -> io::Result<bool> {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')", [], |r|r.get::<_,bool>(0)).map_err(failure)? {
+            return Ok(false);
+        }
         let actual = query_selection(db, &self.original)?;
         if actual.incomplete
             || serde_json::to_value(&actual.rows).map_err(failure)?
@@ -101,6 +104,16 @@ pub(crate) fn resolve(
         return Ok(None);
     }
     let owner = eligible[0];
+    // Claude copied-usage evidence relates physical owners even without a
+    // handoff or parent. Omitting one changes exclusive tokens and evidence,
+    // so those owners require the native usage reducer as well.
+    if owner
+        .query
+        .as_ref()
+        .is_some_and(|query| !query["rows"][&owner.key]["summary"]["claude_usage"].is_null())
+    {
+        return Ok(None);
+    }
     if owner
         .sources
         .iter()
