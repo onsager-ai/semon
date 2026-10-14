@@ -19,7 +19,7 @@ impl Quote {
             _ => None,
         }
     }
-    fn character(self) -> char {
+    pub(crate) fn character(self) -> char {
         match self {
             Self::Single => '\'',
             Self::Double => '"',
@@ -92,6 +92,20 @@ pub(crate) fn unit(input: &str, quote: Quote, final_input: bool) -> Option<Unit>
             }
         }
         'u' if rest.starts_with('{') => {
+            // A non-hex digit already makes this producer escape invalid,
+            // regardless of a later brace. Do not needlessly buffer Unicode
+            // lookahead from the rest of an invalid escape.
+            if rest[1..]
+                .chars()
+                .take_while(|value| *value != '}')
+                .take(7)
+                .any(|value| !value.is_ascii_hexdigit())
+            {
+                return Some(Unit::Scalar {
+                    value: Some('u'),
+                    consumed: prefix,
+                });
+            }
             let close = rest
                 .char_indices()
                 .take(8)
@@ -147,7 +161,7 @@ impl Cursor {
         final_input: bool,
         maximum: usize,
     ) -> io::Result<Step> {
-        if self.complete || maximum == 0 || maximum > super::JSON_STRING_CHUNK_DECODED_MAX {
+        if self.complete || maximum < 4 || maximum > super::JSON_STRING_CHUNK_DECODED_MAX {
             return Err(io::Error::other(
                 "invalid native JavaScript literal continuation",
             ));
@@ -193,6 +207,20 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn undersized_scalar_output_budgets_refuse_instead_of_deferring_forever() {
+        for maximum in 0..4 {
+            let mut cursor = Cursor::new(Quote::Single);
+            assert!(cursor.step("é😀'", true, maximum).is_err());
+        }
+        let mut cursor = Cursor::new(Quote::Single);
+        let first = cursor.step("é😀'", true, 4).unwrap();
+        assert_eq!(first.output, "é");
+        assert_eq!(first.consumed, 2);
+        let second = cursor.step("😀'", true, 4).unwrap();
+        assert_eq!(second.output, "😀");
+        assert!(cursor.complete);
+    }
     #[test]
     fn literal_units_preserve_native_escape_and_template_rules_across_splits() {
         for (input, expected, plain) in [
