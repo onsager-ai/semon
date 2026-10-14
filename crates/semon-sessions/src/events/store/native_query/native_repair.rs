@@ -25,7 +25,12 @@ mod native_harness;
 mod native_metadata;
 mod native_record_source;
 mod native_record_time;
+mod native_object;
 mod native_retirement;
+pub(super) use native_object::SCHEMA as OBJECT_SCHEMA;
+pub(crate) use native_object::{
+    ObjectEntry, ObjectPageCursor, ObjectPageStep, ObjectStep, QualifiedObject,
+};
 mod native_values;
 mod native_views;
 pub(crate) use native_values::NativeTextOrder;
@@ -7315,4 +7320,5 @@ mod tests {
         );
         assert!(!repair.cursor.phase.eq(&Phase::Complete));
     }
+    include!("native_repair/native_object_tests.rs");
 }
