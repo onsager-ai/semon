@@ -24,6 +24,7 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod identity_stage;
 pub(crate) mod native_stage;
 pub(crate) mod relation_stage;
 pub(crate) mod summary;
@@ -1587,22 +1588,15 @@ struct Unions {
 
 impl Unions {
     fn find(&mut self, key: &str) -> String {
-        let mut root = key.to_owned();
-        while let Some(next) = self.parent.get(&root) {
-            if *next == root {
-                break;
+        let mut cursor = identity_stage::UnionCursor::new(key);
+        loop {
+            if let Some(root) = cursor
+                .step(&mut self.parent)
+                .expect("infallible native unions")
+            {
+                return root;
             }
-            root = next.clone();
         }
-        let mut current = key.to_owned();
-        while let Some(next) = self.parent.get(&current).cloned() {
-            if next == root {
-                break;
-            }
-            self.parent.insert(current, root.clone());
-            current = next;
-        }
-        root
     }
 
     fn union(&mut self, a: &str, b: &str) {
@@ -1955,9 +1949,15 @@ impl<'a> Builder<'a> {
             .get(&key)
             .is_some_and(|harnesses| harnesses.iter().any(|other| *other != harness))
         {
-            key = format!("{harness}:{key}");
-            while self.native_harnesses.contains_key(&key) || self.by_key.contains_key(&key) {
-                key.insert(0, ':');
+            let mut cursor = identity_stage::KeyCursor::new(&key, harness, true);
+            loop {
+                if let Some(qualified) = cursor.step(|candidate| {
+                    self.native_harnesses.contains_key(candidate)
+                        || self.by_key.contains_key(candidate)
+                }) {
+                    key = qualified;
+                    break;
+                }
             }
         }
         for file in &files {
