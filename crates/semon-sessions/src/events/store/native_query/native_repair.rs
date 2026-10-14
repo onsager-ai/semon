@@ -455,6 +455,37 @@ fn repair_current(db: &Connection, repair: &Repair) -> rusqlite::Result<bool> {
     .optional()
     .map(|value| value == Some(true))
 }
+
+/// Physical identity is pure derived source evidence, but every operation that
+/// extracts or seals it must still belong to the admitted native repair owner.
+pub(super) fn physical_profile_admitted(
+    db: &Connection,
+    job: &Job,
+    witness: &SourceWitness,
+    repair: &Repair,
+    records: &crate::query_source::Records<'_>,
+    complete: bool,
+) -> rusqlite::Result<()> {
+    let source = &witness.source;
+    if !job_current(db, job)?
+        || !check_source(db, witness)?
+        || !admitted_original(db, job, witness)?
+        || !repair_current(db, repair)?
+        || repair.source.native_id != source.native_id
+        || repair.source.offset != source.offset
+        || repair.source.prefix_sha256 != source.prefix_sha256
+        || repair.source.tail_sha256 != source.tail_sha256
+        || namespace(&repair.source).map_err(|_| invalid("invalid physical Original namespace"))?
+            != repair.original
+        || reference(records, witness)
+            .map_err(|_| invalid("physical Original source authority changed"))?
+            != repair.source
+        || (complete && repair.cursor.phase != Phase::Complete)
+    {
+        return Err(invalid("physical Original operation qualification changed"));
+    }
+    Ok(())
+}
 fn record_status(db: &Connection, repair: &Repair) -> rusqlite::Result<Option<String>> {
     db.query_row(
         "SELECT status FROM native_original_records WHERE original=?1 AND record_offset=?2",

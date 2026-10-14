@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub(crate) mod physical;
 
 const BRIDGE_PREFIX: &str = "bridge:";
-fn atom_prefix(kind: &str) -> Result<&'static str, &'static str> {
+pub(crate) fn link_atom_prefix(kind: &str) -> Result<&'static str, &'static str> {
     match kind {
         "session" | "continued" => Ok(""),
         "bridge" => Ok(BRIDGE_PREFIX),
@@ -26,7 +26,7 @@ pub(crate) fn link_atom_part(
     if limit == 0 || limit > 64 * 1024 {
         return Err("invalid native atom part budget");
     }
-    let prefix = atom_prefix(kind)?.as_bytes();
+    let prefix = link_atom_prefix(kind)?.as_bytes();
     let length = prefix
         .len()
         .checked_add(native.len())
@@ -64,7 +64,7 @@ pub(crate) fn link_atom<'a>(
     kind: &str,
     native: &'a str,
 ) -> Result<std::borrow::Cow<'a, str>, &'static str> {
-    match atom_prefix(kind)? {
+    match link_atom_prefix(kind)? {
         "" => Ok(std::borrow::Cow::Borrowed(native)),
         prefix => Ok(std::borrow::Cow::Owned(format!("{prefix}{native}"))),
     }
