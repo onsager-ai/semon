@@ -1695,8 +1695,17 @@ pub(super) fn cleanup_with_work(
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<Cleanup> {
+    cleanup_with_allowance(db, job, budget, STEP_ROWS, bytes)
+}
+pub(super) fn cleanup_with_allowance(
+    db: &Connection,
+    job: i64,
+    budget: usize,
+    allowance: usize,
+    bytes: &mut usize,
+) -> rusqlite::Result<Cleanup> {
     let removed_budget = budget;
-    let budget = STEP_ROWS;
+    let budget = allowance.min(STEP_ROWS);
     let initial = *bytes;
     let mut work = Work::default();
     macro_rules! finish {
@@ -1711,7 +1720,7 @@ pub(super) fn cleanup_with_work(
             });
         }};
     }
-    if removed_budget == 0 {
+    if removed_budget == 0 || budget == 0 {
         finish!(false);
     }
     let exists=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='native_orthogonal_gc')",[],|row|row.get::<_,bool>(0))?;

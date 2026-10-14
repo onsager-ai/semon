@@ -28,125 +28,9 @@ const PATH_FRAME_BYTES: usize = 68;
 const EMPTY_TREE: &str = "rank/v1/tree/empty";
 
 #[cfg(test)]
-thread_local! {
-    static TRACK_RUST_ALLOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static RUST_ALLOCATION_TOTALS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
-    static RUST_LIVE_BYTES: Cell<usize> = const { Cell::new(0) };
-    static RUST_PEAK_BYTES: Cell<usize> = const { Cell::new(0) };
-    static RUST_BASELINE_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-struct TestCountingAllocator;
-
-#[cfg(test)]
-unsafe impl std::alloc::GlobalAlloc for TestCountingAllocator {
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        let pointer = unsafe {
-            <std::alloc::System as std::alloc::GlobalAlloc>::alloc(&std::alloc::System, layout)
-        };
-        if !pointer.is_null() {
-            record_test_allocation(layout.size());
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
-        release_test_allocation(layout.size());
-        unsafe {
-            <std::alloc::System as std::alloc::GlobalAlloc>::dealloc(
-                &std::alloc::System,
-                pointer,
-                layout,
-            )
-        };
-    }
-
-    unsafe fn realloc(
-        &self,
-        pointer: *mut u8,
-        layout: std::alloc::Layout,
-        new_size: usize,
-    ) -> *mut u8 {
-        let next = unsafe {
-            <std::alloc::System as std::alloc::GlobalAlloc>::realloc(
-                &std::alloc::System,
-                pointer,
-                layout,
-                new_size,
-            )
-        };
-        if !next.is_null() {
-            release_test_allocation(layout.size());
-            record_test_allocation(new_size);
-        }
-        next
-    }
-}
-
-#[cfg(test)]
-#[global_allocator]
-static TEST_COUNTING_ALLOCATOR: TestCountingAllocator = TestCountingAllocator;
-
-#[cfg(test)]
-fn record_test_allocation(bytes: usize) {
-    let _ = RUST_LIVE_BYTES.try_with(|live| {
-        let current = live.get().saturating_add(bytes);
-        live.set(current);
-    });
-    if TRACK_RUST_ALLOCATIONS
-        .try_with(std::cell::Cell::get)
-        .unwrap_or(false)
-    {
-        let current = RUST_LIVE_BYTES.try_with(Cell::get).unwrap_or(0);
-        let _ = RUST_PEAK_BYTES.try_with(|peak| peak.set(peak.get().max(current)));
-        let _ = RUST_ALLOCATION_TOTALS.try_with(|totals| {
-            let (calls, total_bytes) = totals.get();
-            totals.set((calls.saturating_add(1), total_bytes.saturating_add(bytes)));
-        });
-    }
-}
-
-#[cfg(test)]
-fn release_test_allocation(bytes: usize) {
-    let _ = RUST_LIVE_BYTES.try_with(|live| live.set(live.get().saturating_sub(bytes)));
-}
-
-// Operation-owned Rust heap high water on the synchronous test thread. This
-// excludes SQLite's C allocator and stack, just like the cumulative counter.
-#[cfg(test)]
-fn measured_peak_bytes() -> usize {
-    RUST_PEAK_BYTES
-        .with(Cell::get)
-        .saturating_sub(RUST_BASELINE_BYTES.with(Cell::get))
-}
-
-#[cfg(test)]
-struct TestAllocationGuard;
-
-#[cfg(test)]
-impl Drop for TestAllocationGuard {
-    fn drop(&mut self) {
-        let _ = TRACK_RUST_ALLOCATIONS.try_with(|tracking| tracking.set(false));
-    }
-}
-
-/// Count actual Rust allocations made synchronously by one tested operation.
-/// SQLite's C allocator and external provider/proof I/O are intentionally outside
-/// this measurement; SQLite instruction work is measured separately.
-#[cfg(test)]
-fn measure_test_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
-    RUST_ALLOCATION_TOTALS.with(|totals| totals.set((0, 0)));
-    let baseline = RUST_LIVE_BYTES.with(Cell::get);
-    RUST_BASELINE_BYTES.with(|value| value.set(baseline));
-    RUST_PEAK_BYTES.with(|value| value.set(baseline));
-    TRACK_RUST_ALLOCATIONS.with(|tracking| tracking.set(true));
-    let guard = TestAllocationGuard;
-    let value = operation();
-    drop(guard);
-    let (calls, bytes) = RUST_ALLOCATION_TOTALS.with(std::cell::Cell::get);
-    (value, calls, bytes)
-}
+use crate::test_allocations::{
+    measure as measure_test_allocations, peak_bytes as measured_peak_bytes,
+};
 
 /// Registered by the private native producer schema owner in its versioned
 /// migration. Keeping it separate prevents an accidental public Trace change.
@@ -889,243 +773,248 @@ pub(super) fn cleanup(
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<(usize, bool)> {
+    cleanup_with_allowance(db, job, budget, STEP_ROWS, bytes)
+        .map(|step| (step.removed, step.complete))
+}
+
+/// Each stage selects one guarded key at a time. Allowance counts SELECTs,
+/// empty/schema probes, dependency validation, deletions and reference writes.
+pub(super) fn cleanup_with_allowance(
+    db: &Connection,
+    job: i64,
+    budget: usize,
+    allowance: usize,
+    bytes: &mut usize,
+) -> rusqlite::Result<super::Cleanup> {
+    let initial = *bytes;
+    let mut removed = 0;
+    let mut work = super::Work::default();
+    macro_rules! finish {
+        ($complete:expr) => {{
+            *bytes = initial
+                .checked_sub(work.metadata_bytes)
+                .ok_or_else(|| cleanup_error("candidate cleanup exceeded byte allowance"))?;
+            return Ok(super::Cleanup {
+                removed,
+                complete: $complete,
+                work,
+            });
+        }};
+    }
+    macro_rules! reserve {
+        ($rows:expr, $writes:expr, $bytes:expr) => {
+            if work.rows() + $rows > allowance
+                || removed + $writes > budget
+                || initial - work.metadata_bytes < $bytes
+            {
+                finish!(false);
+            }
+        };
+    }
+    reserve!(1, 0, 0);
     let installed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_rank_candidate_cursors')",
-        [],
-        |r| r.get(0),
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='native_rank_candidate_cursors')",
+        [], |r| r.get(0),
     )?;
+    work.sql_reads += 1;
     if !installed {
-        return Ok((0, true));
+        finish!(true);
     }
-    let mut used = 0;
-    let mut q = db.prepare("SELECT CASE WHEN octet_length(cursor) BETWEEN 1 AND 256 THEN cursor END,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_applies WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
-    let applies = q
-        .query_map(params![job, cleanup_limit(budget)?], |r| {
-            Ok((cleanup_text(r, 0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (cursor, raw_length) in applies {
-        let length = usize::try_from(raw_length)
-            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, raw_length))?;
-        if used >= budget || length > *bytes {
+    reserve!(1, 0, 0);
+    let empty: bool = db.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM native_rank_candidate_applies WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_rank_candidate_cursors WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_rank_candidate_roots WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_rank_candidate_bindings WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_rank_candidate_nodes WHERE refs=0)",
+        [job], |r| r.get(0),
+    )?;
+    work.sql_reads += 1;
+    if empty {
+        finish!(true);
+    }
+    for table in [
+        "native_rank_candidate_applies",
+        "native_rank_candidate_cursors",
+    ] {
+        loop {
+            reserve!(2, 1, NODE_BYTES + 256);
+            let row: Option<(String, i64)> = db.query_row(
+                &format!("SELECT CASE WHEN octet_length(cursor) BETWEEN 1 AND 256 AND octet_length(metadata)<=65536 THEN cursor END,octet_length(metadata)+octet_length(cursor) FROM {table} WHERE job=?1 ORDER BY cursor LIMIT 1"),
+                [job], |r| Ok((cleanup_text(r, 0)?, r.get(1)?)),
+            ).optional()?;
+            work.sql_reads += 1;
+            let Some((cursor, length)) = row else {
+                break;
+            };
+            work.metadata_bytes += usize::try_from(length)
+                .map_err(|_| cleanup_error("invalid candidate cursor length"))?;
+            if db.execute(
+                &format!("DELETE FROM {table} WHERE job=?1 AND cursor=?2"),
+                params![job, cursor],
+            )? != 1
+            {
+                return Err(cleanup_error("candidate cleanup cursor disappeared"));
+            }
+            work.sql_writes += 1;
+            removed += 1;
+        }
+    }
+    loop {
+        // Root key + up to two native dependency reads + three writes.
+        reserve!(6, 3, 2 * (NODE_BYTES + 4 * 80) + 160);
+        let row: Option<(String, String)> = db.query_row(
+            "SELECT CASE WHEN identity='rank/v1/tree/empty' OR octet_length(identity)=77 THEN identity END,CASE WHEN octet_length(empty) BETWEEN 79 AND 80 THEN empty END FROM native_rank_candidate_roots WHERE job=?1 ORDER BY identity,empty LIMIT 1",
+            [job], |r| Ok((cleanup_text(r, 0)?, cleanup_text(r, 1)?)),
+        ).optional()?;
+        work.sql_reads += 1;
+        let Some((identity, empty)) = row else {
             break;
+        };
+        work.metadata_bytes += identity.len() + empty.len();
+        let mut tree = TreeDb {
+            db,
+            job,
+            work: CandidateWork::default(),
+        };
+        let mut graph = Graph {
+            db,
+            job,
+            work: super::Work::default(),
+        };
+        if identity != EMPTY_TREE {
+            let id = parse_tree_identity(&identity)
+                .ok_or_else(|| cleanup_error("invalid candidate root"))?;
+            tree.read_node(&id)
+                .map_err(|_| cleanup_error("candidate cleanup root corrupt"))?;
         }
-        if db.execute(
-            "DELETE FROM native_rank_candidate_applies WHERE job=?1 AND cursor=?2",
-            params![job, cursor],
-        )? != 1
-        {
-            return Err(cleanup_error("candidate tree Apply row disappeared"));
-        }
-        *bytes -= length;
-        used += 1;
-    }
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_applies WHERE job=?1)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok((used, false));
-    }
-
-    let mut q = db.prepare("SELECT CASE WHEN octet_length(cursor) BETWEEN 1 AND 256 THEN cursor END,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_cursors WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
-    let cursors = q
-        .query_map(params![job, cleanup_limit(budget)?], |r| {
-            Ok((cleanup_text(r, 0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (cursor, raw_length) in cursors {
-        let length = usize::try_from(raw_length)
-            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, raw_length))?;
-        if used >= budget || length > *bytes {
-            break;
-        }
-        if db.execute(
-            "DELETE FROM native_rank_candidate_cursors WHERE job=?1 AND cursor=?2",
-            params![job, cursor],
-        )? != 1
-        {
-            return Err(cleanup_error("candidate tree cursor disappeared"));
-        }
-        *bytes -= length;
-        used += 1;
-    }
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_cursors WHERE job=?1)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok((used, false));
-    }
-
-    let root_limit = (budget - used) / 3;
-    let mut q = db.prepare("SELECT CASE WHEN identity='rank/v1/tree/empty' OR octet_length(identity)=77 THEN identity END,CASE WHEN octet_length(empty) BETWEEN 79 AND 80 THEN empty END,octet_length(identity)+octet_length(empty) FROM native_rank_candidate_roots WHERE job=?1 ORDER BY identity,empty LIMIT ?2")?;
-    let roots = q
-        .query_map(params![job, cleanup_limit(root_limit)?], |r| {
-            Ok((
-                cleanup_text(r, 0)?,
-                cleanup_text(r, 1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (identity, empty, raw_length) in roots {
-        let length = usize::try_from(raw_length)
-            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, raw_length))?;
-        let node = identity != EMPTY_TREE;
-        let operations = 1 + usize::from(node) + 1;
-        if used + operations > budget || length > *bytes {
-            break;
-        }
+        let empty_id =
+            NodeId::parse(&empty).map_err(|_| cleanup_error("invalid candidate empty graph"))?;
+        graph
+            .node(&empty_id)
+            .map_err(|_| cleanup_error("candidate empty graph corrupt"))?;
         if db.execute(
             "DELETE FROM native_rank_candidate_roots WHERE job=?1 AND identity=?2 AND empty=?3",
             params![job, identity, empty],
         )? != 1
         {
-            return Err(cleanup_error("candidate tree root binding disappeared"));
+            return Err(cleanup_error("candidate cleanup root disappeared"));
         }
-        used += 1;
-        if node {
+        work.sql_writes += 1;
+        removed += 1;
+        if identity != EMPTY_TREE {
             decrement_tree_ref(db, &identity)?;
-            used += 1;
+            work.sql_writes += 1;
+            removed += 1;
         }
-        decrement_graph_ref(db, &empty)?;
-        used += 1;
-        *bytes -= length;
+        graph
+            .references_validated(&empty, -1)
+            .map_err(|_| cleanup_error("candidate empty graph absent"))?;
+        removed += 1;
+        add_cleanup_work(&mut work, tree.work, graph.work);
     }
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_roots WHERE job=?1)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok((used, false));
-    }
-
-    let binding_limit = (budget - used) / 2;
-    let mut q = db.prepare("SELECT CASE WHEN octet_length(identity)=77 THEN identity END,octet_length(identity) FROM native_rank_candidate_bindings WHERE job=?1 ORDER BY identity LIMIT ?2")?;
-    let bindings = q
-        .query_map(params![job, cleanup_limit(binding_limit)?], |r| {
-            Ok((cleanup_text(r, 0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (identity, raw_length) in bindings {
-        let length = usize::try_from(raw_length)
-            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, raw_length))?;
-        if used + 2 > budget || length > *bytes {
+    loop {
+        reserve!(4, 2, NODE_BYTES + 5 * 80);
+        let row: Option<String> = db.query_row(
+            "SELECT CASE WHEN octet_length(identity)=77 THEN identity END FROM native_rank_candidate_bindings WHERE job=?1 ORDER BY identity LIMIT 1",
+            [job], |r| cleanup_text(r, 0),
+        ).optional()?;
+        work.sql_reads += 1;
+        let Some(identity) = row else {
             break;
-        }
+        };
+        work.metadata_bytes += identity.len();
+        let mut tree = TreeDb {
+            db,
+            job,
+            work: CandidateWork::default(),
+        };
+        let id = parse_tree_identity(&identity)
+            .ok_or_else(|| cleanup_error("invalid candidate binding"))?;
+        tree.read_node(&id)
+            .map_err(|_| cleanup_error("candidate binding corrupt"))?;
         if db.execute(
             "DELETE FROM native_rank_candidate_bindings WHERE job=?1 AND identity=?2",
             params![job, identity],
         )? != 1
         {
-            return Err(cleanup_error("candidate tree node binding disappeared"));
+            return Err(cleanup_error("candidate binding disappeared"));
         }
         decrement_tree_ref(db, &identity)?;
-        used += 2;
-        *bytes -= length;
+        work.sql_writes += 2;
+        removed += 2;
+        add_cleanup_work(&mut work, tree.work, super::Work::default());
     }
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_bindings WHERE job=?1)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok((used, false));
-    }
-
-    while budget - used >= 4 {
-        let record: Option<(
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            i64,
-            bool,
-        )> = db
-            .query_row(
-                "SELECT CASE WHEN octet_length(identity)=77 THEN identity END,
-                 CASE WHEN octet_length(metadata)<=65536 THEN metadata END,
-                 CASE WHEN octet_length(left_id)=77 THEN left_id END,
-                 CASE WHEN octet_length(right_id)=77 THEN right_id END,
-                 CASE WHEN octet_length(aggregate) BETWEEN 79 AND 80 THEN aggregate END,
-                 octet_length(metadata)+octet_length(identity)+COALESCE(octet_length(left_id),0)+COALESCE(octet_length(right_id),0)+octet_length(aggregate),
-                 (left_id IS NULL OR octet_length(left_id)=77) AND (right_id IS NULL OR octet_length(right_id)=77)
-                 FROM native_rank_candidate_nodes WHERE refs=0 ORDER BY identity LIMIT 1",
-                [],
-                |r| {
-                    Ok((
-                        cleanup_text(r, 0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        cleanup_text(r, 4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((identity, metadata, left, right, aggregate, raw_length, widths_ok)) = record
-        else {
-            break;
+    loop {
+        // Key + parent/two children/aggregate reads + delete/three ref writes.
+        reserve!(9, 4, 4 * (NODE_BYTES + 4 * 80) + 80);
+        let row: Option<String> = db.query_row(
+            "SELECT CASE WHEN octet_length(identity)=77 THEN identity END FROM native_rank_candidate_nodes WHERE refs=0 ORDER BY identity LIMIT 1",
+            [], |r| cleanup_text(r, 0),
+        ).optional()?;
+        work.sql_reads += 1;
+        let Some(identity) = row else {
+            finish!(true);
         };
-        if !widths_ok {
-            return Err(cleanup_error(
-                "candidate tree cleanup child exceeds address width",
-            ));
-        }
-        let length = usize::try_from(raw_length)
-            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, raw_length))?;
-        if length > *bytes {
-            break;
-        }
-        let metadata = metadata
-            .ok_or_else(|| cleanup_error("candidate tree cleanup node exceeds scalar budget"))?;
-        let node: CandidateNode = serde_json::from_str(&metadata)
-            .map_err(|_| cleanup_error("candidate tree cleanup node is corrupt"))?;
+        work.metadata_bytes += identity.len();
         let id = parse_tree_identity(&identity)
-            .ok_or_else(|| cleanup_error("candidate tree cleanup address is invalid"))?;
-        if !node.valid() || candidate_id(&metadata) != id {
-            return Err(cleanup_error("candidate tree cleanup identity changed"));
-        }
-        let expected = match &node {
-            CandidateNode::Leaf { .. } => (None, None),
-            CandidateNode::Branch { left, right, .. } => {
-                (Some(left.identity()), Some(right.identity()))
-            }
+            .ok_or_else(|| cleanup_error("invalid candidate garbage address"))?;
+        let mut tree = TreeDb {
+            db,
+            job,
+            work: CandidateWork::default(),
         };
-        if (left, right) != expected || node.aggregate().identity() != aggregate {
-            return Err(cleanup_error("candidate tree cleanup references changed"));
+        let mut graph = Graph {
+            db,
+            job,
+            work: super::Work::default(),
+        };
+        let node = tree
+            .read_node(&id)
+            .map_err(|_| cleanup_error("candidate garbage corrupt"))?;
+        let children = match node {
+            CandidateNode::Leaf { .. } => Vec::new(),
+            CandidateNode::Branch {
+                ref left,
+                ref right,
+                ..
+            } => vec![left.clone(), right.clone()],
+        };
+        for child in &children {
+            tree.read_node(child)
+                .map_err(|_| cleanup_error("candidate garbage child corrupt"))?;
         }
+        graph
+            .node(node.aggregate())
+            .map_err(|_| cleanup_error("candidate garbage aggregate corrupt"))?;
         if db.execute(
             "DELETE FROM native_rank_candidate_nodes WHERE identity=?1 AND refs=0",
             [&identity],
         )? != 1
         {
-            return Err(cleanup_error("candidate tree cleanup node changed"));
+            return Err(cleanup_error("candidate garbage changed"));
         }
-        used += 1;
-        for child in [expected.0.as_ref(), expected.1.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            decrement_tree_ref(db, &child)?;
-            used += 1;
+        work.sql_writes += 1;
+        removed += 1;
+        for child in &children {
+            decrement_tree_ref(db, &child.identity())?;
+            work.sql_writes += 1;
+            removed += 1;
         }
-        decrement_graph_ref(db, &node.aggregate().identity())?;
-        used += 1;
-        *bytes -= length;
+        graph
+            .references_validated(&node.aggregate().identity(), -1)
+            .map_err(|_| cleanup_error("candidate aggregate absent"))?;
+        removed += 1;
+        add_cleanup_work(&mut work, tree.work, graph.work);
     }
-    let remains = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_applies WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_cursors WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_roots WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_bindings WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_nodes WHERE refs=0)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )?;
-    if remains {
-        return Ok((used, false));
-    }
-    Ok((used, true))
+}
+
+fn add_cleanup_work(work: &mut super::Work, tree: CandidateWork, graph: super::Work) {
+    work.add(super::Work {
+        sql_reads: tree.sql_reads,
+        sql_writes: tree.sql_writes,
+        metadata_bytes: tree.metadata_bytes,
+        vm_steps: tree.vm_steps,
+        max_live_node_bytes: tree.max_live_node_bytes,
+        ..super::Work::default()
+    });
+    work.add(graph);
 }
 
 fn parse_tree_identity(identity: &str) -> Option<CandidateNodeId> {
@@ -1147,27 +1036,11 @@ fn decrement_tree_ref(db: &Connection, identity: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn decrement_graph_ref(db: &Connection, identity: &str) -> rusqlite::Result<()> {
-    if db.execute(
-        "UPDATE native_rank_nodes SET refs=refs-1 WHERE identity=?1 AND refs>0",
-        [identity],
-    )? != 1
-    {
-        return Err(cleanup_error("candidate tree graph aggregate is absent"));
-    }
-    Ok(())
-}
-
 // Every variable-width cleanup column is SQL-guarded before Rust materializes
 // it. A NULL guard result is corrupt derived metadata, never child absence.
 fn cleanup_text(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<String> {
     row.get::<_, Option<String>>(column)?
         .ok_or_else(|| cleanup_error("candidate tree cleanup address exceeds its width"))
-}
-
-fn cleanup_limit(limit: usize) -> rusqlite::Result<i64> {
-    i64::try_from(limit)
-        .map_err(|_| cleanup_error("candidate tree cleanup row budget exceeds SQLite integer"))
 }
 
 fn cleanup_error(message: &'static str) -> rusqlite::Error {
@@ -1730,6 +1603,159 @@ mod tests {
             .unwrap();
         assert_eq!(result.outcome, CandidateReadOutcome::Qualified);
         serde_json::from_str(result.value.as_deref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn candidate_and_orthogonal_cleanup_share_receipt_and_preserve_imported_roots() {
+        use super::super::orthogonal;
+        let mut fixture = Fixture::new();
+        let mut root = CandidateRoot::empty(fixture.empty.clone());
+        let mut rectangle_root = orthogonal::Root::empty(9).unwrap();
+        let mut expected = Facts::default();
+        for seq in 0..4 {
+            let entry = test_entry(seq, seq as i64, 0);
+            let leaf = fixture.graph_leaf_with_guard(&entry, 0, &[]);
+            let point = orthogonal::Point {
+                order: entry.key.to_vec(),
+                scalar: vec![seq as u8; 9],
+                candidate: leaf.candidate,
+                facts: leaf.aggregate.clone(),
+            };
+            root = fixture
+                .update(&root, entry.key, Some(leaf), "mixed-cleanup-v1")
+                .0;
+            expected.append(entry.facts).unwrap();
+            let start = fixture
+                .store
+                .orthogonal_begin(
+                    &fixture.job,
+                    orthogonal::Mutation {
+                        name: "mixed",
+                        root: &rectangle_root,
+                        order: &point.order,
+                        point: Some(&point),
+                        version: "mixed-cleanup-v1",
+                        identity: &fixture.empty,
+                    },
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(start.outcome, Outcome::Written);
+            fixture.refresh();
+            let mut completed = start.root;
+            for _ in 0..2000 {
+                if completed.is_some() {
+                    break;
+                }
+                let step = fixture
+                    .store
+                    .orthogonal_advance(
+                        &fixture.job,
+                        "mixed",
+                        &combine_facts,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Written);
+                fixture.refresh();
+                completed = step.root;
+            }
+            rectangle_root = completed.expect("mixed geometry did not progress");
+        }
+        let original_spec = fixture.spec.clone();
+        let old = fixture.job.clone();
+        let (next_spec, next) = fixture.new_job("mixed-import");
+        assert_eq!(
+            fixture
+                .store
+                .candidate_tree_begin_update(
+                    &next,
+                    "keep",
+                    &root,
+                    test_entry(100, 100, 0).key,
+                    None,
+                    "mixed-cleanup-v1",
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap()
+                .outcome,
+            Outcome::Written
+        );
+        let next = fixture.store.reload(&next_spec.view_key).unwrap().unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .orthogonal_import(&next, "mixed", &rectangle_root, &valid_closure, &|| false)
+                .unwrap()
+                .outcome,
+            Outcome::Written
+        );
+        assert_eq!(fixture.store.restart(&old).unwrap(), Outcome::Written);
+        let reads = crate::events::FILE_READS.with(Cell::get);
+        let mut complete = false;
+        for round in 0..4096 {
+            let Some(job) = fixture.store.reload(&original_spec.view_key).unwrap() else {
+                complete = true;
+                break;
+            };
+            let (attempt, calls, bytes) =
+                measure_test_allocations(|| fixture.store.cleanup_with_work(&job).unwrap());
+            assert!(matches!(
+                attempt.outcome,
+                Outcome::Deferred | Outcome::Written
+            ));
+            assert!(attempt.work.rows() <= STEP_ROWS);
+            assert!(attempt.work.metadata_bytes <= STEP_BYTES);
+            assert!(
+                attempt.connection_vm_steps >= attempt.work.vm_steps as u64
+                    && attempt.connection_vm_steps <= 500_000
+            );
+            check_allocations(calls, bytes);
+            assert!(measured_peak_bytes() <= STEP_BYTES);
+            if round == 0 {
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+            }
+        }
+        assert!(complete, "mixed owners failed bounded eventual cleanup");
+        fixture.spec = next_spec;
+        fixture.refresh();
+        fixture.ready();
+        assert_eq!(
+            serde_json::to_value(ready_facts(
+                &fixture,
+                &root,
+                &CandidateBounds::default(),
+                u64::MAX
+            ))
+            .unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let empty = serde_json::to_string(&Facts::default()).unwrap();
+        let rectangle = orthogonal::Rectangle::default();
+        let attempt = fixture
+            .store
+            .orthogonal_rectangle(
+                &fixture.job,
+                orthogonal::ReadInput {
+                    name: "mixed",
+                    root: &rectangle_root,
+                    rectangle: &rectangle,
+                    included: u64::MAX,
+                    empty: &empty,
+                    cancelled: &|| false,
+                },
+                &combine_facts,
+                &valid_closure,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&attempt.value.unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
     }
 
     #[test]
