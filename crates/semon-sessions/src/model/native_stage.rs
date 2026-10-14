@@ -32,6 +32,33 @@ pub(crate) struct Entry {
     pub(crate) at: Option<Ref>,
 }
 
+/// A source's annotation queue is consumed in global entry order. Previously
+/// reached positions stay consumed when the next entry has an earlier native
+/// position; a range index can use the same scalar maximum for prefix ranks.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AnnotationReach {
+    position: Option<(u64, u32)>,
+}
+impl AnnotationReach {
+    pub(crate) fn push(&mut self, position: (u64, u32)) {
+        self.position = self.position.max(Some(position));
+    }
+    pub(crate) fn before(&self, position: (u64, u32)) -> bool {
+        self.position.is_some_and(|reached| position < reached)
+    }
+}
+
+/// Operation entries consume their indexed annotation instead of emitting an
+/// ordinary slot. Completed code-mode calls are represented by their children.
+pub(crate) fn ordinary_slot(kind: EntryKind, has_operations: bool) -> bool {
+    match kind {
+        EntryKind::Operation(_) => false,
+        EntryKind::Tool(ToolState::Ok | ToolState::Unknown) => !has_operations,
+        _ => true,
+    }
+}
+
 /// Events before the first timestamp inherit that first timestamp; later
 /// untimed events inherit the preceding timestamp. Producers first locate the
 /// first timed event, then replay source order with this scalar cursor.
@@ -324,6 +351,67 @@ pub(crate) fn signal_kind(signal: &events::Signal, tool: Option<String>) -> Sign
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_annotation_reach_matches_offset_queue_with_backwards_entries_and_operations() {
+        let annotations = [
+            ((1, 0), false),
+            ((4, 0), true),
+            ((4, 1), true),
+            ((6, 0), false),
+            ((9, 0), true),
+            ((12, 0), false),
+        ];
+        let mut reference = std::collections::VecDeque::from(annotations);
+        let mut indexed = reference.clone();
+        let mut reach = AnnotationReach::default();
+        let mut expected = Vec::new();
+        let mut found = Vec::new();
+        // These native placements are reached in timestamp order. Direct
+        // operation removal selects the first remaining same-offset marker.
+        for (step, (position, operation)) in [
+            ((4, 0), true),
+            ((9, 0), false),
+            ((2, 0), false),
+            ((4, 1), true),
+            ((11, 0), false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            while reference.front().is_some_and(|row| row.0 < position) {
+                expected.push(reference.pop_front().unwrap());
+            }
+            reach.push(position);
+            while indexed.front().is_some_and(|row| reach.before(row.0)) {
+                found.push(indexed.pop_front().unwrap());
+            }
+            if operation {
+                for (queue, output) in [(&mut reference, &mut expected), (&mut indexed, &mut found)]
+                {
+                    if let Some(at) = queue.iter().position(|row| row.1 && row.0.0 == position.0) {
+                        output.push(queue.remove(at).unwrap());
+                    }
+                }
+            }
+            assert_eq!(found, expected);
+            assert_eq!(indexed, reference);
+            if step == 1 {
+                reach = serde_json::from_str(&serde_json::to_string(&reach).unwrap()).unwrap();
+            }
+        }
+        assert_eq!(
+            indexed.into_iter().collect::<Vec<_>>(),
+            vec![((12, 0), false)]
+        );
+        for state in [ToolState::Ok, ToolState::Unknown] {
+            assert!(!ordinary_slot(EntryKind::Tool(state), true));
+            assert!(ordinary_slot(EntryKind::Tool(state), false));
+        }
+        assert!(ordinary_slot(EntryKind::Tool(ToolState::Err), true));
+        assert!(ordinary_slot(EntryKind::Tool(ToolState::Pending), true));
+        assert!(!ordinary_slot(EntryKind::Operation(ToolState::Ok), false));
+    }
 
     #[test]
     fn native_symbolic_time_prefix_survives_first_timestamp_append() {

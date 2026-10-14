@@ -4879,6 +4879,7 @@ impl<'a> Builder<'a> {
         }
         let mut slots = Vec::with_capacity(entries.len());
         let mut owner_cursor = native_stage::OwnerCursor::default();
+        let mut annotation_reach = BTreeMap::<usize, native_stage::AnnotationReach>::new();
         let mut signal_cursor = native_stage::SignalCursor::default();
         let mut started = BTreeSet::new();
         let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
@@ -4937,8 +4938,9 @@ impl<'a> Builder<'a> {
         };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
-                let at = entry.pos;
-                while queue.front().is_some_and(|extra| extra.pos() < at) {
+                let reach = annotation_reach.entry(entry.file).or_default();
+                reach.push(entry.pos);
+                while queue.front().is_some_and(|extra| reach.before(extra.pos())) {
                     let extra = queue.pop_front().expect("front");
                     slots.extend(extra_slot(
                         extra,
@@ -4964,11 +4966,10 @@ impl<'a> Builder<'a> {
             }
             // A code-mode call is drawn as its operations, unless it failed
             // or never finished: then it is also that step, after them.
-            if matches!(
+            if !native_stage::ordinary_slot(
                 entry.kind,
-                EntryKind::Tool(ToolState::Ok | ToolState::Unknown)
-            ) && entry.at.is_some_and(|at| operation_parents.contains(&at))
-            {
+                entry.at.is_some_and(|at| operation_parents.contains(&at)),
+            ) {
                 continue;
             }
             let block = entry.at.map_or(0, |at| event(self.files, at).b);
