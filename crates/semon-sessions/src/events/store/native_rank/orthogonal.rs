@@ -2015,9 +2015,12 @@ impl NativeStore {
             tx.commit().map_err(io::Error::other)?;
             // Releasing the read snapshot is necessary: a peer commit during
             // metadata I/O must not pass both checks in an old WAL snapshot.
+            // The final closure may itself do I/O, so recheck owned witnesses
+            // again after it returns before qualifying the output.
             if cancelled()
                 || !self.recheck(job)?
                 || !closure(&self.connection, job.id).map_err(io::Error::other)?
+                || !self.recheck(job)?
                 || cancelled()
             {
                 return Ok(None);
@@ -3723,6 +3726,133 @@ mod tests {
                 "refused read lost attempted work"
             );
             assert!(attempt.work.connection_vm_steps >= attempt.work.geometry.vm_steps as u64);
+        }
+    }
+    #[test]
+    fn orthogonal_all_read_apis_refuse_peer_changes_inside_final_closure() {
+        for operation in ["rectangle", "select", "rank", "seek"] {
+            for scope in ["owner", "source", "publication", "related-membership"] {
+                let mut fixture = Fixture::new();
+                let mut related = fixture.row.clone();
+                related.key = "related".into();
+                related.name = "related".into();
+                fixture.store.connection.execute(
+                    "INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES(?1,0,'claude',?2)",
+                    params![related.key, serde_json::to_string(&related).unwrap()],
+                ).unwrap();
+                let owner = fixture.store.owner_witness(&related).unwrap();
+                assert_eq!(
+                    fixture
+                        .store
+                        .admit(&fixture.job, &[], &[owner], "complete")
+                        .unwrap(),
+                    Outcome::Written
+                );
+                fixture.reload();
+                let root = fixture.populate(4);
+                fixture.qualify();
+                assert!(fixture.store.recheck(&fixture.job).unwrap());
+                let empty = serde_json::to_string(&Facts::default()).unwrap();
+                let rectangle = Rectangle::default();
+                let calls = Cell::new(0);
+                let peer =
+                    Connection::open(EventCache::path(&fixture.store.options.cache)).unwrap();
+                let mode: String = peer
+                    .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(mode.to_ascii_lowercase(), "wal");
+                let fence = |db: &Connection, _: i64| {
+                    let n = calls.get() + 1;
+                    calls.set(n);
+                    assert_eq!(db.is_autocommit(), n == 3, "callback snapshot lifetime");
+                    if n == 3 {
+                        let changed = match scope {
+                            "owner" => peer.execute(
+                                "UPDATE session_catalog SET metadata=metadata WHERE session_key='chosen'",
+                                [],
+                            )?,
+                            "source" => peer.execute(
+                                "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
+                                [fixture.row.sources[0].path.to_str().unwrap()],
+                            )?,
+                            "publication" => peer.execute(
+                                "UPDATE native_query_jobs SET revision=revision+1 WHERE job=?1",
+                                [fixture.job.id],
+                            )?,
+                            _ => peer.execute(
+                                "DELETE FROM session_catalog WHERE session_key='related'",
+                                [],
+                            )?,
+                        };
+                        assert_eq!(changed, 1, "peer mutation did not commit: {scope}");
+                        assert!(peer.is_autocommit());
+                    }
+                    // Deliberately return the closure's earlier successful
+                    // observation after peer I/O. Owned witnesses must catch
+                    // changes made inside this final callback themselves.
+                    Ok(true)
+                };
+                let input = ReadInput {
+                    name: "native",
+                    root: &root,
+                    rectangle: &rectangle,
+                    included: u64::MAX,
+                    empty: &empty,
+                    cancelled: &|| false,
+                };
+                let edge = Edge {
+                    key: order(4).encoded().to_vec(),
+                    inclusive: true,
+                };
+                let algebra = Algebra {
+                    combine: &combine,
+                    count: &count,
+                };
+                let (refused, work) = match operation {
+                    "rectangle" => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_rectangle(&fixture.job, input, &combine, &fence)
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                    "select" => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_select(&fixture.job, input, 0, algebra, &fence)
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                    "rank" => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_rank(&fixture.job, input, &edge, algebra, &fence)
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                    _ => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_seek(&fixture.job, input, &edge, false, algebra, &fence)
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                };
+                assert_eq!(
+                    calls.get(),
+                    3,
+                    "did not reach final closure: {operation}/{scope}"
+                );
+                assert!(refused, "mixed-generation output: {operation}/{scope}");
+                assert!(
+                    work.geometry.sql_reads > 0,
+                    "refused read lost attempted geometry work"
+                );
+                assert!(
+                    work.connection_vm_steps > 0
+                        && work.connection_vm_steps >= work.geometry.vm_steps as u64
+                );
+            }
         }
     }
     #[test]
