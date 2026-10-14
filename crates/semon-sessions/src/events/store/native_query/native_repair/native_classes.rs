@@ -13,12 +13,49 @@ struct Candidate {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SearchRange {
+    /// Search only classes in `(after, through]`.
+    after: u64,
+    through: u64,
+    /// Descending seek position within this range.
+    #[serde(default)]
+    before: Option<u64>,
+    /// One coalesced contiguous range queued after this one.
+    #[serde(default)]
+    pending_through: Option<u64>,
+}
+impl SearchRange {
+    fn new(after: u64, through: u64) -> Self {
+        Self {
+            after,
+            through,
+            before: None,
+            pending_through: None,
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Cursor {
+    /// Descending cursor for the original class range. Newer appended ranges
+    /// are searched separately, then this exact position is resumed.
     before: Option<u64>,
     candidate: Option<Candidate>,
     compare: Option<Compare>,
     complete: bool,
     class: Option<u64>,
+    /// Boundary for the descending base range; `before` tracks its exact
+    /// remaining prefix while appended classes live in `range`. Missing on the
+    /// old format, so a default triggers bounded requalification only.
+    #[serde(default)]
+    high_water: Option<u64>,
+    /// At most one active newer range and one coalesced pending high-water.
+    #[serde(default)]
+    range: Option<SearchRange>,
+    /// An exact match found below a newer range is held until every appended
+    /// candidate range above it has been excluded.
+    #[serde(default)]
+    match_class: Option<u64>,
 }
 impl Cursor {
     fn new() -> Self {
@@ -28,6 +65,9 @@ impl Cursor {
             compare: None,
             complete: false,
             class: None,
+            high_water: None,
+            range: None,
+            match_class: None,
         }
     }
 }
@@ -36,6 +76,38 @@ pub(crate) struct IdentityStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
     pub(crate) text: Option<OriginalText>,
+    /// VM steps from the class interner's explicit SQLite statements.
+    pub(crate) class_sql_vm_steps: i32,
+    /// Serialized cursor size, including the bounded exact comparison state.
+    pub(crate) serialized_cursor_bytes: usize,
+    /// Number of explicit source/runtime/publication and generation fence calls.
+    pub(crate) fence_checks: usize,
+    /// Records.finish rechecks touched source proofs before cursor commit.
+    pub(crate) records_finish_calls: usize,
+}
+
+#[derive(Default)]
+struct IdentityMeter {
+    class_sql_vm_steps: i32,
+    serialized_cursor_bytes: usize,
+    fence_checks: usize,
+    records_finish_calls: usize,
+}
+impl IdentityMeter {
+    fn statement(&mut self, statement: &rusqlite::Statement<'_>) {
+        self.class_sql_vm_steps += statement.get_status(rusqlite::StatementStatus::VmStep);
+    }
+    fn step(&self, outcome: Outcome, work: RepairWork, text: Option<OriginalText>) -> IdentityStep {
+        IdentityStep {
+            outcome,
+            work,
+            text,
+            class_sql_vm_steps: self.class_sql_vm_steps,
+            serialized_cursor_bytes: self.serialized_cursor_bytes,
+            fence_checks: self.fence_checks,
+            records_finish_calls: self.records_finish_calls,
+        }
+    }
 }
 
 /// Content-free representative. This metadata is not equality authority:
@@ -51,13 +123,21 @@ pub(crate) struct Representative {
     pub(crate) receipt: Receipt,
 }
 
-fn class_generation(db: &Connection, original: &[u8; 32]) -> io::Result<i64> {
-    db.query_row(
-        "SELECT coalesce(max(class),0) FROM native_original_classes WHERE original=?1",
-        params![original.as_slice()],
-        |row| row.get(0),
-    )
-    .map_err(io::Error::other)
+fn class_generation(
+    db: &Connection,
+    original: &[u8; 32],
+    work: &mut RepairWork,
+    meter: &mut IdentityMeter,
+) -> io::Result<u64> {
+    let mut query = db
+        .prepare("SELECT coalesce(max(class),0) FROM native_original_classes WHERE original=?1")
+        .map_err(io::Error::other)?;
+    let result = query.query_row(params![original.as_slice()], |row| row.get::<_, i64>(0));
+    meter.statement(&query);
+    let generation = result.map_err(io::Error::other)?;
+    work.metadata_rows += 1;
+    work.metadata_bytes += 8;
+    u64::try_from(generation).map_err(io::Error::other)
 }
 
 fn field_at(
@@ -66,8 +146,30 @@ fn field_at(
     record: u64,
     ordinal: u64,
     work: &mut RepairWork,
+    meter: &mut IdentityMeter,
 ) -> io::Result<(OriginalField, Receipt)> {
-    let row:(Option<String>,i64,Option<Vec<u8>>,Option<i64>,i64)=db.query_row("SELECT CASE WHEN octet_length(f.metadata)<=65536 THEN f.metadata END,octet_length(f.metadata),CASE WHEN octet_length(f.digest)=32 THEN f.digest END,f.decoded_bytes,r.end_offset FROM native_original_fields f JOIN native_original_records r ON r.original=f.original AND r.record_offset=f.record_offset WHERE f.original=?1 AND f.record_offset=?2 AND f.ordinal=?3 AND r.status IN('lexed','folded')",params![repair.original.as_slice(),seq_u64(record)?,seq_u64(ordinal)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).map_err(io::Error::other)?;
+    let mut query = db
+        .prepare("SELECT CASE WHEN octet_length(f.metadata)<=65536 THEN f.metadata END,octet_length(f.metadata),CASE WHEN octet_length(f.digest)=32 THEN f.digest END,f.decoded_bytes,r.end_offset FROM native_original_fields f JOIN native_original_records r ON r.original=f.original AND r.record_offset=f.record_offset WHERE f.original=?1 AND f.record_offset=?2 AND f.ordinal=?3 AND r.status IN('lexed','folded')")
+        .map_err(io::Error::other)?;
+    let result = query.query_row(
+        params![
+            repair.original.as_slice(),
+            seq_u64(record)?,
+            seq_u64(ordinal)?
+        ],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    );
+    meter.statement(&query);
+    let row: (Option<String>, i64, Option<Vec<u8>>, Option<i64>, i64) =
+        result.map_err(io::Error::other)?;
     work.metadata_rows += 1;
     work.metadata_bytes += usize::try_from(row.1).map_err(io::Error::other)? + 48;
     let field: OriginalField = serde_json::from_str(
@@ -105,6 +207,125 @@ fn field_at(
             sha256,
         },
     ))
+}
+
+/// Load one exact-fingerprint candidate from a bounded class interval. The
+/// descending indexed seek preserves the old latest-first behavior without a
+/// catalog materialization, COUNT, digest-only equality, or whole scan.
+fn candidate_in_range(
+    db: &Connection,
+    repair: &Repair,
+    receipt: &Receipt,
+    after: u64,
+    through: u64,
+    before: Option<u64>,
+    work: &mut RepairWork,
+    meter: &mut IdentityMeter,
+) -> io::Result<Option<(i64, i64, i64)>> {
+    let lower = seq_u64(after)?;
+    let upper = seq_u64(through)?;
+    let result = if let Some(before) = before {
+        let mut query = db
+            .prepare("SELECT class,record_offset,ordinal FROM native_original_classes WHERE original=?1 AND digest=?2 AND decoded_bytes=?3 AND class>?4 AND class<=?5 AND class<?6 ORDER BY class DESC LIMIT 1")
+            .map_err(io::Error::other)?;
+        let result = query
+            .query_row(
+                params![
+                    repair.original.as_slice(),
+                    receipt.sha256.as_slice(),
+                    seq_u64(receipt.decoded_bytes)?,
+                    lower,
+                    upper,
+                    seq_u64(before)?
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional();
+        meter.statement(&query);
+        result.map_err(io::Error::other)?
+    } else {
+        let mut query = db
+            .prepare("SELECT class,record_offset,ordinal FROM native_original_classes WHERE original=?1 AND digest=?2 AND decoded_bytes=?3 AND class>?4 AND class<=?5 ORDER BY class DESC LIMIT 1")
+            .map_err(io::Error::other)?;
+        let result = query
+            .query_row(
+                params![
+                    repair.original.as_slice(),
+                    receipt.sha256.as_slice(),
+                    seq_u64(receipt.decoded_bytes)?,
+                    lower,
+                    upper
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional();
+        meter.statement(&query);
+        result.map_err(io::Error::other)?
+    };
+    work.metadata_rows += 1;
+    work.metadata_bytes += 24;
+    Ok(result)
+}
+
+/// Migrate only incomplete legacy search state. The old before/candidate and
+/// Compare remain numeric, exact cursors; newly appended classes get a bounded
+/// first range before the old descending position resumes. serde(default) is
+/// safe here because these fields describe search coverage only, not source,
+/// identity, or equality authority.
+fn observe_generation(cursor: &mut Cursor, generation: u64, is_new: bool) -> bool {
+    if cursor.complete {
+        return true;
+    }
+    if cursor.high_water.is_none() {
+        if is_new {
+            cursor.high_water = Some(generation);
+        } else {
+            let floor = cursor
+                .before
+                .or_else(|| cursor.candidate.as_ref().map(|candidate| candidate.class))
+                .unwrap_or(0);
+            cursor.high_water = Some(floor);
+            if cursor.candidate.is_none() && cursor.before.is_none() {
+                // Class zero is below every allocation and leaves the resumed
+                // old interval empty after this full bounded restart.
+                cursor.before = Some(0);
+            }
+            if generation > floor {
+                cursor.range = Some(SearchRange::new(floor, generation));
+            }
+        }
+    }
+    let high_water = cursor.high_water.unwrap_or(generation);
+    if generation < high_water {
+        return false;
+    }
+    if cursor.before.is_some_and(|before| before > high_water) {
+        return false;
+    }
+    if let Some(range) = cursor.range.as_mut() {
+        if range.after != high_water
+            || range.after >= range.through
+            || range
+                .before
+                .is_some_and(|before| before <= range.after || before > range.through)
+            || range
+                .pending_through
+                .is_some_and(|pending| pending <= range.through || pending > generation)
+            || generation < range.through
+        {
+            return false;
+        }
+        if generation > range.through {
+            range.pending_through = Some(
+                range
+                    .pending_through
+                    .map_or(generation, |pending| pending.max(generation)),
+            );
+        }
+    } else if generation > high_water {
+        cursor.range = Some(SearchRange::new(high_water, generation));
+    }
+    true
 }
 
 fn absolute(record: u64, field: &OriginalField) -> io::Result<(u64, u64)> {
@@ -183,12 +404,15 @@ impl NativeStore {
         }
         let (record,ordinal):(i64,i64)=tx.query_row("SELECT record_offset,ordinal FROM native_original_classes WHERE original=?1 AND class=?2",params![repair.original.as_slice(),seq_u64(text.identity())?],|row|Ok((row.get(0)?,row.get(1)?))).map_err(io::Error::other)?;
         let record = u64::try_from(record).map_err(io::Error::other)?;
+        let mut work = RepairWork::default();
+        let mut meter = IdentityMeter::default();
         let (field, receipt) = field_at(
             &tx,
             repair,
             record,
             u64::try_from(ordinal).map_err(io::Error::other)?,
-            &mut RepairWork::default(),
+            &mut work,
+            &mut meter,
         )?;
         Ok(Representative {
             original: repair.original,
@@ -212,36 +436,54 @@ impl NativeStore {
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<IdentityStep> {
         let mut work = RepairWork::default();
+        let mut meter = IdentityMeter::default();
         if cancelled() {
-            return Ok(IdentityStep {
-                outcome: Outcome::Deferred,
-                work,
-                text: None,
-            });
+            return Ok(meter.step(Outcome::Deferred, work, None));
         }
-        if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
-            return Ok(IdentityStep {
-                outcome: Outcome::Conflict,
-                work,
-                text: None,
-            });
+        meter.fence_checks += 1;
+        if reference(records, witness)? != repair.source {
+            return Ok(meter.step(Outcome::Conflict, work, None));
         }
+        meter.fence_checks += 1;
+        if !self.runtime_current(&job.spec)? {
+            return Ok(meter.step(Outcome::Conflict, work, None));
+        }
+        meter.fence_checks += 1;
         check_record_view(&self.connection, job, witness, repair).map_err(io::Error::other)?;
-        let generation = class_generation(&self.connection, &repair.original)?;
-        work.metadata_rows += 1;
-        work.metadata_bytes += 8;
+        let generation =
+            class_generation(&self.connection, &repair.original, &mut work, &mut meter)?;
         let (field, receipt) = field_at(
             &self.connection,
             repair,
             repair.cursor.record_at,
             ordinal,
             &mut work,
+            &mut meter,
         )?;
-        let existing:Option<(i64,Option<String>,i64)>=self.connection.query_row("SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(ordinal)?],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(io::Error::other)?;
+        let mut identity_query = self.connection.prepare("SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3").map_err(io::Error::other)?;
+        let existing_result = identity_query
+            .query_row(
+                params![
+                    repair.original.as_slice(),
+                    seq_u64(repair.cursor.record_at)?,
+                    seq_u64(ordinal)?
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional();
+        meter.statement(&identity_query);
+        drop(identity_query);
+        let existing: Option<(i64, Option<String>, i64)> =
+            existing_result.map_err(io::Error::other)?;
+        work.metadata_rows += 1;
+        work.metadata_bytes += 8;
+        let is_new = existing.is_none();
         let (revision, mut cursor) =
             if let Some((revision, state, size)) = existing {
+                let size = usize::try_from(size).map_err(io::Error::other)?;
                 work.metadata_rows += 1;
-                work.metadata_bytes += usize::try_from(size).map_err(io::Error::other)?;
+                work.metadata_bytes += size;
+                meter.serialized_cursor_bytes = size;
                 (
                     Some(revision),
                     serde_json::from_str::<Cursor>(state.as_deref().ok_or_else(|| {
@@ -253,32 +495,78 @@ impl NativeStore {
                 (None, Cursor::new())
             };
         let cached = cursor.complete;
+        // A completed experimental cursor predating durable coverage has no
+        // proof that it exhausted appended classes. Keep it explicitly Pending
+        // after the normal source reauthorization instead of promoting it.
+        let legacy_complete = cached && cursor.high_water.is_none();
+        if !observe_generation(&mut cursor, generation, is_new) {
+            return Ok(meter.step(Outcome::Conflict, work, None));
+        }
         let mut allocate = false;
-        if !cursor.complete && cursor.candidate.is_none() {
-            let candidate:Option<(i64,i64,i64)>=self.connection.query_row("SELECT class,record_offset,ordinal FROM native_original_classes WHERE original=?1 AND digest=?2 AND decoded_bytes=?3 AND class<?4 ORDER BY class DESC LIMIT 1",params![repair.original.as_slice(),receipt.sha256.as_slice(),seq_u64(receipt.decoded_bytes)?,cursor.before.map(seq_u64).transpose()?.unwrap_or(i64::MAX)],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(io::Error::other)?;
-            work.metadata_rows += 1;
-            work.metadata_bytes += 24;
-            if let Some((class, record, ordinal)) = candidate {
-                let record = u64::try_from(record).map_err(io::Error::other)?;
-                let (candidate, _) = field_at(
-                    &self.connection,
-                    repair,
-                    record,
-                    u64::try_from(ordinal).map_err(io::Error::other)?,
-                    &mut work,
-                )?;
-                cursor.compare = Some(Compare::new(
-                    absolute(repair.cursor.record_at, &field)?,
-                    absolute(record, &candidate)?,
-                )?);
-                cursor.candidate = Some(Candidate {
-                    class: u64::try_from(class).map_err(io::Error::other)?,
-                    record,
-                    field: candidate,
-                });
+        if !cursor.complete && cursor.candidate.is_none() && cursor.compare.is_none() {
+            if cursor.range.is_none() && cursor.match_class.is_some() {
+                cursor.class = cursor.match_class.take();
+                cursor.complete = true;
             } else {
-                allocate = true;
-                cursor.complete = true
+                let candidate = if let Some(range) = cursor.range.as_ref() {
+                    candidate_in_range(
+                        &self.connection,
+                        repair,
+                        &receipt,
+                        range.after,
+                        range.through,
+                        range.before,
+                        &mut work,
+                        &mut meter,
+                    )?
+                } else if let Some(high_water) = cursor.high_water {
+                    if high_water != generation {
+                        return Ok(meter.step(Outcome::Conflict, work, None));
+                    }
+                    candidate_in_range(
+                        &self.connection,
+                        repair,
+                        &receipt,
+                        0,
+                        high_water,
+                        cursor.before,
+                        &mut work,
+                        &mut meter,
+                    )?
+                } else {
+                    return Err(io::Error::other("native identity lacks class high-water"));
+                };
+                if let Some((class, record, candidate_ordinal)) = candidate {
+                    let record = u64::try_from(record).map_err(io::Error::other)?;
+                    let (candidate, _) = field_at(
+                        &self.connection,
+                        repair,
+                        record,
+                        u64::try_from(candidate_ordinal).map_err(io::Error::other)?,
+                        &mut work,
+                        &mut meter,
+                    )?;
+                    cursor.compare = Some(Compare::new(
+                        absolute(repair.cursor.record_at, &field)?,
+                        absolute(record, &candidate)?,
+                    )?);
+                    cursor.candidate = Some(Candidate {
+                        class: u64::try_from(class).map_err(io::Error::other)?,
+                        record,
+                        field: candidate,
+                    });
+                } else if let Some(finished) = cursor.range.take() {
+                    cursor.high_water = Some(finished.through);
+                    if let Some(pending) = finished
+                        .pending_through
+                        .filter(|pending| *pending > finished.through)
+                    {
+                        cursor.range = Some(SearchRange::new(finished.through, pending));
+                    }
+                } else {
+                    allocate = true;
+                    cursor.complete = true;
+                }
             }
         }
         if let Some(compare) = cursor.compare.as_mut() {
@@ -286,6 +574,9 @@ impl NativeStore {
                 .candidate
                 .as_ref()
                 .ok_or_else(|| io::Error::other("native identity comparison lacks candidate"))?;
+            let in_newer_range = cursor.range.as_ref().is_some_and(|range| {
+                candidate.class > range.after && candidate.class <= range.through
+            });
             let left = part(
                 records,
                 repair,
@@ -306,75 +597,133 @@ impl NativeStore {
                 32 * 1024,
             )?;
             if let Some(result) = compare.result {
-                cursor.before = Some(candidate.class);
-                if result == Comparison::Equal {
-                    cursor.complete = true;
-                    cursor.class = Some(candidate.class)
-                }
-                cursor.candidate = None;
+                let candidate = cursor
+                    .candidate
+                    .take()
+                    .ok_or_else(|| io::Error::other("native identity candidate disappeared"))?;
                 cursor.compare = None;
+                if result == Comparison::Equal {
+                    if in_newer_range {
+                        let finished = cursor
+                            .range
+                            .take()
+                            .ok_or_else(|| io::Error::other("native identity range disappeared"))?;
+                        cursor.high_water = Some(finished.through);
+                        if let Some(pending) = finished
+                            .pending_through
+                            .filter(|pending| *pending > finished.through)
+                        {
+                            cursor.match_class = Some(candidate.class);
+                            cursor.range = Some(SearchRange::new(finished.through, pending));
+                        } else {
+                            cursor.class = Some(candidate.class);
+                            cursor.complete = true;
+                            cursor.match_class = None;
+                        }
+                    } else if cursor.range.is_some() {
+                        cursor.before = Some(candidate.class);
+                        cursor.match_class = Some(candidate.class);
+                    } else {
+                        cursor.complete = true;
+                        cursor.class = Some(candidate.class);
+                    }
+                } else if in_newer_range {
+                    cursor
+                        .range
+                        .as_mut()
+                        .ok_or_else(|| io::Error::other("native identity range disappeared"))?
+                        .before = Some(candidate.class);
+                } else {
+                    cursor.before = Some(candidate.class);
+                }
             }
         }
         if work.range_requests == 0 {
+            meter.fence_checks += 1;
             verify_member_anchor(records, repair, &mut work)?
         }
+        meter.records_finish_calls += 1;
         records.finish()?;
         if cancelled() {
-            return Ok(IdentityStep {
-                outcome: Outcome::Deferred,
-                work,
-                text: None,
-            });
+            return Ok(meter.step(Outcome::Deferred, work, None));
         }
+        meter.fence_checks += 1;
         if !self.runtime_current(&job.spec)? {
-            return Ok(IdentityStep {
-                outcome: Outcome::Conflict,
-                work,
-                text: None,
-            });
+            return Ok(meter.step(Outcome::Conflict, work, None));
         }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io::Error::other)?;
+        meter.fence_checks += 1;
         check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
-        let current:Option<i64>=tx.query_row("SELECT revision FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(ordinal)?],|row|row.get(0)).optional().map_err(io::Error::other)?;
+        meter.fence_checks += 2;
+        let mut current_query = tx
+            .prepare("SELECT revision FROM native_original_identities WHERE original=?1 AND record_offset=?2 AND ordinal=?3")
+            .map_err(io::Error::other)?;
+        let current_result = current_query
+            .query_row(
+                params![
+                    repair.original.as_slice(),
+                    seq_u64(repair.cursor.record_at)?,
+                    seq_u64(ordinal)?
+                ],
+                |row| row.get(0),
+            )
+            .optional();
+        meter.statement(&current_query);
+        drop(current_query);
+        let current: Option<i64> = current_result.map_err(io::Error::other)?;
         work.metadata_rows += 1;
         work.metadata_bytes += 8;
-        work.metadata_rows += 1;
-        work.metadata_bytes += 8;
-        if current != revision || class_generation(&tx, &repair.original)? != generation {
-            return Ok(IdentityStep {
-                outcome: Outcome::Conflict,
-                work,
-                text: None,
-            });
+        let current_generation = class_generation(&tx, &repair.original, &mut work, &mut meter)?;
+        if current != revision || current_generation != generation {
+            return Ok(meter.step(Outcome::Conflict, work, None));
         }
         if allocate {
+            if cursor.range.is_some()
+                || cursor.match_class.is_some()
+                || cursor.high_water != Some(generation)
+            {
+                return Ok(meter.step(Outcome::Conflict, work, None));
+            }
             let class = generation
                 .checked_add(1)
                 .ok_or_else(|| io::Error::other("native identity class sequence overflow"))?;
-            tx.execute(
-                "INSERT INTO native_original_classes VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    repair.original.as_slice(),
-                    class,
-                    seq_u64(repair.cursor.record_at)?,
-                    seq_u64(field.ordinal)?,
-                    receipt.sha256.as_slice(),
-                    seq_u64(receipt.decoded_bytes)?
-                ],
-            )
-            .map_err(io::Error::other)?;
+            let class_id = i64::try_from(class).map_err(io::Error::other)?;
+            let mut insert = tx
+                .prepare("INSERT INTO native_original_classes VALUES(?1,?2,?3,?4,?5,?6)")
+                .map_err(io::Error::other)?;
+            let result = insert.execute(params![
+                repair.original.as_slice(),
+                class_id,
+                seq_u64(repair.cursor.record_at)?,
+                seq_u64(field.ordinal)?,
+                receipt.sha256.as_slice(),
+                seq_u64(receipt.decoded_bytes)?
+            ]);
+            meter.statement(&insert);
+            result.map_err(io::Error::other)?;
             work.metadata_rows += 1;
             work.metadata_bytes += 64;
-            cursor.class = Some(u64::try_from(class).map_err(io::Error::other)?);
+            cursor.class = Some(class);
         }
         let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
+        meter.serialized_cursor_bytes = state.len();
         if !cached {
-            tx.execute("INSERT INTO native_original_identities VALUES(?1,?2,?3,0,?4) ON CONFLICT(original,record_offset,ordinal) DO UPDATE SET cursor=excluded.cursor,revision=revision+1",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(ordinal)?,state]).map_err(io::Error::other)?;
+            let mut update = tx
+                .prepare("INSERT INTO native_original_identities VALUES(?1,?2,?3,0,?4) ON CONFLICT(original,record_offset,ordinal) DO UPDATE SET cursor=excluded.cursor,revision=revision+1")
+                .map_err(io::Error::other)?;
+            let result = update.execute(params![
+                repair.original.as_slice(),
+                seq_u64(repair.cursor.record_at)?,
+                seq_u64(ordinal)?,
+                state
+            ]);
+            meter.statement(&update);
+            result.map_err(io::Error::other)?;
             work.metadata_rows += 1;
-            work.metadata_bytes += state.len();
+            work.metadata_bytes += meter.serialized_cursor_bytes;
         }
         if work.metadata_rows > ROWS
             || work.metadata_bytes > BYTES
@@ -384,7 +733,7 @@ impl NativeStore {
                 "native identity step exceeds bounded work",
             ));
         }
-        let text = if cursor.complete {
+        let text = if cursor.complete && !legacy_complete {
             let class = cursor
                 .class
                 .ok_or_else(|| io::Error::other("qualified identity lacks class"))?;
@@ -401,21 +750,17 @@ impl NativeStore {
             None
         };
         if cancelled() {
-            return Ok(IdentityStep {
-                outcome: Outcome::Deferred,
-                work,
-                text: None,
-            });
+            return Ok(meter.step(Outcome::Deferred, work, None));
         }
         tx.commit().map_err(io::Error::other)?;
-        Ok(IdentityStep {
-            outcome: if text.is_some() {
+        Ok(meter.step(
+            if text.is_some() {
                 Outcome::Written
             } else {
                 Outcome::Deferred
             },
             work,
             text,
-        })
+        ))
     }
 }
