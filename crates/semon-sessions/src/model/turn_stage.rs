@@ -1,7 +1,7 @@
 //! The native turn-end reducer, shared by complete and paged producers.
 //! Only content-free observations survive a page boundary. Entries and sent
 //! handoffs remain in the producer's indexed output, not in reducer state.
-use super::{End, ToolState};
+use super::{End, Event, ToolState, native_stage::EntryKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,6 +18,20 @@ pub(crate) enum Content {
 pub(crate) struct ToYou {
     pub(crate) id: String,
     pub(crate) waiting: bool,
+}
+
+pub(crate) struct HandoffEnd<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) kind: &'a str,
+    pub(crate) status: &'a str,
+}
+
+pub(crate) fn incoming_handoff(kind: &str, received: bool, started: bool) -> bool {
+    received && matches!(kind, "ask" | "relay" | "spawn") && !started
+}
+
+pub(crate) fn turn_id(owner: &str, file: &str, offset: u64, start: Option<&str>) -> String {
+    start.map_or_else(|| format!("{owner}:{file}:{offset}"), str::to_owned)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -57,6 +71,47 @@ impl GroupCursor {
 }
 
 impl EndFacts {
+    /// Observe one native entry. Only outgoing handoffs are content; every
+    /// handoff still keeps a group, and only native event references contribute
+    /// an observed completion timestamp. Return whether this entry replaced
+    /// the last content, so storage can checkpoint its lazy yield reference.
+    pub(crate) fn observe(
+        &mut self,
+        kind: EntryKind,
+        found: Option<&Event>,
+        outgoing: Option<HandoffEnd<'_>>,
+    ) -> bool {
+        let content = match kind {
+            EntryKind::A => Some(Content::Assistant),
+            EntryKind::Tool(state) => Some(Content::Tool { state }),
+            EntryKind::Operation(state) => Some(Content::Operation { state }),
+            EntryKind::H(_) => outgoing.as_ref().map(|handoff| Content::Handoff {
+                id: handoff.id.to_owned(),
+                failed: handoff.status == "err",
+            }),
+            _ => None,
+        };
+        let replaced = content.is_some();
+        let to_you = outgoing
+            .filter(|handoff| handoff.kind == "toyou")
+            .map(|handoff| ToYou {
+                id: handoff.id.to_owned(),
+                waiting: handoff.status == "wait",
+            });
+        let completed_at = found.and_then(|found| match kind {
+            EntryKind::A | EntryKind::Operation(_) => found.t,
+            EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
+            _ => None,
+        });
+        self.push(
+            content,
+            matches!(kind, EntryKind::H(_)),
+            to_you,
+            completed_at,
+        );
+        replaced
+    }
+
     pub(crate) fn push(
         &mut self,
         content: Option<Content>,
@@ -364,5 +419,53 @@ mod tests {
                 .why,
             "replied"
         );
+    }
+
+    #[test]
+    fn native_turn_observation_keeps_incoming_handoff_and_event_completion_distinct() {
+        let mut facts = EndFacts::default();
+        let found = Event {
+            t: Some(100),
+            ..Event::default()
+        };
+        assert!(!facts.observe(EntryKind::H(3), Some(&found), None));
+        assert_eq!(
+            facts
+                .finish(None, false, false, None, "done", || false)
+                .unwrap()
+                .why,
+            "no_reply"
+        );
+        let response = Event {
+            t: Some(9),
+            ..Event::default()
+        };
+        assert!(facts.observe(EntryKind::A, Some(&response), None));
+        assert!(facts.observe(
+            EntryKind::H(4),
+            Some(&found),
+            Some(HandoffEnd {
+                id: "h4",
+                kind: "toyou",
+                status: "done"
+            })
+        ));
+        assert_eq!(
+            facts.finish(None, false, false, None, "done", || false),
+            Some(End {
+                at: Some(9),
+                st: "done",
+                why: "toyou",
+                h: Some("h4".into())
+            })
+        );
+        assert!(incoming_handoff("spawn", true, false));
+        assert!(!incoming_handoff("spawn", true, true));
+        assert!(!incoming_handoff("toyou", true, false));
+        assert_eq!(
+            turn_id(":claude:same", "file", 3, None),
+            ":claude:same:file:3"
+        );
+        assert_eq!(turn_id("owner", "file", 3, Some("h4")), "h4");
     }
 }
