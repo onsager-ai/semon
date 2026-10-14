@@ -952,7 +952,7 @@ impl NativeStore {
         let id = identity(&witness.source.path, address);
         let read = self.source_candidate(
             source_candidate::Evidence::Current(witness),
-            &source_candidate::Request {
+            source_candidate::Request {
                 address,
                 member: if address.extra {
                     source_candidate::Member::Operation
