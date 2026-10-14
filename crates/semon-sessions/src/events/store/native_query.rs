@@ -268,6 +268,44 @@ pub(crate) struct CleanupAttempt {
     pub(crate) connection_vm_steps: u64,
 }
 
+/// Work attempted before an error, including statements later rolled back.
+/// Nested owners return their metadata counters only on success, so a failed
+/// attempt's known work is a lower bound, never an exact or committed receipt.
+#[derive(Debug)]
+pub(crate) struct CleanupReceipt {
+    pub(crate) known_work: super::native_rank::Work,
+    pub(crate) connection_vm_steps: u64,
+    pub(crate) work_complete: bool,
+}
+
+impl CleanupReceipt {
+    /// Also available through the compatibility `cleanup` error path.
+    pub(crate) fn from_error(error: &io::Error) -> Option<&Self> {
+        error
+            .get_ref()?
+            .downcast_ref::<CleanupFailure>()
+            .map(|failure| &failure.receipt)
+    }
+}
+
+#[derive(Debug)]
+struct CleanupFailure {
+    source: io::Error,
+    receipt: CleanupReceipt,
+}
+
+impl std::fmt::Display for CleanupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for CleanupFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JobSpec {
     pub(crate) view_key: String,
@@ -750,11 +788,7 @@ impl NativeStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(io::Error::other)?;
         for (source, text) in sources.iter().zip(&source_text) {
-            bytes += text.len()
-                + source.source.path.as_os_str().len()
-                + source.archive.as_ref().map_or(0, String::len)
-                + source.mutation.as_ref().map_or(0, String::len)
-                + 64;
+            bytes += source_witness_bytes(source, text);
         }
         for owner in owners {
             bytes += owner_bytes(owner);
@@ -1170,22 +1204,26 @@ impl NativeStore {
 
     /// Actual complete-attempt receipt, including the native controller's
     /// scalar admission, empty probes, bookkeeping and COMMIT VM instructions.
+    /// Errors preserve their original kind, message and source, with attempted
+    /// work accessible through `CleanupReceipt::from_error`. Their VM interval
+    /// includes the failed statement and transaction rollback; metadata work
+    /// is explicitly partial when an inner owner cannot return its counters.
     pub(crate) fn cleanup_with_work(&mut self, job: &Job) -> io::Result<CleanupAttempt> {
         let meter = super::native_rank::cleanup_vm_meter(&self.connection);
         let mut work = super::native_rank::Work::default();
-        let result = (|| {
+        let result: io::Result<Outcome> = (|| {
             let tx = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(io::Error::other)?;
             // Cleanup needs only a CAS and the final deletion size. Avoid
             // decoding the former job's cursor/state just to retire it.
+            work.sql_reads += 1;
             let header: Option<(bool, i64)> = tx.query_row(
                 "SELECT job=?2 AND phase='cleanup' AND revision=?3,64+octet_length(view_key)+COALESCE(octet_length(catalog_generation),0)+octet_length(runtime)+octet_length(phase)+octet_length(cursor)+octet_length(state) FROM native_query_jobs WHERE view_key=?1",
                 params![job.spec.view_key, job.id, job.revision],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             ).optional().map_err(io::Error::other)?;
-            work.sql_reads += 1;
             let Some((true, header_bytes)) = header else {
                 return Ok(Outcome::Conflict);
             };
@@ -1223,12 +1261,13 @@ impl NativeStore {
                         .map_err(io::Error::other)?;
                 }
             }
+            work.sql_reads += 1;
             let remains: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM native_query_rows WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_sources WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_owners WHERE job=?1)",
                 [job.id], |r| r.get(0),
             ).map_err(io::Error::other)?;
-            work.sql_reads += 1;
             let finished = rank_complete && !remains && header_bytes <= bytes_left;
+            work.sql_writes += 1;
             if finished {
                 tx.execute("DELETE FROM native_query_jobs WHERE job=?1", [job.id])
                     .map_err(io::Error::other)?;
@@ -1240,7 +1279,6 @@ impl NativeStore {
                 )
                 .map_err(io::Error::other)?;
             }
-            work.sql_writes += 1;
             tx.commit().map_err(io::Error::other)?;
             Ok(if finished {
                 Outcome::Written
@@ -1249,11 +1287,25 @@ impl NativeStore {
             })
         })();
         self.connection.progress_handler(0, None::<fn() -> bool>);
-        result.map(|outcome| CleanupAttempt {
-            outcome,
-            work,
-            connection_vm_steps: meter.load(std::sync::atomic::Ordering::Relaxed),
-        })
+        let connection_vm_steps = meter.load(std::sync::atomic::Ordering::Relaxed);
+        match result {
+            Ok(outcome) => Ok(CleanupAttempt {
+                outcome,
+                work,
+                connection_vm_steps,
+            }),
+            Err(source) => Err(io::Error::new(
+                source.kind(),
+                CleanupFailure {
+                    source,
+                    receipt: CleanupReceipt {
+                        known_work: work,
+                        connection_vm_steps,
+                        work_complete: false,
+                    },
+                },
+            )),
+        }
     }
     /// The native resolver can discover a new dependency without changing any
     /// captured row. Invalidating its private work preserves original custody.
@@ -1316,12 +1368,12 @@ fn cleanup_rows(
         if work.rows() + 2 > allowance {
             return Ok(false);
         }
+        work.sql_reads += 1;
         let row: Option<CleanupRow> = tx.query_row(
             "SELECT CASE WHEN octet_length(metadata)+octet_length(identity)+octet_length(kind)+64<=?2 THEN kind END,k0,k1,k2,k3,k4,ordinal,CASE WHEN octet_length(metadata)+octet_length(identity)+octet_length(kind)+64<=?2 THEN identity END,octet_length(metadata)+octet_length(identity)+octet_length(kind)+64 FROM native_query_rows WHERE job=?1 ORDER BY kind,k0,k1,k2,k3,k4,ordinal,identity LIMIT 1",
             params![job, i64::try_from(*bytes_left).map_err(|_| invalid("cleanup byte allowance invalid"))?],
             |r| Ok(CleanupRow { kind: r.get(0)?, order: [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?], ordinal: r.get(6)?, identity: r.get(7)?, bytes: r.get(8)? }),
         ).optional()?;
-        work.sql_reads += 1;
         let Some(CleanupRow {
             kind,
             order,
@@ -1340,10 +1392,10 @@ fn cleanup_rows(
         let identity = identity.ok_or_else(|| invalid("native cleanup identity absent"))?;
         *bytes_left -= bytes;
         work.metadata_bytes += bytes;
+        work.sql_writes += 1;
         if tx.execute("DELETE FROM native_query_rows WHERE job=?1 AND kind=?2 AND (k0,k1,k2,k3,k4,ordinal,identity)=(?3,?4,?5,?6,?7,?8,?9)",params![job,kind,order[0],order[1],order[2],order[3],order[4],ordinal,identity])? != 1 {
             return Err(invalid("native cleanup row disappeared"));
         }
-        work.sql_writes += 1;
     }
 }
 fn cleanup_witnesses(
@@ -1354,16 +1406,19 @@ fn cleanup_witnesses(
     bytes_left: &mut usize,
     work: &mut super::native_rank::Work,
 ) -> rusqlite::Result<bool> {
+    // Sources have seven INTEGER columns (56 bytes); reserve 64 for them.
+    // Owners have one INTEGER job column (8 bytes). BLOB/TEXT payloads are
+    // charged separately, using the same SQL expression for admission and debit.
     let (table, key, length) = match table {
         "sources" => (
             "native_query_sources",
             "path",
-            "octet_length(path)+octet_length(metadata)+COALESCE(octet_length(archive),0)+COALESCE(octet_length(mutation),0)+64",
+            "octet_length(path)+octet_length(metadata)+COALESCE(octet_length(mtime_ns),0)+COALESCE(octet_length(ctime_ns),0)+COALESCE(octet_length(prefix),0)+COALESCE(octet_length(tail),0)+COALESCE(octet_length(archive),0)+COALESCE(octet_length(mutation),0)+64",
         ),
         "owners" => (
             "native_query_owners",
             "identity",
-            "octet_length(identity)+octet_length(session_key)+COALESCE(octet_length(catalog),0)+COALESCE(octet_length(history),0)+COALESCE(octet_length(private_header),0)+COALESCE(octet_length(trace_header),0)+COALESCE(octet_length(slot_header),0)+COALESCE(octet_length(history_header),0)",
+            "octet_length(identity)+octet_length(session_key)+COALESCE(octet_length(catalog),0)+COALESCE(octet_length(history),0)+COALESCE(octet_length(private_header),0)+COALESCE(octet_length(trace_header),0)+COALESCE(octet_length(slot_header),0)+COALESCE(octet_length(history_header),0)+8",
         ),
         _ => return Err(invalid("unknown native cleanup table")),
     };
@@ -1371,12 +1426,12 @@ fn cleanup_witnesses(
         if work.rows() + 2 > allowance {
             return Ok(false);
         }
+        work.sql_reads += 1;
         let row: Option<(Option<String>, i64)> = tx.query_row(
             &format!("SELECT CASE WHEN {length}<=?2 THEN {key} END,{length} FROM {table} WHERE job=?1 ORDER BY {key} LIMIT 1"),
             params![job, i64::try_from(*bytes_left).map_err(|_| invalid("cleanup byte allowance invalid"))?],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
-        work.sql_reads += 1;
         let Some((key_value, bytes)) = row else {
             return Ok(true);
         };
@@ -1387,6 +1442,7 @@ fn cleanup_witnesses(
         let key_value = key_value.ok_or_else(|| invalid("native cleanup witness key absent"))?;
         *bytes_left -= bytes;
         work.metadata_bytes += bytes;
+        work.sql_writes += 1;
         if tx.execute(
             &format!("DELETE FROM {table} WHERE job=?1 AND {key}=?2"),
             params![job, key_value],
@@ -1394,7 +1450,6 @@ fn cleanup_witnesses(
         {
             return Err(invalid("native cleanup witness disappeared"));
         }
-        work.sql_writes += 1;
     }
 }
 
@@ -1414,8 +1469,26 @@ pub(super) fn job_current(db: &Connection, job: &Job) -> rusqlite::Result<bool> 
         })
         && witnesses_current(db, job.id)?)
 }
+// Match cleanup_witnesses' SQL debit so every admitted witness can retire
+// under the same byte ceiling, including optional Current ledger BLOBs.
+fn source_witness_bytes(source: &SourceWitness, metadata: &str) -> usize {
+    metadata.len()
+        + source.source.path.to_string_lossy().len()
+        + source.archive.as_ref().map_or(0, String::len)
+        + source.mutation.as_ref().map_or(0, String::len)
+        + source.ledger.as_ref().map_or(0, |ledger| {
+            ledger.stat.modified_ns.to_be_bytes().len()
+                + ledger
+                    .stat
+                    .changed_ns
+                    .map_or(0, |time| time.to_be_bytes().len())
+                + ledger.prefix.len()
+                + ledger.tail.len()
+        })
+        + 64
+}
 fn owner_bytes(owner: &OwnerWitness) -> usize {
-    owner.identity.len()
+    8 + owner.identity.len()
         + owner.key.len()
         + [
             &owner.catalog,
@@ -4444,6 +4517,529 @@ mod tests {
         let attempt = fixture.store.cleanup_with_work(&current).unwrap();
         assert_eq!(attempt.outcome, Outcome::Written);
         assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+    }
+
+    // Independent payload sum: every variable column in the source schema,
+    // seven 8-byte INTEGER payloads (job/present/dev/ino/size/resume_at/claim),
+    // and the cleanup owner's additional conservative 8-byte scalar reserve.
+    fn cleanup_source_payload_bytes(db: &Connection, job: i64) -> usize {
+        db.query_row(
+            "SELECT COALESCE(sum(7*8+8+length(CAST(path AS BLOB))+length(CAST(metadata AS BLOB))+COALESCE(length(mtime_ns),0)+COALESCE(length(ctime_ns),0)+COALESCE(length(prefix),0)+COALESCE(length(tail),0)+COALESCE(length(CAST(archive AS BLOB)),0)+COALESCE(length(CAST(mutation AS BLOB)),0)),0) FROM native_query_sources WHERE job=?1",
+            [job], |row| row.get::<_, i64>(0),
+        ).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn native_query_cleanup_source_blobs_obey_actual_payload_boundary_and_resume() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        fixture.store.connection.execute(
+            "UPDATE native_query_sources SET path='a',metadata='',mtime_ns=zeroblob(16),ctime_ns=zeroblob(16),prefix=zeroblob(32),tail=zeroblob(32),archive='archive',mutation='mutation' WHERE job=?1",
+            [job.id],
+        ).unwrap();
+        assert_eq!(fixture.store.connection.query_row(
+            "SELECT length(mtime_ns)+length(ctime_ns)+length(prefix)+length(tail) FROM native_query_sources WHERE job=?1",
+            [job.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 96);
+        let empty_payload = cleanup_source_payload_bytes(&fixture.store.connection, job.id);
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_query_sources SET metadata=?2 WHERE job=?1",
+                params![job.id, "x".repeat(BYTES - 16 - empty_payload)],
+            )
+            .unwrap();
+        assert_eq!(
+            cleanup_source_payload_bytes(&fixture.store.connection, job.id),
+            BYTES - 16
+        );
+        fixture.store.connection.execute(
+            "INSERT INTO native_query_sources SELECT job,'z','{}',present,dev,ino,size,mtime_ns,ctime_ns,resume_at,prefix,tail,claim,archive,mutation FROM native_query_sources WHERE job=?1",
+            [job.id],
+        ).unwrap();
+        let before = cleanup_source_payload_bytes(&fixture.store.connection, job.id);
+        fixture.store.restart(&job).unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let attempt = fixture.store.cleanup_with_work(&job).unwrap();
+        assert_eq!(attempt.outcome, Outcome::Deferred);
+        let remaining = cleanup_source_payload_bytes(&fixture.store.connection, job.id);
+        assert!(
+            remaining > 16,
+            "the next witness must exceed the residual allowance"
+        );
+        assert_eq!(attempt.work.metadata_bytes, before - remaining);
+        assert_eq!(attempt.work.metadata_bytes, BYTES - 16);
+        assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT path FROM native_query_sources WHERE job=?1",
+                    [job.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "z"
+        );
+        let current = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let attempt = fixture.store.cleanup_with_work(&current).unwrap();
+        assert_eq!(attempt.outcome, Outcome::Written);
+        assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+        assert!(fixture.store.reload(&job.spec.view_key).unwrap().is_none());
+    }
+
+    #[test]
+    fn native_query_cleanup_guards_oversize_source_blob_before_key_decode() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_query_sources SET prefix=zeroblob(?2) WHERE job=?1",
+                params![job.id, (2 * BYTES) as i64],
+            )
+            .unwrap();
+        fixture.store.restart(&job).unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let (attempt, _, allocated) =
+            crate::test_allocations::measure(|| fixture.store.cleanup_with_work(&job).unwrap());
+        assert_eq!(attempt.outcome, Outcome::Deferred);
+        assert_eq!(attempt.work.metadata_bytes, 0);
+        assert_eq!(attempt.work.sql_writes, 1, "only the revision may change");
+        assert!(attempt.work.rows() <= ROWS && attempt.connection_vm_steps > 0);
+        assert!(allocated < 128 * 1024 && crate::test_allocations::peak_bytes() < 128 * 1024);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT length(prefix) FROM native_query_sources WHERE job=?1",
+                    [job.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            (2 * BYTES) as i64
+        );
+    }
+
+    #[test]
+    fn native_query_maximum_admitted_source_retires_with_present_optional_and_absent_ledger() {
+        for state in ["populated", "without-ctime", "absent"] {
+            let mut fixture = Fixture::new(0);
+            let path = fixture.row.sources[0].path.to_string_lossy().into_owned();
+            match state {
+                "without-ctime" => {
+                    fixture
+                        .store
+                        .connection
+                        .execute("UPDATE files SET ctime_ns=NULL WHERE path=?1", [&path])
+                        .unwrap();
+                    fixture.row.sources[0].changed_ns = None;
+                }
+                "absent" => {
+                    fixture
+                        .store
+                        .connection
+                        .execute("DELETE FROM files WHERE path=?1", [&path])
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let mut source = fixture.source();
+            source.source.native_id.clear();
+            let fixed = source_witness_bytes(&source, &json(&source.source).unwrap());
+            source.source.native_id = "x".repeat(BYTES - fixed);
+            let mut job = fixture.store.begin(&fixture.spec()).unwrap();
+            source.source.native_id.push('x');
+            let error = fixture
+                .store
+                .admit(&job, std::slice::from_ref(&source), &[], "")
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("native witness metadata budget exceeded")
+            );
+            source.source.native_id.pop();
+            assert_eq!(
+                fixture.store.admit(&job, &[source], &[], "").unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(
+                cleanup_source_payload_bytes(&fixture.store.connection, job.id),
+                BYTES,
+                "{state}"
+            );
+            let blob_bytes: i64 = fixture.store.connection.query_row(
+                "SELECT COALESCE(length(mtime_ns),0)+COALESCE(length(ctime_ns),0)+COALESCE(length(prefix),0)+COALESCE(length(tail),0) FROM native_query_sources WHERE job=?1",
+                [job.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(
+                blob_bytes,
+                match state {
+                    "absent" => 0,
+                    "without-ctime" => 80,
+                    _ => 96,
+                }
+            );
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            fixture.store.restart(&job).unwrap();
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            let attempt = fixture.store.cleanup_with_work(&job).unwrap();
+            assert_eq!(attempt.outcome, Outcome::Deferred, "{state}");
+            assert_eq!(attempt.work.metadata_bytes, BYTES, "{state}");
+            assert!(attempt.work.rows() <= ROWS);
+            let current = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            let attempt = fixture.store.cleanup_with_work(&current).unwrap();
+            assert_eq!(attempt.outcome, Outcome::Written, "{state}");
+            assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+        }
+    }
+
+    #[test]
+    fn native_query_cleanup_owner_receipt_includes_job_scalar() {
+        let fixture = Fixture::new(0);
+        let job = fixture.store.connection.query_row(
+            "INSERT INTO native_query_jobs(view_key,version,runtime,phase,revision,cursor,state) VALUES('owner-payload',1,'runtime','cleanup',0,'','{}') RETURNING job",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap();
+        fixture.store.connection.execute(
+            "INSERT INTO native_query_owners VALUES(?1,'identity','key','catalog','history','private','trace','slot','original')",
+            [job],
+        ).unwrap();
+        let expected: usize = fixture.store.connection.query_row(
+            "SELECT 8+length(CAST(identity AS BLOB))+length(CAST(session_key AS BLOB))+length(CAST(catalog AS BLOB))+length(CAST(history AS BLOB))+length(CAST(private_header AS BLOB))+length(CAST(trace_header AS BLOB))+length(CAST(slot_header AS BLOB))+length(CAST(history_header AS BLOB)) FROM native_query_owners WHERE job=?1",
+            [job], |row| row.get::<_, i64>(0),
+        ).unwrap().try_into().unwrap();
+        let tx = fixture.store.connection.unchecked_transaction().unwrap();
+        let mut bytes_left = expected - 1;
+        let mut work = super::super::native_rank::Work::default();
+        assert!(!cleanup_witnesses(&tx, job, "owners", ROWS, &mut bytes_left, &mut work).unwrap());
+        assert_eq!(work.metadata_bytes, 0);
+        bytes_left = expected;
+        assert!(cleanup_witnesses(&tx, job, "owners", ROWS, &mut bytes_left, &mut work).unwrap());
+        assert_eq!(bytes_left, 0);
+        assert_eq!(work.metadata_bytes, expected);
+    }
+
+    fn failed_cleanup_receipt(error: &io::Error) -> &CleanupReceipt {
+        let receipt = CleanupReceipt::from_error(error).expect("cleanup failure lost its receipt");
+        assert!(
+            !receipt.work_complete,
+            "failed nested work cannot be claimed exact"
+        );
+        assert!(receipt.known_work.rows() <= ROWS && receipt.known_work.metadata_bytes <= BYTES);
+        assert!(receipt.connection_vm_steps > 0);
+        receipt
+    }
+
+    #[test]
+    fn native_query_cleanup_sql_abort_preserves_attempted_receipt_and_rollback() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        fixture
+            .store
+            .checkpoint(
+                &job,
+                "slots",
+                "two",
+                &serde_json::json!({}),
+                &[stage_row(0, 100), stage_row(1, 100)],
+                &|| false,
+            )
+            .unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        fixture.store.restart(&job).unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        fixture.store.connection.execute_batch(
+            "CREATE TEMP TRIGGER cleanup_test_abort BEFORE DELETE ON native_query_rows WHEN OLD.identity='slot:1' BEGIN SELECT RAISE(ABORT,'cleanup test abort'); END;",
+        ).unwrap();
+        // Independently measure the failed statement and rollback VM programs,
+        // rather than treating deleted rows as complete connection work.
+        fixture
+            .store
+            .connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "DELETE FROM native_query_rows WHERE job=?1 AND identity='slot:0'",
+                [job.id],
+            )
+            .unwrap();
+        let (original, failed_vm) = {
+            let mut statement = fixture
+                .store
+                .connection
+                .prepare("DELETE FROM native_query_rows WHERE job=?1 AND identity='slot:1'")
+                .unwrap();
+            let original = statement
+                .execute([job.id])
+                .map_err(io::Error::other)
+                .unwrap_err();
+            (
+                original,
+                statement.get_status(rusqlite::StatementStatus::VmStep) as u64,
+            )
+        };
+        let rollback_vm = {
+            let mut statement = fixture.store.connection.prepare("ROLLBACK").unwrap();
+            statement.execute([]).unwrap();
+            statement.get_status(rusqlite::StatementStatus::VmStep) as u64
+        };
+        assert!(failed_vm > 0 && rollback_vm > 0);
+        let changes = fixture.store.connection.total_changes();
+        let error = match fixture.store.cleanup_with_work(&job) {
+            Err(error) => error,
+            Ok(_) => panic!("ABORT was swallowed"),
+        };
+        assert_eq!(error.kind(), original.kind());
+        assert_eq!(error.to_string(), original.to_string());
+        let source = std::error::Error::source(error.get_ref().unwrap()).unwrap();
+        assert_eq!(source.to_string(), original.to_string());
+        let receipt = failed_cleanup_receipt(&error);
+        assert!(receipt.connection_vm_steps >= failed_vm + rollback_vm);
+        assert_eq!(
+            receipt.known_work.sql_writes, 2,
+            "count the failed delete as attempted work"
+        );
+        assert!(receipt.known_work.metadata_bytes > 200);
+        assert_eq!(
+            fixture.store.connection.total_changes(),
+            changes + 1,
+            "the first delete was attempted"
+        );
+        assert!(fixture.store.connection.is_autocommit());
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_query_rows WHERE job=?1",
+                    [job.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "the first delete must be rolled back"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .reload(&job.spec.view_key)
+                .unwrap()
+                .unwrap()
+                .revision,
+            job.revision
+        );
+        // The compatibility wrapper must retain the payload as well.
+        let error = fixture.store.cleanup(&job).unwrap_err();
+        failed_cleanup_receipt(&error);
+        fixture
+            .store
+            .connection
+            .execute_batch("DROP TRIGGER cleanup_test_abort")
+            .unwrap();
+        let attempt = fixture.store.cleanup_with_work(&job).unwrap();
+        assert_eq!(attempt.outcome, Outcome::Written);
+        assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+    }
+
+    #[test]
+    fn native_query_cleanup_corrupt_nested_metadata_reports_partial_work_and_keeps_import() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        let metadata = r#"{"Terminal":{"facts":"{}"}}"#;
+        let identity = format!("rank/v1/node/64/{:x}", Sha256::digest(metadata.as_bytes()));
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO native_rank_nodes VALUES(?1,64,?2,NULL,NULL,2)",
+                params![identity, r#"{"Terminal":{"facts":"[]"}}"#],
+            )
+            .unwrap();
+        for owner in [job.id, job.id + 1] {
+            fixture
+                .store
+                .connection
+                .execute(
+                    "INSERT INTO native_rank_bindings VALUES(?1,?2)",
+                    params![owner, identity],
+                )
+                .unwrap();
+        }
+        let memo = format!("rank/v1/memo/{}", "0".repeat(64));
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO native_rank_memos VALUES(?1,?2,'{}')",
+                params![job.id, memo],
+            )
+            .unwrap();
+        fixture.store.restart(&job).unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let changes = fixture.store.connection.total_changes();
+        let error = match fixture.store.cleanup_with_work(&job) {
+            Err(error) => error,
+            Ok(_) => panic!("corrupt metadata was swallowed"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("native rank cleanup binding node corrupt")
+        );
+        let receipt = failed_cleanup_receipt(&error);
+        assert!(
+            receipt.known_work.sql_reads > 0,
+            "the controller admission must remain known"
+        );
+        assert_eq!(
+            receipt.known_work.sql_writes, 0,
+            "nested counters were not returned"
+        );
+        assert_eq!(
+            fixture.store.connection.total_changes(),
+            changes + 1,
+            "nested memo delete was attempted"
+        );
+        assert!(fixture.store.connection.is_autocommit());
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT refs FROM native_rank_nodes WHERE identity=?1",
+                    [&identity],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_rank_bindings WHERE identity=?1",
+                    [&identity],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_rank_memos WHERE job=?1",
+                    [job.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "nested memo delete must roll back"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .reload(&job.spec.view_key)
+                .unwrap()
+                .unwrap()
+                .revision,
+            job.revision
+        );
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_rank_nodes SET metadata=?2 WHERE identity=?1",
+                params![identity, metadata],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.store.cleanup_with_work(&job).unwrap().outcome,
+            Outcome::Written
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT refs FROM native_rank_nodes WHERE identity=?1",
+                    [&identity],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "the imported root must survive predecessor cleanup"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_rank_bindings WHERE job=?1 AND identity=?2",
+                    params![job.id + 1, identity],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_query_cleanup_begin_failure_preserves_exact_connection_vm_and_error() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        fixture.store.restart(&job).unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        fixture
+            .store
+            .connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .unwrap();
+        let direct_meter = super::super::native_rank::cleanup_vm_meter(&fixture.store.connection);
+        let original = {
+            let mut statement = fixture.store.connection.prepare("BEGIN IMMEDIATE").unwrap();
+            let original = statement.execute([]).map_err(io::Error::other).unwrap_err();
+            assert!(statement.get_status(rusqlite::StatementStatus::VmStep) > 0);
+            original
+        };
+        let expected_vm = direct_meter.load(std::sync::atomic::Ordering::Relaxed);
+        fixture
+            .store
+            .connection
+            .progress_handler(0, None::<fn() -> bool>);
+        let error = match fixture.store.cleanup_with_work(&job) {
+            Err(error) => error,
+            Ok(_) => panic!("nested BEGIN was swallowed"),
+        };
+        assert_eq!(error.kind(), original.kind());
+        assert_eq!(error.to_string(), original.to_string());
+        let receipt = failed_cleanup_receipt(&error);
+        assert_eq!(receipt.connection_vm_steps, expected_vm);
+        assert_eq!(
+            receipt.known_work.rows(),
+            0,
+            "BEGIN failed before metadata admission"
+        );
+        assert!(
+            !fixture.store.connection.is_autocommit(),
+            "the preexisting transaction is owned by the caller"
+        );
+        fixture.store.connection.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            fixture.store.cleanup_with_work(&job).unwrap().outcome,
+            Outcome::Written
+        );
     }
 
     #[test]
