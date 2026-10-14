@@ -23,9 +23,9 @@ mod native_copilot;
 mod native_events;
 mod native_harness;
 mod native_metadata;
+mod native_object;
 mod native_record_source;
 mod native_record_time;
-mod native_object;
 mod native_retirement;
 pub(super) use native_object::SCHEMA as OBJECT_SCHEMA;
 pub(crate) use native_object::{
