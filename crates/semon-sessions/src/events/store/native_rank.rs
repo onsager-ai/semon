@@ -63,17 +63,42 @@ pub(super) fn cleanup(
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<(usize, bool)> {
-    let (used, complete) = candidate_tree::cleanup(db, job, budget, bytes)?;
-    if !complete || used == budget { return Ok((used, false)); }
-    cleanup_with_work(db, job, budget - used, bytes).map(|step| (used + step.removed, step.complete))
+    cleanup_with_work(db, job, budget, bytes).map(|step| (step.removed, step.complete))
 }
+
 pub(super) fn cleanup_with_work(
     db: &Connection,
     job: i64,
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<Cleanup> {
-    let step = orthogonal::cleanup_with_work(db, job, budget, bytes)?;
+    cleanup_with_allowance(db, job, budget, STEP_ROWS, bytes)
+}
+
+pub(super) fn cleanup_vm_meter(db: &Connection) -> Arc<AtomicU64> {
+    let meter = Arc::new(AtomicU64::new(0));
+    let observed = meter.clone();
+    db.progress_handler(
+        1,
+        Some(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    );
+    meter
+}
+
+/// Nested owners receive only the remaining metadata-statement allowance.
+/// The outer production owner measures the complete connection VM interval.
+pub(super) fn cleanup_with_allowance(
+    db: &Connection,
+    job: i64,
+    budget: usize,
+    allowance: usize,
+    bytes: &mut usize,
+) -> rusqlite::Result<Cleanup> {
+    let allowance = allowance.min(STEP_ROWS);
+    let step = candidate_tree::cleanup_with_allowance(db, job, budget, allowance, bytes)?;
     let mut removed = step.removed;
     let mut work = step.work;
     macro_rules! finish {
@@ -86,7 +111,7 @@ pub(super) fn cleanup_with_work(
         };
     }
     macro_rules! exhausted {()=>{{
-        if work.rows()<STEP_ROWS {
+        if work.rows()<allowance {
             let remains=db.query_row("SELECT EXISTS(SELECT 1 FROM native_rank_memos WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_bindings WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_nodes WHERE refs=0)",[job],|row|row.get::<_,bool>(0))?;work.sql_reads+=1;finish!(!remains);
         }
         finish!(false);
@@ -94,8 +119,20 @@ pub(super) fn cleanup_with_work(
     if !step.complete {
         finish!(false);
     }
+    let geometry = orthogonal::cleanup_with_allowance(
+        db,
+        job,
+        budget - removed,
+        allowance - work.rows(),
+        bytes,
+    )?;
+    removed += geometry.removed;
+    work.add(geometry.work);
+    if !geometry.complete {
+        finish!(false);
+    }
     loop {
-        if removed == budget || work.rows() + 2 > STEP_ROWS {
+        if removed == budget || work.rows() + 2 > allowance {
             exhausted!();
         }
         let record:Option<(Option<String>,i64,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity)=77 AND octet_length(metadata)<=65536 THEN identity END,octet_length(metadata)+octet_length(identity),(octet_length(identity)=77 AND octet_length(metadata)<=65536) FROM native_rank_memos WHERE job=?1 ORDER BY identity LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
@@ -123,7 +160,7 @@ pub(super) fn cleanup_with_work(
         removed += 1;
     }
     loop {
-        if removed + 2 > budget || work.rows() + 4 > STEP_ROWS {
+        if removed + 2 > budget || work.rows() + 4 > allowance {
             exhausted!();
         }
         let record:Option<(Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity) BETWEEN 79 AND 80 THEN identity END,(octet_length(identity) BETWEEN 79 AND 80) FROM native_rank_bindings WHERE job=?1 ORDER BY identity LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -163,7 +200,7 @@ pub(super) fn cleanup_with_work(
     }
     loop {
         // One key, parent and two child reads, parent delete and two ref writes.
-        if removed + 3 > budget || work.rows() + 7 > STEP_ROWS {
+        if removed + 3 > budget || work.rows() + 7 > allowance {
             exhausted!();
         }
         let record:Option<(Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity) BETWEEN 79 AND 80 THEN identity END,(octet_length(identity) BETWEEN 79 AND 80) FROM native_rank_nodes WHERE refs=0 ORDER BY identity LIMIT 1",[],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -839,10 +876,10 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    fn rows(&self) -> usize {
+    pub(super) fn rows(&self) -> usize {
         self.sql_reads + self.sql_writes
     }
-    fn add(&mut self, other: Work) {
+    pub(super) fn add(&mut self, other: Work) {
         self.sql_reads += other.sql_reads;
         self.sql_writes += other.sql_writes;
         self.metadata_bytes += other.metadata_bytes;

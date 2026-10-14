@@ -48,6 +48,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(SCHEMA)?;
     db.execute_batch(super::native_rank::SCHEMA)?;
     db.execute_batch(super::native_rank::CANDIDATE_TREE_SCHEMA)?;
+    db.execute_batch(super::native_rank::ORTHOGONAL_SCHEMA)?;
     db.execute_batch(native_repair::SCHEMA)?;
     db.execute_batch(native_repair::COMPARE_SCHEMA)?;
     db.execute_batch(candidate_delta::SCHEMA)?;
@@ -257,6 +258,12 @@ pub(crate) struct OwnerWitness {
     trace_header: Option<String>,
     slot_header: Option<String>,
     history_header: Option<String>,
+}
+
+pub(crate) struct CleanupAttempt {
+    pub(crate) outcome: Outcome,
+    pub(crate) work: super::native_rank::Work,
+    pub(crate) connection_vm_steps: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1156,54 +1163,94 @@ impl NativeStore {
         .transpose()
     }
     pub(crate) fn cleanup(&mut self, job: &Job) -> io::Result<Outcome> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(io::Error::other)?;
-        let actual = read_job(&tx, &job.spec.view_key).map_err(io::Error::other)?;
-        if actual
-            .as_ref()
-            .is_none_or(|a| a.id != job.id || a.phase != "cleanup" || a.revision != job.revision)
-        {
-            return Ok(Outcome::Conflict);
-        };
-        let mut budget = ROWS;
-        let mut bytes_left = BYTES;
-        let (rank_removed, rank_complete) =
-            super::native_rank::cleanup(&tx, job.id, budget, &mut bytes_left)
+        self.cleanup_with_work(job).map(|attempt| attempt.outcome)
+    }
+
+    /// Actual complete-attempt receipt, including the native controller's
+    /// scalar admission, empty probes, bookkeeping and COMMIT VM instructions.
+    pub(crate) fn cleanup_with_work(&mut self, job: &Job) -> io::Result<CleanupAttempt> {
+        let meter = super::native_rank::cleanup_vm_meter(&self.connection);
+        let mut work = super::native_rank::Work::default();
+        let result = (|| {
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(io::Error::other)?;
-        budget -= rank_removed;
-        // Row identities/cursors, not metadata values, are selected for bounded
-        // cleanup. Witness count is independently bounded by the closure cap.
-        let removed =
-            cleanup_rows(&tx, job.id, budget, &mut bytes_left).map_err(io::Error::other)?;
-        budget -= removed;
-        if budget > 0 {
-            budget -= cleanup_witnesses(&tx, job.id, "sources", budget, &mut bytes_left)
-                .map_err(io::Error::other)?;
-        }
-        if budget > 0 {
-            budget -= cleanup_witnesses(&tx, job.id, "owners", budget, &mut bytes_left)
-                .map_err(io::Error::other)?;
-        }
-        let remains:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM native_query_rows WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_sources WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_owners WHERE job=?1)",[job.id],|r|r.get(0)).map_err(io::Error::other)?;
-        let header_bytes:i64=tx.query_row("SELECT 64+octet_length(view_key)+COALESCE(octet_length(catalog_generation),0)+octet_length(runtime)+octet_length(phase)+octet_length(cursor)+octet_length(state) FROM native_query_jobs WHERE job=?1",[job.id],|r|r.get(0)).map_err(io::Error::other)?;
-        let finished = rank_complete && !remains && budget > 0 && header_bytes <= bytes_left as i64;
-        if finished {
-            tx.execute("DELETE FROM native_query_jobs WHERE job=?1", [job.id])
-                .map_err(io::Error::other)?;
-        } else {
-            tx.execute(
-                "UPDATE native_query_jobs SET revision=revision+1 WHERE job=?1",
-                [job.id],
+            // Cleanup needs only a CAS and the final deletion size. Avoid
+            // decoding the former job's cursor/state just to retire it.
+            let header: Option<(bool, i64)> = tx.query_row(
+                "SELECT job=?2 AND phase='cleanup' AND revision=?3,64+octet_length(view_key)+COALESCE(octet_length(catalog_generation),0)+octet_length(runtime)+octet_length(phase)+octet_length(cursor)+octet_length(state) FROM native_query_jobs WHERE view_key=?1",
+                params![job.spec.view_key, job.id, job.revision],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional().map_err(io::Error::other)?;
+            work.sql_reads += 1;
+            let Some((true, header_bytes)) = header else {
+                return Ok(Outcome::Conflict);
+            };
+            let header_bytes = usize::try_from(header_bytes).map_err(io::Error::other)?;
+            let mut bytes_left = BYTES;
+            // Reserve the final remains probe and revision/delete write before
+            // invoking any nested owner. Every nested allowance is residual.
+            let step = super::native_rank::cleanup_with_allowance(
+                &tx,
+                job.id,
+                ROWS,
+                ROWS - work.rows() - 2,
+                &mut bytes_left,
             )
             .map_err(io::Error::other)?;
-        }
-        tx.commit().map_err(io::Error::other)?;
-        Ok(if finished {
-            Outcome::Written
-        } else {
-            Outcome::Deferred
+            let rank_complete = step.complete;
+            work.add(step.work);
+            if rank_complete {
+                let allowance = ROWS - 2;
+                let rows_complete =
+                    cleanup_rows(&tx, job.id, allowance, &mut bytes_left, &mut work)
+                        .map_err(io::Error::other)?;
+                if rows_complete
+                    && cleanup_witnesses(
+                        &tx,
+                        job.id,
+                        "sources",
+                        allowance,
+                        &mut bytes_left,
+                        &mut work,
+                    )
+                    .map_err(io::Error::other)?
+                {
+                    cleanup_witnesses(&tx, job.id, "owners", allowance, &mut bytes_left, &mut work)
+                        .map_err(io::Error::other)?;
+                }
+            }
+            let remains: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_query_rows WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_sources WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_owners WHERE job=?1)",
+                [job.id], |r| r.get(0),
+            ).map_err(io::Error::other)?;
+            work.sql_reads += 1;
+            let finished = rank_complete && !remains && header_bytes <= bytes_left;
+            if finished {
+                tx.execute("DELETE FROM native_query_jobs WHERE job=?1", [job.id])
+                    .map_err(io::Error::other)?;
+                work.metadata_bytes += header_bytes;
+            } else {
+                tx.execute(
+                    "UPDATE native_query_jobs SET revision=revision+1 WHERE job=?1",
+                    [job.id],
+                )
+                .map_err(io::Error::other)?;
+            }
+            work.sql_writes += 1;
+            tx.commit().map_err(io::Error::other)?;
+            Ok(if finished {
+                Outcome::Written
+            } else {
+                Outcome::Deferred
+            })
+        })();
+        self.connection.progress_handler(0, None::<fn() -> bool>);
+        result.map(|outcome| CleanupAttempt {
+            outcome,
+            work,
+            connection_vm_steps: meter.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
     /// The native resolver can discover a new dependency without changing any
@@ -1248,52 +1295,63 @@ fn spec_current(db: &Connection, spec: &JobSpec) -> rusqlite::Result<bool> {
         .as_ref()
         == Some(expected))
 }
+struct CleanupRow {
+    kind: Option<String>,
+    order: [i64; 5],
+    ordinal: i64,
+    identity: Option<String>,
+    bytes: i64,
+}
+
 fn cleanup_rows(
     tx: &Transaction<'_>,
     job: i64,
-    budget: usize,
+    allowance: usize,
     bytes_left: &mut usize,
-) -> rusqlite::Result<usize> {
-    let mut q=tx.prepare("SELECT kind,k0,k1,k2,k3,k4,ordinal,identity,octet_length(metadata)+octet_length(identity)+64 FROM native_query_rows WHERE job=?1 ORDER BY kind,k0,k1,k2,k3,k4,ordinal,identity LIMIT ?2")?;
-    let mut rows = q.query(params![job, budget as i64])?;
-    let mut keys = Vec::new();
-    while let Some(row) = rows.next()? {
-        let bytes = usize::try_from(row.get::<_, i64>(8)?)
-            .map_err(|_| invalid("invalid native cleanup size"))?;
-        if bytes > *bytes_left {
-            break;
+    work: &mut super::native_rank::Work,
+) -> rusqlite::Result<bool> {
+    loop {
+        if work.rows() + 2 > allowance {
+            return Ok(false);
         }
+        let row: Option<CleanupRow> = tx.query_row(
+            "SELECT CASE WHEN octet_length(metadata)+octet_length(identity)+64<=?2 THEN kind END,k0,k1,k2,k3,k4,ordinal,CASE WHEN octet_length(metadata)+octet_length(identity)+64<=?2 THEN identity END,octet_length(metadata)+octet_length(identity)+64 FROM native_query_rows WHERE job=?1 ORDER BY kind,k0,k1,k2,k3,k4,ordinal,identity LIMIT 1",
+            params![job, i64::try_from(*bytes_left).map_err(|_| invalid("cleanup byte allowance invalid"))?],
+            |r| Ok(CleanupRow { kind: r.get(0)?, order: [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?], ordinal: r.get(6)?, identity: r.get(7)?, bytes: r.get(8)? }),
+        ).optional()?;
+        work.sql_reads += 1;
+        let Some(CleanupRow {
+            kind,
+            order,
+            ordinal,
+            identity,
+            bytes,
+        }) = row
+        else {
+            return Ok(true);
+        };
+        let bytes = usize::try_from(bytes).map_err(|_| invalid("invalid native cleanup size"))?;
+        if bytes > *bytes_left {
+            return Ok(false);
+        }
+        let kind = kind.ok_or_else(|| invalid("native cleanup kind absent"))?;
+        let identity = identity.ok_or_else(|| invalid("native cleanup identity absent"))?;
         *bytes_left -= bytes;
-        keys.push((
-            row.get::<_, String>(0)?,
-            RowKey {
-                order: [
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ],
-                ordinal: row.get(6)?,
-                identity: row.get(7)?,
-            },
-        ));
+        work.metadata_bytes += bytes;
+        if tx.execute("DELETE FROM native_query_rows WHERE job=?1 AND kind=?2 AND (k0,k1,k2,k3,k4,ordinal,identity)=(?3,?4,?5,?6,?7,?8,?9)",params![job,kind,order[0],order[1],order[2],order[3],order[4],ordinal,identity])? != 1 {
+            return Err(invalid("native cleanup row disappeared"));
+        }
+        work.sql_writes += 1;
     }
-    drop(rows);
-    drop(q);
-    let mut removed = 0;
-    for (kind, k) in keys {
-        removed+=tx.execute("DELETE FROM native_query_rows WHERE job=?1 AND kind=?2 AND (k0,k1,k2,k3,k4,ordinal,identity)=(?3,?4,?5,?6,?7,?8,?9)",params![job,kind,k.order[0],k.order[1],k.order[2],k.order[3],k.order[4],k.ordinal,k.identity])?;
-    }
-    Ok(removed)
 }
 fn cleanup_witnesses(
     tx: &Transaction<'_>,
     job: i64,
     table: &str,
-    budget: usize,
+    allowance: usize,
     bytes_left: &mut usize,
-) -> rusqlite::Result<usize> {
+    work: &mut super::native_rank::Work,
+) -> rusqlite::Result<bool> {
     let (table, key, length) = match table {
         "sources" => (
             "native_query_sources",
@@ -1307,31 +1365,37 @@ fn cleanup_witnesses(
         ),
         _ => return Err(invalid("unknown native cleanup table")),
     };
-    let mut q = tx.prepare(&format!(
-        "SELECT {key},{length} FROM {table} WHERE job=?1 ORDER BY {key} LIMIT ?2"
-    ))?;
-    let mut rows = q.query(params![job, budget as i64])?;
-    let mut keys = Vec::new();
-    while let Some(row) = rows.next()? {
-        let bytes = usize::try_from(row.get::<_, i64>(1)?)
-            .map_err(|_| invalid("invalid native cleanup size"))?;
-        if bytes > *bytes_left {
-            break;
+    loop {
+        if work.rows() + 2 > allowance {
+            return Ok(false);
         }
+        let row: Option<(Option<String>, i64)> = tx.query_row(
+            &format!("SELECT CASE WHEN {length}<=?2 THEN {key} END,{length} FROM {table} WHERE job=?1 ORDER BY {key} LIMIT 1"),
+            params![job, i64::try_from(*bytes_left).map_err(|_| invalid("cleanup byte allowance invalid"))?],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        work.sql_reads += 1;
+        let Some((key_value, bytes)) = row else {
+            return Ok(true);
+        };
+        let bytes = usize::try_from(bytes).map_err(|_| invalid("invalid native cleanup size"))?;
+        if bytes > *bytes_left {
+            return Ok(false);
+        }
+        let key_value = key_value.ok_or_else(|| invalid("native cleanup witness key absent"))?;
         *bytes_left -= bytes;
-        keys.push(row.get::<_, String>(0)?);
-    }
-    drop(rows);
-    drop(q);
-    let mut removed = 0;
-    for value in keys {
-        removed += tx.execute(
+        work.metadata_bytes += bytes;
+        if tx.execute(
             &format!("DELETE FROM {table} WHERE job=?1 AND {key}=?2"),
-            params![job, value],
-        )?;
+            params![job, key_value],
+        )? != 1
+        {
+            return Err(invalid("native cleanup witness disappeared"));
+        }
+        work.sql_writes += 1;
     }
-    Ok(removed)
 }
+
 fn read_job(db: &Connection, key: &str) -> rusqlite::Result<Option<Job>> {
     db.query_row("SELECT job,version,catalog_generation,runtime,phase,revision,cursor,state FROM native_query_jobs WHERE view_key=?1",[key],|r|{
         let state:String=r.get(7)?;
@@ -4134,6 +4198,114 @@ mod tests {
         assert_eq!(next.phase, "capture");
     }
     #[test]
+    fn native_query_cleanup_receipts_bound_actual_work_across_history_and_reopen() {
+        let mut first_vm = Vec::new();
+        for earlier in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(earlier);
+            let mut job = fixture.admitted();
+            let rows = (0..64)
+                .map(|rank| stage_row(rank, 1000))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                fixture
+                    .store
+                    .checkpoint(
+                        &job,
+                        "slots",
+                        "page",
+                        &serde_json::json!({}),
+                        &rows,
+                        &|| false
+                    )
+                    .unwrap(),
+                Outcome::Written
+            );
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            assert_eq!(fixture.store.restart(&job).unwrap(), Outcome::Written);
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            let reads = super::super::super::FILE_READS.with(Cell::get);
+            let (attempt, calls, bytes) =
+                crate::test_allocations::measure(|| fixture.store.cleanup_with_work(&job).unwrap());
+            assert_eq!(attempt.outcome, Outcome::Deferred);
+            assert!(attempt.work.sql_reads > 0 && attempt.work.sql_writes > 1);
+            assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+            assert!(
+                attempt.connection_vm_steps >= attempt.work.vm_steps as u64
+                    && attempt.connection_vm_steps <= 500_000
+            );
+            assert!(
+                calls > 0 && bytes <= 2 * BYTES && crate::test_allocations::peak_bytes() <= BYTES
+            );
+            first_vm.push(attempt.connection_vm_steps);
+            let stale = fixture.store.cleanup_with_work(&job).unwrap();
+            assert_eq!(stale.outcome, Outcome::Conflict);
+            assert_eq!(stale.work.sql_reads, 1);
+            assert_eq!(stale.work.sql_writes, 0);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            let mut finished = false;
+            for _ in 0..16 {
+                let Some(current) = fixture.store.reload(&job.spec.view_key).unwrap() else {
+                    finished = true;
+                    break;
+                };
+                let attempt = fixture.store.cleanup_with_work(&current).unwrap();
+                assert!(matches!(
+                    attempt.outcome,
+                    Outcome::Deferred | Outcome::Written
+                ));
+                assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+                assert!(
+                    attempt.connection_vm_steps >= attempt.work.vm_steps as u64
+                        && attempt.connection_vm_steps <= 500_000
+                );
+            }
+            assert!(finished, "cleanup did not resume: prefix {earlier}");
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+        }
+        assert!(
+            first_vm.windows(2).all(|pair| pair[1] <= pair[0] + 2048),
+            "fixed cleanup grew with native history: {first_vm:?}"
+        );
+    }
+
+    #[test]
+    fn native_query_cleanup_full_byte_row_retires_before_header_without_pending_forever() {
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        let metadata = serde_json::to_string(&"x".repeat(BYTES - 3 - 64 - 2)).unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO native_query_rows VALUES(?1,'slot',0,0,0,0,0,0,'max',?2)",
+                params![job.id, metadata],
+            )
+            .unwrap();
+        assert_eq!(fixture.store.restart(&job).unwrap(), Outcome::Written);
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let attempt = fixture.store.cleanup_with_work(&job).unwrap();
+        assert_eq!(attempt.outcome, Outcome::Deferred);
+        assert_eq!(attempt.work.metadata_bytes, BYTES);
+        assert!(attempt.work.rows() <= ROWS);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_query_rows WHERE job=?1",
+                    [job.id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let current = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let attempt = fixture.store.cleanup_with_work(&current).unwrap();
+        assert_eq!(attempt.outcome, Outcome::Written);
+        assert!(attempt.work.rows() <= ROWS && attempt.work.metadata_bytes <= BYTES);
+    }
+
+    #[test]
     fn native_query_primitive_append_changes_tail_only_and_old_missing_primitives_remain_pending() {
         let fixture = Fixture::new(0);
         let path = fixture.row.sources[0].path.to_str().unwrap();
@@ -5230,6 +5402,12 @@ mod tests {
             ).unwrap(),
             0,
         );
+        assert_eq!(
+            standalone.query_row(
+                "SELECT (SELECT count(*) FROM sqlite_schema WHERE name GLOB 'native_orthogonal_*' OR name GLOB 'native_rank_candidate_*')+(SELECT count(*) FROM sqlite_temp_schema WHERE name GLOB 'native_orthogonal_*' OR name GLOB 'native_rank_candidate_*')",
+                [], |row| row.get::<_, i64>(0),
+            ).unwrap(), 0,
+        );
     }
 
     #[test]
@@ -5366,6 +5544,11 @@ mod tests {
             "native_rank_candidate_roots",
             "native_rank_candidate_cursors",
             "native_rank_candidate_applies",
+            "native_orthogonal_nodes",
+            "native_orthogonal_roots",
+            "native_orthogonal_work",
+            "native_orthogonal_frames",
+            "native_orthogonal_gc",
             "native_candidate_changes",
             "native_candidate_interests",
             "native_original_copilot_started",
@@ -5556,6 +5739,11 @@ mod tests {
                 ("native_rank_candidate_roots", "table"),
                 ("native_rank_candidate_cursors", "table"),
                 ("native_rank_candidate_applies", "table"),
+                ("native_orthogonal_nodes", "table"),
+                ("native_orthogonal_roots", "table"),
+                ("native_orthogonal_work", "table"),
+                ("native_orthogonal_frames", "table"),
+                ("native_orthogonal_gc", "table"),
                 ("native_candidate_changes", "table"),
                 ("native_candidate_interests", "table"),
                 ("native_candidate_change_path", "index"),
