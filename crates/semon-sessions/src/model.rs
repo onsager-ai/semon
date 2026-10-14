@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod relation_stage;
 pub(crate) mod summary;
+pub(crate) mod turn_stage;
 use serde_json::Value;
 
 #[cfg(test)]
@@ -5348,12 +5349,8 @@ impl<'a> Builder<'a> {
     fn groups(&self, index: usize, entries: &[Entry]) -> Vec<Group> {
         let mut started = BTreeSet::new();
         let mut open: Vec<Group> = Vec::new();
-        let mut current: Option<usize> = None;
+        let mut cursor = turn_stage::GroupCursor::default();
         for (position, entry) in entries.iter().enumerate() {
-            if matches!(entry.kind, EntryKind::Gap) {
-                current = None;
-                continue;
-            }
             let incoming = match entry.kind {
                 EntryKind::H(handoff) => {
                     let found = &self.handoffs[handoff];
@@ -5364,7 +5361,11 @@ impl<'a> Builder<'a> {
                 EntryKind::U => true,
                 _ => false,
             };
-            if incoming || current.is_none() {
+            let Some((group, starts)) = cursor.push(matches!(entry.kind, EntryKind::Gap), incoming)
+            else {
+                continue;
+            };
+            if starts {
                 let start = match entry.kind {
                     EntryKind::H(handoff) if incoming => {
                         started.insert(handoff);
@@ -5382,9 +5383,8 @@ impl<'a> Builder<'a> {
                         .or(entry.t),
                     entries: Vec::new(),
                 });
-                current = Some(open.len() - 1);
             }
-            open[current.expect("open turn")].entries.push(position);
+            open[group].entries.push(position);
         }
         open
     }
@@ -5419,7 +5419,7 @@ impl<'a> Builder<'a> {
                     _ => None,
                 })
                 .collect();
-            let Some(mut end) = self.end(
+            let Some(end) = self.end(
                 index,
                 &turn.entries,
                 entries,
@@ -5430,25 +5430,6 @@ impl<'a> Builder<'a> {
             ) else {
                 continue;
             };
-            if !matches!(end.st, "work" | "wait")
-                && !matches!(end.why, "unfinished_step" | "no_reply")
-            {
-                end.at = turn
-                    .entries
-                    .iter()
-                    .filter_map(|position| {
-                        let entry = &entries[*position];
-                        let at = entry.at?;
-                        let found = event(self.files, at);
-                        match entry.kind {
-                            EntryKind::A => found.t,
-                            EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
-                            EntryKind::Operation(_) => found.t,
-                            _ => None,
-                        }
-                    })
-                    .max();
-            }
             for position in &turn.entries {
                 owners[*position] = Some(turns.len());
             }
@@ -5498,135 +5479,66 @@ impl<'a> Builder<'a> {
         sent: &[usize],
         last: bool,
     ) -> Option<End> {
-        let content: Vec<&Entry> = members
-            .iter()
-            .map(|position| &entries[*position])
-            .filter(|entry| match entry.kind {
-                EntryKind::A | EntryKind::Tool(_) | EntryKind::Operation(_) => true,
+        let mut facts = turn_stage::EndFacts::default();
+        let mut last_content_at = None;
+        for position in members {
+            let entry = &entries[*position];
+            let outgoing = match entry.kind {
                 EntryKind::H(handoff) => sent.contains(&handoff),
                 _ => false,
-            })
-            .collect();
-        let has_h = members
-            .iter()
-            .any(|position| matches!(entries[*position].kind, EntryKind::H(_)));
-        if start.is_none() && !u && content.is_empty() && !has_h {
-            return None;
-        }
-        if last && self.sessions[index].out.waiting_for.is_some() {
-            return Some(End {
-                at: None,
-                st: "wait",
-                why: if self.sessions[index].out.waiting_for.as_deref() == Some("permission prompt")
-                {
-                    "permission"
-                } else {
-                    "input"
-                },
-                h: None,
-            });
-        }
-        if last && self.sessions[index].out.state == "work" {
-            return Some(End {
-                at: None,
-                st: "work",
-                why: "working",
-                h: None,
-            });
-        }
-        if let Some(handoff) = sent
-            .iter()
-            .rev()
-            .find(|handoff| self.handoffs[**handoff].out.kind == "toyou")
-        {
-            let found = &self.handoffs[*handoff].out;
-            return Some(End {
-                at: None,
-                st: if found.status == "wait" {
-                    "wait"
-                } else {
-                    "done"
-                },
-                why: "toyou",
-                h: Some(found.id.clone()),
-            });
-        }
-        let start = start.map(|handoff| &self.handoffs[handoff].out);
-        if start.is_some_and(|start| start.status == "err") {
-            return Some(End {
-                at: None,
-                st: "err",
-                why: "failed",
-                h: None,
-            });
-        }
-        let last_content = content.last();
-        match last_content.map(|entry| entry.kind) {
-            Some(EntryKind::Operation(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
+            };
+            let content = match entry.kind {
+                EntryKind::A => Some(turn_stage::Content::Assistant),
+                EntryKind::Tool(state) => Some(turn_stage::Content::Tool { state }),
+                EntryKind::Operation(state) => Some(turn_stage::Content::Operation { state }),
+                EntryKind::H(handoff) if outgoing => Some(turn_stage::Content::Handoff {
+                    id: self.handoffs[handoff].out.id.clone(),
+                    failed: self.handoffs[handoff].out.status == "err",
+                }),
+                _ => None,
+            };
+            if content.is_some() {
+                last_content_at = entry.at;
             }
-            Some(EntryKind::Tool(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            // Reached only outside the running last turn of a working
-            // session, or for a yielded command still running there.
-            Some(EntryKind::Tool(ToolState::Pending))
-                if !last_content
-                    .and_then(|entry| entry.at)
-                    .is_some_and(|at| self.live_yield(index, at)) =>
-            {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "unfinished_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::H(handoff)) if self.handoffs[handoff].out.status == "err" => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "handoff_failed",
-                    h: Some(self.handoffs[handoff].out.id.clone()),
-                });
-            }
-            _ => {}
-        }
-        if start.is_some_and(|start| start.kind == "spawn" && start.status == "done") {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "returned",
-                h: None,
+            let to_you = match entry.kind {
+                EntryKind::H(handoff) if outgoing && self.handoffs[handoff].out.kind == "toyou" => {
+                    Some(turn_stage::ToYou {
+                        id: self.handoffs[handoff].out.id.clone(),
+                        waiting: self.handoffs[handoff].out.status == "wait",
+                    })
+                }
+                _ => None,
+            };
+            let completed_at = entry.at.and_then(|at| {
+                let found = event(self.files, at);
+                match entry.kind {
+                    EntryKind::A => found.t,
+                    EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
+                    EntryKind::Operation(_) => found.t,
+                    _ => None,
+                }
             });
+            facts.push(
+                content,
+                matches!(entry.kind, EntryKind::H(_)),
+                to_you,
+                completed_at,
+            );
         }
-        if content
-            .iter()
-            .any(|entry| matches!(entry.kind, EntryKind::A))
-        {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "replied",
-                h: None,
-            });
-        }
-        Some(End {
-            at: None,
-            st: "idle",
-            why: "no_reply",
-            h: None,
-        })
+        facts.finish(
+            start.map(|handoff| {
+                let start = &self.handoffs[handoff].out;
+                (
+                    start.status == "err",
+                    start.kind == "spawn" && start.status == "done",
+                )
+            }),
+            u,
+            last,
+            self.sessions[index].out.waiting_for.as_deref(),
+            self.sessions[index].out.state,
+            || last_content_at.is_some_and(|at| self.live_yield(index, at)),
+        )
     }
 }
 
@@ -5665,7 +5577,7 @@ fn tool_state(found: &Event) -> ToolState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ToolState {
     Ok,
     Err,
