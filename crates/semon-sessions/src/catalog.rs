@@ -3951,6 +3951,7 @@ mod tests {
             .status,
             404
         );
+        core.close();
     }
 
     #[test]
