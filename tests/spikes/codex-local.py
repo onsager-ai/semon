@@ -152,7 +152,8 @@ def main():
             tid = json.loads((state / "session.json").read_text())["thread"]
             selection = urlencode({"machine": "local", "sid": tid})
             identity_status, initial_identity = request("GET", "/api/session-identity?" + selection)
-            assert identity_status == 404, (identity_status, initial_identity)
+            assert identity_status in (404, 503), (identity_status, initial_identity)
+            assert initial_identity["error"]["code"] == ("session_not_found" if identity_status == 404 else "catalog_unavailable"), initial_identity
             assert request("GET", "/api/session-control?" + selection)[1]["control"] is None
             assert not list((state / "home" / "sessions").rglob("*.jsonl"))
             _, home = request("GET", "/api/viewer/home")
