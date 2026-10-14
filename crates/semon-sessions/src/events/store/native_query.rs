@@ -3,6 +3,8 @@
 use super::*;
 use crate::model::summary::{CatalogRow, CatalogSource};
 
+mod native_repair;
+
 pub(crate) const ROWS: usize = 64;
 pub(crate) const BYTES: usize = 1024 * 1024;
 const STATE_BYTES: usize = 64 * 1024;
@@ -38,6 +40,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("DROP TRIGGER IF EXISTS native_catalog_owner_update;")?;
     db.execute_batch(SCHEMA)?;
     db.execute_batch(super::native_rank::SCHEMA)?;
+    db.execute_batch(native_repair::SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![SCHEMA_KEY, SCHEMA_VERSION.to_string()],
