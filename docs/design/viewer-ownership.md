@@ -63,9 +63,11 @@ selects a writable destination. Current role qualification reads generation-boun
 ledgers and independently indexed sidecars in the Catalog transaction; it does
 not load complete event indexes, transcript slots or byte-proof pages. Every
 physical ledger field and sidecar observation remains fenced. A partial publication cannot prove unique
-ownership; cold/provisional or virtual handoff identities use shared native Query derivation, including received-copy policy,
-rather than preparing a compatibility workspace model. This cold fallback still
-prepares a native cohort and remains a scaling boundary to remove.
+ownership. Cold, provisional, invalidated and virtual-only identities cannot select
+controls and never trigger a native cohort to infer ownership. Qualified aliases
+use indexed native bindings and the same generation/role checks; literal IDs win
+before presentation suffixes. Received copies retain the existing earlier-owner
+policy. Ordinary native publication supplies the missing evidence independently.
 
 Sessions retain source-scoped catalog pages, metadata search, native resolution,
 transcript pagination, qualified field expansion and live revalidation. Hosts

@@ -1263,24 +1263,71 @@ impl ViewerCore {
         self.follow();
         let views = self.views();
         let labels = native_machine_ids(&views);
-        let now = model::now_ms();
-        let mut selected = None;
-        let mut complete = true;
-        for (index, (key, view)) in views.iter().enumerate() {
-            complete &= !view.catalog_observation_pending();
-            let source = if key.is_empty() { "local" } else { key };
-            match crate::catalog::qualified_current_identity(view.options(), source, id) {
-                Ok(Some(identity)) => {
-                    if view
-                        .evidence
-                        .local_query_target(&identity.catalog_key, now)?
-                        .is_none()
-                    {
-                        complete = false;
-                        continue;
+        let lookup = |view: &MachineView,
+                      source: &str,
+                      id: &str|
+         -> Result<
+            Option<crate::CatalogSessionIdentity>,
+            crate::CatalogIdentityError,
+        > {
+            let mut selected =
+                crate::catalog::qualified_current_identity(view.options(), source, id)?;
+            if selected.is_none() {
+                for harness in ["claude", "codex", "copilot"] {
+                    let resolved = crate::session_catalog_resolve_native(
+                        view.options(),
+                        source,
+                        harness,
+                        id,
+                        crate::CatalogReadScope::Current,
+                    )?;
+                    match resolved.state {
+                        crate::CatalogNativeResolutionState::Pending => continue,
+                        crate::CatalogNativeResolutionState::Resolved => {}
+                        _ => return Err(crate::CatalogIdentityError::Unavailable),
                     }
+                    let key = resolved
+                        .catalog_key
+                        .as_deref()
+                        .ok_or(crate::CatalogIdentityError::Unavailable)?;
+                    let identity =
+                        crate::catalog::qualified_current_identity(view.options(), source, key)?
+                            .ok_or(crate::CatalogIdentityError::Unavailable)?;
+                    if identity.generation != resolved.generation.as_deref().unwrap_or("")
+                        || identity.native_id.as_deref() != Some(id)
+                        || selected
+                            .as_ref()
+                            .is_some_and(|prior| prior.catalog_key != identity.catalog_key)
+                    {
+                        return Err(crate::CatalogIdentityError::Unavailable);
+                    }
+                    selected = Some(identity);
+                }
+            }
+            if let Some(identity) = &selected {
+                if identity.native_id.is_none()
+                    || view
+                        .evidence
+                        .local_query_target(&identity.catalog_key, model::now_ms())
+                        .ok()
+                        .flatten()
+                        .is_none()
+                {
+                    return Err(crate::CatalogIdentityError::Unavailable);
+                }
+            }
+            Ok(selected)
+        };
+        let mut selected = None;
+        for (index, (key, view)) in views.iter().enumerate() {
+            if view.catalog_observation_pending() {
+                return Ok(None);
+            }
+            let source = if key.is_empty() { "local" } else { key };
+            match lookup(view, source, id) {
+                Ok(Some(_)) => {
+                    // Received copies give way to an earlier qualified owner.
                     if selected.is_some() {
-                        // Received copies give way to an earlier owner.
                         if index < self.droppable() {
                             return Ok(None);
                         }
@@ -1289,33 +1336,35 @@ impl ViewerCore {
                     }
                 }
                 Ok(None) => {}
-                Err(_) => complete = false,
+                Err(_) => return Ok(None),
             }
         }
         // Literal native IDs win before interpreting a presentation alias.
-        let alias = id
-            .rsplit_once('@')
-            .is_some_and(|(_, label)| labels.iter().any(|candidate| candidate == label));
-        if complete && (selected.is_some() || (!alias && !id.starts_with("unsent:"))) {
-            return Ok(selected);
+        if selected.is_none()
+            && let Some((own, label)) = id.rsplit_once('@')
+        {
+            for (index, (key, view)) in views.iter().enumerate() {
+                if labels[index] != label {
+                    continue;
+                }
+                let source = if key.is_empty() { "local" } else { key };
+                match lookup(view, source, own) {
+                    Ok(Some(_)) if selected.is_none() => {
+                        selected = Some((key.clone(), label.to_owned()))
+                    }
+                    Ok(Some(_)) | Err(_) => return Ok(None),
+                    Ok(None) => {}
+                }
+            }
         }
-        // Cold/provisional publications and virtual handoff identities use
-        // the shared native semantic derivation. They never prepare Built or
-        // retain a compatibility workspace model solely to bind controls.
-        let parts = views
+        // A publication/audit that starts during lookup cannot lend ownership.
+        if views
             .iter()
-            .map(|(key, view)| Ok((key.clone(), view.evidence.query_at(now)?)))
-            .collect::<io::Result<Vec<_>>>()?;
-        let native = QueryRead::new(parts, self.droppable());
-        if native.plan.conflicts.contains(id) {
+            .any(|(_, view)| view.catalog_observation_pending())
+        {
             return Ok(None);
         }
-        Ok(native.plan.owners.get(id).map(|(index, _)| {
-            (
-                views[*index].0.clone(),
-                native.plan.machine_ids[*index].clone(),
-            )
-        }))
+        Ok(selected)
     }
     /// The V1 tree: every machine's roots, each node with its machine's
     /// id as `machine`.
@@ -1554,6 +1603,27 @@ mod tests {
         std::fs::remove_file(second.claude_home.join("projects/project/shared.jsonl")).unwrap();
         write(&second, "replacement");
         assert!(core.invalidate("second"));
+        assert_eq!(
+            core.session_machine_key("replacement").unwrap(),
+            None,
+            "invalidated ownership must await native publication"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            assert_eq!(
+                core.respond("GET", "/api/sessions", "machine=second", None)
+                    .status,
+                200
+            );
+            if core.session_machine_key("replacement").unwrap().as_deref() == Some("second") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native ownership publication did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(
             core.session_machine_key("replacement").unwrap().as_deref(),
             Some("second")

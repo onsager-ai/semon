@@ -4051,6 +4051,18 @@ mod tests {
             ("first-key".into(), first.options.clone()),
             ("second-key".into(), second.options.clone()),
         ]);
+        let cold_reads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        assert_eq!(
+            core.session_machine_key("first-session").unwrap(),
+            None,
+            "cold control lookup must wait for publication"
+        );
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            cold_reads,
+            "cold control lookup decoded source history"
+        );
+        publish_core_native(&core);
         assert_eq!(
             core.session_machine_key("first-session")
                 .unwrap()
@@ -4069,6 +4081,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(identity.0, "first-key");
+        let alias = format!("first-session@{}", identity.1);
+        assert_eq!(
+            core.session_view_identity(&alias).unwrap(),
+            Some(identity.clone())
+        );
+
         let inventory = body_of(&core.respond("GET", "/api/session-sources", "", None));
         assert!(
             inventory["items"]
@@ -4094,7 +4112,7 @@ mod tests {
 
     #[test]
     fn published_control_ownership_reads_only_selected_role_metadata_and_no_models() {
-        for unrelated in [0, 256] {
+        for unrelated in [0, 256, 2048] {
             let first = machine("same-host", "selected");
             let second = machine("same-host", "peer");
             for n in 0..unrelated {
@@ -4186,7 +4204,13 @@ mod tests {
                 [],
             )
             .unwrap();
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
         assert_eq!(core.session_machine_key("selected").unwrap(), None);
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            before,
+            "partial ownership lookup loaded history to infer completeness"
+        );
     }
 
     #[test]
