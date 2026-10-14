@@ -151,19 +151,33 @@ def main():
             # a qualified Catalog identity may expose its control snapshot.
             tid = json.loads((state / "session.json").read_text())["thread"]
             selection = urlencode({"machine": "local", "sid": tid})
+            report["cases"]["native_bootstrap"] = {"thread": tid, "qualified": False}
 
             def snap():
                 def selected_control():
                     status, result = request("GET", "/api/session-control?" + selection)
                     assert status == 200, (status, result)
                     snapshot = result.get("control")
+                    report["cases"]["native_bootstrap"]["last_control"] = snapshot
                     if snapshot is not None:
                         assert snapshot["thread"] == tid, snapshot
                     return snapshot
 
                 return until(selected_control)
 
-            snap()
+            try:
+                snap()
+            except TimeoutError:
+                status, identity = request("GET", "/api/session-identity?" + selection)
+                report["cases"]["native_bootstrap"].update(
+                    identity_status=status,
+                    identity_response=identity,
+                    native_rollout_count=sum(1 for _ in (state / "home" / "sessions").rglob("*.jsonl")),
+                )
+                raise AssertionError(
+                    "Empty launched native thread has no qualified Catalog/control bootstrap; "
+                    "first-message usability remains a release blocker"
+                ) from None
             status, identity = request("GET", "/api/session-identity?" + selection)
             assert status == 200, (status, identity)
             identity = identity["identity"]
@@ -171,6 +185,7 @@ def main():
             assert identity["harness"] == "codex", identity
             assert identity["native_id"] == tid, identity
             assert identity["owner_qualification"] == "qualified", identity
+            report["cases"]["native_bootstrap"]["qualified"] = True
             report["cases"]["native_read_contract"] = {
                 "retired_model_status": 404,
                 "qualified_selected_identity": identity,
