@@ -11222,18 +11222,22 @@ fn native_point_owner_publishes_atomically_with_catalog_and_serves_indexed_all_k
 
 #[test]
 fn native_point_publication_failure_rolls_back_catalog_headers_postings_and_epoch() {
-    let home = Home::new();
-    home.top(
-        "owner",
-        &[human("owner", ts(0, 0), "private native prompt sentinel")],
-    );
+    let home = relay_home();
     let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
     let inputs = crate::inputs(&home.options).unwrap();
     let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    assert!(
+        prepared
+            .native_points
+            .relations
+            .values()
+            .any(|relation| { relation.kind == "relay" && !relation.placements.is_empty() })
+    );
     let db =
         rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
     db.execute_batch("CREATE TRIGGER fail_native_point BEFORE INSERT ON native_point_postings BEGIN SELECT RAISE(ABORT,'point failure'); END;").unwrap();
-    assert!(cache.publish_partial_catalog_fenced(&prepared).is_err());
+    let error = cache.publish_partial_catalog_fenced(&prepared).unwrap_err();
+    assert!(error.to_string().contains("point failure"), "{error}");
     for table in [
         "session_catalog",
         "native_point_publications",

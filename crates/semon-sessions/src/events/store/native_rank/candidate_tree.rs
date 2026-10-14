@@ -152,6 +152,8 @@ pub(crate) struct CandidateWork {
     pub(crate) sqlite_vm_steps: u64,
     pub(crate) apply_visits: usize,
     pub(crate) nodes_written: usize,
+    /// Actual structural-node SELECT attempts, excluding Graph and controls.
+    pub(crate) structural_reads: usize,
     pub(crate) max_depth: usize,
     pub(crate) max_cursor_bytes: usize,
     pub(crate) max_apply_bytes: usize,
@@ -453,6 +455,7 @@ impl TreeDb<'_> {
             )
             .map_err(io::Error::other)?;
         q.reset_status(rusqlite::StatementStatus::VmStep);
+        self.work.structural_reads += 1;
         let row: Option<(
             Option<String>,
             Option<String>,
@@ -1844,6 +1847,47 @@ mod tests {
     }
 
     #[test]
+    fn source_neighbor_leaf_on_last_read_preserves_24_node_budget() {
+        let mut fixture = Fixture::new();
+        let mut root = CandidateRoot::empty(fixture.empty.clone());
+        let mut keys = Vec::new();
+        for position in 0..24 {
+            let mut entry = test_entry(position, 0, 0);
+            entry.candidate = [0; 32];
+            entry.candidate[position / 8] = 1 << (7 - position % 8);
+            entry.key[..37].fill(0);
+            entry.key[37..].copy_from_slice(&entry.candidate);
+            let leaf = fixture.graph_leaf(&entry, 0);
+            root = fixture.update(&root, entry.key, Some(leaf), "facts-v1").0;
+            keys.push(entry.key);
+        }
+        keys.sort();
+        fixture.ready();
+        let mut stage = unpublished_stage(&mut fixture);
+        fixture
+            .store
+            .candidate_tree_source_begin_neighbor(
+                &stage,
+                "last-node",
+                &root,
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        refresh_source_stage(&fixture, &mut stage);
+        let step = fixture
+            .store
+            .candidate_tree_source_advance_neighbor(&stage, "last-node", &valid_closure, &|| false)
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Written);
+        assert!(step.complete);
+        assert_eq!(step.point.unwrap().key, keys[0]);
+        assert_eq!(step.work.structural_reads, 24);
+    }
+
+    #[test]
     fn source_neighbor_is_resumable_structural_and_does_not_grant_query_ready() {
         let mut fixture = Fixture::new();
         let mut root = CandidateRoot::empty(fixture.empty.clone());
@@ -1917,6 +1961,7 @@ mod tests {
                 .unwrap();
             assert_eq!(step.outcome, Outcome::Written);
             assert!(step.work.sql_reads + step.work.sql_writes <= STEP_ROWS);
+            assert!(step.work.structural_reads <= 24);
             assert!(step.work.metadata_bytes <= STEP_BYTES);
             assert!(step.work.sqlite_vm_steps > 0);
             attempts += 1;
@@ -5440,6 +5485,7 @@ impl NativeStore {
             if !state.valid() || !tree.root_bound(&state.root)? {
                 return Err(invalid("invalid source neighbor cursor"));
             }
+            let mut point = None;
             for _ in 0..24 {
                 if cancelled() {
                     break;
@@ -5459,13 +5505,26 @@ impl NativeStore {
                     break;
                 }
                 match tree.read_node(&id)? {
-                    CandidateNode::Leaf { key, .. } => {
+                    CandidateNode::Leaf {
+                        key,
+                        candidate,
+                        aggregate,
+                        payload,
+                    } => {
                         let eligible = if state.forward {
                             key >= state.bound
                         } else {
                             key <= state.bound
                         };
                         if eligible {
+                            point = Some(CandidatePoint {
+                                key: fixed_key(&key)?,
+                                leaf: CandidateLeaf {
+                                    candidate,
+                                    aggregate,
+                                    payload,
+                                },
+                            });
                             state.result = Some(id);
                             state.complete = true;
                             state.siblings.clear();
@@ -5504,7 +5563,12 @@ impl NativeStore {
                     state.complete = true;
                 }
             }
-            let point = source_neighbor_point(tree, &state)?;
+            // The matching leaf was already read in this attempt. Replaying
+            // a completed cursor still reads its retained result once.
+            let point = match point {
+                Some(point) => Some(point),
+                None => source_neighbor_point(tree, &state)?,
+            };
             tree.put_cursor(cursor, &encoded(&state, CURSOR_BYTES)?)?;
             Ok((state.complete, point))
         })
