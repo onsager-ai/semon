@@ -20,6 +20,7 @@ mod native_compare;
 mod native_copilot;
 mod native_events;
 mod native_harness;
+mod native_metadata;
 mod native_record_source;
 mod native_record_time;
 mod native_retirement;
@@ -35,6 +36,9 @@ pub(crate) type BodyStep = native_copilot::BodyStep;
 pub(crate) type AdmissionStep = native_admission::AdmissionStep;
 pub(crate) type OriginalActivityFacts = native_activity::OriginalActivityFacts;
 pub(crate) type RecordTimeStep = native_record_time::RecordTimeStep;
+pub(crate) type MetadataStep = native_metadata::MetadataStep;
+pub(crate) type OriginalHeaderField = crate::events::native_harness::header::Field;
+pub(crate) type OriginalHeaderValue = crate::events::native_harness::header::Value<OriginalText>;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -115,6 +119,11 @@ CREATE TABLE IF NOT EXISTS native_original_copilot_admission (
  PRIMARY KEY(original,record_offset)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_record_time (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_copilot_metadata (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset)
@@ -2561,6 +2570,9 @@ mod tests {
             result
         }
         fn new(bytes: &[u8]) -> Self {
+            Self::new_harness(bytes, "claude")
+        }
+        fn new_harness(bytes: &[u8], harness: &'static str) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "semon-original-repair-{}-{}",
                 std::process::id(),
@@ -2577,7 +2589,14 @@ mod tests {
                 cache: root.join("cache"),
                 ..crate::Options::default()
             };
-            let path = options.claude_home.join("projects/p/chosen.jsonl");
+            let path = match harness {
+                "claude" => options.claude_home.join("projects/p/chosen.jsonl"),
+                "codex" => options.codex_home.join("sessions/chosen.jsonl"),
+                "copilot" => options
+                    .copilot_home
+                    .join("session-state/chosen/events.jsonl"),
+                _ => panic!("native fixture harness"),
+            };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, bytes).unwrap();
             let capture = crate::source_chunks::capture(
@@ -2608,13 +2627,20 @@ mod tests {
                 if let Ok(value) = serde_json::from_slice::<Value>(line)
                     && value.is_object()
                 {
-                    super::super::super::super::claude(&mut index, &value, offset);
+                    match harness {
+                        "claude" => super::super::super::super::claude(&mut index, &value, offset),
+                        "codex" => super::super::super::super::codex(&mut index, &value, offset),
+                        "copilot" => {
+                            super::super::super::super::copilot(&mut index, &value, offset)
+                        }
+                        _ => unreachable!("native fixture harness"),
+                    }
                 } else {
                     super::super::super::super::gap(&mut index, offset);
                 }
                 offset += line.len() as u64;
             }
-            let row:CatalogRow=serde_json::from_value(serde_json::json!({"key":"chosen","name":"chosen","harness":"claude","kind":"session","native_ids":["chosen"],"parent":null,"parent_source":null,"repo":null,"branch":null,"model":null,"effort":null,"start":null,"last":null,"tokens":[0.0,0.0,0.0],"cost":crate::pricing::Cost::default(),"sources":[original]})).unwrap();
+            let row:CatalogRow=serde_json::from_value(serde_json::json!({"key":"chosen","name":"chosen","harness":harness,"kind":"session","native_ids":["chosen"],"parent":null,"parent_source":null,"repo":null,"branch":null,"model":null,"effort":null,"start":null,"last":null,"tokens":[0.0,0.0,0.0],"cost":crate::pricing::Cost::default(),"sources":[original]})).unwrap();
             let (mut writer, _) = SqliteStore::attempt_scoped(
                 &super::super::super::super::EventCache::path(&options.cache),
                 None,
@@ -3748,6 +3774,190 @@ mod tests {
     }
 
     #[test]
+    fn copilot_record_actions_refuse_other_original_roots_before_native_io() {
+        let mut fixture = Fixture::new(b"{}\n");
+        let repair = fixture.qualified_record();
+        assert_eq!(repair.source.root, "claude");
+        let admission = fixture
+            .store
+            .original_copilot_admission_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(admission.outcome, Outcome::Conflict);
+        assert_eq!(admission.work.native_bytes, 0);
+        let metadata = fixture
+            .store
+            .original_copilot_metadata_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                None,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(metadata.outcome, Outcome::Conflict);
+        assert_eq!(metadata.work.native_bytes, 0);
+        let body = fixture
+            .store
+            .original_copilot_body_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                &crate::events::native_event::NativeEvent::default(),
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(body.outcome, Outcome::Conflict);
+        assert_eq!(body.work.native_bytes, 0);
+    }
+
+    #[test]
+    fn original_copilot_fixed_metadata_matches_native_headers_and_signals_with_giant_models() {
+        use crate::events::native_harness::header::{Field, Store, Value as HeaderValue};
+        use crate::events::native_producer::SignalStore;
+        for size in [0usize, 128, 1024, 8192, 200_000] {
+            let model = "m".repeat(size + 1);
+            let record = serde_json::json!({"id":"record-id","type":"session.start","timestamp":"2026-10-15T01:02:03Z","data":{"copilotVersion":"1.0.90","sessionId":"chosen","context":{"cwd":"/native/repo"},"selectedModel":model,"reasoningEffort":"high"}});
+            let bytes = format!("{record}\n");
+            let mut fixture = Fixture::new_harness(bytes.as_bytes(), "copilot");
+            let repair = fixture.qualified_record();
+            assert_eq!(repair.source.root, "copilot");
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            loop {
+                let step = fixture
+                    .store
+                    .original_copilot_admission_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                if step.admission.is_some() {
+                    assert_eq!(
+                        step.admission,
+                        Some(crate::events::native_harness::Admission::Accepted)
+                    );
+                    break;
+                }
+            }
+            let time = crate::events::record_time(&record);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                assert!(attempts < 128);
+                let step = fixture
+                    .store
+                    .original_copilot_metadata_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        time,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                if step.complete {
+                    assert!(!step.snapshot_required);
+                    break;
+                }
+            }
+            let data = fixture.member(&repair, "data");
+            let selected = fixture
+                .store
+                .original_member_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    data.address,
+                    "selectedModel",
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .node
+                .unwrap();
+            let model_ref = fixture.identity(&repair, selected.ordinal);
+            let timestamp = fixture.member(&repair, "timestamp");
+            let timestamp_ref = fixture.identity(&repair, timestamp.ordinal);
+            let events =
+                native_events::Events::read_only(&fixture.store.connection, repair.original);
+            assert_eq!(
+                events.header(Field::LastModel).unwrap(),
+                Some(HeaderValue::Native(model_ref))
+            );
+            assert_eq!(
+                events.header(Field::Entrypoint).unwrap(),
+                Some(HeaderValue::CopilotCli)
+            );
+            assert_eq!(
+                events.header(Field::CopilotLifecycle).unwrap(),
+                Some(HeaderValue::Start)
+            );
+            assert_eq!(
+                events.header(Field::CopilotFirst).unwrap(),
+                Some(HeaderValue::Native(timestamp_ref.clone()))
+            );
+            assert_eq!(
+                events.header(Field::CopilotLast).unwrap(),
+                Some(HeaderValue::Native(timestamp_ref))
+            );
+            let signal = events
+                .last_signal(Some(crate::events::SignalKind::Model))
+                .unwrap()
+                .unwrap()
+                .1;
+            let expected_tag = if model.len() > 64 {
+                format!("{}#{}", &model[..55], crate::events::short_hash(&model))
+            } else {
+                model.clone()
+            };
+            assert_eq!(
+                signal,
+                crate::events::Signal {
+                    k: crate::events::SignalKind::Model,
+                    o: 0,
+                    t: time,
+                    at: 0,
+                    n: Some(expected_tag),
+                    v: None
+                }
+            );
+            assert_eq!(
+                events
+                    .last_signal(Some(crate::events::SignalKind::Effort))
+                    .unwrap()
+                    .unwrap()
+                    .1
+                    .n
+                    .as_deref(),
+                Some("high")
+            );
+            let mut native = crate::events::FileIndex::default();
+            crate::events::copilot(&mut native, &record, 0);
+            assert_eq!(native.last_model.as_deref(), Some(model.as_str()));
+            assert_eq!(native.entrypoint.as_deref(), Some("copilot-cli"));
+            assert_eq!(
+                native.copilot.as_ref().unwrap().lifecycle.as_deref(),
+                Some("session.start")
+            );
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
     fn original_record_time_preserves_native_precedence_and_qualified_unknown() {
         for size in [0usize, 128, 1024, 8192, 200_000] {
             let valid = format!("2026-10-15T01:02:03{}Z", "x".repeat(size));
@@ -3936,7 +4146,7 @@ mod tests {
             let version = "v".repeat(size);
             let record = serde_json::json!({"id":"identity","type":"session.start","data":{"copilotVersion":version,"sessionId":"native-session"}});
             let bytes = format!("{record}\n");
-            let mut fixture = Fixture::new(bytes.as_bytes());
+            let mut fixture = Fixture::new_harness(bytes.as_bytes(), "copilot");
             let repair = fixture.qualified_record();
             let reads = crate::events::FILE_READS.with(Cell::get);
             let mut attempts = 0;
@@ -4011,7 +4221,7 @@ mod tests {
                 Admission::BeforeStart,
             ),
         ] {
-            let mut fixture = Fixture::new(format!("{record}\n").as_bytes());
+            let mut fixture = Fixture::new_harness(format!("{record}\n").as_bytes(), "copilot");
             let repair = fixture.qualified_record();
             loop {
                 let step = fixture
@@ -4061,7 +4271,7 @@ mod tests {
             let call_id = "λ".repeat(1024);
             let record = serde_json::json!({"id":"record-id","timestamp":"2026-10-15T01:02:03Z","type":"assistant.message","data":{"messageId":"message-id","content":" ","toolRequests":[{"toolCallId":call_id,"name":"bash"}]}});
             let bytes = format!("{}\n", record);
-            let mut fixture = Fixture::new(bytes.as_bytes());
+            let mut fixture = Fixture::new_harness(bytes.as_bytes(), "copilot");
             let reads = crate::events::FILE_READS.with(Cell::get);
             let repair = fixture.qualified_record();
             let uid_node = fixture.member(&repair, "id");

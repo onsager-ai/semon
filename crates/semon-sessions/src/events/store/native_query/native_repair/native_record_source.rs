@@ -445,3 +445,26 @@ impl crate::events::native_harness::CopilotIdentityStore for Observation<'_, '_>
         Err(io::Error::other("native observation cannot write"))
     }
 }
+impl crate::events::native_harness::header::Store for Observation<'_, '_> {
+    fn header(
+        &self,
+        field: crate::events::native_harness::header::Field,
+    ) -> io::Result<Option<crate::events::native_harness::header::Value<OriginalText>>> {
+        use crate::events::native_harness::header::Store;
+        self.read(|s| s.header(field))
+    }
+    fn set_header(
+        &mut self,
+        _: crate::events::native_harness::header::Field,
+        _: Option<crate::events::native_harness::header::Value<OriginalText>>,
+    ) -> io::Result<()> {
+        Err(io::Error::other("native observation cannot write"))
+    }
+    fn initialize_copilot(
+        &mut self,
+        _: Option<OriginalText>,
+        _: Option<OriginalText>,
+    ) -> io::Result<()> {
+        Err(io::Error::other("native observation cannot write"))
+    }
+}

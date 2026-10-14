@@ -422,6 +422,60 @@ impl crate::events::native_harness::CopilotIdentityStore for Events<'_> {
 }
 
 impl crate::events::native_harness::header::Store for Events<'_> {
+    fn header(
+        &self,
+        field: crate::events::native_harness::header::Field,
+    ) -> io::Result<Option<crate::events::native_harness::header::Value<Text>>> {
+        let row:Option<(Option<String>,i64)>=self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END,octet_length(metadata) FROM native_original_header WHERE original=?1 AND field=?2",params![self.original.as_slice(),field.key()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)?;
+        self.account(
+            1,
+            row.as_ref()
+                .map_or(0, |r| usize::try_from(r.1).unwrap_or(BYTES + 1)),
+        )?;
+        let value: Option<crate::events::native_harness::header::Value<Text>> = row
+            .map(|r| {
+                serde_json::from_str(
+                    r.0.as_deref()
+                        .ok_or_else(|| io::Error::other("native header exceeds residency"))?,
+                )
+                .map_err(io::Error::other)
+            })
+            .transpose()?;
+        if let Some(crate::events::native_harness::header::Value::Native(text)) = &value
+            && text.original() != self.original
+        {
+            return Err(io::Error::other("native header reference changed Original"));
+        }
+        Ok(value)
+    }
+    fn set_header(
+        &mut self,
+        field: crate::events::native_harness::header::Field,
+        value: Option<crate::events::native_harness::header::Value<Text>>,
+    ) -> io::Result<()> {
+        use crate::events::native_harness::header::Value;
+        if let Some(Value::Native(text)) = &value
+            && text.original() != self.original
+        {
+            return Err(io::Error::other(
+                "native header text belongs to a different Original",
+            ));
+        }
+        if let Some(value) = value {
+            let value = bounded_json(&value, STATE_BYTES).map_err(io::Error::other)?;
+            self.account(1, value.len())?;
+            self.db.execute("INSERT INTO native_original_header VALUES(?1,?2,?3) ON CONFLICT(original,field) DO UPDATE SET metadata=excluded.metadata",params![self.original.as_slice(),field.key(),value]).map_err(io::Error::other)?;
+        } else {
+            self.account(1, 0)?;
+            self.db
+                .execute(
+                    "DELETE FROM native_original_header WHERE original=?1 AND field=?2",
+                    params![self.original.as_slice(), field.key()],
+                )
+                .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
     fn initialize_copilot(
         &mut self,
         version: Option<Text>,
