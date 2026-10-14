@@ -24,12 +24,7 @@ impl Epoch {
     }
 }
 
-/// Closure work is separate from the storage controls. A callback reports all
-/// metadata it decoded, including related-membership probes, on refusal too.
-pub(crate) struct ClosureRead {
-    pub(crate) current: bool,
-    pub(crate) work: Work,
-}
+pub(crate) use super::ClosureRead;
 
 #[derive(Default, Debug)]
 pub(crate) struct CheckpointWork {
