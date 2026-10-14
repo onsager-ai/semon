@@ -6,14 +6,47 @@ use super::{
     turn_stage::{EndFacts, HandoffEnd},
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) type CandidateRef = [u8; 32];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Order {
     pub(crate) key: EntryKey,
     pub(crate) ordinal: u64,
     /// Private candidate content address, never the raw native session ID.
-    pub(crate) identity: [u8; 32],
+    pub(crate) identity: CandidateRef,
+}
+
+impl Order {
+    /// Fixed-width lexicographic encoding of the complete native placement
+    /// key, including stable tie ordinal and point-address candidate identity.
+    pub(crate) fn encoded(&self) -> [u8; 69] {
+        let mut bytes = [0; 69];
+        bytes[..8].copy_from_slice(&((self.key.0 as u64) ^ (1 << 63)).to_be_bytes());
+        bytes[8..16].copy_from_slice(
+            &u64::try_from(self.key.1)
+                .expect("native file ordinal fits")
+                .to_be_bytes(),
+        );
+        bytes[16..24].copy_from_slice(&self.key.2.to_be_bytes());
+        bytes[24..28].copy_from_slice(&self.key.3.to_be_bytes());
+        bytes[28] = self.key.4;
+        bytes[29..37].copy_from_slice(&self.ordinal.to_be_bytes());
+        bytes[37..].copy_from_slice(&self.identity);
+        bytes
+    }
+}
+impl Ord for Order {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.encoded().cmp(&other.encoded())
+    }
+}
+impl PartialOrd for Order {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +185,41 @@ impl Facts {
 mod tests {
     use super::*;
     use crate::model::{ToolState, native_stage::EntryKind};
+
+    #[test]
+    fn native_range_order_encoding_preserves_signed_time_and_all_tie_fields() {
+        let mut orders = Vec::new();
+        for time in [i64::MIN, -1, 0, 1, i64::MAX] {
+            for file in [0, 1] {
+                for offset in [0, u64::MAX] {
+                    for block in [0, u32::MAX] {
+                        for phase in [0, 2] {
+                            for ordinal in [0, u64::MAX] {
+                                for identity in [[0; 32], [255; 32]] {
+                                    orders.push(Order {
+                                        key: (time, file, offset, block, phase),
+                                        ordinal,
+                                        identity,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for pair in orders.windows(2) {
+            assert_eq!(
+                pair[0].encoded().cmp(&pair[1].encoded()),
+                (&pair[0].key, pair[0].ordinal, &pair[0].identity).cmp(&(
+                    &pair[1].key,
+                    pair[1].ordinal,
+                    &pair[1].identity
+                ))
+            );
+            assert!(pair[0] < pair[1]);
+        }
+    }
 
     #[test]
     fn native_interleaved_source_ranges_match_global_order_and_lazy_content_reference() {
