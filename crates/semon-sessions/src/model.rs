@@ -5271,9 +5271,11 @@ impl<'a> Builder<'a> {
             let incoming = match entry.kind {
                 EntryKind::H(handoff) => {
                     let found = &self.handoffs[handoff];
-                    found.to == Some(index)
-                        && matches!(found.out.kind, "ask" | "relay" | "spawn")
-                        && !started.contains(&handoff)
+                    turn_stage::incoming_handoff(
+                        found.out.kind,
+                        found.to == Some(index),
+                        started.contains(&handoff),
+                    )
                 }
                 EntryKind::U => true,
                 _ => false,
@@ -5359,10 +5361,13 @@ impl<'a> Builder<'a> {
                 prompts.push((turns.len(), at));
             }
             turns.push(Turn {
-                id: match turn.start {
-                    Some(handoff) => self.handoffs[handoff].out.id.clone(),
-                    None => format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset),
-                },
+                id: turn_stage::turn_id(
+                    sid,
+                    &self.files[turn.file].id,
+                    turn.offset,
+                    turn.start
+                        .map(|handoff| self.handoffs[handoff].out.id.as_str()),
+                ),
                 sid: sid.clone(),
                 start: turn
                     .start
@@ -5401,46 +5406,23 @@ impl<'a> Builder<'a> {
         for position in members {
             let entry = &entries[*position];
             let outgoing = match entry.kind {
-                EntryKind::H(handoff) => sent.contains(&handoff),
-                _ => false,
-            };
-            let content = match entry.kind {
-                EntryKind::A => Some(turn_stage::Content::Assistant),
-                EntryKind::Tool(state) => Some(turn_stage::Content::Tool { state }),
-                EntryKind::Operation(state) => Some(turn_stage::Content::Operation { state }),
-                EntryKind::H(handoff) if outgoing => Some(turn_stage::Content::Handoff {
-                    id: self.handoffs[handoff].out.id.clone(),
-                    failed: self.handoffs[handoff].out.status == "err",
-                }),
-                _ => None,
-            };
-            if content.is_some() {
-                last_content_at = entry.at;
-            }
-            let to_you = match entry.kind {
-                EntryKind::H(handoff) if outgoing && self.handoffs[handoff].out.kind == "toyou" => {
-                    Some(turn_stage::ToYou {
-                        id: self.handoffs[handoff].out.id.clone(),
-                        waiting: self.handoffs[handoff].out.status == "wait",
+                EntryKind::H(handoff) if sent.contains(&handoff) => {
+                    let handoff = &self.handoffs[handoff].out;
+                    Some(turn_stage::HandoffEnd {
+                        id: &handoff.id,
+                        kind: handoff.kind,
+                        status: handoff.status,
                     })
                 }
                 _ => None,
             };
-            let completed_at = entry.at.and_then(|at| {
-                let found = event(self.files, at);
-                match entry.kind {
-                    EntryKind::A => found.t,
-                    EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
-                    EntryKind::Operation(_) => found.t,
-                    _ => None,
-                }
-            });
-            facts.push(
-                content,
-                matches!(entry.kind, EntryKind::H(_)),
-                to_you,
-                completed_at,
-            );
+            if facts.observe(
+                entry.kind,
+                entry.at.map(|at| event(self.files, at)),
+                outgoing,
+            ) {
+                last_content_at = entry.at;
+            }
         }
         facts.finish(
             start.map(|handoff| {
