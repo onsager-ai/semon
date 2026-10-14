@@ -5436,3 +5436,87 @@ fn focused_tail_summary_and_stopped_search_do_not_prepare_growing_selected_histo
         }
     }
 }
+
+#[test]
+fn selected_late_search_scans_content_without_eager_index_or_slot_preparation() {
+    let mut scans = Vec::new();
+    for prefix in [0, 128] {
+        let home = Home::new("selected-late-search");
+        let mut records = vec![human("lead", ts(1, 0), "opening needle")];
+        records.extend((0..prefix).map(|n| {
+            assistant(
+                "lead",
+                ts(1, 1),
+                vec![text(&format!("preceding {n} {}", "history ".repeat(64)))],
+            )
+        }));
+        records.push(assistant("lead", ts(23, 59), vec![text("fixed tail")]));
+        home.top("lead", &records);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        drop(cache);
+        let args = json!({"text":"opening needle","limit":1});
+        let expected = Query::from_sources(admitted(home.options.clone()))
+            .call_at("find", &args, NOW)
+            .unwrap();
+        let archive = Arc::new(selected_archive(&home, 0));
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        let shared = archive.clone();
+        let factory = move |_: &str, _: &str| {
+            Ok(Box::new(SharedSearchArchive(shared.clone()))
+                as Box<dyn crate::SessionSourceReader>)
+        };
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let answer = query
+            .call_catalog_at(
+                "find",
+                &args,
+                Some(&factory),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(answer, expected);
+        assert_eq!(answer["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(answer["matches"][0]["position"], 0);
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            indexes
+        );
+        assert!(query.native.is_none());
+        assert!(
+            query.sources.machines[0]
+                .1
+                .work
+                .lock()
+                .unwrap()
+                .events
+                .is_none()
+        );
+        let work = (
+            answer["scanned_bytes"].as_u64().unwrap(),
+            transcript::SLOTS.with(std::cell::Cell::get),
+            archive.calls.load(Ordering::Relaxed),
+            archive.read_bytes.load(Ordering::Relaxed),
+        );
+        eprintln!("selected_late_search prefix={prefix} work={work:?}");
+        scans.push(work);
+    }
+    assert!(
+        scans[1].0 > scans[0].0,
+        "late search must actually scan preceding content"
+    );
+    assert!(
+        scans[1].1 > 64,
+        "late search must page past its first recipe batch"
+    );
+    assert!(scans[1].2 <= 1024);
+}

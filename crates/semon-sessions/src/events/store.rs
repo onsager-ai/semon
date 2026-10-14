@@ -7450,6 +7450,30 @@ mod tests {
                     crate::native_timing::cleanup_tests::snapshot(&store.connection),
                     snapshot
                 );
+                let mut stale_sources = rows.clone();
+                stale_sources
+                    .iter_mut()
+                    .find(|row| row.key == key)
+                    .unwrap()
+                    .sources[0]
+                    .offset += 1;
+                assert_eq!(
+                    catalog_write(
+                        &mut store,
+                        &stale_sources,
+                        &projections,
+                        false,
+                        CatalogWriter::Auto
+                    )
+                    .unwrap()
+                    .0,
+                    Outcome::Conflict
+                );
+                assert_eq!(
+                    crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                    snapshot,
+                    "stale replacement source advanced custody"
+                );
                 let other = rows.iter().find(|row| row.key == "native-cl-00").unwrap();
                 let other_projection = projections
                     .iter()
