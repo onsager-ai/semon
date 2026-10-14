@@ -14,7 +14,7 @@ const STATE_BYTES: usize = 64 * 1024;
 // Rebuildable private Query metadata is versioned independently from the
 // public native Event Index schema28 and the native parser/custody contract.
 // Install both Original repair metadata and the cross-channel child index.
-pub(super) const SCHEMA_VERSION: i64 = 11;
+pub(super) const SCHEMA_VERSION: i64 = 12;
 const SCHEMA_KEY: &str = "native_query_schema";
 
 pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
@@ -5251,6 +5251,11 @@ mod tests {
         private_original_schema_reopen(10);
     }
 
+    #[test]
+    fn native_query_private_eleven_reopen_preserves_classes_and_installs_harness_tables() {
+        private_original_schema_reopen(11);
+    }
+
     fn private_original_schema_reopen(previous_version: i64) {
         let mut fixture = Fixture::new(0);
         let source = fixture.source();
@@ -5322,11 +5327,33 @@ mod tests {
                 )
                 .unwrap();
         }
+        if previous_version >= 11 {
+            fixture
+                .store
+                .connection
+                .execute_batch(
+                    "INSERT INTO native_original_classes VALUES(X'07',1,0,1,X'08',1);
+                 INSERT INTO native_original_identities VALUES(X'07',0,1,1,'{}');
+                 INSERT INTO native_original_retirements VALUES(X'07',X'08',0);",
+                )
+                .unwrap();
+        }
         let mut added = vec![
-            "native_original_classes",
-            "native_original_identities",
-            "native_original_retirements",
+            "native_original_channel_state",
+            "native_original_extras",
+            "native_original_signals",
+            "native_original_positions",
+            "native_original_literal",
+            "native_original_copilot_started",
+            "native_original_copilot_seen",
         ];
+        if previous_version < 11 {
+            added.extend([
+                "native_original_classes",
+                "native_original_identities",
+                "native_original_retirements",
+            ]);
+        }
         if previous_version < 10 {
             added.extend([
                 "native_original_event_state",
@@ -5443,7 +5470,7 @@ mod tests {
                     None,
                     true,
                 )
-                .unwrap();
+                .unwrap_or_else(|_| panic!("private schema reopen must succeed"));
                 NativeStore {
                     connection: store.connection,
                     options: fixture.options.clone(),
@@ -5483,6 +5510,18 @@ mod tests {
                 ("native_original_event_identity", "index"),
                 ("native_original_pending_open", "index"),
                 ("native_original_plain_tool_ids", "index"),
+                ("native_original_channel_state", "table"),
+                ("native_original_extras", "table"),
+                ("native_original_signals", "table"),
+                ("native_original_positions", "table"),
+                ("native_original_literal", "table"),
+                ("native_original_copilot_started", "table"),
+                ("native_original_copilot_seen", "table"),
+                ("native_original_signal_kind", "index"),
+                ("native_original_signal_observation", "index"),
+                ("native_original_regular_time", "index"),
+                ("native_original_regular_offset", "index"),
+                ("native_original_child_order", "index"),
                 ("native_source_child_operations", "table"),
                 ("native_source_child_operation_facts", "table"),
                 ("native_source_child_operation_parent", "index"),
