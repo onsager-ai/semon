@@ -71,7 +71,7 @@ impl Cursor {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct IdentityStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,

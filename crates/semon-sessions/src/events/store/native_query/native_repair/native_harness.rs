@@ -10,7 +10,7 @@ struct LiteralCursor {
     compare: Compare,
     result: Option<bool>,
 }
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct LiteralStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
