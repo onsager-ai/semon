@@ -2,7 +2,7 @@
 //!
 //! serde_json 1.0.151 has `float_roundtrip` enabled by semon-control's
 //! serde_json_canonicalizer dependency. Its lexical f64 producer retains 768
-//! significant decimal digits and one sticky digit (lexical/bhcomp.rs and
+//! significant decimal digits and one native sticky digit (lexical/bhcomp.rs and
 //! lexical/num.rs, MAX_DIGITS = 769). Retain that bounded evidence, then delegate
 //! conversion of an equivalent compact spelling to the same serde_json owner.
 //!
@@ -10,13 +10,19 @@
 //! its terminating decimal numerator m * 5^(-q) has at most 768 digits because
 //! log10(2^54 * 5^1075) < 768. Thus a discarded nonzero digit after digit 768
 //! can distinguish an exact midpoint from a value above it, but cannot cross
-//! another midpoint. A single sticky 1 has the same rounding consequence. This
-//! includes zero/min-subnormal and max-finite/overflow boundaries. No float
+//! another midpoint. A single sticky 1 has the same rounding consequence. The
+//! native parser additionally treats any discarded INTEGER digit as sticky,
+//! even a zero: parse_truncated_float trims only fractional trailing zeroes,
+//! while parse_mantissa unconditionally appends 1 for remaining digits. Preserve
+//! that source-channel distinction, including the native result when a long
+//! compensated integer spelling differs from its mathematical decimal twin.
+//! This includes zero/min-subnormal and max-finite/overflow boundaries. No float
 //! conversion or rounding is implemented here.
 //!
 //! Primary owner: https://github.com/serde-rs/json/tree/v1.0.151/src/lexical .
 //! de.rs:623-636, 674-713, 740-833, 876-899; lexical/bhcomp.rs:21-75,
-//! 192-222; lexical/num.rs:366-370 and lexical/exponent.rs:25-49.
+//! 192-222; lexical/num.rs:366-370, lexical/parse.rs:49-87 and
+//! lexical/exponent.rs:25-49.
 //! Changing that owner's version/features requires new derived metadata policy
 //! and independent complete-parser qualification; old receipts cannot be reused.
 
@@ -239,7 +245,10 @@ impl Cursor {
                         if self.prefix.len() < SIGNIFICANT_DIGITS {
                             self.prefix.push(char::from(byte));
                         } else {
-                            self.sticky |= digit != 0;
+                            // Native lexical trims trailing zeros only from
+                            // the fraction. Integer digits left after its 768
+                            // digit prefix always cause the appended sticky 1.
+                            self.sticky |= digit != 0 || matches!(old, Some(Number::Integer));
                         }
                     }
                 }
@@ -549,6 +558,59 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn native_integer_suffix_sticky_differs_from_fractional_zero_trimming() {
+        for (mantissa, exponent) in [
+            ((1u64 << 53) + 1, -53),
+            (1, -1075),
+            ((1u64 << 53) - 1, -1075),
+            ((1u64 << 53) + 1, -1075),
+            ((1u64 << 54) - 1, 970),
+        ] {
+            let tie = midpoint(mantissa, exponent);
+            let (integer, fraction) = tie.split_once('.').unwrap();
+            let digits = format!("{integer}{fraction}");
+            let digits = digits.trim_start_matches('0');
+            for width in [767, 768, 769, 8192] {
+                // Widths below the exact midpoint's significant length use
+                // its downward decimal prefix; the native complete parser
+                // still independently owns the expected result.
+                let kept = digits.len().min(width);
+                let zeros = width.saturating_sub(digits.len());
+                let scale =
+                    digits.len() as i64 - kept as i64 - fraction.len() as i64 - zeros as i64;
+                let integer_form = format!("{}{}e{scale}", &digits[..kept], "0".repeat(zeros));
+                assert_native(&integer_form);
+                assert_native(&format!("-{integer_form}"));
+                let decimal_form = format!("{tie}{}", "0".repeat(width));
+                assert_native(&decimal_form);
+                assert_native(&format!("-{decimal_form}"));
+            }
+        }
+        // Preserve the primary owner's surprising integer-channel behavior,
+        // rather than replacing it with an independently rounded decimal.
+        let tie = midpoint((1u64 << 53) + 1, -53);
+        let digits = tie.replace('.', "");
+        let zeros = "0".repeat(8192);
+        let scale = digits.len() + zeros.len() - 1;
+        let integer_form = format!("{digits}{zeros}e-{scale}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Number>(&integer_form)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            1f64.to_bits() + 1
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Number>(&format!("{tie}{zeros}"))
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            1f64.to_bits()
+        );
     }
     #[test]
     fn restart_rejects_a_different_numeric_producer_policy_and_nonfinite_receipts() {
