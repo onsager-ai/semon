@@ -4573,6 +4573,135 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
 }
 
 #[test]
+fn physical_namespace_with_several_survivors_preserves_literal_owner_and_fixed_page_work() {
+    for history in [0usize, 128, 1024, 8192] {
+        let mut home = Home::new("physical-multiple-namespace-survivors");
+        home.options.all = false;
+        home.options.since = Duration::from_secs(6 * 3600);
+        let mut records = vec![human(
+            "same-id",
+            iso(NOW - 4 * 3600_000),
+            "selected Claude owner",
+        )];
+        for index in 0..history {
+            let mut record = assistant(
+                "same-id",
+                iso(NOW - 3 * 3600_000 + index as i64),
+                vec![text("native reply")],
+            );
+            record["uuid"] = json!(format!("native-reply-{index}"));
+            records.push(record);
+        }
+        home.top("same-id", &records);
+        home.top(
+            "claude:same-id",
+            &[human(
+                "claude:same-id",
+                iso(NOW - 2 * 3600_000),
+                "selected literal owner",
+            )],
+        );
+        home.lines(
+            "codex/sessions/2026/09/24/rollout-same-id.jsonl",
+            &[
+                codex_line(
+                    iso(NOW - 86_400_000),
+                    "session_meta",
+                    json!({"id":"same-id"}),
+                ),
+                codex_line(
+                    iso(NOW - 86_399_000),
+                    "event_msg",
+                    json!({"type":"user_message","message":"omitted Codex owner"}),
+                ),
+            ],
+        );
+        for path in [
+            home.options
+                .claude_home
+                .join("projects/-work-proj/same-id.jsonl"),
+            home.options
+                .claude_home
+                .join("projects/-work-proj/claude:same-id.jsonl"),
+        ] {
+            fs::File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_millis((NOW - 3600_000) as u64),
+                ))
+                .unwrap();
+        }
+        fs::File::open(
+            home.options
+                .codex_home
+                .join("sessions/2026/09/24/rollout-same-id.jsonl"),
+        )
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_millis((NOW - 86_400_000) as u64),
+            ),
+        )
+        .unwrap();
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let options = Options {
+            scan_window: true,
+            ..home.options.clone()
+        };
+        for id in ["same-id", "claude:same-id"] {
+            let args = json!({"id":id,"limit":1});
+            // Build the independent complete native result before resetting
+            // work counters. It never serves as a production readiness warmup.
+            let expected = Query::from_sources(admitted(options.clone()))
+                .call_at("read_transcript", &args, NOW)
+                .unwrap();
+            let mut ordinary = home.query();
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+            let actual = ordinary.call_at("read_transcript", &args, NOW).unwrap();
+            assert_eq!(actual, expected, "history={history}, id={id}");
+            assert_eq!(
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                loads,
+                "multiple surviving namespace owners loaded complete Indexes"
+            );
+            assert_eq!(
+                crate::model::BUILDS.with(std::cell::Cell::get),
+                builds,
+                "multiple surviving namespace owners prepared selected history"
+            );
+            assert!(
+                super::transcript::SLOTS.with(std::cell::Cell::get) <= 2,
+                "fixed page decoded a history prefix"
+            );
+        }
+        for id in [":claude:same-id", "codex:same-id"] {
+            let args = json!({"id":id,"turn":"not-a-turn","limit":1});
+            let expected = Query::from_sources(admitted(options.clone())).call_at(
+                "read_transcript",
+                &args,
+                NOW,
+            );
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+            let actual = home.query().call_at("read_transcript", &args, NOW);
+            assert_eq!(actual, expected, "old spelling changed error ordering");
+            assert_eq!(actual.unwrap_err().code, "unknown_session");
+            assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), loads);
+            assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
+        }
+    }
+}
+
+#[test]
 fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_changes() {
     let mut home = Home::new("ordinary-native-alias");
     home.options.all = false;

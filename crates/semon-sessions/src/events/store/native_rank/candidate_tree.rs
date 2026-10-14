@@ -1402,6 +1402,200 @@ mod tests {
     }
 
     #[test]
+    fn native_source_forest_cold_seed_omission_ranges_and_seek_match_complete_order() {
+        use crate::model::indexed_native::forest::{Channel, Forest, Source, Weight};
+        for history in [0usize, 128, 1024, 8192] {
+            let mut fixture = Fixture::new();
+            let mut roots = vec![CandidateRoot::empty(fixture.empty.clone()); 3];
+            let mut native = Vec::new();
+            for seq in 0..history + 3 {
+                let source = seq % 3;
+                let time = if source == 0 {
+                    0
+                } else {
+                    (seq as i64 % 11) - 5
+                };
+                let identity = Sha256::digest(seq.to_le_bytes()).into();
+                let order = Order {
+                    key: (time, 0, (history + 3 - seq) as u64, (seq % 2) as u32, 1),
+                    ordinal: seq as u64,
+                    identity,
+                };
+                let entry = Entry {
+                    kind: match seq % 7 {
+                        0 => EntryKind::U,
+                        1 => EntryKind::Gap,
+                        2 => EntryKind::Operation(crate::model::ToolState::Ok),
+                        _ => EntryKind::A,
+                    },
+                    file: 0,
+                    offset: order.key.2,
+                    pos: (order.key.2, order.key.3),
+                    t: (source != 0).then_some(time),
+                    at: Some((0, seq)),
+                };
+                let event = Event {
+                    t: entry.t,
+                    ..Event::default()
+                };
+                let mut facts = Facts::default();
+                facts
+                    .observe(Leaf {
+                        order: order.clone(),
+                        entry: &entry,
+                        found: Some(&event),
+                        outgoing: None,
+                        boundary: matches!(entry.kind, EntryKind::U),
+                        count: u64::from(!matches!(entry.kind, EntryKind::Operation(_))),
+                    })
+                    .unwrap();
+                let copied = seq % 5 == 0;
+                let empty = serde_json::to_string(&Facts::default()).unwrap();
+                let facts_text = serde_json::to_string(&facts).unwrap();
+                let decisions: &[(u8, bool)] = if copied { &[(1, false)] } else { &[] };
+                let (outcome, leaf) = fixture
+                    .store
+                    .rank_guard(
+                        &fixture.job,
+                        &facts_text,
+                        &empty,
+                        decisions,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(outcome, Outcome::Written);
+                fixture.refresh();
+                roots[source] = fixture
+                    .update(
+                        &roots[source],
+                        order.encoded(),
+                        Some(CandidateLeaf {
+                            candidate: identity,
+                            aggregate: leaf.unwrap().0,
+                        }),
+                        "native-forest-facts-v2",
+                    )
+                    .0;
+                native.push((source, copied, order, facts));
+            }
+            fixture.ready();
+            // Both seeds are cold: only scalars/source order differ. The trees
+            // are neither rewritten nor warmed up for either query context.
+            for seed in [i64::MIN, -3, 40] {
+                for (bits, omitted) in [(0, None), (2, Some(1usize))] {
+                    let sources: Vec<_> = roots
+                        .iter()
+                        .enumerate()
+                        .filter(|(source, _)| Some(*source) != omitted)
+                        .map(|(source, root)| Source {
+                            root,
+                            channel: if source == 0 {
+                                Channel::BeforeFirst
+                            } else {
+                                Channel::Observed
+                            },
+                            source: 17 + source,
+                            file_order: 2 - source,
+                            first_regular_time: Some(seed),
+                            included: bits,
+                        })
+                        .collect();
+                    let forest = Forest {
+                        store: &fixture.store,
+                        job: &fixture.job,
+                        sources: &sources,
+                        several: true,
+                        closure: &valid_closure,
+                        cancelled: &|| false,
+                    };
+                    let mut oracle: Vec<_> = native
+                        .iter()
+                        .filter(|(source, copied, _, _)| {
+                            Some(*source) != omitted && (!copied || bits & 2 == 0)
+                        })
+                        .map(|(source, _, order, facts)| {
+                            let mut order = order.clone();
+                            let mut facts = facts.clone();
+                            order.key.0 = if *source == 0 { seed } else { order.key.0 };
+                            order.key.1 = 2 - *source;
+                            facts.qualify(
+                                17 + source,
+                                2 - source,
+                                true,
+                                (*source == 0).then_some(seed),
+                            );
+                            (order, facts)
+                        })
+                        .collect();
+                    oracle.sort_by(|a, b| a.0.cmp(&b.0));
+                    let Some((bound, _)) = oracle.get(oracle.len().saturating_sub(2)) else {
+                        continue;
+                    };
+                    let bounds = CandidateBounds {
+                        lower: None,
+                        upper: Some(bound.encoded()),
+                    };
+                    let mut expected = Facts::default();
+                    for (order, facts) in &oracle {
+                        if order <= bound {
+                            expected.merge(facts.clone()).unwrap();
+                        }
+                    }
+                    let reads = crate::events::FILE_READS.with(Cell::get);
+                    let (range, calls, allocated) =
+                        measure_test_allocations(|| forest.range(&bounds).unwrap());
+                    assert!(matches!(range.outcome, CandidateReadOutcome::Qualified));
+                    assert_eq!(
+                        serde_json::to_value(range.value.unwrap()).unwrap(),
+                        serde_json::to_value(expected).unwrap()
+                    );
+                    assert!(calls > 0 && allocated <= 16 * STEP_BYTES);
+                    assert!(
+                        range.work.sql_reads < 1000
+                            && range.work.metadata_bytes < 16 * STEP_BYTES
+                            && range.work.sqlite_vm_steps < 2_000_000,
+                        "forest range exceeded fixed context bound: {:?}",
+                        range.work
+                    );
+                    let sought = forest
+                        .seek(
+                            &bound.encoded(),
+                            CandidateDirection::Forward,
+                            Weight::Entries,
+                        )
+                        .unwrap();
+                    assert!(matches!(sought.outcome, CandidateReadOutcome::Qualified));
+                    let point = sought.value.unwrap().unwrap();
+                    assert_eq!(point.order, *bound);
+                    assert_eq!(
+                        point.source,
+                        17 + native
+                            .iter()
+                            .find(|(_, _, order, _)| order.identity == point.order.identity)
+                            .unwrap()
+                            .0
+                    );
+                    assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+                    assert!(
+                        sought.work.sql_reads < 1000
+                            && sought.work.metadata_bytes < 16 * STEP_BYTES
+                            && sought.work.sqlite_vm_steps < 2_000_000
+                    );
+                    let cancelled = Forest {
+                        cancelled: &|| true,
+                        ..forest
+                    };
+                    assert!(matches!(
+                        cancelled.range(&bounds).unwrap().outcome,
+                        CandidateReadOutcome::Deferred
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn candidate_tree_schema_is_registered_separately_by_the_private_owner() {
         let fixture = Fixture::new();
         assert!(

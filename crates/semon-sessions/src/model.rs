@@ -1648,11 +1648,12 @@ fn lineages(files: &[SourceFile]) -> Vec<Vec<usize>> {
         // tie the file that was continued elsewhere comes first.
         group.sort_by_key(|file| {
             let file = &files[*file];
-            (
-                file.first.unwrap_or(i64::MAX),
+            let (first, continued_empty, _) = identity_stage::source_order(
+                file.first,
                 file.summary.links.continued_in.is_empty(),
-                file.id.clone(),
-            )
+                &file.id,
+            );
+            (first, continued_empty, file.id.clone())
         });
     }
     result

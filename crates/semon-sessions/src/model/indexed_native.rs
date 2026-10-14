@@ -8,6 +8,8 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod forest;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OrderedFacts {
