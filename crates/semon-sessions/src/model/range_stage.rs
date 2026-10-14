@@ -9,8 +9,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Mark {
+pub(crate) struct Order {
     pub(crate) key: EntryKey,
+    pub(crate) ordinal: u64,
+    pub(crate) identity: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Mark {
+    pub(crate) order: Order,
     pub(crate) file: usize,
     pub(crate) offset: u64,
 }
@@ -18,7 +26,7 @@ pub(crate) struct Mark {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContentMark {
-    key: EntryKey,
+    order: Order,
     at: Option<Ref>,
 }
 
@@ -31,11 +39,11 @@ pub(crate) struct Facts {
     pub(crate) last: Option<Mark>,
     pub(crate) boundary: Option<Mark>,
     content: Option<ContentMark>,
-    to_you: Option<EntryKey>,
+    to_you: Option<Order>,
 }
 
 pub(crate) struct Leaf<'a> {
-    pub(crate) key: EntryKey,
+    pub(crate) order: Order,
     pub(crate) entry: &'a Entry,
     pub(crate) found: Option<&'a Event>,
     pub(crate) outgoing: Option<HandoffEnd<'a>>,
@@ -50,7 +58,7 @@ impl Facts {
             ..Self::default()
         };
         let mark = Mark {
-            key: leaf.key,
+            order: leaf.order.clone(),
             file: leaf.entry.file,
             offset: leaf.entry.offset,
         };
@@ -64,11 +72,11 @@ impl Facts {
             .as_ref()
             .is_some_and(|handoff| handoff.kind == "toyou")
         {
-            next.to_you = Some(leaf.key);
+            next.to_you = Some(leaf.order.clone());
         }
         if next.end.observe(leaf.entry.kind, leaf.found, leaf.outgoing) {
             next.content = Some(ContentMark {
-                key: leaf.key,
+                order: leaf.order,
                 at: leaf.entry.at,
             });
         }
@@ -145,7 +153,11 @@ mod tests {
             };
             sequential.observe(kind, Some(&event), outgoing());
             let leaf = || Leaf {
-                key: (0, 0, position as u64, 0, 1),
+                order: Order {
+                    key: (0, 0, position as u64, 0, 1),
+                    ordinal: 0,
+                    identity: String::new(),
+                },
                 entry: &entry,
                 found: Some(&event),
                 outgoing: outgoing(),
@@ -198,5 +210,50 @@ mod tests {
             .is_err()
         );
         assert_eq!(serde_json::to_value(left).unwrap(), before);
+    }
+
+    #[test]
+    fn native_range_marks_retain_stable_equal_key_placements() {
+        let mut facts = Facts::default();
+        let entry = Entry {
+            kind: EntryKind::H(0),
+            file: 0,
+            offset: 0,
+            pos: (0, 0),
+            t: None,
+            at: None,
+        };
+        for (ordinal, id) in [(0, "first"), (1, "second")] {
+            facts
+                .observe(Leaf {
+                    order: Order {
+                        key: (i64::MIN, 0, 0, 0, 0),
+                        ordinal,
+                        identity: id.into(),
+                    },
+                    entry: &entry,
+                    found: None,
+                    outgoing: Some(HandoffEnd {
+                        id,
+                        kind: "toyou",
+                        status: "done",
+                    }),
+                    boundary: true,
+                    count: 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(facts.first.as_ref().unwrap().order.identity, "first");
+        assert_eq!(facts.last.as_ref().unwrap().order.ordinal, 1);
+        assert_eq!(facts.boundary.as_ref().unwrap().order.identity, "second");
+        assert_eq!(
+            facts
+                .end
+                .finish(None, true, false, None, "idle", || panic!("unneeded yield"))
+                .unwrap()
+                .h
+                .as_deref(),
+            Some("second")
+        );
     }
 }
