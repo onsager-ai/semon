@@ -7,6 +7,7 @@
 //! verified checkpoint or a prior chunk's cursor. A raw offset is not authority
 //! or proof of a scalar boundary. No prefix or complete record is needed here.
 pub(crate) mod native_identity;
+pub(crate) mod native_number;
 pub(crate) mod native_record;
 pub(crate) mod native_scan;
 
