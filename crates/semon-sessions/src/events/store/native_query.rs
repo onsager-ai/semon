@@ -14,7 +14,7 @@ const STATE_BYTES: usize = 64 * 1024;
 // Rebuildable private Query metadata is versioned independently from the
 // public native Event Index schema28 and the native parser/custody contract.
 // Install both Original repair metadata and the cross-channel child index.
-pub(super) const SCHEMA_VERSION: i64 = 10;
+pub(super) const SCHEMA_VERSION: i64 = 11;
 const SCHEMA_KEY: &str = "native_query_schema";
 
 pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
@@ -5216,6 +5216,14 @@ mod tests {
                 .unwrap(),
             0
         );
+        assert_eq!(
+            standalone.query_row(
+                "SELECT (SELECT count(*) FROM sqlite_schema WHERE name GLOB 'native_original_*')+(SELECT count(*) FROM sqlite_temp_schema WHERE name GLOB 'native_original_*')",
+                [],
+                |row| row.get::<_, i64>(0),
+            ).unwrap(),
+            0,
+        );
     }
 
     #[test]
@@ -5236,6 +5244,11 @@ mod tests {
     #[test]
     fn native_query_private_nine_reopen_preserves_child_facts_and_installs_event_tables() {
         private_original_schema_reopen(9);
+    }
+
+    #[test]
+    fn native_query_private_ten_reopen_preserves_event_rows_and_installs_policy_restart_tables() {
+        private_original_schema_reopen(10);
     }
 
     fn private_original_schema_reopen(previous_version: i64) {
@@ -5297,12 +5310,31 @@ mod tests {
                 )
                 .unwrap();
         }
+        if previous_version >= 10 {
+            fixture
+                .store
+                .connection
+                .execute_batch(
+                    "INSERT INTO native_original_event_state VALUES(X'07',1);
+                 INSERT INTO native_original_events VALUES(X'07',0,1,1,0,0,'{}');
+                 INSERT INTO native_original_pending VALUES(X'07',1,0,0);
+                 INSERT INTO native_original_tool_ids VALUES(X'07',1,0,1);",
+                )
+                .unwrap();
+        }
         let mut added = vec![
-            "native_original_event_state",
-            "native_original_events",
-            "native_original_pending",
-            "native_original_tool_ids",
+            "native_original_classes",
+            "native_original_identities",
+            "native_original_retirements",
         ];
+        if previous_version < 10 {
+            added.extend([
+                "native_original_event_state",
+                "native_original_events",
+                "native_original_pending",
+                "native_original_tool_ids",
+            ]);
+        }
         if previous_version < 8 {
             added.extend([
                 "native_original_numbers",
@@ -5434,6 +5466,10 @@ mod tests {
                 ("native_original_numbers", "table"),
                 ("native_original_members", "table"),
                 ("native_original_cleanup", "table"),
+                ("native_original_retirements", "table"),
+                ("native_original_classes", "table"),
+                ("native_original_class_candidates", "index"),
+                ("native_original_identities", "table"),
                 ("native_original_node_parent", "index"),
                 ("native_original_node_key", "index"),
                 ("native_original_node_element", "index"),
