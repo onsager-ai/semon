@@ -132,15 +132,21 @@ impl EndFacts {
     /// result is identical to observing every entry, so an indexed range tree
     /// can answer a group end without decoding all of its member events.
     pub(crate) fn append(&mut self, later: Self) {
-        self.has_handoff |= later.has_handoff;
-        self.has_assistant |= later.has_assistant;
-        if later.last_content.is_some() {
-            self.last_content = later.last_content;
+        self.merge(later, true, true);
+    }
+
+    /// Merge disjoint ranges whose entries may interleave. The native order
+    /// owner selects the last content and outgoing-to-you extrema.
+    pub(crate) fn merge(&mut self, other: Self, content_later: bool, to_you_later: bool) {
+        self.has_handoff |= other.has_handoff;
+        self.has_assistant |= other.has_assistant;
+        if content_later && other.last_content.is_some() {
+            self.last_content = other.last_content;
         }
-        if later.last_to_you.is_some() {
-            self.last_to_you = later.last_to_you;
+        if to_you_later && other.last_to_you.is_some() {
+            self.last_to_you = other.last_to_you;
         }
-        self.completed_at = self.completed_at.max(later.completed_at);
+        self.completed_at = self.completed_at.max(other.completed_at);
     }
 
     pub(crate) fn finish(
