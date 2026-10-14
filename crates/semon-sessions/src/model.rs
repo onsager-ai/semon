@@ -5251,8 +5251,21 @@ impl<'a> Builder<'a> {
                 EntryKind::U => true,
                 _ => false,
             };
-            let Some((group, starts)) = cursor.push(matches!(entry.kind, EntryKind::Gap), incoming)
-            else {
+            let Some((group, starts)) = cursor.push_mark(turn_stage::GroupMark {
+                order: range_stage::Order {
+                    key: (
+                        0,
+                        0,
+                        u64::try_from(position).expect("native entry position fits"),
+                        0,
+                        0,
+                    ),
+                    ordinal: 0,
+                    identity: [0; 32],
+                },
+                entry: entry.clone(),
+                incoming,
+            }) else {
                 continue;
             };
             if starts {

@@ -1,7 +1,11 @@
 //! The native turn-end reducer, shared by complete and paged producers.
 //! Only content-free observations survive a page boundary. Entries and sent
 //! handoffs remain in the producer's indexed output, not in reducer state.
-use super::{End, Event, ToolState, native_stage::EntryKind};
+use super::{
+    End, Event, ToolState,
+    native_stage::{Entry, EntryKind},
+    range_stage::Order,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,13 +59,155 @@ pub(crate) struct GroupCursor {
     next: usize,
 }
 
+/// One already-qualified native boundary. Handoff membership is resolved by
+/// the native producer before summarizing, never by the range store.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GroupMark {
+    pub(crate) order: Order,
+    pub(crate) entry: Entry,
+    pub(crate) incoming: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GroupEffect {
+    pub(crate) groups: u64,
+    pub(crate) open: bool,
+    pub(crate) first: Option<GroupMark>,
+    pub(crate) last: Option<GroupMark>,
+}
+
+/// The ordered native group reducer as a two-state transducer. Its two inputs
+/// describe whether a preceding range left a group open. Unlike count/extrema
+/// Facts, this summary must only compose adjacent ranges in global native
+/// order: source streams interleaving in time cannot be added independently.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GroupSummary {
+    closed: GroupEffect,
+    open: GroupEffect,
+}
+
+impl Default for GroupSummary {
+    fn default() -> Self {
+        Self {
+            closed: GroupEffect {
+                groups: 0,
+                open: false,
+                first: None,
+                last: None,
+            },
+            open: GroupEffect {
+                groups: 0,
+                open: true,
+                first: None,
+                last: None,
+            },
+        }
+    }
+}
+
+// Complete Builder and the ordered indexed summary use this exact rule.
+fn group_step(open: bool, gap: bool, incoming: bool) -> (bool, bool) {
+    if gap {
+        (false, false)
+    } else {
+        (true, incoming || !open)
+    }
+}
+
+impl GroupSummary {
+    pub(crate) fn single(mark: GroupMark) -> Self {
+        let gap = matches!(mark.entry.kind, EntryKind::Gap);
+        let effect = |previous| {
+            let (open, starts) = group_step(previous, gap, mark.incoming);
+            GroupEffect {
+                groups: u64::from(starts),
+                open,
+                first: starts.then(|| mark.clone()),
+                last: starts.then(|| mark.clone()),
+            }
+        };
+        Self {
+            closed: effect(false),
+            open: effect(true),
+        }
+    }
+
+    pub(crate) fn effect(&self, open: bool) -> &GroupEffect {
+        if open { &self.open } else { &self.closed }
+    }
+
+    /// Failed checked composition leaves the receiver unchanged. Immutable
+    /// tree parents checkpoint only a complete result of this native kernel.
+    pub(crate) fn append(&mut self, later: &Self) -> Result<(), &'static str> {
+        let compose = |first: &GroupEffect| {
+            let second = later.effect(first.open);
+            Ok::<_, &'static str>(GroupEffect {
+                groups: first
+                    .groups
+                    .checked_add(second.groups)
+                    .ok_or("native group count overflow")?,
+                open: second.open,
+                first: first.first.clone().or_else(|| second.first.clone()),
+                last: second.last.clone().or_else(|| first.last.clone()),
+            })
+        };
+        let next = Self {
+            closed: compose(&self.closed)?,
+            open: compose(&self.open)?,
+        };
+        *self = next;
+        Ok(())
+    }
+}
+
 impl GroupCursor {
+    pub(crate) fn advance(
+        &mut self,
+        summary: &GroupSummary,
+    ) -> Result<Option<usize>, &'static str> {
+        let prefix = GroupEffect {
+            groups: u64::try_from(self.next).map_err(|_| "native group count overflow")?,
+            open: self.current.is_some(),
+            first: None,
+            last: None,
+        };
+        let mut applied = GroupSummary {
+            closed: prefix.clone(),
+            open: prefix,
+        };
+        applied.append(summary)?;
+        let effect = applied.effect(false);
+        let next = usize::try_from(effect.groups).map_err(|_| "native group count overflow")?;
+        let current = if !effect.open {
+            None
+        } else if next != self.next {
+            Some(next - 1)
+        } else {
+            self.current
+        };
+        self.next = next;
+        self.current = current;
+        Ok(current)
+    }
+
+    pub(crate) fn push_mark(&mut self, mark: GroupMark) -> Option<(usize, bool)> {
+        let summary = GroupSummary::single(mark);
+        let starts = summary.effect(self.current.is_some()).groups != 0;
+        self.advance(&summary)
+            .expect("native group count fits")
+            .map(|group| (group, starts))
+    }
+
+    #[cfg(test)]
     pub(crate) fn push(&mut self, gap: bool, incoming: bool) -> Option<(usize, bool)> {
-        if gap {
+        let (open, starts) = group_step(self.current.is_some(), gap, incoming);
+        if !open {
             self.current = None;
             return None;
         }
-        let starts = incoming || self.current.is_none();
         if starts {
             self.current = Some(self.next);
             self.next += 1;
@@ -234,6 +380,185 @@ impl EndFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mark(position: usize, kind: EntryKind, incoming: bool) -> GroupMark {
+        GroupMark {
+            order: Order {
+                key: (position as i64, position % 3, position as u64, 0, 1),
+                ordinal: position as u64,
+                identity: [0; 32],
+            },
+            entry: Entry {
+                kind,
+                file: position % 3,
+                offset: position as u64,
+                pos: (position as u64, 0),
+                t: Some(position as i64),
+                at: Some((position % 3, position)),
+            },
+            incoming,
+        }
+    }
+
+    // The complete pre-index group rule, independently spelled out rather
+    // than calling either group_step or the new summary implementation.
+    fn reference(marks: &[GroupMark], initially_open: bool) -> (Vec<usize>, bool) {
+        let mut open = initially_open;
+        let mut starts = Vec::new();
+        for (position, mark) in marks.iter().enumerate() {
+            if matches!(mark.entry.kind, EntryKind::Gap) {
+                open = false;
+                continue;
+            }
+            if mark.incoming || !open {
+                starts.push(position);
+                open = true;
+            }
+        }
+        (starts, open)
+    }
+
+    fn summarize(marks: &[GroupMark]) -> GroupSummary {
+        let mut summary = GroupSummary::default();
+        for mark in marks {
+            summary.append(&GroupSummary::single(mark.clone())).unwrap();
+        }
+        summary
+    }
+
+    fn assert_reference(summary: &GroupSummary, marks: &[GroupMark]) {
+        for initially_open in [false, true] {
+            let (starts, open) = reference(marks, initially_open);
+            let effect = summary.effect(initially_open);
+            assert_eq!(effect.groups, starts.len() as u64);
+            assert_eq!(effect.open, open);
+            assert_eq!(
+                effect.first.as_ref().map(|mark| &mark.order),
+                starts.first().map(|position| &marks[*position].order)
+            );
+            assert_eq!(
+                effect.last.as_ref().map(|mark| &mark.order),
+                starts.last().map(|position| &marks[*position].order)
+            );
+        }
+    }
+
+    #[test]
+    fn native_ordered_group_summary_matches_reference_across_every_page_cut() {
+        // All short combinations cover closed prefixes, repeated gaps,
+        // incoming members, and ordinary tails on both sides of a page cut.
+        for length in 0..=6 {
+            for pattern in 0..3usize.pow(length) {
+                let mut remaining = pattern;
+                let marks: Vec<_> = (0..length as usize)
+                    .map(|position| {
+                        let (kind, incoming) = match remaining % 3 {
+                            0 => (EntryKind::A, false),
+                            1 => (EntryKind::U, true),
+                            _ => (EntryKind::Gap, false),
+                        };
+                        remaining /= 3;
+                        mark(position, kind, incoming)
+                    })
+                    .collect();
+                let expected = summarize(&marks);
+                assert_reference(&expected, &marks);
+                for split in 0..=marks.len() {
+                    let mut prefix: GroupSummary = serde_json::from_str(
+                        &serde_json::to_string(&summarize(&marks[..split])).unwrap(),
+                    )
+                    .unwrap();
+                    prefix.append(&summarize(&marks[split..])).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(prefix).unwrap(),
+                        serde_json::to_value(&expected).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_group_summary_preserves_qualified_handoff_dedup_and_global_interleaving() {
+        let mut started = std::collections::BTreeSet::new();
+        let mut marks = Vec::new();
+        for (position, (kind, received)) in [
+            (EntryKind::H(7), true),
+            (EntryKind::A, false),
+            (EntryKind::H(7), true),
+            (EntryKind::Gap, false),
+            (EntryKind::H(7), true),
+            (EntryKind::H(8), false),
+            (EntryKind::U, false),
+            (EntryKind::H(8), true),
+            (EntryKind::A, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let incoming = match kind {
+                EntryKind::H(id) if received => started.insert(id),
+                EntryKind::U => true,
+                _ => false,
+            };
+            marks.push(mark(position, kind, incoming));
+        }
+        let whole = summarize(&marks);
+        assert_reference(&whole, &marks);
+        let mut cursor = GroupCursor::default();
+        let actual: Vec<_> = marks
+            .iter()
+            .enumerate()
+            .filter_map(|(position, mark)| {
+                cursor
+                    .push(matches!(mark.entry.kind, EntryKind::Gap), mark.incoming)
+                    .and_then(|(_, starts)| starts.then_some(position))
+            })
+            .collect();
+        assert_eq!(actual, reference(&marks, false).0);
+
+        // Source-local summaries cannot be appended in file order when their
+        // entries interleave. A qualified ordered forest supplies native order.
+        let mut by_source = GroupSummary::default();
+        for source in 0..3 {
+            let local: Vec<_> = marks
+                .iter()
+                .filter(|mark| mark.entry.file == source)
+                .cloned()
+                .collect();
+            by_source.append(&summarize(&local)).unwrap();
+        }
+        assert_ne!(
+            serde_json::to_value(by_source).unwrap(),
+            serde_json::to_value(whole).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_group_summary_is_bounded_and_composition_is_atomic() {
+        for history in [0, 128, 1024, 8192] {
+            let mut summary = GroupSummary::default();
+            for position in 0..history {
+                summary
+                    .append(&GroupSummary::single(mark(position, EntryKind::A, false)))
+                    .unwrap();
+            }
+            summary
+                .append(&GroupSummary::single(mark(history, EntryKind::U, true)))
+                .unwrap();
+            assert_eq!(
+                summary.effect(false).groups,
+                if history == 0 { 1 } else { 2 }
+            );
+            assert!(serde_json::to_string(&summary).unwrap().len() < 2048);
+            let before = serde_json::to_value(&summary).unwrap();
+            let mut overflow = GroupSummary::single(mark(history + 1, EntryKind::U, true));
+            overflow.closed.groups = u64::MAX;
+            overflow.open.groups = u64::MAX;
+            assert!(summary.append(&overflow).is_err());
+            assert_eq!(serde_json::to_value(summary).unwrap(), before);
+        }
+    }
 
     #[test]
     fn native_turn_ranges_combine_in_order_across_tree_shapes() {
