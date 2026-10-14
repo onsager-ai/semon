@@ -19,8 +19,8 @@ mod native_harness;
 mod native_retirement;
 mod native_source;
 mod native_time;
-pub(crate) use native_classes::IdentityStep;
-pub(crate) use native_classes::Representative as OriginalTextRepresentative;
+pub(crate) type IdentityStep = native_classes::IdentityStep;
+pub(crate) type OriginalTextRepresentative = native_classes::Representative;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -234,7 +234,7 @@ pub(crate) struct RepairWork {
     /// page cache and fixed transaction/statement storage.
     pub(crate) cleanup_key_bytes: usize,
 }
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct RepairStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
@@ -288,7 +288,7 @@ impl MemberCursor {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct MemberStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
@@ -2279,6 +2279,7 @@ fn next_record_cursor(repair: &Repair) -> Cursor {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::Arc;
 
     struct Fixture {
         root: PathBuf,
@@ -2334,7 +2335,7 @@ mod tests {
                 }
             }
         }
-        fn member(&mut self, repair: &Repair, name: &str) -> OriginalNode {
+        fn member(&mut self, repair: &Repair, name: &'static str) -> OriginalNode {
             let root = self
                 .store
                 .original_root(&self.job, &self.source, repair)
@@ -2493,7 +2494,7 @@ mod tests {
                 None,
                 true,
             )
-            .unwrap();
+            .unwrap_or_else(|_| panic!("native repair fixture store must open"));
             assert_eq!(
                 writer
                     .write_one(path.to_str().unwrap(), None, None, &ledger, &index)

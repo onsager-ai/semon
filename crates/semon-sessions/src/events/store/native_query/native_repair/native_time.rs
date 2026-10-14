@@ -14,7 +14,7 @@ struct Cursor {
     end: u64,
     complete: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct TimestampStep {
     pub(crate) outcome: Outcome,
     pub(crate) work: RepairWork,
