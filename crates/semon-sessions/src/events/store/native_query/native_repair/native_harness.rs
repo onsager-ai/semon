@@ -39,6 +39,30 @@ impl NativeStore {
         records: &crate::query_source::Records<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<LiteralStep> {
+        self.original_literal_step_with_budget(
+            job,
+            witness,
+            repair,
+            ordinal,
+            literal,
+            records,
+            cancelled,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+        )
+    }
+    pub(crate) fn original_literal_step_with_budget(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        ordinal: u64,
+        literal: &'static str,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<LiteralStep> {
         self.original_field_literal_step(
             job,
             witness,
@@ -48,6 +72,8 @@ impl NativeStore {
             literal,
             records,
             cancelled,
+            native_allowance,
+            metadata_rows_allowance,
         )
     }
 
@@ -64,13 +90,44 @@ impl NativeStore {
         records: &crate::query_source::Records<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<LiteralStep> {
+        self.original_text_literal_step_with_budget(
+            job,
+            witness,
+            repair,
+            text,
+            literal,
+            records,
+            cancelled,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+        )
+    }
+    pub(crate) fn original_text_literal_step_with_budget(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        text: &OriginalText,
+        literal: &'static str,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<LiteralStep> {
+        if cancelled() || native_allowance == 0 || metadata_rows_allowance < 7 {
+            return Ok(literal_result(
+                Outcome::Deferred,
+                RepairWork::default(),
+                None,
+            ));
+        }
         let representative = self.original_text_representative(job, witness, repair, text)?;
         if representative.original != repair.original || representative.source != repair.source {
             return Err(io::Error::other(
                 "native literal text belongs to a different Original",
             ));
         }
-        self.original_field_literal_step(
+        let mut step = self.original_field_literal_step(
             job,
             witness,
             repair,
@@ -79,7 +136,13 @@ impl NativeStore {
             literal,
             records,
             cancelled,
-        )
+            native_allowance,
+            metadata_rows_allowance - 2,
+        )?;
+        step.work.metadata_rows += 2;
+        step.work.metadata_bytes +=
+            json(&representative.field).map_err(io::Error::other)?.len() + 64;
+        Ok(step)
     }
 
     fn original_field_literal_step(
@@ -92,6 +155,8 @@ impl NativeStore {
         literal: &'static str,
         records: &crate::query_source::Records<'_>,
         cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
     ) -> io::Result<LiteralStep> {
         // This restricts caller-supplied parser literals, not supported source
         // strings. All source text lengths/escapes remain descriptor-backed.
@@ -106,7 +171,7 @@ impl NativeStore {
             ));
         }
         let mut work = RepairWork::default();
-        if cancelled() {
+        if cancelled() || native_allowance == 0 || metadata_rows_allowance < 5 {
             return Ok(literal_result(Outcome::Deferred, work, None));
         }
         if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
@@ -210,11 +275,16 @@ impl NativeStore {
                 .ok_or_else(|| io::Error::other("native literal comparison exceeds field"))?;
             let mut native = None;
             if count > 0 {
+                if native_allowance < 12 {
+                    return Ok(literal_result(Outcome::Deferred, work, None));
+                }
                 let at = field_record_at
                     .checked_add(left.at)
                     .ok_or_else(|| io::Error::other("native literal source offset overflow"))?;
-                let maximum = usize::try_from(count.min(crate::SESSION_SOURCE_CHUNK_MAX as u64))
-                    .map_err(io::Error::other)?;
+                let maximum = usize::try_from(
+                    count.min(native_allowance.min(crate::SESSION_SOURCE_CHUNK_MAX) as u64),
+                )
+                .map_err(io::Error::other)?;
                 let pin = repair
                     .cursor
                     .pin
@@ -261,7 +331,7 @@ impl NativeStore {
         let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
         work.metadata_rows += 2;
         work.metadata_bytes += state.len();
-        if work.metadata_rows > ROWS || work.metadata_bytes > BYTES {
+        if work.metadata_rows > metadata_rows_allowance || work.metadata_bytes > BYTES {
             return Err(io::Error::other(
                 "native literal classification exceeds step work",
             ));

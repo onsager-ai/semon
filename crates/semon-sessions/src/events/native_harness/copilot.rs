@@ -16,6 +16,11 @@ use std::borrow::Borrow;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum Phase<N, T> {
     Dispatch,
+    DispatchKind {
+        data: Option<N>,
+        kind: Option<N>,
+        index: u8,
+    },
     User {
         data: Option<N>,
     },
@@ -96,25 +101,55 @@ pub(crate) fn prepare<R, S>(
 ) -> Result<Prepared<R::Node, R::Text>, R::Error>
 where
     R: RecordSource,
-    S: CopilotStore<Text = R::Text, Error = R::Error>,
+    S: CopilotStore<Text = R::Text>,
+    R::Error: From<S::Error>,
 {
     let mut action = Action::None;
     let next = match &cursor.phase {
         Phase::Dispatch => {
             let root = record.root();
             let data = record.member(&root, "data")?;
-            if member_literal(record, Some(&root), "type", "user.message")? {
-                Phase::User { data }
-            } else if member_literal(record, Some(&root), "type", "assistant.message")? {
-                Phase::Assistant { data }
-            } else if member_literal(record, Some(&root), "type", "tool.execution_complete")? {
-                Phase::Completion { data }
-            } else if member_literal(record, Some(&root), "type", "subagent.started")?
-                || member_literal(record, Some(&root), "type", "subagent.completed")?
-            {
-                match member_text(record, Some(&root), "type")? {
-                    Some(name) => Phase::Subagent { data, name },
+            let kind = record.member(&root, "type")?;
+            Phase::DispatchKind {
+                data,
+                kind,
+                index: 0,
+            }
+        }
+        Phase::DispatchKind { data, kind, index } => {
+            let literals = [
+                "user.message",
+                "assistant.message",
+                "tool.execution_complete",
+                "subagent.started",
+                "subagent.completed",
+            ];
+            let matches = match kind {
+                Some(kind) => record.literal(kind, literals[usize::from(*index)])?,
+                None => false,
+            };
+            if matches && *index == 0 {
+                Phase::User { data: data.clone() }
+            } else if matches && *index == 1 {
+                Phase::Assistant { data: data.clone() }
+            } else if matches && *index == 2 {
+                Phase::Completion { data: data.clone() }
+            } else if matches {
+                match kind {
+                    Some(kind) => match record.text(kind)? {
+                        Some(name) => Phase::Subagent {
+                            data: data.clone(),
+                            name,
+                        },
+                        None => Phase::Done,
+                    },
                     None => Phase::Done,
+                }
+            } else if *index < 4 {
+                Phase::DispatchKind {
+                    data: data.clone(),
+                    kind: kind.clone(),
+                    index: *index + 1,
                 }
             } else {
                 Phase::Done
@@ -229,7 +264,8 @@ where
         Phase::Completion { data } => {
             let id = member_text(record, data.as_ref(), "toolCallId")?;
             if let Some(id) = id
-                && let Some(target) = copilot_completion_target(store, id.borrow())?
+                && let Some(target) =
+                    copilot_completion_target(store, id.borrow()).map_err(R::Error::from)?
             {
                 let success = member_bool(record, data.as_ref(), "success")?;
                 let shell = match data {
@@ -248,7 +284,10 @@ where
                     None => None,
                 };
                 let denied = member_literal(record, error.as_ref(), "code", "denied")?;
-                let name = store.event(target)?.and_then(|event| event.n);
+                let name = store
+                    .event(target)
+                    .map_err(R::Error::from)?
+                    .and_then(|event| event.n);
                 let bash = match name {
                     Some(name) => record.text_literal(&name, "bash")?,
                     None => false,

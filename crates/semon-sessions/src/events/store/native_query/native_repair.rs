@@ -15,8 +15,10 @@ use crate::json_string::native_record::{
 
 mod native_classes;
 mod native_compare;
+mod native_copilot;
 mod native_events;
 mod native_harness;
+mod native_record_source;
 mod native_retirement;
 mod native_source;
 mod native_time;
@@ -25,10 +27,11 @@ pub(crate) type OriginalTextRepresentative = native_classes::Representative;
 pub(super) use native_compare::SCHEMA as COMPARE_SCHEMA;
 pub(crate) type ComparisonSource<'a, 'r> = native_compare::ComparisonSource<'a, 'r>;
 pub(crate) type TextComparisonStep = native_compare::TextComparisonStep;
+pub(crate) type BodyStep = native_copilot::BodyStep;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
-pub(crate) use native_time::TimestampStep;
+pub(crate) type TimestampStep = native_time::TimestampStep;
 
 pub(crate) const REPAIR_FORMAT: u32 = 3;
 // The pre-format namespace was published with parser 24. Its key must stay
@@ -87,6 +90,11 @@ CREATE TABLE IF NOT EXISTS native_original_timestamp (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset,ordinal)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_copilot_body (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_copilot_started (
  original BLOB PRIMARY KEY
@@ -698,6 +706,19 @@ impl NativeStore {
         repair: &Repair,
         address: u64,
     ) -> io::Result<Option<crate::json_string::native_number::NativeNumber>> {
+        self.original_number_with_size(job, witness, repair, address)
+            .map(|(number, _)| number)
+    }
+    pub(super) fn original_number_with_size(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        address: u64,
+    ) -> io::Result<(
+        Option<crate::json_string::native_number::NativeNumber>,
+        usize,
+    )> {
         if !self.runtime_current(&job.spec)? {
             return Err(io::Error::other("native number runtime changed"));
         }
@@ -706,23 +727,30 @@ impl NativeStore {
             .unchecked_transaction()
             .map_err(io::Error::other)?;
         check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
-        let receipt:Option<Option<String>>=tx.query_row("SELECT CASE WHEN octet_length(receipt)<=65536 THEN receipt END FROM native_original_numbers WHERE original=?1 AND record_offset=?2 AND address=?3",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(address)?],|row|row.get(0)).optional().map_err(io::Error::other)?;
-        receipt
-            .map(|receipt| {
-                match serde_json::from_str(
-                    receipt.as_deref().ok_or_else(|| {
-                        io::Error::other("native number receipt is not qualified")
-                    })?,
-                )
-                .map_err(io::Error::other)?
-                {
-                    NumberQualification::Finite(number) => Ok(number),
-                    NumberQualification::Invalid => {
-                        Err(io::Error::other("native number belongs to a gap record"))
-                    }
-                }
-            })
+        let receipt:Option<(Option<String>,Option<i64>)>=tx.query_row("SELECT CASE WHEN octet_length(receipt)<=65536 THEN receipt END,octet_length(receipt) FROM native_original_numbers WHERE original=?1 AND record_offset=?2 AND address=?3",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(address)?],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(io::Error::other)?;
+        let size = receipt
+            .as_ref()
+            .and_then(|r| r.1)
+            .map(usize::try_from)
             .transpose()
+            .map_err(io::Error::other)?
+            .unwrap_or(0);
+        let number =
+            receipt
+                .map(|receipt| {
+                    match serde_json::from_str(receipt.0.as_deref().ok_or_else(|| {
+                        io::Error::other("native number receipt is not qualified")
+                    })?)
+                    .map_err(io::Error::other)?
+                    {
+                        NumberQualification::Finite(number) => Ok(number),
+                        NumberQualification::Invalid => {
+                            Err(io::Error::other("native number belongs to a gap record"))
+                        }
+                    }
+                })
+                .transpose()?;
+        Ok((number, size))
     }
 
     pub(crate) fn original_root(
@@ -768,6 +796,31 @@ impl NativeStore {
         records: &crate::query_source::Records<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<MemberStep> {
+        self.original_member_step_with_budget(
+            job,
+            witness,
+            repair,
+            parent,
+            name,
+            records,
+            cancelled,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+        )
+    }
+
+    pub(crate) fn original_member_step_with_budget(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        parent: u64,
+        name: &'static str,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<MemberStep> {
         // This is a producer API literal bound, not a bound on supported keys.
         // Arbitrary native keys remain complete descriptor/hash candidates.
         if name.len() > 128
@@ -781,7 +834,7 @@ impl NativeStore {
             ));
         }
         let mut work = RepairWork::default();
-        if cancelled() {
+        if cancelled() || native_allowance == 0 || metadata_rows_allowance < 8 {
             return Ok(MemberStep {
                 outcome: Outcome::Deferred,
                 work,
@@ -799,8 +852,8 @@ impl NativeStore {
         }
         check_record_view(&self.connection, job, witness, repair).map_err(io::Error::other)?;
         let existing:Option<(i64,Option<String>,i64)>=self.connection.query_row("SELECT revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,octet_length(cursor) FROM native_original_members WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND name=?4",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,name],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(io::Error::other)?;
+        work.metadata_rows += 1;
         let (revision, mut cursor) = if let Some((revision, text, size)) = existing {
-            work.metadata_rows += 1;
             work.metadata_bytes += usize::try_from(size).map_err(io::Error::other)?;
             (
                 Some(revision),
@@ -830,6 +883,15 @@ impl NativeStore {
                 .map(|key| self.original_value_by_key(job, witness, repair, key))
                 .transpose()?
                 .flatten();
+            if cursor.key.is_some() {
+                work.metadata_rows += 2;
+                work.metadata_bytes += 8 + node
+                    .as_ref()
+                    .map(json)
+                    .transpose()
+                    .map_err(io::Error::other)?
+                    .map_or(0, |s| s.len());
+            }
             if cursor.key.is_some() && node.is_none() {
                 return Err(io::Error::other(
                     "native member value descriptor is missing",
@@ -848,8 +910,8 @@ impl NativeStore {
                 sha256: Sha256::digest(name.as_bytes()).into(),
             };
             let candidate:Option<(Option<String>,i64)>=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END,octet_length(metadata) FROM native_original_fields WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND is_key=1 AND digest=?4 AND decoded_bytes=?5 AND ordinal<?6 ORDER BY ordinal DESC LIMIT 1",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,receipt.sha256.as_slice(),seq_u64(receipt.decoded_bytes)?,cursor.before.map(seq_u64).transpose()?.unwrap_or(i64::MAX)],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(io::Error::other)?;
+            work.metadata_rows += 1;
             if let Some((text, size)) = candidate {
-                work.metadata_rows += 1;
                 work.metadata_bytes += usize::try_from(size).map_err(io::Error::other)?;
                 let field: OriginalField =
                     serde_json::from_str(text.as_deref().ok_or_else(|| {
@@ -886,13 +948,23 @@ impl NativeStore {
                 .ok_or_else(|| io::Error::other("native member comparison exceeds field"))?;
             let mut native = None;
             if left > 0 {
+                if native_allowance < 12 {
+                    return Ok(MemberStep {
+                        outcome: Outcome::Deferred,
+                        work,
+                        complete: false,
+                        node: None,
+                    });
+                }
                 let at = repair
                     .cursor
                     .record_at
                     .checked_add(remaining.at)
                     .ok_or_else(|| io::Error::other("native member source offset overflow"))?;
-                let maximum = usize::try_from(left.min(crate::SESSION_SOURCE_CHUNK_MAX as u64))
-                    .map_err(io::Error::other)?;
+                let maximum = usize::try_from(
+                    left.min(native_allowance.min(crate::SESSION_SOURCE_CHUNK_MAX) as u64),
+                )
+                .map_err(io::Error::other)?;
                 let part = records.read_range(
                     &repair.source,
                     repair
@@ -970,6 +1042,7 @@ impl NativeStore {
             .map_err(io::Error::other)?;
         check_record_view(&tx, job, witness, repair).map_err(io::Error::other)?;
         let current:Option<i64>=tx.query_row("SELECT revision FROM native_original_members WHERE original=?1 AND record_offset=?2 AND parent_offset=?3 AND name=?4",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(parent)?,name],|row|row.get(0)).optional().map_err(io::Error::other)?;
+        work.metadata_rows += 1;
         if current != revision {
             return Ok(MemberStep {
                 outcome: Outcome::Conflict,
@@ -994,6 +1067,21 @@ impl NativeStore {
             .map(|key| self.original_value_by_key(job, witness, repair, key))
             .transpose()?
             .flatten();
+        if cursor.key.is_some() {
+            work.metadata_rows += 2;
+            work.metadata_bytes += 8 + node
+                .as_ref()
+                .map(json)
+                .transpose()
+                .map_err(io::Error::other)?
+                .map_or(0, |s| s.len());
+        }
+        if work.metadata_rows > metadata_rows_allowance
+            || work.native_bytes > native_allowance.min(crate::SESSION_SOURCE_CHUNK_MAX)
+            || work.metadata_bytes > BYTES
+        {
+            return Err(io::Error::other("native member exceeded reserved work"));
+        }
         if cursor.key.is_some() && node.is_none() {
             return Err(io::Error::other(
                 "native member value descriptor is missing",
@@ -3620,6 +3708,186 @@ mod tests {
                     .unwrap()
                     .0
                     .is_none()
+            );
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_copilot_body_resumes_every_duplicate_reset_without_complete_indexes() {
+        use crate::events::native_event::{NativeEvent, NativeReply};
+        use crate::events::native_producer::{self, ToolStore};
+        for history in [0usize, 128, 1024, 8192] {
+            let call_id = "λ".repeat(1024);
+            let record = serde_json::json!({"id":"record-id","timestamp":"2026-10-15T01:02:03Z","type":"assistant.message","data":{"messageId":"message-id","content":" ","toolRequests":[{"toolCallId":call_id,"name":"bash"}]}});
+            let bytes = format!("{}\n", record);
+            let mut fixture = Fixture::new(bytes.as_bytes());
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let repair = fixture.qualified_record();
+            let uid_node = fixture.member(&repair, "id");
+            let uid = fixture.identity(&repair, uid_node.ordinal);
+            let data = fixture.member(&repair, "data");
+            let tools = fixture
+                .store
+                .original_member_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    data.address,
+                    "toolRequests",
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .node
+                .unwrap();
+            let request = fixture
+                .store
+                .original_array_page(&fixture.job, &fixture.source, &repair, tools.address, None)
+                .unwrap()
+                .rows
+                .into_iter()
+                .next()
+                .unwrap();
+            let mut get = |name| {
+                fixture
+                    .store
+                    .original_member_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        request.address,
+                        name,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap()
+                    .node
+                    .unwrap()
+            };
+            let id_node = get("toolCallId");
+            let name_node = get("name");
+            let message_node = fixture
+                .store
+                .original_member_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    data.address,
+                    "messageId",
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .node
+                .unwrap();
+            let message = fixture.identity(&repair, message_node.ordinal);
+            let id = fixture.identity(&repair, id_node.ordinal);
+            let name = fixture.identity(&repair, name_node.ordinal);
+            let base = NativeEvent {
+                o: repair.cursor.record_at,
+                t: crate::events::record_time(&record),
+                u: Some(uid),
+                ..Default::default()
+            };
+            let mut oracle = crate::events::FileIndex {
+                copilot: Some(Default::default()),
+                ..Default::default()
+            };
+            for sequence in 0..history {
+                let event = NativeEvent {
+                    k: crate::events::Kind::Tool,
+                    o: 0,
+                    b: sequence as u32,
+                    id: Some(id.clone()),
+                    n: Some(name.clone()),
+                    r: Some(NativeReply {
+                        e: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut native =
+                    native_events::Events::new(&fixture.store.connection, repair.original).unwrap();
+                native_producer::tool_event(&mut native, event.clone()).unwrap();
+                native_producer::complete(native_producer::tool_event(
+                    &mut oracle,
+                    NativeEvent {
+                        id: Some(call_id.clone()),
+                        n: Some("bash".to_owned()),
+                        ..event.scalar().into()
+                    },
+                ));
+            }
+            crate::events::copilot(&mut oracle, &record, repair.cursor.record_at);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                assert!(
+                    attempts < history + 128,
+                    "every bounded phase must make progress"
+                );
+                let step = fixture
+                    .store
+                    .original_copilot_body_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &base,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                if step.complete {
+                    break;
+                }
+            }
+            assert!(attempts >= history);
+            let native =
+                native_events::Events::read_only(&fixture.store.connection, repair.original);
+            assert_eq!(native.event_count().unwrap(), oracle.events.len());
+            for (sequence, expected) in oracle.events.iter().enumerate() {
+                let native =
+                    native_events::Events::read_only(&fixture.store.connection, repair.original);
+                let event = native.event(sequence).unwrap().unwrap();
+                assert_eq!(
+                    serde_json::to_value(event.scalar()).unwrap(),
+                    serde_json::to_value(NativeEvent::from(expected.clone()).scalar()).unwrap()
+                );
+                assert_eq!(
+                    event.id,
+                    expected.id.as_ref().map(|text| if text == &call_id {
+                        id.clone()
+                    } else {
+                        assert_eq!(text, "message-id");
+                        message.clone()
+                    })
+                );
+                assert_eq!(
+                    event.n,
+                    expected.n.as_ref().map(|text| {
+                        assert_eq!(text, "bash");
+                        name.clone()
+                    })
+                );
+                assert_eq!(
+                    event.u,
+                    expected.u.as_ref().map(|text| {
+                        assert_eq!(text, "record-id");
+                        base.u.clone().unwrap()
+                    })
+                );
+            }
+            assert!(
+                fixture
+                    .store
+                    .original_event_facts(&fixture.job, &fixture.source, &repair)
+                    .is_err(),
+                "a body cannot certify missing header/admission/source work"
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
         }

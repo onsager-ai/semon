@@ -43,6 +43,13 @@ pub(super) struct Events<'a> {
     work: RefCell<RepairWork>,
 }
 impl<'a> Events<'a> {
+    pub(super) fn read_only(db: &'a Connection, original: [u8; 32]) -> Self {
+        Self {
+            db,
+            original,
+            work: RefCell::new(RepairWork::default()),
+        }
+    }
     pub(super) fn new(db: &'a Connection, original: [u8; 32]) -> io::Result<Self> {
         let store = Self {
             db,
