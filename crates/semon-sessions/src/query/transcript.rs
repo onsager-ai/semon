@@ -276,11 +276,10 @@ fn virtual_read(
     now: i64,
 ) -> Result<Option<Value>, QueryError> {
     let requested = args["id"].as_str().expect("validated focused id");
-    if requested != key
-        && args["_machine_alias"]
-            .as_str()
-            .is_none_or(|alias| requested != format!("{key}@{alias}"))
-    {
+    let served = args["_machine_alias"]
+        .as_str()
+        .map_or_else(|| key.to_owned(), |alias| format!("{key}@{alias}"));
+    if requested != served {
         return Err(QueryError::unknown_session(requested));
     }
     let mut db = Connection::open_with_flags(
@@ -489,7 +488,7 @@ fn virtual_read(
             tx::Anchor::Turn(turn) => {
                 return Err(QueryError::new(
                     "unknown_turn",
-                    format!("session {key:?} has no turn {turn:?}"),
+                    format!("session {requested:?} has no turn {turn:?}"),
                 ));
             }
         };

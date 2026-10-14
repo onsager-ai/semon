@@ -3646,8 +3646,31 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
             assert_eq!(labels[1], ("b".into(), "same-host~b".into()));
         }
         for tool in ["get_session", "read_transcript"] {
+            for invalid in [
+                format!("{raw}@not-this-machine"),
+                if multiple {
+                    raw.to_owned()
+                } else {
+                    format!("{raw}@same-host")
+                },
+            ] {
+                let invalid_args = json!({"id":invalid});
+                assert_eq!(
+                    focused.call_selected_at(
+                        "a",
+                        raw,
+                        tool,
+                        &invalid_args,
+                        None,
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        NOW
+                    ),
+                    legacy.call_at(tool, &invalid_args, NOW)
+                );
+            }
             let mut cases = vec![json!({"id":id})];
             if tool == "read_transcript" {
+                cases.push(json!({"id":id,"turn":"absent"}));
                 for position in [0, 1, 2, 100] {
                     for limit in [1, 2, 100] {
                         cases.push(json!({"id":id,"before":position,"limit":limit}));
@@ -3685,6 +3708,20 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
                 );
             }
         }
+        let args = json!({"id":"lead"});
+        assert_eq!(
+            focused.call_selected_at(
+                "a",
+                "lead",
+                "get_session",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            ),
+            legacy.call_at("get_session", &args, NOW)
+        );
+        assert!(focused.native.is_none());
         for (_, source) in &sources.machines {
             assert!(source.work.lock().unwrap().events.is_none());
         }
