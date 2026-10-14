@@ -26,6 +26,9 @@ mod launch_calls;
 // integration; unused entrypoints remain intentional in this foundation commit.
 #[allow(dead_code)]
 pub(crate) mod native_query;
+// The native model owns the terminal algebra and the publication consumer.
+#[allow(dead_code)]
+pub(crate) mod native_rank;
 mod relocation;
 mod semantic_stage;
 
@@ -61,7 +64,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 33;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -4403,6 +4406,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
         // Private owner epoch triggers require both Current and History tables.
         transaction.execute_batch(native_query::SCHEMA)?;
+        transaction.execute_batch(native_rank::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
         // Format 2 also reads the existing format-1 postings. Promote only its
         // metadata in this additive transaction, before the publication path

@@ -215,8 +215,8 @@ pub(crate) struct Page<T, K> {
 }
 
 pub(crate) struct NativeStore {
-    connection: Connection,
-    options: crate::Options,
+    pub(super) connection: Connection,
+    pub(super) options: crate::Options,
 }
 
 fn invalid(message: &str) -> rusqlite::Error {
@@ -331,7 +331,7 @@ pub(super) fn pending(db: &Connection) -> rusqlite::Result<bool> {
 }
 
 impl NativeStore {
-    fn runtime_current(&self, spec: &JobSpec) -> io::Result<bool> {
+    pub(super) fn runtime_current(&self, spec: &JobSpec) -> io::Result<bool> {
         Ok(crate::native_evidence::query_runtime_generation(&self.options)? == spec.runtime)
     }
     pub(crate) fn begin(&mut self, spec: &JobSpec) -> io::Result<Job> {
@@ -828,6 +828,10 @@ impl NativeStore {
         };
         let mut budget = ROWS;
         let mut bytes_left = BYTES;
+        let (rank_removed, rank_complete) =
+            super::native_rank::cleanup(&tx, job.id, budget, &mut bytes_left)
+                .map_err(io::Error::other)?;
+        budget -= rank_removed;
         // Row identities/cursors, not metadata values, are selected for bounded
         // cleanup. Witness count is independently bounded by the closure cap.
         let removed =
@@ -843,7 +847,7 @@ impl NativeStore {
         }
         let remains:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM native_query_rows WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_sources WHERE job=?1) OR EXISTS(SELECT 1 FROM native_query_owners WHERE job=?1)",[job.id],|r|r.get(0)).map_err(io::Error::other)?;
         let header_bytes:i64=tx.query_row("SELECT 64+octet_length(view_key)+COALESCE(octet_length(catalog_generation),0)+octet_length(runtime)+octet_length(phase)+octet_length(cursor)+octet_length(state) FROM native_query_jobs WHERE job=?1",[job.id],|r|r.get(0)).map_err(io::Error::other)?;
-        let finished = !remains && budget > 0 && header_bytes <= bytes_left as i64;
+        let finished = rank_complete && !remains && budget > 0 && header_bytes <= bytes_left as i64;
         if finished {
             tx.execute("DELETE FROM native_query_jobs WHERE job=?1", [job.id])
                 .map_err(io::Error::other)?;
@@ -993,7 +997,7 @@ fn read_job(db: &Connection, key: &str) -> rusqlite::Result<Option<Job>> {
         Ok(Job{id:r.get(0)?,spec:JobSpec{view_key:key.into(),version:r.get(1)?,catalog_generation:r.get(2)?,runtime:r.get(3)?},phase:r.get(4)?,revision:r.get(5)?,cursor:r.get(6)?,state:from_json(7,&state)?})
     }).optional()
 }
-fn job_current(db: &Connection, job: &Job) -> rusqlite::Result<bool> {
+pub(super) fn job_current(db: &Connection, job: &Job) -> rusqlite::Result<bool> {
     Ok(spec_current(db, &job.spec)?
         && read_job(db, &job.spec.view_key)?.is_some_and(|a| {
             a.id == job.id
@@ -2713,6 +2717,431 @@ mod tests {
                 .source_has_copy_identity(&fixture.source(), "native-uuid")
                 .is_err()
         );
+    }
+    #[test]
+    fn native_rank_transactions_cancel_reopen_and_refuse_changed_related_owners() {
+        use super::super::native_rank::ApplyInput;
+        let mut fixture = Fixture::new(0);
+        let mut related = fixture.row.clone();
+        related.key = "related".into();
+        related.name = "related".into();
+        fixture.store.connection.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES(?1,?2,?3,?4)",params![related.key,related.last.unwrap(),related.harness,json(&related).unwrap()]).unwrap();
+        let spec = fixture.spec();
+        let job = fixture.store.begin(&spec).unwrap();
+        let source = fixture.source();
+        let owners = [
+            fixture.store.owner_witness(&fixture.row).unwrap(),
+            fixture.store.owner_witness(&related).unwrap(),
+        ];
+        fixture
+            .store
+            .admit(&job, &[source], &owners, "complete-closure")
+            .unwrap();
+        let mut job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        let empty = serde_json::to_string(&crate::model::range_stage::Facts::default()).unwrap();
+        let one = serde_json::to_string(&crate::model::range_stage::Facts {
+            count: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let checks = Cell::new(0);
+        let cancel_after_write = || {
+            checks.set(checks.get() + 1);
+            checks.get() == 2
+        };
+        assert_eq!(
+            fixture
+                .store
+                .rank_guard(
+                    &job,
+                    &one,
+                    &empty,
+                    &[(0, true)],
+                    &|_, _| Ok(true),
+                    &cancel_after_write
+                )
+                .unwrap()
+                .0,
+            Outcome::Deferred
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_rank_nodes", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let (_, root) = fixture
+            .store
+            .rank_guard(&job, &one, &empty, &[(0, true)], &|_, _| Ok(true), &|| {
+                false
+            })
+            .unwrap();
+        let root = root.unwrap().0;
+        job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        let (_, identity) = fixture
+            .store
+            .rank_guard(&job, &empty, &empty, &[], &|_, _| Ok(true), &|| false)
+            .unwrap();
+        let identity = identity.unwrap().0;
+        job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .rank_begin_apply(
+                    &job,
+                    ApplyInput {
+                        cursor: "append",
+                        version: "native-range-v1",
+                        identity: &identity,
+                        left: &root,
+                        right: &root
+                    },
+                    &|_, _| Ok(true),
+                    &|| false
+                )
+                .unwrap(),
+            Outcome::Written
+        );
+        job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        assert!(
+            fixture
+                .store
+                .rank_advance_apply(
+                    &job,
+                    "append",
+                    &|_, _| Err(io::Error::other("injected native combine failure")),
+                    &|_, _| Ok(true),
+                    &|| false
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fixture
+                .store
+                .reload(&spec.view_key)
+                .unwrap()
+                .unwrap()
+                .revision,
+            job.revision
+        );
+        for table in ["native_rank_nodes", "native_rank_memos"] {
+            let before: i64 = fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_rank_nodes", [], |r| r.get(0))
+                .unwrap();
+            fixture.store.connection.execute_batch(&format!("CREATE TEMP TRIGGER rank_injected_write BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'injected rank write'); END")).unwrap();
+            assert!(
+                fixture
+                    .store
+                    .rank_advance_apply(
+                        &job,
+                        "append",
+                        &|left, right| {
+                            let mut facts: crate::model::range_stage::Facts =
+                                serde_json::from_str(left).map_err(io::Error::other)?;
+                            facts
+                                .append(serde_json::from_str(right).map_err(io::Error::other)?)
+                                .map_err(io::Error::other)?;
+                            serde_json::to_string(&facts).map_err(io::Error::other)
+                        },
+                        &|_, _| Ok(true),
+                        &|| false
+                    )
+                    .is_err()
+            );
+            fixture
+                .store
+                .connection
+                .execute_batch("DROP TRIGGER rank_injected_write")
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .reload(&spec.view_key)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                job.revision
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM native_rank_nodes", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                before
+            );
+        }
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        let combine = |left: &str, right: &str| {
+            let mut facts: crate::model::range_stage::Facts =
+                serde_json::from_str(left).map_err(io::Error::other)?;
+            facts
+                .append(serde_json::from_str(right).map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
+            serde_json::to_string(&facts).map_err(io::Error::other)
+        };
+        let complete = loop {
+            let step = fixture
+                .store
+                .rank_advance_apply(&job, "append", &combine, &|_, _| Ok(true), &|| false)
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            assert!(step.work.sql_reads + step.work.sql_writes <= ROWS);
+            job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+            if let Some(root) = step.complete {
+                break root;
+            }
+        };
+        assert!(
+            fixture
+                .store
+                .rank_evaluate(&job, &complete, 1, &|_, _| Ok(true))
+                .unwrap()
+                .is_none(),
+            "staged nodes have no reader authority"
+        );
+        fixture
+            .store
+            .checkpoint(
+                &job,
+                "finish",
+                "complete",
+                &serde_json::json!({}),
+                &[],
+                &|| false,
+            )
+            .unwrap();
+        job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        fixture
+            .store
+            .qualify(
+                &job,
+                &serde_json::to_value(&complete).unwrap(),
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+        let (facts, _) = fixture
+            .store
+            .rank_evaluate(&job, &complete, 1, &|_, _| Ok(true))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::model::range_stage::Facts>(&facts)
+                .unwrap()
+                .count,
+            2
+        );
+        assert!(
+            fixture
+                .store
+                .rank_evaluate(&job, &complete, 1, &|_, _| Ok(false))
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata=metadata||' ' WHERE session_key='related'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .rank_evaluate(&job, &complete, 1, &|_, _| Ok(true))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_rank_qualified_point_read_accounts_for_all_witness_vm_work_at_fixed_page() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let mut vm = Vec::new();
+        for earlier in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(earlier);
+            let mut job = fixture.admitted();
+            let empty =
+                serde_json::to_string(&crate::model::range_stage::Facts::default()).unwrap();
+            let one = serde_json::to_string(&crate::model::range_stage::Facts {
+                count: 1,
+                ..Default::default()
+            })
+            .unwrap();
+            let (_, root) = fixture
+                .store
+                .rank_guard(
+                    &job,
+                    &one,
+                    &empty,
+                    &[(0, true), (1, false)],
+                    &|_, _| Ok(true),
+                    &|| false,
+                )
+                .unwrap();
+            let root = root.unwrap().0;
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            fixture
+                .store
+                .checkpoint(
+                    &job,
+                    "finish",
+                    "complete",
+                    &serde_json::json!({}),
+                    &[],
+                    &|| false,
+                )
+                .unwrap();
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            fixture
+                .store
+                .qualify(
+                    &job,
+                    &serde_json::to_value(&root).unwrap(),
+                    &|_, _| Ok(true),
+                    &|| false,
+                )
+                .unwrap();
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            let reads = super::super::super::FILE_READS.with(Cell::get);
+            let builds = crate::model::COMPAT_BUILDS.with(Cell::get);
+            let opcodes = Arc::new(AtomicUsize::new(0));
+            let observed = opcodes.clone();
+            fixture.store.connection.progress_handler(
+                1,
+                Some(move || {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let (facts, work) = fixture
+                .store
+                .rank_evaluate(&job, &root, 1, &|_, _| Ok(true))
+                .unwrap()
+                .unwrap();
+            vm.push(opcodes.load(Ordering::Relaxed));
+            assert_eq!(
+                serde_json::from_str::<crate::model::range_stage::Facts>(&facts)
+                    .unwrap()
+                    .count,
+                1
+            );
+            assert_eq!(work.sql_reads, 3);
+            assert!(work.metadata_bytes < 4096);
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+            assert_eq!(crate::model::COMPAT_BUILDS.with(Cell::get), builds);
+        }
+        assert!(
+            vm.windows(2).all(|pair| pair[0] == pair[1]),
+            "full qualified point-read SQLite VM work {vm:?}"
+        );
+    }
+
+    #[test]
+    fn native_rank_full_source_guard_admission_resumes_in_bounded_steps() {
+        use super::super::native_rank::GuardInput;
+        let mut fixture = Fixture::new(0);
+        let mut job = fixture.admitted();
+        let empty = serde_json::to_string(&crate::model::range_stage::Facts::default()).unwrap();
+        let one = serde_json::to_string(&crate::model::range_stage::Facts {
+            count: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let guard = (0..64).map(|source| (source, true)).collect::<Vec<_>>();
+        fixture
+            .store
+            .rank_begin_guard(
+                &job,
+                GuardInput {
+                    cursor: "full-guard",
+                    facts: &one,
+                    empty: &empty,
+                    decisions: &guard,
+                },
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        let mut attempts = 0;
+        let root = loop {
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            let step = fixture
+                .store
+                .rank_advance_guard(&job, "full-guard", &|_, _| Ok(true), &|| false)
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            assert!(step.work.sql_reads + step.work.sql_writes <= ROWS);
+            assert!(step.work.metadata_bytes <= BYTES);
+            attempts += 1;
+            assert!(attempts < 10);
+            if let Some(root) = step.complete {
+                break root;
+            }
+        };
+        assert!(attempts > 1);
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        fixture
+            .store
+            .checkpoint(
+                &job,
+                "finish",
+                "complete",
+                &serde_json::json!({}),
+                &[],
+                &|| false,
+            )
+            .unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        fixture
+            .store
+            .qualify(
+                &job,
+                &serde_json::to_value(&root).unwrap(),
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        let (facts, work) = fixture
+            .store
+            .rank_evaluate(&job, &root, u64::MAX, &|_, _| Ok(true))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::model::range_stage::Facts>(&facts)
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(work.sql_reads, 65);
+        for source in 0..64 {
+            let (facts, _) = fixture
+                .store
+                .rank_evaluate(&job, &root, u64::MAX ^ (1u64 << source), &|_, _| Ok(true))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<crate::model::range_stage::Facts>(&facts)
+                    .unwrap()
+                    .count,
+                0
+            );
+        }
     }
     #[test]
     fn native_query_all_admitted_owners_and_new_closure_are_fenced() {
