@@ -4395,31 +4395,27 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
     }
     if let Some(id) = field(record, "session_id")
         && Some(id) != field(record, "sessionId")
+        && summary.links.session_ids.insert(id.to_owned())
+        && let Some(dirty) = &mut summary.dirty_rows
     {
-        if summary.links.session_ids.insert(id.to_owned())
-            && let Some(dirty) = &mut summary.dirty_rows
-        {
-            dirty.links.insert(("session".into(), id.to_owned()));
-        }
+        dirty.links.insert(("session".into(), id.to_owned()));
     }
     match field(record, "type") {
         Some("continued-in") => {
-            if let Some(id) = field(record, "continuedInSessionId") {
-                if summary.links.continued_in.insert(id.to_owned())
-                    && let Some(dirty) = &mut summary.dirty_rows
-                {
-                    dirty.links.insert(("continued".into(), id.to_owned()));
-                }
+            if let Some(id) = field(record, "continuedInSessionId")
+                && summary.links.continued_in.insert(id.to_owned())
+                && let Some(dirty) = &mut summary.dirty_rows
+            {
+                dirty.links.insert(("continued".into(), id.to_owned()));
             }
             return;
         }
         Some("bridge-session") => {
-            if let Some(id) = field(record, "bridgeSessionId") {
-                if summary.links.bridges.insert(id.to_owned())
-                    && let Some(dirty) = &mut summary.dirty_rows
-                {
-                    dirty.links.insert(("bridge".into(), id.to_owned()));
-                }
+            if let Some(id) = field(record, "bridgeSessionId")
+                && summary.links.bridges.insert(id.to_owned())
+                && let Some(dirty) = &mut summary.dirty_rows
+            {
+                dirty.links.insert(("bridge".into(), id.to_owned()));
             }
             return;
         }
