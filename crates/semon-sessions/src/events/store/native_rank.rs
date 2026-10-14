@@ -1301,6 +1301,30 @@ impl Graph<'_> {
     }
 }
 
+#[derive(Debug)]
+struct TransactionFailure {
+    source: io::Error,
+    steps: u64,
+}
+impl std::fmt::Display for TransactionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+impl std::error::Error for TransactionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+/// Complete connection work, including rollback, survives an unsuccessful
+/// primitive while retaining the caller's error kind and display text.
+pub(crate) fn transaction_error_vm_steps(error: &io::Error) -> Option<u64> {
+    error
+        .get_ref()?
+        .downcast_ref::<TransactionFailure>()
+        .map(|failure| failure.steps)
+}
+
 impl NativeStore {
     /// Import an immutable predecessor root under the producer's new, complete
     /// source-prefix/relationship qualification. One root reference retains
@@ -1334,7 +1358,8 @@ impl NativeStore {
         cancelled: &dyn Fn() -> bool,
         operation: impl FnOnce(&Connection, i64) -> io::Result<T>,
     ) -> io::Result<(Outcome, Option<T>)> {
-        self.rank_transaction_body(job, closure, cancelled, operation)
+        self.rank_transaction_measured(job, closure, cancelled, operation)
+            .map(|(outcome, value, _)| (outcome, value))
     }
 
     /// Candidate-tree work reports the whole SQLite instruction delta for its
@@ -1351,7 +1376,9 @@ impl NativeStore {
         let measurement = native_query::vm_meter::begin(&self.connection);
         let result = self.rank_transaction_body(job, closure, cancelled, operation);
         let steps = measurement.finish(&self.connection);
-        result.map(|(outcome, value)| (outcome, value, steps))
+        result
+            .map(|(outcome, value)| (outcome, value, steps))
+            .map_err(|source| io::Error::new(source.kind(), TransactionFailure { source, steps }))
     }
 
     fn rank_transaction_body<T>(
@@ -1381,11 +1408,15 @@ impl NativeStore {
         if cancelled() {
             return Ok((Outcome::Deferred, None));
         }
-        if crate::native_evidence::query_runtime_generation(&self.options)? != job.spec.runtime
+        // Caller I/O and observations must precede the final owned fences.
+        if !closure(&tx, job.id).map_err(io::Error::other)?
             || !native_query::job_current(&tx, job).map_err(io::Error::other)?
-            || !closure(&tx, job.id).map_err(io::Error::other)?
+            || crate::native_evidence::query_runtime_generation(&self.options)? != job.spec.runtime
         {
             return Ok((Outcome::Conflict, None));
+        }
+        if cancelled() {
+            return Ok((Outcome::Deferred, None));
         }
         let changed = tx
             .execute(
@@ -1400,6 +1431,20 @@ impl NativeStore {
             return Ok((Outcome::Deferred, None));
         }
         tx.commit().map_err(io::Error::other)?;
+        let mut advanced = job.clone();
+        advanced.revision += 1;
+        // Refuse a result if a newly related owner, publication or runtime
+        // changed after the transaction snapshot was released. The committed
+        // private progress remains NotReady and cannot publish mixed facts.
+        if !closure(&self.connection, job.id).map_err(io::Error::other)?
+            || !native_query::job_current(&self.connection, &advanced).map_err(io::Error::other)?
+            || !self.runtime_current(&job.spec)?
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        if cancelled() {
+            return Ok((Outcome::Deferred, None));
+        }
         Ok((Outcome::Written, Some(result)))
     }
 
