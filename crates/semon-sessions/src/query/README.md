@@ -361,6 +361,8 @@ unqualified selected semantic preparation remain distinct scaling costs.
 Qualified physical `get_session` reads reuse the producer's exact summary and
 private Query turn/handoff recipes in the existing Index metadata region. They
 page content-free metadata and resolve only returned prompt/handoff fields.
+The busy interval vector lives in separate private session metadata, so a small
+transcript page does not decode the complete busy history from its Catalog row.
 Public Trace rows, their digest and transport are unchanged. Private recipes
 are separated by native harness owner; their header binds the source vector,
 Query observation, trace generation and complete recipe counts. Publication and
@@ -374,7 +376,7 @@ are retained. A late match legitimately scans earlier content; it does not first
 prepare the complete selected Event Index or transcript. Bodies, providers,
 verification state and the single preparation block belong to one request.
 
-Existing bounds remain: 64 sources in a relationship closure, 1 MiB per Catalog
+Existing bounds remain: 64 sources in a relationship closure, 1 MiB per Catalog or private session
 metadata value, 64 KiB per Query/slot recipe, 4 MiB for the complete content-free
 source-proof hash vectors, 8 MiB for the requested session result metadata, 64 MiB
 for native Query detail input, and 1,024 provider requests shared with final

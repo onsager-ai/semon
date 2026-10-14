@@ -688,7 +688,6 @@ pub(crate) fn catalog_summaries<'a>(
             (
                 id.clone(),
                 json!({"summary":summary,
-                    "busy":session["busy"],
                     "recorded_status":facts.get(id).and_then(|f| f.recorded_status.as_deref()),
                     "state":session["state"], "last":session["last"],
                 }),
