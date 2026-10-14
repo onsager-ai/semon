@@ -6,9 +6,11 @@
 //! requires a complete source index. Point reads return one metadata event;
 //! turn closure visits at most 64 pending calls per resumable step.
 
-use super::{
-    Event, FileIndex, Kind, POLLS_MAX, Reply, STDIN, Signal, SignalKind, UNKNOWN, YIELDS_MAX,
-};
+use super::native_event::{NativeEvent, NativeReply};
+#[cfg(test)]
+use super::{Event, Reply};
+use super::{FileIndex, Kind, POLLS_MAX, STDIN, Signal, SignalKind, UNKNOWN, YIELDS_MAX};
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
@@ -16,25 +18,31 @@ pub(crate) const CLOSE_PAGE: usize = 64;
 
 pub(crate) trait ToolStore {
     type Error;
+    type Identity: ?Sized;
+    type Text: Clone + Borrow<Self::Identity>;
     fn event_count(&self) -> Result<usize, Self::Error>;
-    fn event(&self, sequence: usize) -> Result<Option<Event>, Self::Error>;
-    fn replace_event(&mut self, sequence: usize, event: Event) -> Result<(), Self::Error>;
-    fn append_event(&mut self, event: Event) -> Result<usize, Self::Error>;
-    fn pending(&self, id: &str) -> Result<Option<usize>, Self::Error>;
-    fn take_pending(&mut self, id: &str) -> Result<Option<usize>, Self::Error>;
-    fn set_pending(&mut self, id: &str, sequence: usize) -> Result<(), Self::Error>;
-    fn add_tool_id(&mut self, id: &str, sequence: usize) -> Result<(), Self::Error>;
+    fn event(&self, sequence: usize) -> Result<Option<NativeEvent<Self::Text>>, Self::Error>;
+    fn replace_event(
+        &mut self,
+        sequence: usize,
+        event: NativeEvent<Self::Text>,
+    ) -> Result<(), Self::Error>;
+    fn append_event(&mut self, event: NativeEvent<Self::Text>) -> Result<usize, Self::Error>;
+    fn pending(&self, id: &Self::Identity) -> Result<Option<usize>, Self::Error>;
+    fn take_pending(&mut self, id: &Self::Identity) -> Result<Option<usize>, Self::Error>;
+    fn set_pending(&mut self, id: &Self::Identity, sequence: usize) -> Result<(), Self::Error>;
+    fn add_tool_id(&mut self, id: &Self::Identity, sequence: usize) -> Result<(), Self::Error>;
     /// Newest exact occurrence, optionally requiring a non-code-mode call.
     /// `floor` is an absolute event address, not a number of matching calls.
     fn latest_tool(
         &self,
-        id: &str,
+        id: &Self::Identity,
         plain: bool,
         floor: usize,
     ) -> Result<Option<usize>, Self::Error>;
     /// Native late-exit fallback scans the last 512 events, even when a
     /// persisted occurrence map is absent. The floor remains absolute.
-    fn recent_tool(&self, id: &str, floor: usize) -> Result<Option<usize>, Self::Error>;
+    fn recent_tool(&self, id: &Self::Identity, floor: usize) -> Result<Option<usize>, Self::Error>;
     /// Exactly one open code-mode pending call, otherwise None. Indexed
     /// implementations need at most two matching rows to establish ambiguity.
     fn unique_open_code_mode(&self) -> Result<Option<usize>, Self::Error>;
@@ -124,7 +132,11 @@ pub(crate) fn signal<S: SignalStore>(
     store.append_signal(Signal { k, o, t, at, n, v })
 }
 
-pub(crate) fn push<S: ToolStore>(store: &mut S, event: Event) -> Result<(), S::Error> {
+pub(crate) fn push<S: ToolStore>(
+    store: &mut S,
+    event: impl Into<NativeEvent<S::Text>>,
+) -> Result<(), S::Error> {
+    let event = event.into();
     if event.k == Kind::Gap
         && let Some(last) = store.event_count()?.checked_sub(1)
         && store.event(last)?.is_some_and(|last| last.k == Kind::Gap)
@@ -268,10 +280,10 @@ impl YieldStore for FileIndex {
     }
 }
 
-pub(crate) fn resolve<S: ToolStore>(
+pub(crate) fn resolve<S: ToolStore, R: Into<NativeReply<S::Text>>>(
     store: &mut S,
-    id: &str,
-    reply: impl FnOnce(Option<&str>) -> Reply,
+    id: &S::Identity,
+    reply: impl FnOnce(Option<&S::Identity>) -> R,
 ) -> Result<(), S::Error> {
     let Some(sequence) = store.take_pending(id)? else {
         return Ok(());
@@ -279,21 +291,25 @@ pub(crate) fn resolve<S: ToolStore>(
     if let Some(mut event) = store.event(sequence)?
         && event.k == Kind::Tool
     {
-        event.r = Some(reply(event.n.as_deref()));
+        event.r = Some(reply(event.n.as_ref().map(Borrow::borrow)).into());
         event.code_mode_open = false;
         store.replace_event(sequence, event)?;
     }
     Ok(())
 }
 
-pub(crate) fn tool_event<S: ToolStore>(store: &mut S, event: Event) -> Result<(), S::Error> {
+pub(crate) fn tool_event<S: ToolStore>(
+    store: &mut S,
+    event: impl Into<NativeEvent<S::Text>>,
+) -> Result<(), S::Error> {
+    let event = event.into();
     let id = event.id.clone();
     let pending = event.r.is_none();
     let sequence = store.append_event(event)?;
     if let Some(id) = id {
-        store.add_tool_id(&id, sequence)?;
+        store.add_tool_id(id.borrow(), sequence)?;
         if pending {
-            store.set_pending(&id, sequence)?;
+            store.set_pending(id.borrow(), sequence)?;
         }
     }
     Ok(())
@@ -301,7 +317,7 @@ pub(crate) fn tool_event<S: ToolStore>(store: &mut S, event: Event) -> Result<()
 
 pub(crate) fn link_item<S: ToolStore>(
     store: &mut S,
-    id: &str,
+    id: &S::Identity,
     offset: u64,
 ) -> Result<(), S::Error> {
     if let Some(sequence) = store.latest_tool(id, true, 0)?
@@ -315,17 +331,17 @@ pub(crate) fn link_item<S: ToolStore>(
 
 pub(crate) fn exit_code<S: ToolStore>(
     store: &mut S,
-    id: &str,
+    id: &S::Identity,
     code: i64,
     offset: u64,
     time: Option<i64>,
 ) -> Result<(), S::Error> {
     if store.pending(id)?.is_some() {
-        return resolve(store, id, |_| Reply {
+        return resolve(store, id, |_| NativeReply::<S::Text> {
             o: offset,
             t: time,
             e: code != 0,
-            ..Reply::default()
+            ..NativeReply::default()
         });
     }
     // Preserve the native last-512-events limit, including non-tool events.
@@ -386,21 +402,27 @@ pub(super) fn complete<T>(result: Result<T, Infallible>) -> T {
 
 impl ToolStore for FileIndex {
     type Error = Infallible;
+    type Identity = str;
+    type Text = String;
     fn event_count(&self) -> Result<usize, Infallible> {
         Ok(self.events.len())
     }
-    fn event(&self, sequence: usize) -> Result<Option<Event>, Infallible> {
-        Ok(self.events.get(sequence).cloned())
+    fn event(&self, sequence: usize) -> Result<Option<NativeEvent<String>>, Infallible> {
+        Ok(self.events.get(sequence).cloned().map(Into::into))
     }
-    fn replace_event(&mut self, sequence: usize, event: Event) -> Result<(), Infallible> {
+    fn replace_event(
+        &mut self,
+        sequence: usize,
+        event: NativeEvent<String>,
+    ) -> Result<(), Infallible> {
         if let Some(existing) = self.event_mut(sequence) {
-            *existing = event;
+            *existing = event.into();
         }
         Ok(())
     }
-    fn append_event(&mut self, event: Event) -> Result<usize, Infallible> {
+    fn append_event(&mut self, event: NativeEvent<String>) -> Result<usize, Infallible> {
         let sequence = self.events.len();
-        self.events.push(event);
+        self.events.push(event.into());
         Ok(sequence)
     }
     fn pending(&self, id: &str) -> Result<Option<usize>, Infallible> {
@@ -461,6 +483,135 @@ impl ToolStore for FileIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+    struct Descriptor {
+        key: u64,
+        decoded_bytes: u64,
+    }
+    struct DescriptorStore {
+        events: Vec<NativeEvent<Descriptor>>,
+        pending: BTreeMap<Descriptor, usize>,
+        tools: BTreeMap<Descriptor, Vec<usize>>,
+        reads: Cell<usize>,
+    }
+    impl ToolStore for DescriptorStore {
+        type Error = Infallible;
+        type Identity = Descriptor;
+        type Text = Descriptor;
+        fn event_count(&self) -> Result<usize, Infallible> {
+            Ok(self.events.len())
+        }
+        fn event(&self, sequence: usize) -> Result<Option<NativeEvent<Descriptor>>, Infallible> {
+            self.reads.set(self.reads.get() + 1);
+            Ok(self.events.get(sequence).cloned())
+        }
+        fn replace_event(
+            &mut self,
+            sequence: usize,
+            event: NativeEvent<Descriptor>,
+        ) -> Result<(), Infallible> {
+            self.events[sequence] = event;
+            Ok(())
+        }
+        fn append_event(&mut self, event: NativeEvent<Descriptor>) -> Result<usize, Infallible> {
+            let index = self.events.len();
+            self.events.push(event);
+            Ok(index)
+        }
+        fn pending(&self, id: &Descriptor) -> Result<Option<usize>, Infallible> {
+            Ok(self.pending.get(id).copied())
+        }
+        fn take_pending(&mut self, id: &Descriptor) -> Result<Option<usize>, Infallible> {
+            Ok(self.pending.remove(id))
+        }
+        fn set_pending(&mut self, id: &Descriptor, sequence: usize) -> Result<(), Infallible> {
+            self.pending.insert(id.clone(), sequence);
+            Ok(())
+        }
+        fn add_tool_id(&mut self, id: &Descriptor, sequence: usize) -> Result<(), Infallible> {
+            self.tools.entry(id.clone()).or_default().push(sequence);
+            Ok(())
+        }
+        fn latest_tool(
+            &self,
+            id: &Descriptor,
+            plain: bool,
+            floor: usize,
+        ) -> Result<Option<usize>, Infallible> {
+            Ok(self.tools.get(id).and_then(|indices| {
+                indices.iter().rev().copied().find(|&index| {
+                    index >= floor
+                        && self.events[index].k == Kind::Tool
+                        && (!plain || !self.events[index].code_mode)
+                })
+            }))
+        }
+        fn recent_tool(&self, id: &Descriptor, floor: usize) -> Result<Option<usize>, Infallible> {
+            Ok(self
+                .events
+                .iter()
+                .enumerate()
+                .rev()
+                .take(512)
+                .find(|(index, event)| {
+                    *index >= floor && event.k == Kind::Tool && event.id.as_ref() == Some(id)
+                })
+                .map(|(index, _)| index))
+        }
+        fn unique_open_code_mode(&self) -> Result<Option<usize>, Infallible> {
+            let mut values = self.pending.values().copied().filter(|&index| {
+                self.events[index].k == Kind::Tool
+                    && self.events[index].code_mode
+                    && self.events[index].code_mode_open
+            });
+            Ok(values.next().filter(|_| values.next().is_none()))
+        }
+    }
+
+    #[test]
+    fn descriptor_tool_kernel_never_needs_owned_native_text_or_history_hydration() {
+        for prior in [0, 128, 1024, 8192] {
+            let descriptor = Descriptor {
+                key: 1,
+                decoded_bytes: 1_000_000 + prior as u64,
+            };
+            let mut store = DescriptorStore {
+                events: vec![NativeEvent::default(); prior],
+                pending: BTreeMap::new(),
+                tools: BTreeMap::new(),
+                reads: Cell::new(0),
+            };
+            complete(tool_event(
+                &mut store,
+                NativeEvent {
+                    k: Kind::Tool,
+                    o: 10,
+                    id: Some(descriptor.clone()),
+                    n: Some(descriptor.clone()),
+                    code_mode: true,
+                    code_mode_open: true,
+                    ..NativeEvent::default()
+                },
+            ));
+            assert_eq!(complete(store.unique_open_code_mode()), Some(prior));
+            complete(resolve(&mut store, &descriptor, |name| {
+                assert_eq!(name, Some(&descriptor));
+                NativeReply::<Descriptor> {
+                    o: 20,
+                    m: Some(descriptor.clone()),
+                    ..NativeReply::default()
+                }
+            }));
+            assert_eq!(store.reads.get(), 1);
+            let event = &store.events[prior];
+            assert_eq!(event.r.as_ref().unwrap().o, 20);
+            assert!(!event.code_mode_open);
+            assert!(serde_json::to_vec(event).unwrap().len() < 1024);
+            assert!(event.scalar().r.unwrap().m.is_none());
+        }
+    }
 
     #[test]
     fn close_resume_preserves_pending_and_absolute_addresses() {

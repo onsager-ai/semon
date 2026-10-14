@@ -13,12 +13,36 @@ use crate::json_string::native_record::{
     Container, Cursor as RecordCursor, Literal, Location, Span, Token,
 };
 
+mod native_events;
+
 pub(crate) const REPAIR_FORMAT: u32 = 2;
 // The pre-format namespace was published with parser 24. Its key must stay
 // frozen even when the complete native producer later advances CACHE_VERSION.
 const PREVIOUS_REPAIR_PARSER: u32 = 24;
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_original_event_state (
+ original BLOB PRIMARY KEY, event_count INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_events (
+ original BLOB NOT NULL, sequence INTEGER NOT NULL, is_tool INTEGER NOT NULL,
+ identity INTEGER, code_mode INTEGER NOT NULL, code_mode_open INTEGER NOT NULL,
+ metadata TEXT NOT NULL, PRIMARY KEY(original,sequence)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_event_identity
+ ON native_original_events(original,identity,sequence) WHERE is_tool=1;
+CREATE TABLE IF NOT EXISTS native_original_pending (
+ original BLOB NOT NULL, identity INTEGER NOT NULL, sequence INTEGER NOT NULL,
+ code_mode_open INTEGER NOT NULL, PRIMARY KEY(original,identity)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_pending_open
+ ON native_original_pending(original,identity,sequence) WHERE code_mode_open=1;
+CREATE TABLE IF NOT EXISTS native_original_tool_ids (
+ original BLOB NOT NULL, identity INTEGER NOT NULL, sequence INTEGER NOT NULL,
+ plain INTEGER NOT NULL, PRIMARY KEY(original,identity,sequence)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_plain_tool_ids
+ ON native_original_tool_ids(original,identity,plain,sequence);
 CREATE TABLE IF NOT EXISTS native_original_cleanup (
  original BLOB PRIMARY KEY, obsolete BLOB NOT NULL, table_index INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -301,6 +325,111 @@ fn admitted_original(
 }
 
 impl NativeStore {
+    /// One native Gap transition, followed by the same record cursor seal used
+    /// by the complete record reducer. This never qualifies the publication:
+    /// other retained records and source/owner completion still remain pending.
+    pub(crate) fn original_gap_step(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<RepairStep> {
+        let mut work = RepairWork::default();
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        if reference(records, witness)? != repair.source || repair.cursor.phase != Phase::FoldRecord
+        {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        if record_status(&self.connection, repair)
+            .map_err(io::Error::other)?
+            .as_deref()
+            != Some("gap")
+        {
+            return Err(io::Error::other(
+                "native Gap reducer requires a qualified Gap record",
+            ));
+        }
+        verify_member_anchor(records, repair, &mut work)?;
+        records.finish()?;
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        if !self.runtime_current(&job.spec)? {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        if !job_current(&tx, job).map_err(io::Error::other)?
+            || !check_source(&tx, witness).map_err(io::Error::other)?
+            || !repair_current(&tx, repair).map_err(io::Error::other)?
+            || !admitted_original(&tx, job, witness).map_err(io::Error::other)?
+            || record_status(&tx, repair)
+                .map_err(io::Error::other)?
+                .as_deref()
+                != Some("gap")
+        {
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
+        }
+        let mut events = native_events::Events::new(&tx, repair.original)?;
+        crate::events::native_producer::push(
+            &mut events,
+            crate::events::native_event::NativeEvent::<native_events::Text> {
+                k: crate::events::Kind::Gap,
+                o: repair.cursor.record_at,
+                ..Default::default()
+            },
+        )?;
+        let event_work = events.work();
+        work.metadata_rows += event_work.metadata_rows + 2;
+        work.metadata_bytes += event_work.metadata_bytes;
+        let cursor = next_record_cursor(repair);
+        let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
+        work.metadata_bytes += state.len();
+        if work.metadata_rows > ROWS || work.metadata_bytes > BYTES {
+            return Err(io::Error::other("native Gap fold exceeds metadata work"));
+        }
+        if tx.execute("UPDATE native_original_records SET status='folded' WHERE original=?1 AND record_offset=?2 AND end_offset=?3 AND status='gap'",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(repair.cursor.source_at)?]).map_err(io::Error::other)?!=1 {
+            return Ok(RepairStep { outcome:Outcome::Conflict,work });
+        }
+        tx.execute(
+            "UPDATE native_original_repairs SET cursor=?2,revision=revision+1 WHERE original=?1",
+            params![repair.original.as_slice(), state],
+        )
+        .map_err(io::Error::other)?;
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        tx.commit().map_err(io::Error::other)?;
+        Ok(RepairStep {
+            outcome: Outcome::Written,
+            work,
+        })
+    }
+
     /// Retire only this same Original's obsolete derived-format rows. Unknown
     /// old cursor JSON is never decoded and never becomes reader authority.
     /// At most 30 small primary keys are read/deleted plus one cursor update;
@@ -1782,19 +1911,7 @@ impl NativeStore {
         if changed != 1 {
             return Ok(Outcome::Conflict);
         }
-        let mut cursor = repair.cursor.clone();
-        cursor.record_at = cursor.source_at;
-        cursor.ordinal = 0;
-        cursor.record = RecordCursor::new();
-        cursor.fields_after = None;
-        cursor.fields_registered = false;
-        cursor.node_stack.clear();
-        cursor.native_invalid = false;
-        cursor.phase = if cursor.source_at == repair.source.offset {
-            Phase::Complete
-        } else {
-            Phase::Lexing
-        };
+        let cursor = next_record_cursor(repair);
         let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
         tx.execute(
             "UPDATE native_original_repairs SET cursor=?2,revision=revision+1 WHERE original=?1",
@@ -2196,6 +2313,23 @@ fn seq_u64(value: u64) -> io::Result<i64> {
     i64::try_from(value).map_err(io::Error::other)
 }
 
+fn next_record_cursor(repair: &Repair) -> Cursor {
+    let mut cursor = repair.cursor.clone();
+    cursor.record_at = cursor.source_at;
+    cursor.ordinal = 0;
+    cursor.record = RecordCursor::new();
+    cursor.fields_after = None;
+    cursor.fields_registered = false;
+    cursor.node_stack.clear();
+    cursor.native_invalid = false;
+    cursor.phase = if cursor.source_at == repair.source.offset {
+        Phase::Complete
+    } else {
+        Phase::Lexing
+    };
+    cursor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2319,6 +2453,166 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn native_gap_fold_is_durable_coalesced_and_bounded_with_growing_history() {
+        use crate::events::native_event::NativeEvent;
+        use crate::events::native_producer::ToolStore;
+        for size in [0usize, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(b"[]\nnull\n");
+            let mut repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            // Already-derived history can grow without becoming resident in
+            // the next native record transition. Only the last row is read.
+            {
+                let tx = fixture.store.connection.transaction().unwrap();
+                tx.execute(
+                    "INSERT INTO native_original_event_state VALUES(?1,?2)",
+                    params![repair.original.as_slice(), size as i64],
+                )
+                .unwrap();
+                let text = serde_json::to_string(&NativeEvent::<native_events::Text> {
+                    k: crate::events::Kind::U,
+                    ..Default::default()
+                })
+                .unwrap();
+                for sequence in 0..size {
+                    tx.execute(
+                        "INSERT INTO native_original_events VALUES(?1,?2,0,NULL,0,0,?3)",
+                        params![repair.original.as_slice(), sequence as i64, text],
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let reads = super::super::super::super::FILE_READS.with(Cell::get);
+            let mut gap_steps = 0;
+            while repair.cursor.phase != Phase::Complete {
+                if repair.cursor.phase == Phase::FoldRecord {
+                    let prepared = fixture
+                        .store
+                        .original_fields_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    repair = fixture
+                        .store
+                        .reload_original_repair(
+                            &fixture.job,
+                            &fixture.source,
+                            &fixture.sources.reader(),
+                        )
+                        .unwrap()
+                        .unwrap();
+                    if prepared.outcome == Outcome::Written {
+                        let before = repair.revision;
+                        let calls = Cell::new(0);
+                        let cancelled = || {
+                            calls.set(calls.get() + 1);
+                            calls.get() == 3
+                        };
+                        let step = fixture
+                            .store
+                            .original_gap_step(
+                                &fixture.job,
+                                &fixture.source,
+                                &repair,
+                                &fixture.sources.reader(),
+                                &cancelled,
+                            )
+                            .unwrap();
+                        assert_eq!(step.outcome, Outcome::Deferred);
+                        fixture.store = NativeStore::open(&fixture.options).unwrap();
+                        repair = fixture
+                            .store
+                            .reload_original_repair(
+                                &fixture.job,
+                                &fixture.source,
+                                &fixture.sources.reader(),
+                            )
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(repair.revision, before);
+                        let step = fixture
+                            .store
+                            .original_gap_step(
+                                &fixture.job,
+                                &fixture.source,
+                                &repair,
+                                &fixture.sources.reader(),
+                                &|| false,
+                            )
+                            .unwrap();
+                        assert_eq!(step.outcome, Outcome::Written);
+                        assert!(step.work.metadata_rows <= ROWS);
+                        assert!(step.work.metadata_bytes < 4096);
+                        assert_eq!(step.work.range_requests, 1);
+                        assert!(step.work.native_bytes <= 1);
+                        gap_steps += 1;
+                    }
+                } else {
+                    fixture
+                        .store
+                        .original_lex_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                }
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            assert_eq!(gap_steps, 2);
+            let events =
+                native_events::Events::new(&fixture.store.connection, repair.original).unwrap();
+            assert_eq!(events.event_count().unwrap(), size + 1);
+            let last = events.event(size).unwrap().unwrap();
+            assert_eq!(
+                last.scalar(),
+                Event {
+                    k: crate::events::Kind::Gap,
+                    o: 0,
+                    ..Default::default()
+                }
+            );
+            // Independent complete native parsing of both non-object records
+            // gives one Gap at the first absolute offset, never one per line.
+            let mut complete = FileIndex::default();
+            for (offset, line) in [(0, b"[]".as_slice()), (3, b"null".as_slice())] {
+                let value: Value = serde_json::from_slice(line).unwrap();
+                assert!(!value.is_object());
+                super::super::super::super::gap(&mut complete, offset);
+            }
+            assert_eq!(complete.events, vec![last.scalar()]);
+            assert_eq!(
+                super::super::super::super::FILE_READS.with(Cell::get),
+                reads
+            );
         }
     }
 
