@@ -436,23 +436,12 @@ pub(crate) fn short_hash(text: &str) -> String {
 /// longer value is cut and ends in `#` and a hash of the whole value, so two
 /// values that share a long prefix stay different.
 fn bounded(text: &str) -> Option<String> {
-    let safe = !text.is_empty()
-        && text.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'_' | b'-' | b'.' | b':' | b'/' | b'[' | b']' | b'+' | b' '
-                )
-        });
-    if !safe {
+    let mut cursor = native_harness::tag::Cursor::default();
+    cursor.push(text.as_bytes());
+    if cursor.rejected() {
         return None;
     }
-    // The text is ASCII, so bytes and characters agree.
-    Some(if text.len() > TAG_MAX {
-        format!("{}#{}", &text[..TAG_MAX - 9], short_hash(text))
-    } else {
-        text.to_owned()
-    })
+    cursor.result(&Sha256::digest(text.as_bytes()).into())
 }
 
 /// Pushes a signal whose tag is already bounded, without the compaction dedupe.

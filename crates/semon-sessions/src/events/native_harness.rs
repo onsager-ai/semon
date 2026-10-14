@@ -6,6 +6,7 @@
 
 pub(crate) mod copilot;
 pub(crate) mod record;
+pub(crate) mod tag;
 pub(crate) mod time;
 
 use super::native_event::NativeReply;

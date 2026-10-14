@@ -21,6 +21,7 @@ mod native_harness;
 mod native_record_source;
 mod native_retirement;
 mod native_source;
+mod native_tag;
 mod native_time;
 pub(crate) type IdentityStep = native_classes::IdentityStep;
 pub(crate) type OriginalTextRepresentative = native_classes::Representative;
@@ -32,6 +33,7 @@ pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
 pub(crate) type TimestampStep = native_time::TimestampStep;
+pub(crate) type TagStep = native_tag::TagStep;
 
 pub(crate) const REPAIR_FORMAT: u32 = 3;
 // The pre-format namespace was published with parser 24. Its key must stay
@@ -87,6 +89,11 @@ CREATE TABLE IF NOT EXISTS native_original_literal (
  PRIMARY KEY(original,record_offset,ordinal,literal)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_timestamp (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset,ordinal)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_tag (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset,ordinal)
@@ -3890,6 +3897,72 @@ mod tests {
                 "a body cannot certify missing header/admission/source work"
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_signal_tags_stream_the_whole_safe_value_and_resume_after_cancellation() {
+        for size in [0usize, 128, 1024, 8192, 200_000] {
+            for suffix in ["", "λ", "\n"] {
+                let value = format!("{}{}", "model-".repeat(size), suffix);
+                let bytes = format!("{{\"value\":{}}}\n", serde_json::to_string(&value).unwrap());
+                let mut fixture = Fixture::new(bytes.as_bytes());
+                let repair = fixture.qualified_record();
+                let node = fixture.member(&repair, "value");
+                let reads = crate::events::FILE_READS.with(Cell::get);
+                let mut attempts = 0;
+                loop {
+                    attempts += 1;
+                    assert!(attempts < 256);
+                    let cancelled = fixture
+                        .store
+                        .original_tag_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            node.ordinal,
+                            &fixture.sources.reader(),
+                            &|| true,
+                        )
+                        .unwrap();
+                    assert_eq!(cancelled.work.native_bytes, 0);
+                    let step = fixture
+                        .store
+                        .original_tag_step_with_budget(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            node.ordinal,
+                            &fixture.sources.reader(),
+                            &|| false,
+                            crate::SESSION_SOURCE_CHUNK_MAX - 2,
+                            4,
+                        )
+                        .unwrap();
+                    assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX - 2);
+                    assert!(step.work.metadata_rows <= 4);
+                    assert!(step.work.metadata_bytes < 16 * 1024);
+                    fixture.store = NativeStore::open(&fixture.options).unwrap();
+                    if step.complete {
+                        assert_eq!(step.tag, crate::events::bounded(&value));
+                        break;
+                    }
+                }
+                let cached = fixture
+                    .store
+                    .original_tag_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        node.ordinal,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(cached.work.native_bytes, 1);
+                assert_eq!(cached.tag, crate::events::bounded(&value));
+                assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+            }
         }
     }
 
