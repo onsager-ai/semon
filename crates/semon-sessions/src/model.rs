@@ -5095,14 +5095,9 @@ impl<'a> Builder<'a> {
         let mut event_times: HashMap<usize, Vec<i64>> = HashMap::new();
         for file in session_files {
             let events = &self.files[*file].summary.events;
-            let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
-            let times = events
-                .iter()
-                .map(|found| {
-                    time = found.t.unwrap_or(time);
-                    time
-                })
-                .collect();
+            let mut time =
+                native_stage::EventTimeCursor::new(events.iter().find_map(|event| event.t));
+            let times = events.iter().map(|found| time.push(found.t)).collect();
             event_times.insert(*file, times);
         }
         // The time of the last event at or before `offset` in `file`: events
@@ -5194,38 +5189,23 @@ impl<'a> Builder<'a> {
                 // A code-mode call drawn as its operations that failed, or
                 // that never finished, is still a step: after them, where its
                 // failure arrived or after the last of them.
-                let (time, pos, phase) = native_stage::position(
+                let (time, phase, entry) = native_stage::event_entry(
                     kind,
+                    at.0,
+                    at.1,
                     found,
                     last_operation.get(&at).copied(),
                     time,
                     |offset| time_at(at.0, offset),
                 );
-                keyed.push((
-                    key(time, at.0, pos, phase),
-                    Entry {
-                        kind,
-                        file: at.0,
-                        offset: found.o,
-                        pos,
-                        t: found.t,
-                        at: Some(at),
-                    },
-                ));
+                keyed.push((key(time, at.0, entry.pos, phase), entry));
             }
             if let Some(handoff) = self.after.get(&at) {
                 // The event's own place, so the handoff follows it even when
                 // it is a later block of its line.
                 keyed.push((
                     key(time, at.0, (found.o, found.b), 2),
-                    Entry {
-                        kind: EntryKind::H(*handoff),
-                        file: at.0,
-                        offset: found.o,
-                        pos: (found.o, found.b),
-                        t: found.t,
-                        at: None,
-                    },
+                    native_stage::after_entry(*handoff, at.0, found),
                 ));
             }
         }
@@ -5234,23 +5214,10 @@ impl<'a> Builder<'a> {
                 if extra.k != Kind::Operation {
                     continue;
                 }
-                let state = match extra.r.as_ref() {
-                    Some(reply) if reply.e => ToolState::Err,
-                    Some(reply) if reply.f & UNKNOWN != 0 => ToolState::Unknown,
-                    Some(_) => ToolState::Ok,
-                    None => ToolState::Pending,
-                };
                 let time = extra.t.unwrap_or_else(|| time_at(*file, extra.o));
                 keyed.push((
                     key(time, *file, (extra.o, extra.b), 1),
-                    Entry {
-                        kind: EntryKind::Operation(state),
-                        file: *file,
-                        offset: extra.o,
-                        pos: (extra.o, extra.b),
-                        t: extra.t,
-                        at: None,
-                    },
+                    native_stage::operation_entry(*file, extra),
                 ));
             }
         }
