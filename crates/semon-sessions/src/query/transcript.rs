@@ -343,6 +343,12 @@ fn virtual_read(
         headers.push((identity.clone(), header));
         let encoded: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1",[format!("{}{}",crate::query_projection::prefix("virtual",&identity),key)],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
         if let Some(encoded) = encoded {
+            // A shared virtual transcript is an aggregate, not the first
+            // physical owner's recipe vector. Retain the native aggregate
+            // resolver until its generation-bound ordered projection exists.
+            if owner.is_some() {
+                return Ok(None);
+            }
             let header: Value = serde_json::from_str(&encoded).map_err(unavailable)?;
             if owner.is_none() {
                 owner = Some((
