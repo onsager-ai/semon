@@ -6,6 +6,8 @@
 //! Readers bind spans/cursors to an authorized source generation and begin at a
 //! verified checkpoint or a prior chunk's cursor. A raw offset is not authority
 //! or proof of a scalar boundary. No prefix or complete record is needed here.
+pub(crate) mod native_scan;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,
@@ -432,39 +434,24 @@ impl Lexer<'_> {
         self.take(b'"')?;
         let start = self.at;
         let mut checkpoints = pointer.map(|_| vec![start as u64]).unwrap_or_default();
-        let mut checkpoint = start;
-        loop {
-            if self.bytes.get(self.at) == Some(&b'"') {
-                break;
-            }
-            // Plain ASCII cannot split a scalar or escape. Walk that run up to
-            // the next checkpoint without decoding one character at a time.
-            // Quotes, escapes, controls and UTF-8 retain scalar validation.
-            let remaining = self.bytes.get(self.at..).ok_or_else(invalid)?;
-            let limit = if pointer.is_some() {
-                remaining
-                    .len()
-                    .min(self.checkpoint_bytes.saturating_sub(self.at - checkpoint))
-            } else {
-                remaining.len()
-            };
-            let ascii = remaining[..limit]
-                .iter()
-                .position(|byte| *byte < 0x20 || *byte >= 0x80 || matches!(byte, b'"' | b'\\'))
-                .unwrap_or(limit);
-            if ascii > 0 {
-                self.at += ascii;
-            } else {
-                let (_, width) = scalar(remaining, true)?.ok_or_else(invalid)?;
-                self.at += width;
-            }
-            if pointer.is_some() && self.at - checkpoint >= self.checkpoint_bytes {
-                checkpoints.push(self.at as u64);
-                checkpoint = self.at;
-            }
+        let mut cursor = native_scan::Cursor::new(start as u64);
+        let step = cursor.step(
+            &self.bytes[self.at..],
+            true,
+            self.bytes.len() - self.at,
+            self.checkpoint_bytes,
+            |at| {
+                if pointer.is_some() {
+                    checkpoints.push(at);
+                }
+                Ok(())
+            },
+        )?;
+        let end = usize::try_from(step.end.ok_or_else(invalid)?).map_err(|_| invalid())?;
+        self.at = start.checked_add(step.consumed).ok_or_else(invalid)?;
+        if self.at != end + 1 {
+            return Err(invalid());
         }
-        let end = self.at;
-        self.at += 1;
         if let Some(pointer) = pointer {
             if self.spans.len() >= MAX_FIELDS {
                 return Err(limit());
