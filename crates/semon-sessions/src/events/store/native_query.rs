@@ -1228,7 +1228,7 @@ impl NativeStore {
             != witness
                 .ledger
                 .as_ref()
-                .map(json)
+                .map(source_fact_generation)
                 .transpose()
                 .map_err(io::Error::other)?
                 .as_deref()
