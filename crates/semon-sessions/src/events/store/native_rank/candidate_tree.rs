@@ -2,7 +2,7 @@
 //! source/time qualification and the graph's Facts algebra; this module owns
 //! only fixed-width placement keys, candidate addresses, and graph roots.
 use super::{
-    Apply, Frame, Graph, Node, NodeId, Pair, Phase, ROW_PREFIX, STEP_BYTES, STEP_ROWS,
+    Apply, Frame, Graph, NodeId, Pair, Phase, ROW_PREFIX, STEP_BYTES, STEP_ROWS,
     native_query::{self, Job, NativeStore},
 };
 use crate::events::Outcome;
@@ -125,7 +125,7 @@ pub(crate) struct CandidateRead<T> {
     pub(crate) work: CandidateWork,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct CandidateStep {
     pub(crate) outcome: Outcome,
     pub(crate) complete: Option<CandidateRoot>,
@@ -1059,10 +1059,11 @@ fn cleanup_error(message: &'static str) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Node;
     use super::*;
     use crate::{
-        events::store::{EventCache, SqliteStore},
-        events::{Event, FileIndex, Kind},
+        events::store::SqliteStore,
+        events::{Event, EventCache, FileIndex, Kind},
         model::{
             native_stage::{Entry, EntryKind},
             range_stage::{Facts, Leaf, Order},
@@ -3425,8 +3426,9 @@ mod tests {
                 [&huge],
             )
             .unwrap();
+            let mut remaining_bytes = usize::MAX;
             let (result, _, allocated) =
-                measure_test_allocations(|| cleanup(&db, 1, 32, &mut usize::MAX));
+                measure_test_allocations(|| cleanup(&db, 1, 32, &mut remaining_bytes));
             assert!(result.is_err(), "{table}.{column} was admitted");
             assert!(
                 allocated < 128 * 1024,
@@ -5304,7 +5306,7 @@ fn prepare_at_leaf(
 /// One unpublished, structural neighbor search. No conditional graph is
 /// evaluated: even an invisible candidate participates in native tie order.
 /// Source qualification and readiness remain separate from public Query reads.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct SourceNeighborStep {
     pub(crate) outcome: Outcome,
     pub(crate) complete: bool,

@@ -367,7 +367,8 @@ impl Geometry<'_> {
             return Err(failure("orthogonal dependency absent"));
         }
         if delta < 0 {
-            self.execute("INSERT INTO native_orthogonal_gc SELECT ?1,identity FROM native_orthogonal_nodes WHERE identity=?2 AND refs=0 ON CONFLICT(job,identity) DO NOTHING", params![self.job, id.identity()])?;
+            let job = self.job;
+            self.execute("INSERT INTO native_orthogonal_gc SELECT ?1,identity FROM native_orthogonal_nodes WHERE identity=?2 AND refs=0 ON CONFLICT(job,identity) DO NOTHING", params![job, id.identity()])?;
         }
         Ok(())
     }
@@ -626,11 +627,13 @@ impl Geometry<'_> {
     ) -> io::Result<()> {
         let text = encoded(frame)?;
         self.work.metadata_bytes += text.len();
-        self.execute("INSERT INTO native_orthogonal_frames VALUES(?1,?2,?3,?4,?5) ON CONFLICT(job,name,family,depth) DO UPDATE SET metadata=excluded.metadata", params![self.job, name, family, depth as i64, text])?;
+        let job = self.job;
+        self.execute("INSERT INTO native_orthogonal_frames VALUES(?1,?2,?3,?4,?5) ON CONFLICT(job,name,family,depth) DO UPDATE SET metadata=excluded.metadata", params![job, name, family, depth as i64, text])?;
         Ok(())
     }
     fn pop_frame(&mut self, name: &str, family: u8, depth: usize) -> io::Result<()> {
-        if self.execute("DELETE FROM native_orthogonal_frames WHERE job=?1 AND name=?2 AND family=?3 AND depth=?4", params![self.job, name, family, depth as i64])? != 1 {
+        let job = self.job;
+        if self.execute("DELETE FROM native_orthogonal_frames WHERE job=?1 AND name=?2 AND family=?3 AND depth=?4", params![job, name, family, depth as i64])? != 1 {
             return Err(failure("orthogonal cursor frame is absent"));
         }
         Ok(())
@@ -1141,7 +1144,8 @@ impl Geometry<'_> {
         let text = encoded(state)?;
         self.work.metadata_bytes += text.len();
         let bytes = text.len();
-        self.execute("INSERT INTO native_orthogonal_work VALUES(?1,?2,?3) ON CONFLICT(job,name) DO UPDATE SET metadata=excluded.metadata", params![self.job, name, text])?;
+        let job = self.job;
+        self.execute("INSERT INTO native_orthogonal_work VALUES(?1,?2,?3) ON CONFLICT(job,name) DO UPDATE SET metadata=excluded.metadata", params![job, name, text])?;
         Ok(bytes)
     }
     fn bind(&mut self, name: &str, root: &Root) -> io::Result<()> {
@@ -1172,7 +1176,8 @@ impl Geometry<'_> {
             self.reference(id, 1)?;
         }
         self.work.metadata_bytes += next.as_ref().map_or(0, String::len);
-        self.execute("INSERT INTO native_orthogonal_roots VALUES(?1,?2,?3) ON CONFLICT(job,name) DO UPDATE SET identity=excluded.identity", params![self.job, name, next])?;
+        let job = self.job;
+        self.execute("INSERT INTO native_orthogonal_roots VALUES(?1,?2,?3) ON CONFLICT(job,name) DO UPDATE SET identity=excluded.identity", params![job, name, next])?;
         if let Some(Some(old)) = old {
             self.reference(&Id::parse(&old)?, -1)?;
         }
