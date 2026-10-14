@@ -4,6 +4,28 @@
 use super::*;
 use rusqlite::params;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_IDENTITY: std::cell::RefCell<Option<(u8, Box<dyn FnOnce()>)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn after_identity_snapshot(_stage: u8) {
+    #[cfg(test)]
+    AFTER_IDENTITY.with(|slot| {
+        let hook = {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(stage, _)| *stage == _stage) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, hook)) = hook {
+            hook();
+        }
+    });
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Headers {
     private: Option<String>,
@@ -34,6 +56,11 @@ fn headers(db: &Connection, row: &CatalogRow) -> io::Result<Headers> {
 pub(crate) struct Identity {
     pub(crate) owner: CatalogRow,
     pub(crate) canonical: String,
+    fence: Fence,
+}
+
+/// Both positive and negative identity decisions bind the entire selection.
+pub(crate) struct Fence {
     original: String,
     context: Vec<CatalogRow>,
     headers: Vec<Headers>,
@@ -42,7 +69,7 @@ pub(crate) struct Identity {
 
 pub(crate) enum Resolution {
     Known(Identity),
-    Unknown,
+    Unknown(Fence),
 }
 
 fn native_seed(
@@ -84,7 +111,7 @@ fn native_seed(
     Ok(chosen.map(|(_, _, id)| id))
 }
 
-impl Identity {
+impl Fence {
     fn metadata_unchanged(&self, db: &Connection) -> io::Result<bool> {
         let actual = query_selection(db, &self.original)?;
         if actual.incomplete
@@ -131,6 +158,12 @@ impl Identity {
         // Outside a held snapshot this also catches new owners joining during
         // the filesystem/custody checks above. Consumers repeat after release.
         self.metadata_unchanged(db)
+    }
+}
+
+impl Identity {
+    pub(crate) fn unchanged(&self, db: &Connection, options: &Options) -> io::Result<bool> {
+        self.fence.unchanged(db, options)
     }
 }
 
@@ -225,6 +258,14 @@ pub(crate) fn resolve(
         .iter()
         .map(|source| store.source_witness(source))
         .collect::<io::Result<Vec<_>>>()?;
+    // Capture headers before consulting separate native metadata snapshots.
+    // A raced lookup can produce a negative decision just as easily as a
+    // positive one, so both carry the same final publication/source fence.
+    let witnesses = selected
+        .rows
+        .iter()
+        .map(|row| headers(db, row))
+        .collect::<io::Result<Vec<_>>>()?;
     let mut names = std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
     for row in &eligible {
         for id in &row.native_ids {
@@ -264,20 +305,19 @@ pub(crate) fn resolve(
             owner = Some(((*row).clone(), canonical));
         }
     }
-    let Some((owner, canonical)) = owner else {
-        return Ok(Some(Resolution::Unknown));
-    };
-    let witnesses = selected
-        .rows
-        .iter()
-        .map(|row| headers(db, row))
-        .collect::<io::Result<Vec<_>>>()?;
-    Ok(Some(Resolution::Known(Identity {
-        owner,
-        canonical,
+    after_identity_snapshot(0);
+    let fence = Fence {
         original: key.to_owned(),
         context: selected.rows,
         headers: witnesses,
         dependencies,
+    };
+    let Some((owner, canonical)) = owner else {
+        return Ok(Some(Resolution::Unknown(fence)));
+    };
+    Ok(Some(Resolution::Known(Identity {
+        owner,
+        canonical,
+        fence,
     })))
 }

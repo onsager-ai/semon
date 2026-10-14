@@ -701,7 +701,15 @@ fn read_inner(
             Some(crate::overview_repair::physical_identity::Resolution::Known(identity)) => {
                 Some(identity)
             }
-            Some(crate::overview_repair::physical_identity::Resolution::Unknown) => {
+            Some(crate::overview_repair::physical_identity::Resolution::Unknown(fence)) => {
+                if !fence.unchanged(&tx, options).map_err(unavailable)? {
+                    return Err(unavailable("Native physical identity publication changed"));
+                }
+                tx.commit().map_err(unavailable)?;
+                crate::overview_repair::physical_identity::after_identity_snapshot(1);
+                if !fence.unchanged(&db, options).map_err(unavailable)? {
+                    return Err(unavailable("Native physical identity publication changed"));
+                }
                 return Err(QueryError::unknown_session(requested));
             }
             None => None,
