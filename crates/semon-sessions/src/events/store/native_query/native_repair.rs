@@ -27,6 +27,7 @@ mod native_retirement;
 mod native_source;
 mod native_tag;
 mod native_time;
+mod native_usage;
 pub(crate) type IdentityStep = native_classes::IdentityStep;
 pub(crate) type OriginalTextRepresentative = native_classes::Representative;
 pub(super) use native_compare::SCHEMA as COMPARE_SCHEMA;
@@ -39,6 +40,7 @@ pub(crate) type RecordTimeStep = native_record_time::RecordTimeStep;
 pub(crate) type MetadataStep = native_metadata::MetadataStep;
 pub(crate) type OriginalHeaderField = crate::events::native_harness::header::Field;
 pub(crate) type OriginalHeaderValue = crate::events::native_harness::header::Value<OriginalText>;
+pub(crate) type UsageRowStep = native_usage::UsageRowStep;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -127,6 +129,11 @@ CREATE TABLE IF NOT EXISTS native_original_copilot_metadata (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_copilot_usage_row (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, report_address INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset,report_address)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_header (
  original BLOB NOT NULL, field TEXT NOT NULL, metadata TEXT NOT NULL,
@@ -3770,6 +3777,102 @@ mod tests {
                     .is_none()
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_copilot_usage_rows_match_independent_native_numbers_with_fixed_work() {
+        use crate::events::native_harness::copilot_usage::Row;
+        for size in [0usize, 128, 1024, 8192] {
+            for input in [
+                serde_json::json!(17),
+                serde_json::json!(u64::MAX),
+                serde_json::json!(1.0),
+                serde_json::json!(-1),
+                serde_json::Value::Null,
+            ] {
+                let report = serde_json::json!({"usage":{"inputTokens":input,"outputTokens":2,"cacheReadTokens":3,"cacheWriteTokens":4,"reasoningTokens":5}});
+                let expected = report["usage"]["inputTokens"].as_u64().map(|input| Row {
+                    input,
+                    output: 2,
+                    read: 3,
+                    write: 4,
+                    reasoning: 5,
+                });
+                let record = serde_json::json!({"id":"record-id","type":"session.shutdown","data":{"modelMetrics":{"native-model":report}},"padding":"x".repeat(size)});
+                let bytes = format!("{record}\n");
+                let mut fixture = Fixture::new_harness(bytes.as_bytes(), "copilot");
+                let repair = fixture.qualified_record();
+                let data = fixture.member(&repair, "data");
+                let metrics = fixture
+                    .store
+                    .original_member_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        data.address,
+                        "modelMetrics",
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap()
+                    .node
+                    .unwrap();
+                let report = fixture
+                    .store
+                    .original_member_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        metrics.address,
+                        "native-model",
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap()
+                    .node
+                    .unwrap();
+                let reads = crate::events::FILE_READS.with(Cell::get);
+                let mut attempts = 0;
+                loop {
+                    attempts += 1;
+                    assert!(attempts < 32);
+                    let step = fixture
+                        .store
+                        .original_copilot_usage_row_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &report,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    assert!(step.work.metadata_rows <= ROWS);
+                    assert!(step.work.metadata_bytes < 16 * 1024);
+                    assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                    fixture.store = NativeStore::open(&fixture.options).unwrap();
+                    if step.complete {
+                        assert_eq!(step.row, expected);
+                        break;
+                    }
+                }
+                let cached = fixture
+                    .store
+                    .original_copilot_usage_row_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &report,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(cached.complete);
+                assert_eq!(cached.row, expected);
+                assert_eq!(cached.work.native_bytes, 1);
+                assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+            }
         }
     }
 
