@@ -146,6 +146,12 @@ pub(crate) struct DecodedFingerprint {
     receipt: Option<Receipt>,
 }
 impl DecodedFingerprint {
+    pub(crate) fn from_receipt(receipt: Receipt) -> Self {
+        Self {
+            hash: PrefixState::default(),
+            receipt: Some(receipt),
+        }
+    }
     pub(crate) fn receipt(&self) -> Option<Receipt> {
         self.receipt
     }
