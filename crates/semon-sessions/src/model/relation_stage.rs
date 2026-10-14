@@ -84,6 +84,9 @@ pub(crate) struct Context {
     pub(crate) native_events: Vec<NativeEvent>,
     pub(crate) companions: Vec<String>,
     pub(crate) matching_locations: Option<Vec<Location>>,
+    /// Native background completion placement, independent of handoff kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) background_ends: Vec<(Location, Location)>,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +158,10 @@ pub(crate) struct Location {
     pub(crate) block: u32,
     pub(crate) kind: Kind,
     pub(crate) occurrence: usize,
+    /// Absolute regular-event index under the complete source witness. Older
+    /// staged observations retain their occurrence adapter until republished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) seq: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -170,6 +177,9 @@ pub(crate) struct NativeEvent {
 pub(crate) struct Placement {
     pub(crate) at: Location,
     pub(crate) outgoing: bool,
+    /// The original order in Builder.placed[at], before grouping by handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ordinal: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +215,8 @@ pub(crate) struct Relation {
     pub(crate) previews: BTreeMap<String, Preview>,
     pub(crate) order: (u8, i64, String, u64, u32),
     pub(crate) explicit_previews: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_order: Option<usize>,
     pub(crate) stubs: Vec<Stub>,
 }
 
@@ -287,11 +299,35 @@ impl Location {
             offset: found.o,
             block: found.b,
             kind: found.k,
+            seq: Some(at.1),
             occurrence: builder.files[at.0].summary.events[..at.1]
                 .iter()
                 .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
                 .count(),
         }
+    }
+
+    /// Resolve a newly published location through the existing native point
+    /// owner. A legacy occurrence-only location is repair work, never license
+    /// to restore its complete selected Index in the focused producer.
+    pub(crate) fn point(
+        &self,
+        store: &crate::events::store::native_query::NativeStore,
+        witness: &crate::events::store::native_query::SourceWitness,
+    ) -> io::Result<Option<(usize, Event)>> {
+        if self.source != witness.source {
+            return Err(io::Error::other(SourceGenerationChanged));
+        }
+        let Some(seq) = self.seq else {
+            return Ok(None);
+        };
+        let found = store
+            .event_at(witness, false, seq)?
+            .ok_or_else(|| io::Error::other("staged native absolute event disappeared"))?;
+        if found.o != self.offset || found.b != self.block || found.k != self.kind {
+            return Err(io::Error::other("staged native absolute event changed"));
+        }
+        Ok(Some((seq, found)))
     }
 
     /// A foreign source has no local Ref. A selected source must match the
@@ -306,6 +342,17 @@ impl Location {
         };
         if summary::source(&builder.files[file]) != self.source {
             return Err(io::Error::other(SourceGenerationChanged));
+        }
+        if let Some(seq) = self.seq {
+            let found = builder.files[file]
+                .summary
+                .events
+                .get(seq)
+                .ok_or_else(|| io::Error::other("staged native absolute event disappeared"))?;
+            if found.o != self.offset || found.b != self.block || found.k != self.kind {
+                return Err(io::Error::other("staged native absolute event changed"));
+            }
+            return Ok(Some((file, seq)));
         }
         let mut matches = builder.files[file]
             .summary
@@ -350,6 +397,24 @@ impl Context {
     pub(super) fn capture(
         builder: &Builder<'_>,
         observed: Option<&BTreeMap<String, SessionFacts>>,
+    ) -> Self {
+        Self::capture_inner(builder, observed, false)
+    }
+
+    /// Indexed candidate publication retains every native placement kind.
+    /// The existing staged relationship resolver deliberately replays only
+    /// spawn/relay; it continues using capture(), with its existing semantics.
+    pub(super) fn capture_points(
+        builder: &Builder<'_>,
+        observed: Option<&BTreeMap<String, SessionFacts>>,
+    ) -> Self {
+        Self::capture_inner(builder, observed, true)
+    }
+
+    fn capture_inner(
+        builder: &Builder<'_>,
+        observed: Option<&BTreeMap<String, SessionFacts>>,
+        all_points: bool,
     ) -> Self {
         let rows = summary::catalog(
             builder,
@@ -429,7 +494,7 @@ impl Context {
             .handoffs
             .iter()
             .enumerate()
-            .filter(|(_, h)| matches!(h.out.kind, "spawn" | "relay"))
+            .filter(|(_, h)| all_points || matches!(h.out.kind, "spawn" | "relay"))
             .map(|(index, h)| {
                 let previews = h
                     .previews
@@ -467,10 +532,12 @@ impl Context {
                         .flat_map(|(at, entries)| {
                             entries
                                 .iter()
-                                .filter(move |(handoff, _)| *handoff == index)
-                                .map(|(_, place)| Placement {
+                                .enumerate()
+                                .filter(move |(_, (handoff, _))| *handoff == index)
+                                .map(|(ordinal, (_, place))| Placement {
                                     at: Location::capture(builder, *at),
                                     outgoing: *place == Place::Out,
+                                    ordinal: Some(ordinal),
                                 })
                         })
                         .collect(),
@@ -488,6 +555,7 @@ impl Context {
                         .collect(),
                     previews,
                     explicit_previews: h.previews.is_some(),
+                    native_order: Some(index),
                     stubs: [h.from, h.to]
                         .into_iter()
                         .flatten()
@@ -581,6 +649,20 @@ impl Context {
         Self {
             endpoints,
             relations,
+            background_ends: if all_points {
+                builder
+                    .bg_ends
+                    .iter()
+                    .map(|(end, call)| {
+                        (
+                            Location::capture(builder, *end),
+                            Location::capture(builder, *call),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             ..Default::default()
         }
     }

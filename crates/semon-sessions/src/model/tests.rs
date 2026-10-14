@@ -4287,6 +4287,7 @@ fn record_selected_companion_batch(
             offset: found.o,
             block: found.b,
             kind: found.k,
+            seq: Some(at),
             occurrence: index.events[..at]
                 .iter()
                 .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
@@ -10978,5 +10979,120 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     assert_eq!(
         crate::session_catalog_history_identity(&options, "fixture", native),
         Err(crate::CatalogIdentityError::Unavailable)
+    );
+}
+
+#[test]
+fn native_point_relationship_capture_retains_absolute_addresses_all_kinds_and_placement_order() {
+    let home = Home::new();
+    home.top(
+        "owner",
+        &[
+            human("owner", ts(0, 0), "question"),
+            assistant("owner", ts(0, 1), vec![text("reply")]),
+        ],
+    );
+    let facts = MachineFacts::of(&home.options);
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut texts = Texts::default();
+    let (files, _, _) = scan(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut texts,
+        None,
+        &facts,
+        None,
+    )
+    .unwrap();
+    let proofs = crate::query_source::Sources::capture(
+        &home.options,
+        files
+            .iter()
+            .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
+    )
+    .unwrap();
+    let records = proofs.reader();
+    let mut builder = Builder::new(
+        (&files, &records),
+        &mut texts,
+        NOW,
+        "testbox".into(),
+        &facts,
+        &[],
+        &mut cache,
+    );
+    builder.sessions(lineages(&files), &[], &BTreeSet::new());
+    builder.order_events();
+    for (ordinal, kind) in ["ask", "toyou", "relay"].into_iter().enumerate() {
+        let edge = builder.add_handoff(
+            Handoff::new(
+                format!("point-{ordinal}"),
+                kind,
+                ("owner".into(), "owner".into()),
+                NOW,
+                "done",
+                "",
+            ),
+            Some(0),
+            Some(0),
+        );
+        builder.place(
+            (0, 0),
+            edge,
+            if ordinal % 2 == 0 {
+                Place::In
+            } else {
+                Place::Out
+            },
+        );
+        if ordinal == 0 {
+            builder.head.insert(0, edge);
+        }
+        if ordinal == 1 {
+            builder.after.insert((0, 1), edge);
+        }
+    }
+    builder.bg_ends.insert((0, 1), (0, 0));
+    let legacy = relation_stage::Context::capture(&builder, None);
+    let points = relation_stage::Context::capture_points(&builder, None);
+    assert_eq!(legacy.relations.len(), 1);
+    assert!(legacy.background_ends.is_empty());
+    assert_eq!(points.relations.len(), 3);
+    assert_eq!(points.background_ends.len(), 1);
+    let store = crate::events::store::native_query::NativeStore::open_read(&home.options).unwrap();
+    for ordinal in 0..3 {
+        let relation = &points.relations[&format!("point-{ordinal}")];
+        assert_eq!(relation.native_order, Some(ordinal));
+        let placement = &relation.placements[0];
+        assert_eq!(placement.ordinal, Some(ordinal));
+        assert_eq!(placement.at.seq, Some(0));
+        assert_eq!(placement.at.local(&builder).unwrap(), Some((0, 0)));
+        let witness = store.source_witness(&placement.at.source).unwrap();
+        assert_eq!(placement.at.point(&store, &witness).unwrap().unwrap().0, 0);
+        let mut old = placement.at.clone();
+        old.seq = None;
+        assert_eq!(old.local(&builder).unwrap(), Some((0, 0)));
+        assert!(old.point(&store, &witness).unwrap().is_none());
+        let mut invalid = placement.at.clone();
+        invalid.offset += 1;
+        assert!(invalid.local(&builder).is_err());
+        assert!(invalid.point(&store, &witness).is_err());
+        let mut wrong_source = witness.clone();
+        wrong_source.source.size += 1;
+        assert!(relation_stage::source_generation_changed(
+            &placement.at.point(&store, &wrong_source).unwrap_err()
+        ));
+    }
+    assert_eq!(points.relations["point-0"].heads, ["owner"]);
+    assert_eq!(points.relations["point-1"].after[0].seq, Some(1));
+    assert_eq!(points.background_ends[0].0.seq, Some(1));
+    assert_eq!(points.background_ends[0].1.seq, Some(0));
+    let encoded = serde_json::to_string(&points).unwrap();
+    assert!(!encoded.contains("question") && !encoded.contains("reply"));
+    let restored: relation_stage::Context = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(points).unwrap(),
+        serde_json::to_value(restored).unwrap()
     );
 }

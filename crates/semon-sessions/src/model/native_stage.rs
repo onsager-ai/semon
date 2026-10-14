@@ -140,14 +140,9 @@ pub(crate) fn event_entry(
 }
 
 pub(crate) fn after_entry(handoff: usize, file: usize, found: &Event) -> Entry {
-    Entry {
-        kind: EntryKind::H(handoff),
-        file,
-        offset: found.o,
-        pos: (found.o, found.b),
-        t: found.t,
-        at: None,
-    }
+    super::native_producer::Candidate::after(0, found, handoff, SourceTime::BeforeFirst, [0; 32], 0)
+        .qualify(file, 0, true, None)
+        .1
 }
 
 pub(crate) fn operation_entry(file: usize, found: &Event) -> Entry {
