@@ -7368,12 +7368,28 @@ mod tests {
                 "source-event-0",
                 &serde_json::json!({"epoch":epoch,"next":1}),
                 &[],
-                &|_, _| Ok(true),
+                &|_, _| {
+                    Ok(source_roots::ClosureRead {
+                        current: true,
+                        work: Work::default(),
+                    })
+                },
                 &|| false,
             )
             .unwrap();
         assert_eq!(outcome, Outcome::Written);
-        assert!(sql > 0);
+        assert!(sql.sqlite_vm_steps > 0);
+        assert_eq!(sql.control_rows_reserved, 24);
+        assert_eq!(sql.staged_rows, 0);
+        assert_eq!(sql.closure.decoded_rows, 0);
+        assert!(sql.control_bytes_reserved + sql.staged_bytes < BYTES);
+        assert!(
+            fixture
+                .store
+                .begin_source_roots(&epoch, &[source.clone(), source.clone()])
+                .is_err()
+        );
+
         let before = stage.job.revision;
         fixture.store = NativeStore::open(&fixture.options).unwrap();
         stage = fixture
@@ -7384,6 +7400,42 @@ mod tests {
         assert!(stage.job.revision > before);
         assert_eq!(stage.job.state["next"], 1);
         assert_eq!(stage.job.cursor, "source-event-0");
+
+        let before = stage.job.revision;
+        let (outcome, work) = fixture
+            .store
+            .checkpoint_source_roots(
+                &stage,
+                "entries",
+                "oversized-closure",
+                &serde_json::json!({}),
+                &[],
+                &|_, _| {
+                    Ok(source_roots::ClosureRead {
+                        current: true,
+                        work: Work {
+                            decoded_rows: 17,
+                            metadata_bytes: 33,
+                            vm_steps: 7,
+                        },
+                    })
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(outcome, Outcome::Conflict);
+        assert_eq!(work.closure.decoded_rows, 17);
+        assert_eq!(work.closure.metadata_bytes, 33);
+        assert!(work.sqlite_vm_steps > 0);
+        assert_eq!(
+            fixture
+                .store
+                .reload(&stage.job.spec.view_key)
+                .unwrap()
+                .unwrap()
+                .revision,
+            before
+        );
         for cancelled in [false, true] {
             fixture
                 .store
@@ -7399,7 +7451,12 @@ mod tests {
                     "unqualified",
                     &serde_json::json!({}),
                     &[],
-                    &|_, _| Ok(true),
+                    &|_, _| {
+                        Ok(source_roots::ClosureRead {
+                            current: true,
+                            work: Work::default(),
+                        })
+                    },
                     &|| cancelled,
                 )
                 .unwrap();
@@ -7421,7 +7478,7 @@ mod tests {
                 before
             );
             if !cancelled {
-                assert!(sql > 0);
+                assert!(sql.sqlite_vm_steps > 0);
             }
             fixture
                 .store

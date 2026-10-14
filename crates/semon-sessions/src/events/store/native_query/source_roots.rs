@@ -24,9 +24,28 @@ impl Epoch {
     }
 }
 
-/// A distinct producer namespace prevents confusing a prepublication source
-/// tree with a qualified reader view. Construction admits only the exact
-/// source witness; it never invents a synthetic Catalog owner.
+/// Closure work is separate from the storage controls. A callback reports all
+/// metadata it decoded, including related-membership probes, on refusal too.
+pub(crate) struct ClosureRead {
+    pub(crate) current: bool,
+    pub(crate) work: Work,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct CheckpointWork {
+    /// Reserved upper bounds for the fixed source/job/epoch SQL controls.
+    /// Actual executed instructions are measured by sqlite_vm_steps below.
+    pub(crate) control_rows_reserved: usize,
+    pub(crate) control_bytes_reserved: usize,
+    pub(crate) closure: Work,
+    pub(crate) staged_rows: usize,
+    pub(crate) staged_bytes: usize,
+    pub(crate) sqlite_vm_steps: u64,
+    /// Full RuntimeFacts fence calls are external to this metadata receipt.
+    pub(crate) runtime_checks: usize,
+}
+
+/// A distinct source producer namespace never grants reader/owner authority.
 pub(crate) struct SourceStage {
     pub(crate) job: Job,
     pub(crate) epoch: Epoch,
@@ -38,8 +57,10 @@ impl NativeStore {
         epoch: &Epoch,
         sources: &[SourceWitness],
     ) -> io::Result<Option<SourceStage>> {
-        if sources.is_empty() || sources.len() > ROWS {
-            return Err(io::Error::other("source root closure budget exceeded"));
+        if sources.len() != 1 {
+            return Err(io::Error::other(
+                "one native source root job requires exactly one source",
+            ));
         }
         if !epoch.current(&self.connection).map_err(io::Error::other)? {
             return Ok(None);
@@ -117,8 +138,9 @@ impl NativeStore {
 
     /// Only this typed source stage permits zero owners. Normal checkpoint()
     /// keeps its source+owner requirement, and reader admission is unchanged.
-    /// Every attempted SQL instruction, including all witness and epoch checks,
-    /// is returned even for conflict/cancellation; no source body is read here.
+    /// The returned receipt separates reserved control work, actual closure
+    /// reads, and staged output. Whole-connection SQLite instructions include
+    /// fences/CAS and survive conflict/cancellation; runtime work is separate.
     pub(crate) fn checkpoint_source_roots(
         &mut self,
         stage: &SourceStage,
@@ -126,13 +148,13 @@ impl NativeStore {
         cursor: &str,
         state: &Value,
         rows: &[StageRow],
-        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<ClosureRead>,
         cancelled: &dyn Fn() -> bool,
-    ) -> io::Result<(Outcome, u64)> {
+    ) -> io::Result<(Outcome, CheckpointWork)> {
         if !stage.job.spec.view_key.starts_with(PREFIX)
             || stage.job.spec.catalog_generation.is_some()
             || stage.job.spec.runtime != stage.epoch.runtime
-            || rows.len() > ROWS
+            || rows.len() > 8
             || !matches!(phase, "entries" | "metadata" | "finish")
         {
             return Err(io::Error::other("invalid native source root checkpoint"));
@@ -150,11 +172,35 @@ impl NativeStore {
                 .zip(&texts)
                 .map(|(row, text)| 64 + row.key.identity.len() + text.len())
                 .sum::<usize>();
-        if bytes > BYTES || cursor.len() > STATE_BYTES {
+        // Reserve before doing SQL: 24 fixed controls, two closure reads of
+        // at most16 rows/128KiB each, and at most8 staged output rows. The two
+        // bounded job records plus epoch/scalar probes fit the byte reserve.
+        let job_bytes = bounded_json(
+            &serde_json::json!({"spec":stage.job.spec,"cursor":stage.job.cursor,"state":stage.job.state}),
+            STATE_BYTES,
+        ).map_err(io::Error::other)?.len();
+        let epoch_bytes = bounded_json(&stage.epoch, STATE_BYTES)
+            .map_err(io::Error::other)?
+            .len();
+        let controls = 2 * (job_bytes + epoch_bytes) + 4096;
+        if bytes > 256 * 1024 || controls > 256 * 1024 || cursor.len() + state.len() > STATE_BYTES {
             return Err(io::Error::other(
                 "native source root metadata budget exceeded",
             ));
         }
+        let mut work = CheckpointWork {
+            control_rows_reserved: 24,
+            control_bytes_reserved: controls,
+            staged_rows: rows.len(),
+            staged_bytes: bytes,
+            ..Default::default()
+        };
+        let mut read_closure = |db: &Connection| -> io::Result<bool> {
+            let read = closure(db, stage.job.id).map_err(io::Error::other)?;
+            let bounded = read.work.decoded_rows <= 16 && read.work.metadata_bytes <= 128 * 1024;
+            add_work(&mut work.closure, read.work)?;
+            Ok(read.current && bounded)
+        };
         let steps = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&steps);
         self.connection.progress_handler(
@@ -168,6 +214,7 @@ impl NativeStore {
             if cancelled() {
                 return Ok(Outcome::Deferred);
             }
+            work.runtime_checks += 1;
             if !self.runtime_current(&stage.job.spec)? {
                 return Ok(Outcome::Conflict);
             }
@@ -178,7 +225,7 @@ impl NativeStore {
             if matches!(stage.job.phase.as_str(), "cleanup" | "ready")
                 || !job_current(&tx, &stage.job).map_err(io::Error::other)?
                 || !stage.epoch.current(&tx).map_err(io::Error::other)?
-                || !closure(&tx, stage.job.id).map_err(io::Error::other)?
+                || !read_closure(&tx)?
             {
                 return Ok(Outcome::Conflict);
             }
@@ -189,7 +236,7 @@ impl NativeStore {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(io::Error::other)?;
-            if sources == 0 || owners != 0 {
+            if sources != 1 || owners != 0 {
                 return Err(io::Error::other("native source root witnesses are invalid"));
             }
             for (row, text) in rows.iter().zip(texts) {
@@ -201,15 +248,19 @@ impl NativeStore {
             if cancelled() {
                 return Ok(Outcome::Deferred);
             }
-            let complete = closure(&tx, stage.job.id).map_err(io::Error::other)?;
+            let complete = read_closure(&tx)?;
             if cancelled() {
                 return Ok(Outcome::Deferred);
             }
             if !complete
                 || !stage.epoch.current(&tx).map_err(io::Error::other)?
                 || !job_current(&tx, &stage.job).map_err(io::Error::other)?
-                || crate::native_evidence::query_runtime_generation(&self.options)?
-                    != stage.job.spec.runtime
+            {
+                return Ok(Outcome::Conflict);
+            }
+            work.runtime_checks += 1;
+            if crate::native_evidence::query_runtime_generation(&self.options)?
+                != stage.job.spec.runtime
             {
                 return Ok(Outcome::Conflict);
             }
@@ -224,6 +275,7 @@ impl NativeStore {
             Ok(Outcome::Written)
         })();
         self.connection.progress_handler(0, None::<fn() -> bool>);
-        result.map(|outcome| (outcome, steps.load(Ordering::Relaxed)))
+        work.sqlite_vm_steps = steps.load(Ordering::Relaxed);
+        result.map(|outcome| (outcome, work))
     }
 }
