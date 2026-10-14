@@ -24,9 +24,11 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod native_stage;
 pub(crate) mod relation_stage;
 pub(crate) mod summary;
 pub(crate) mod turn_stage;
+use native_stage::{Entry, EntryKind};
 use serde_json::Value;
 
 #[cfg(test)]
@@ -4870,13 +4872,14 @@ impl<'a> Builder<'a> {
             extras.insert(*file, annotations.into());
         }
         let mut slots = Vec::with_capacity(entries.len());
-        let mut owner: Option<usize> = None;
+        let mut owner_cursor = native_stage::OwnerCursor::default();
+        let mut signal_cursor = native_stage::SignalCursor::default();
         let mut started = BTreeSet::new();
         let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
-        let extra_slot = |annotation: Annotation,
-                          file: usize,
-                          owner: Option<usize>,
-                          started: &mut BTreeSet<usize>| {
+        let mut extra_slot = |annotation: Annotation,
+                              file: usize,
+                              owner: Option<usize>,
+                              started: &mut BTreeSet<usize>| {
             if let Annotation::Signal(signal) = annotation {
                 let tool = matches!(
                     signal.k,
@@ -4890,16 +4893,10 @@ impl<'a> Builder<'a> {
                         .map(tool_label)
                 })
                 .flatten();
+                let mut signal_data = native_stage::signal_kind(signal, tool);
+                signal_cursor.apply(&mut signal_data);
                 let mut slot = Slot::new(
-                    SlotKind::Signal(SignalData {
-                        kind: signal.k,
-                        tag: signal.n.clone(),
-                        previous: None,
-                        value: (signal.k == events::SignalKind::Compact)
-                            .then_some(signal.v)
-                            .flatten(),
-                        tool,
-                    }),
+                    SlotKind::Signal(signal_data),
                     Some(Arc::clone(&self.slot_files[file])),
                     signal.o,
                     0,
@@ -4911,27 +4908,12 @@ impl<'a> Builder<'a> {
             let Annotation::Extra(event) = annotation else {
                 unreachable!()
             };
-            let kind = match event.k {
-                Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
-                Kind::Operation => {
-                    let ok = event
-                        .r
-                        .as_ref()
-                        .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e));
-                    let script_offset = event
-                        .parent
-                        .and_then(|parent| self.files[file].summary.events.get(parent))
-                        .filter(|parent| parent.k == Kind::Tool && parent.code_mode)
-                        .map(|parent| parent.o);
-                    SlotKind::Operation {
-                        kind: event.n.clone().unwrap_or_default(),
-                        ok,
-                        script_offset,
-                    }
-                }
-                Kind::Think => SlotKind::Think,
-                _ => return None,
-            };
+            let kind = native_stage::extra_kind(
+                event,
+                event
+                    .parent
+                    .and_then(|parent| self.files[file].summary.events.get(parent)),
+            )?;
             let mut slot = Slot::new(
                 kind,
                 Some(Arc::clone(&self.slot_files[file])),
@@ -4955,12 +4937,13 @@ impl<'a> Builder<'a> {
                     slots.extend(extra_slot(
                         extra,
                         entry.file,
-                        owner.or(owners[position]),
+                        owner_cursor.before(owners[position]),
                         &mut started,
                     ));
                 }
             }
-            owner = owners[position];
+            let owner = owners[position];
+            owner_cursor.set(owner);
             if matches!(entry.kind, EntryKind::Operation(_)) {
                 let operation = extras.get_mut(&entry.file).and_then(|queue| {
                     let position = queue
@@ -5003,61 +4986,24 @@ impl<'a> Builder<'a> {
                     let found = entry.at.map(|at| event(self.files, at));
                     let running = matches!(session.out.state, "work" | "wait")
                         && owner.is_some_and(|turn| turn + 1 == turns.len() && turns[turn].last);
-                    let shown = match state {
-                        ToolState::Ok => Shown::Ok,
-                        ToolState::Err => Shown::Err,
-                        ToolState::Unknown => Shown::Unknown,
-                        ToolState::Pending if session.out.harness == "copilot" => Shown::Unknown,
-                        ToolState::Pending if running => Shown::Live,
-                        ToolState::Pending => Shown::Unfinished,
-                    };
                     let started = found
                         .and_then(|found| found.poll)
                         .and_then(|start| self.files[entry.file].summary.events.get(start))
                         .filter(|start| start.y.is_some());
-                    let yielded = found.and_then(|found| found.y.as_deref());
-                    match (found, yielded, started, entry.at) {
-                        (Some(found), Some(yielded), _, _) => SlotKind::Yielded {
-                            // Running while its session works and its
-                            // session id is open, whichever turn started
-                            // it: its polls may come in a later turn.
-                            shown: match (state, entry.at) {
-                                (ToolState::Pending, Some(at)) if self.live_yield(index, at) => {
-                                    Shown::Live
-                                }
-                                (ToolState::Pending, _) => Shown::Unfinished,
-                                _ => shown,
-                            },
-                            first: found.r.as_ref().map(|reply| reply.o),
-                            polls: yielded.polls.clone(),
-                            cut: yielded.cut,
-                            done: yielded.done.clone(),
+                    native_stage::tool_kind(
+                        native_stage::ToolInput {
+                            state,
+                            running,
+                            harness: session.out.harness,
+                            found,
+                            started,
+                            has_operations: entry
+                                .at
+                                .is_some_and(|at| operation_parents.contains(&at)),
                         },
-                        (Some(found), None, Some(started), Some(at))
-                            if !operation_parents.contains(&at) =>
-                        {
-                            SlotKind::Sent {
-                                shown,
-                                reply: found.r.clone(),
-                                start: started.o,
-                                done: started
-                                    .y
-                                    .as_ref()
-                                    .and_then(|yielded| yielded.done.as_ref())
-                                    .map(|done| done.o),
-                            }
-                        }
-                        _ => SlotKind::Tool {
-                            shown,
-                            name: found
-                                .and_then(|found| found.n.clone())
-                                .unwrap_or_else(|| "tool".into()),
-                            reply: found.and_then(|found| found.r.clone()),
-                            item: found.and_then(|found| found.item),
-                            // Only a launch that returned: one denied or blocked
-                            // (an error result) started nothing, and one with
-                            // no result yet is running or unfinished as any call.
-                            bg: entry
+                        || entry.at.is_some_and(|at| self.live_yield(index, at)),
+                        || {
+                            entry
                                 .at
                                 .filter(|_| state == ToolState::Ok)
                                 .and_then(|at| self.backgrounds.get(&at))
@@ -5082,9 +5028,9 @@ impl<'a> Builder<'a> {
                                             failed: found.script & events::BACKGROUND_FAILED != 0,
                                         }
                                     }),
-                                }),
+                                })
                         },
-                    }
+                    )
                 }
                 EntryKind::Operation(_) => unreachable!("operation slots are read from extras"),
             };
@@ -5099,6 +5045,7 @@ impl<'a> Builder<'a> {
             slot.first = owner.is_some_and(|turn| started.insert(turn));
             slots.push(slot);
         }
+        let owner = owner_cursor.current();
         // Markers after the last entry, from every file, in time order.
         let mut rest: Vec<(usize, Annotation)> = extras
             .into_iter()
@@ -5128,22 +5075,6 @@ impl<'a> Builder<'a> {
             );
             slot.turn = turn_id(owner);
             slots.push(slot);
-        }
-        let mut previous = BTreeMap::new();
-        for slot in &mut slots {
-            if let SlotKind::Signal(signal) = &mut slot.kind
-                && matches!(
-                    signal.kind,
-                    events::SignalKind::Model
-                        | events::SignalKind::Effort
-                        | events::SignalKind::Approval
-                        | events::SignalKind::Sandbox
-                        | events::SignalKind::Permission
-                )
-                && let Some(tag) = &signal.tag
-            {
-                signal.previous = previous.insert(signal.kind, tag.clone());
-            }
         }
         Transcript::from_slots(slots)
     }
@@ -5189,11 +5120,11 @@ impl<'a> Builder<'a> {
         // Several files merge by time; within a file, line and block order.
         // Phase 2 puts a handoff after the event it follows.
         let key = |time: i64, file: usize, pos: (u64, u32), phase: u8| {
-            (
-                if several { time } else { 0 },
+            native_stage::key(
+                several,
+                time,
                 *file_order.get(&file).unwrap_or(&usize::MAX),
-                pos.0,
-                pos.1,
+                pos,
                 phase,
             )
         };
@@ -5247,25 +5178,11 @@ impl<'a> Builder<'a> {
                     .map(|(handoff, _)| EntryKind::H(*handoff))
                     .collect()
             } else {
-                match found.k {
-                    Kind::U => Some(EntryKind::U),
-                    Kind::A => Some(EntryKind::A),
-                    Kind::Gap => Some(EntryKind::Gap),
-                    Kind::Tn if self.bg_ends.contains_key(&at) => Some(EntryKind::BgEnd),
-                    // A poll of a yielded command folds into the step the
-                    // script that started it is, unless it sent input.
-                    Kind::Tool
-                        if found.poll.is_some()
-                            && found.script & events::SENDS == 0
-                            && !last_operation.contains_key(&at) =>
-                    {
-                        None
-                    }
-                    Kind::Tool if found.n.as_deref() != Some("SubagentHandback") => {
-                        Some(EntryKind::Tool(tool_state(found)))
-                    }
-                    _ => None,
-                }
+                native_stage::event_kind(
+                    found,
+                    self.bg_ends.contains_key(&at),
+                    last_operation.contains_key(&at),
+                )
                 .into_iter()
                 .collect()
             };
@@ -5273,17 +5190,13 @@ impl<'a> Builder<'a> {
                 // A code-mode call drawn as its operations that failed, or
                 // that never finished, is still a step: after them, where its
                 // failure arrived or after the last of them.
-                let (time, pos, phase) = match (&kind, &found.r, last_operation.get(&at)) {
-                    (EntryKind::Tool(ToolState::Err), Some(reply), Some(_)) => (
-                        reply.t.unwrap_or_else(|| time_at(at.0, reply.o)),
-                        (reply.o, reply.b),
-                        1,
-                    ),
-                    (EntryKind::Tool(ToolState::Pending), None, Some((time, pos))) => {
-                        (*time, *pos, 2)
-                    }
-                    _ => (time, (found.o, found.b), 1),
-                };
+                let (time, pos, phase) = native_stage::position(
+                    kind,
+                    found,
+                    last_operation.get(&at).copied(),
+                    time,
+                    |offset| time_at(at.0, offset),
+                );
                 keyed.push((
                     key(time, at.0, pos, phase),
                     Entry {
@@ -5588,17 +5501,6 @@ pub(crate) enum ToolState {
     Pending,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryKind {
-    H(usize),
-    U,
-    A,
-    Tool(ToolState),
-    Operation(ToolState),
-    BgEnd,
-    Gap,
-}
-
 /// How a tool call is drawn: a pending call is live only in the last turn
 /// of a working session, as the model's turn ends and activity read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5895,18 +5797,6 @@ impl Transcript {
             signals,
         }
     }
-}
-
-struct Entry {
-    kind: EntryKind,
-    file: usize,
-    offset: u64,
-    /// Where it sits in its file (line offset, block): its event's place, the
-    /// event a handoff follows, or where a failed code-mode call's failure
-    /// arrived.
-    pos: (u64, u32),
-    t: Option<i64>,
-    at: Option<Ref>,
 }
 
 /// One turn's entries, before its end is known.
