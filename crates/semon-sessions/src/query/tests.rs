@@ -4625,7 +4625,19 @@ fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_change
         .call_at(tool, &args, NOW)
         .unwrap();
         let mut ordinary = home.query();
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let builds = crate::model::BUILDS.with(std::cell::Cell::get);
         assert_eq!(ordinary.call_at(tool, &args, NOW).unwrap(), expected);
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            loads,
+            "changed native namespace loaded a complete selected Index"
+        );
+        assert_eq!(
+            crate::model::BUILDS.with(std::cell::Cell::get),
+            builds,
+            "changed native namespace prepared selected history"
+        );
         assert!(
             ordinary.sources.machines[0]
                 .1
@@ -4652,6 +4664,257 @@ fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_change
         error.code, "invalid_arguments",
         "host-selected Catalog ID validation was weakened"
     );
+    for args in [
+        json!({"id":"codex:same-id"}),
+        json!({"id":"codex:same-id","turn":"missing"}),
+    ] {
+        let expected = Query::from_sources(admitted(Options {
+            scan_window: true,
+            ..home.options.clone()
+        }))
+        .call_at("read_transcript", &args, NOW);
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        assert_eq!(
+            Query::from_sources(admitted(Options {
+                scan_window: true,
+                ..home.options.clone()
+            }))
+            .call_selected_at(
+                "local",
+                "codex:same-id",
+                "read_transcript",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW
+            ),
+            expected
+        );
+        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), loads);
+    }
+}
+
+fn physical_collision_fixture(earlier: usize) -> Home {
+    let mut home = Home::new(&format!("physical-identity-work-{earlier}"));
+    home.options.all = false;
+    home.options.since = Duration::from_secs(6 * 3600);
+    for id in ["same", "codex:same", ":codex:same"] {
+        home.top(id, &[human(id, ts(1, 0), "omitted namespace occupant")]);
+        fs::File::open(
+            home.options
+                .claude_home
+                .join(format!("projects/-work-proj/{id}.jsonl")),
+        )
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_millis((NOW - 86400000) as u64),
+            ),
+        )
+        .unwrap();
+    }
+    let mut lines = vec![
+        codex_line(ts(1, 0), "session_meta", json!({"id":"same"})),
+        codex_line(
+            ts(1, 1),
+            "event_msg",
+            json!({"type":"user_message","message":"one turn"}),
+        ),
+    ];
+    for _ in 0..earlier {
+        lines.push(codex_line(ts(1,2),"response_item",json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"earlier reply"}]})));
+    }
+    lines.push(codex_line(ts(1,3),"response_item",json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"tail"}]})));
+    home.lines("codex/sessions/2026/09/24/rollout-same.jsonl", &lines);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(cache);
+    home
+}
+
+#[test]
+fn physical_collision_identity_paging_stays_indexed_as_selected_history_grows() {
+    for earlier in [0, 128, 1024, 8192] {
+        let home = physical_collision_fixture(earlier);
+        let options = Options {
+            scan_window: true,
+            ..home.options.clone()
+        };
+        let mut native = Query::from_sources(admitted(options.clone()));
+        let session = native
+            .call_at("get_session", &json!({"id":"same"}), NOW)
+            .unwrap();
+        let turn = session["session"]["turns"][0]["id"].clone();
+        for args in [
+            json!({"id":"same","limit":1}),
+            json!({"id":"same","limit":1,"after":0}),
+            json!({"id":"same","limit":1,"before":1}),
+            json!({"id":"same","limit":1,"turn":turn}),
+            json!({"id":"same","turn":"missing"}),
+        ] {
+            let expected = native.call_at("read_transcript", &args, NOW);
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+            assert_eq!(
+                home.query().call_at("read_transcript", &args, NOW),
+                expected,
+                "prefix {earlier}, args {args}"
+            );
+            assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), loads);
+            assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
+            assert!(
+                super::transcript::SLOTS.with(std::cell::Cell::get) <= 4,
+                "constant page prepared growing recipe prefix"
+            );
+        }
+        let source = crate::session_query_sources(&home.options, "::codex:same")
+            .unwrap()
+            .into_iter()
+            .find(|source| source.root == "codex")
+            .unwrap();
+        let archive = SelectedArchive {
+            bytes: Arc::from(fs::read(home.options.codex_home.join(&source.path)).unwrap()),
+            source,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            read_bytes: AtomicU64::new(0),
+            fault: 0,
+        };
+        let args = json!({"id":"same","limit":1});
+        let expected = native.call_at("read_transcript", &args, NOW);
+        let catalog = crate::overview_repair::local_query_target(&options, "same", NOW)
+            .unwrap()
+            .unwrap();
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+        crate::events::store::chunk_proofs::FOCUSED_METADATA_BYTES.with(|n| n.set(0));
+        assert_eq!(
+            Query::from_sources(admitted(options)).execute_selected_at(
+                "local",
+                &catalog,
+                "read_transcript",
+                &args,
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW
+            ),
+            expected
+        );
+        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), loads);
+        assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
+        assert!(archive.calls.load(Ordering::Relaxed) <= 4);
+        assert!(
+            archive.read_bytes.load(Ordering::Relaxed)
+                <= 4 * crate::SESSION_SOURCE_CHUNK_MAX as u64
+        );
+        assert!(
+            crate::events::store::chunk_proofs::FOCUSED_METADATA_BYTES.with(std::cell::Cell::get)
+                < 64 * 1024
+        );
+    }
+}
+
+struct ChangingPhysicalDependency {
+    archive: SelectedArchive,
+    path: PathBuf,
+    index: PathBuf,
+    fault: u8,
+    changed: std::sync::atomic::AtomicBool,
+}
+impl crate::SessionSourceReader for ChangingPhysicalDependency {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        let bytes = self.archive.read_range(source, expected, offset, max)?;
+        if !self.changed.swap(true, Ordering::SeqCst) {
+            if self.fault == 0 {
+                fs::File::open(&self.path)?.set_times(
+                    fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + Duration::from_millis(NOW as u64)),
+                )?;
+            } else {
+                let db = rusqlite::Connection::open(&self.index).unwrap();
+                let text: String = db
+                    .query_row(
+                        "SELECT metadata FROM session_catalog WHERE session_key='codex:same'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let row: crate::model::summary::CatalogRow = serde_json::from_str(&text).unwrap();
+                let header = crate::query_projection::prefix(
+                    "header",
+                    &crate::query_projection::identity(&row),
+                );
+                db.execute(
+                    "UPDATE meta SET value=value||'changed' WHERE key=?1",
+                    [header],
+                )
+                .unwrap();
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+#[test]
+fn physical_collision_identity_rechecks_omitted_dependencies_after_io() {
+    for fault in [0, 1] {
+        let home = physical_collision_fixture(8);
+        let options = Options {
+            scan_window: true,
+            ..home.options.clone()
+        };
+        let source = crate::session_query_sources(&home.options, "::codex:same")
+            .unwrap()
+            .into_iter()
+            .find(|source| source.root == "codex")
+            .unwrap();
+        let archive = ChangingPhysicalDependency {
+            archive: SelectedArchive {
+                bytes: Arc::from(fs::read(home.options.codex_home.join(&source.path)).unwrap()),
+                source,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                read_bytes: AtomicU64::new(0),
+                fault: 0,
+            },
+            path: home
+                .options
+                .claude_home
+                .join("projects/-work-proj/codex:same.jsonl"),
+            index: crate::events::EventCache::path(&home.options.cache),
+            fault,
+            changed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let catalog = crate::overview_repair::local_query_target(&options, "same", NOW)
+            .unwrap()
+            .unwrap();
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+        let result = Query::from_sources(admitted(options)).execute_selected_at(
+            "local",
+            &catalog,
+            "read_transcript",
+            &json!({"id":"same","limit":1}),
+            Some(&archive),
+            crate::SessionSourceReadMode::ProviderOnly,
+            NOW,
+        );
+        assert_eq!(result.unwrap_err().code, "io");
+        assert!(archive.changed.load(Ordering::Relaxed));
+        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), loads);
+        assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
+    }
 }
 
 #[test]

@@ -1,5 +1,6 @@
 //! Bounded migration of content-free publications from original native sources.
 //! Uses the existing producer; never restores files or publishes current owners.
+pub(crate) mod physical_identity;
 use crate::{
     Options, SessionSourceReadMode, SessionSourceReader, events::EventCache,
     model::summary::CatalogRow,
