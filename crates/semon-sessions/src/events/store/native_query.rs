@@ -6,7 +6,10 @@ use crate::model::{
     summary::{CatalogRow, CatalogSource},
 };
 
+pub(super) mod candidate_delta;
 mod native_repair;
+pub(crate) type CandidateChange = candidate_delta::CandidateChange;
+pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
 
 pub(crate) const ROWS: usize = 64;
 pub(crate) const BYTES: usize = 1024 * 1024;
@@ -47,6 +50,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(super::native_rank::CANDIDATE_TREE_SCHEMA)?;
     db.execute_batch(native_repair::SCHEMA)?;
     db.execute_batch(native_repair::COMPARE_SCHEMA)?;
+    db.execute_batch(candidate_delta::SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![SCHEMA_KEY, SCHEMA_VERSION.to_string()],
@@ -5362,6 +5366,8 @@ mod tests {
             "native_rank_candidate_roots",
             "native_rank_candidate_cursors",
             "native_rank_candidate_applies",
+            "native_candidate_changes",
+            "native_candidate_interests",
             "native_original_copilot_started",
             "native_original_copilot_seen",
         ];
@@ -5550,6 +5556,9 @@ mod tests {
                 ("native_rank_candidate_roots", "table"),
                 ("native_rank_candidate_cursors", "table"),
                 ("native_rank_candidate_applies", "table"),
+                ("native_candidate_changes", "table"),
+                ("native_candidate_interests", "table"),
+                ("native_candidate_change_path", "index"),
                 ("native_rank_candidate_unused", "index"),
                 ("native_rank_candidate_cursor_job", "index"),
                 ("native_original_copilot_started", "table"),
@@ -5774,6 +5783,289 @@ mod tests {
         assert!(
             !fixture.store.recheck(&job).unwrap(),
             "an independent scalar selection change remains fenced"
+        );
+    }
+
+    #[test]
+    fn native_candidate_delta_captures_old_new_parents_identity_and_placement_before_overwrite() {
+        for earlier in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(earlier);
+            let mut old = fixture.index.clone();
+            old.events[0] = Event {
+                k: Kind::Tool,
+                parent: Some(11),
+                u: Some("old-uuid".into()),
+                o: 5,
+                b: 7,
+                t: Some(9),
+                ..Event::default()
+            };
+            old.extras[0] = Event {
+                k: Kind::Operation,
+                parent: Some(17),
+                o: 15,
+                b: 2,
+                t: Some(19),
+                ..Event::default()
+            };
+            fixture.write_full_index(&old);
+            let prior: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT max(change_id) FROM native_candidate_changes",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut new = old.clone();
+            new.events[0].parent = Some(12);
+            new.events[0].u = Some("new-uuid".into());
+            new.events[0].o = 6;
+            new.extras[0].parent = Some(18);
+            new.extras[0].o = 16;
+            new.signals[0].n = Some("low".into());
+            new.events.push(Event {
+                k: Kind::A,
+                o: 80_000,
+                t: Some(-30),
+                ..Event::default()
+            });
+            let changes = super::super::super::DirtyRows::between(&old, &new);
+            let source = fixture.source();
+            let ledger = source.ledger.as_ref().unwrap();
+            let reads = super::super::super::FILE_READS.with(Cell::get);
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(
+                &tx,
+                source.source.path.to_str().unwrap(),
+                ledger,
+                &new,
+                Some(&changes),
+                Some(ledger),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+            let source = fixture.source();
+            let deltas = fixture
+                .store
+                .candidate_changes_page(&source, Some(prior))
+                .unwrap();
+            assert!(deltas.complete);
+            assert_eq!(deltas.rows.len(), 1);
+            let delta = &deltas.rows[0];
+            assert!(!delta.reset);
+            assert_eq!(delta.counts, (earlier + 2, 1, 1));
+            assert_eq!(delta.before_generation, delta.generation);
+            let interests = fixture
+                .store
+                .candidate_interests_page(&source, delta.id, None)
+                .unwrap();
+            assert!(interests.complete);
+            assert_eq!(interests.rows.len(), 4);
+            assert_eq!(interests.work.decoded_rows, 4);
+            let point = &interests.rows[0];
+            assert_eq!((point.channel, point.first, point.last), (0, 0, Some(0)));
+            assert_eq!(
+                point.before.as_ref().unwrap(),
+                &serde_json::to_value(&old.events[0]).unwrap()
+            );
+            assert_eq!(
+                point.after.as_ref().unwrap(),
+                &serde_json::to_value(&new.events[0]).unwrap()
+            );
+            let suffix = &interests.rows[1];
+            assert_eq!(
+                (suffix.channel, suffix.first, suffix.last),
+                (0, earlier + 1, Some(earlier + 2))
+            );
+            assert!(suffix.before.is_none() && suffix.after.is_none());
+            assert_eq!(
+                interests.rows[2].before.as_ref().unwrap(),
+                &serde_json::to_value(&old.extras[0]).unwrap()
+            );
+            assert_eq!(
+                interests.rows[2].after.as_ref().unwrap(),
+                &serde_json::to_value(&new.extras[0]).unwrap()
+            );
+            assert_eq!(interests.rows[3].before.as_ref().unwrap()["n"], "high");
+            assert_eq!(interests.rows[3].after.as_ref().unwrap()["n"], "low");
+            // Immutable delta survives connection replacement and cannot be
+            // interpreted through a different path with a reused native ID.
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .candidate_interests_page(&source, delta.id, None)
+                    .unwrap()
+                    .rows
+                    .len(),
+                4
+            );
+            let mut wrong = source.clone();
+            wrong.source.path = fixture.options.claude_home.join("projects/p/other.jsonl");
+            wrong.ledger = None;
+            wrong.claim = None;
+            assert!(
+                fixture
+                    .store
+                    .candidate_interests_page(&wrong, delta.id, None)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_candidate_delta_ranges_rollback_and_source_change_fence() {
+        for earlier in [0, 128, 1024, 8192] {
+            let fixture = Fixture::new(earlier);
+            let original = fixture.source();
+            let ledger = original.ledger.as_ref().unwrap();
+            let prior: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT max(change_id) FROM native_candidate_changes",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut cut = fixture.index.clone();
+            cut.events.truncate(0);
+            cut.extras.truncate(0);
+            cut.signals.truncate(0);
+            let changes = super::super::super::DirtyRows::between(&fixture.index, &cut);
+            {
+                let tx = fixture.store.connection.unchecked_transaction().unwrap();
+                write_index_changes(
+                    &tx,
+                    original.source.path.to_str().unwrap(),
+                    ledger,
+                    &cut,
+                    Some(&changes),
+                    Some(ledger),
+                )
+                .unwrap();
+                // Cancellation before commit rolls back both row mutation and
+                // all interests, including the monotonically allocated ID.
+            }
+            assert!(
+                fixture
+                    .store
+                    .candidate_changes_page(&original, Some(prior))
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(
+                &tx,
+                original.source.path.to_str().unwrap(),
+                ledger,
+                &cut,
+                Some(&changes),
+                Some(ledger),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert!(
+                fixture
+                    .store
+                    .candidate_changes_page(&original, Some(prior))
+                    .is_err()
+            );
+            let source = fixture.source();
+            let deltas = fixture
+                .store
+                .candidate_changes_page(&source, Some(prior))
+                .unwrap();
+            assert_eq!(deltas.rows.len(), 1);
+            let delta = &deltas.rows[0];
+            let interests = fixture
+                .store
+                .candidate_interests_page(&source, delta.id, None)
+                .unwrap();
+            assert_eq!(
+                interests.rows.len(),
+                3,
+                "cut enumerated old candidate history"
+            );
+            assert_eq!(interests.work.metadata_bytes, 3 * 64);
+            for (channel, interest) in interests.rows.iter().enumerate() {
+                assert_eq!(interest.channel, channel as u8);
+                assert_eq!(interest.first, 0);
+                assert!(
+                    interest.last.is_none()
+                        && interest.before.is_none()
+                        && interest.after.is_none()
+                );
+            }
+            assert_eq!(delta.counts, (0, 0, 0));
+            assert!(!delta.reset);
+        }
+    }
+
+    #[test]
+    fn native_candidate_delta_full_replacement_retains_old_generation_range() {
+        let fixture = Fixture::new(128);
+        let source = fixture.source();
+        let prior: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT max(change_id) FROM native_candidate_changes",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ledger = source.ledger.as_ref().unwrap();
+        let replacement = FileIndex {
+            events: vec![Event {
+                k: Kind::U,
+                o: 3,
+                ..Event::default()
+            }],
+            ..FileIndex::default()
+        };
+        let tx = fixture.store.connection.unchecked_transaction().unwrap();
+        write_index_changes(
+            &tx,
+            source.source.path.to_str().unwrap(),
+            ledger,
+            &replacement,
+            None,
+            Some(ledger),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let source = fixture.source();
+        let deltas = fixture
+            .store
+            .candidate_changes_page(&source, Some(prior))
+            .unwrap();
+        assert_eq!(deltas.rows.len(), 1);
+        let delta = &deltas.rows[0];
+        assert!(delta.reset);
+        assert_eq!(
+            delta.before_generation,
+            Some(source_fact_generation(ledger).unwrap())
+        );
+        assert_eq!(delta.counts, (1, 0, 0));
+        assert_eq!(
+            fixture
+                .store
+                .candidate_interests_page(&source, delta.id, None)
+                .unwrap()
+                .rows
+                .len(),
+            3
+        );
+        assert!(fixture.store.event_at(&source, false, 1).unwrap().is_none());
+        assert!(fixture.store.event_at(&source, true, 0).unwrap().is_none());
+        assert_eq!(
+            fixture.store.event_at(&source, false, 0).unwrap().unwrap(),
+            replacement.events[0]
         );
     }
 
