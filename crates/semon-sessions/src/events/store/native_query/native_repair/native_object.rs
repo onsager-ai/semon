@@ -1,4 +1,5 @@
-//! Native serde_json object order: decoded str order, last physical duplicate wins.
+//! Qualified object metadata: lexical lookup plus native insertion-order iteration.
+//! Native serde_json preserves first insertion position and last duplicate value.
 //! The tree retains descriptors, never decoded keys or native values. Its only
 //! comparator is the existing qualified native text ordering owner.
 use super::*;
@@ -122,6 +123,7 @@ enum Stage {
     Identity,
     Search(Option<u64>),
     Balance(u64),
+    Seal,
     Complete,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,11 +136,15 @@ struct Build {
     pending: Option<Pending>,
     path: Vec<Edge>,
     stage: Stage,
+    seal: Vec<Branch>,
+    sealed: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Node {
     class: u64,
+    first_ordinal: u64,
+    lexical_start: Option<u64>,
     key: OriginalField,
     value: OriginalNode,
     left: Option<u64>,
@@ -152,6 +158,7 @@ impl Node {
             && self.height > 0
             && usize::from(self.height) < HEIGHT
             && self.count > 0
+            && self.first_ordinal <= self.key.ordinal
             && self.key.key
             && self.key.location.parent == Some(b.object.address)
             && self.value.location.parent == Some(b.object.address)
@@ -193,15 +200,68 @@ pub(crate) struct ObjectEntry {
     pub(crate) physical_key: OriginalField,
     pub(crate) value: OriginalNode,
 }
-/// Opaque, durable rank seek and in-order traversal. Construct with seek(0) for
-/// first; retain returned continuation for next. Empty Pending steps are normal.
+/// One subtree's immutable lexical interval. Frontier intervals let resumed
+/// cursors reject omitted ancestors before cloning or performing any I/O.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Branch {
+    class: u64,
+    start: u64,
+    count: u64,
+}
+impl Branch {
+    fn end(&self) -> io::Result<u64> {
+        if self.class == 0 || self.count == 0 {
+            return Err(bad("native object empty/invalid page branch"));
+        }
+        self.start
+            .checked_add(self.count)
+            .ok_or_else(|| bad("native object page interval overflow"))
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Frame {
+    branch: Branch,
+    rank: u64,
+    right: Option<Branch>,
+}
+fn page_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Frame>, D::Error> {
+    struct PathVisitor;
+    impl<'de> serde::de::Visitor<'de> for PathVisitor {
+        type Value = Vec<Frame>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a bounded native object ancestor path")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            // Never reserve the untrusted size_hint or allocate an oversized path.
+            let mut path = Vec::new();
+            while let Some(frame) = seq.next_element::<Frame>()? {
+                if path.len() + 1 >= HEIGHT {
+                    return Err(serde::de::Error::custom(
+                        "native object ancestor path exceeds height",
+                    ));
+                }
+                path.push(frame);
+            }
+            Ok(path)
+        }
+    }
+    deserializer.deserialize_seq(PathVisitor)
+}
+/// Lexical metadata traversal, distinct from native serde_json insertion order.
+/// Construct with seek(0) for first; retain returned continuation for next.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObjectPageCursor {
     object: QualifiedObject,
-    rank: u64,
-    at: Option<u64>,
-    path: Vec<u64>,
+    next_rank: u64,
+    at: Option<Branch>,
+    #[serde(deserialize_with = "page_path")]
+    path: Vec<Frame>,
     seeking: bool,
     complete: bool,
 }
@@ -209,12 +269,89 @@ impl ObjectPageCursor {
     pub(crate) fn seek(object: &QualifiedObject, rank: u64) -> Self {
         Self {
             object: object.clone(),
-            rank,
-            at: object.root,
+            next_rank: rank,
+            at: object.root.map(|class| Branch {
+                class,
+                start: 0,
+                count: object.count,
+            }),
             path: Vec::new(),
             seeking: true,
             complete: rank >= object.count,
         }
+    }
+    fn valid(&self) -> io::Result<()> {
+        if self.path.len() >= HEIGHT || (self.object.count == 0) != self.object.root.is_none() {
+            return Err(bad("native object page root/path disagrees"));
+        }
+        if self.complete && self.seeking {
+            let root = self.object.root.map(|class| Branch {
+                class,
+                start: 0,
+                count: self.object.count,
+            });
+            if self.next_rank < self.object.count || !self.path.is_empty() || self.at != root {
+                return Err(bad("native object initial completed seek is not canonical"));
+            }
+            return Ok(());
+        }
+        if self.next_rank > self.object.count
+            || self.complete != (self.next_rank == self.object.count)
+        {
+            return Err(bad("native object page completion rank disagrees"));
+        }
+        if self.complete && (self.at.is_some() || !self.path.is_empty()) {
+            return Err(bad("native object complete page retains branches"));
+        }
+        let mut end = if let Some(at) = &self.at {
+            let end = at.end()?;
+            if at.start > self.next_rank
+                || self.next_rank >= end
+                || !self.seeking && at.start != self.next_rank
+            {
+                return Err(bad("native object page active interval disagrees"));
+            }
+            end
+        } else {
+            if self.seeking {
+                return Err(bad("native object seek lost its active branch"));
+            }
+            self.next_rank
+        };
+        for (i, frame) in self.path.iter().enumerate().rev() {
+            if frame.branch.start > frame.rank
+                || frame.rank >= frame.branch.end()?
+                || frame.rank != end
+                || self
+                    .at
+                    .as_ref()
+                    .is_some_and(|at| at.class == frame.branch.class)
+                || self.path[..i]
+                    .iter()
+                    .any(|other| other.branch.class == frame.branch.class)
+            {
+                return Err(bad("native object page ancestor/interval disagrees"));
+            }
+            let after = frame
+                .rank
+                .checked_add(1)
+                .ok_or_else(|| bad("native object page rank overflow"))?;
+            end = if let Some(right) = &frame.right {
+                if right.start != after {
+                    return Err(bad("native object page right interval disagrees"));
+                }
+                right.end()?
+            } else {
+                after
+            };
+            if end != frame.branch.end()? {
+                return Err(bad("native object ancestor does not cover its subtree"));
+            }
+        }
+        if end != self.object.count {
+            return Err(bad("native object page frontier omits native keys"));
+        }
+        Ok(())
     }
 }
 #[derive(Debug)]
@@ -415,6 +552,11 @@ fn load_build(db: &Connection, b: &Binding, m: &mut Meter) -> io::Result<Option<
     if let Some((_, v)) = &v {
         if !same(&v.binding, b)?
             || v.path.len() >= HEIGHT
+            || v.seal.len() >= HEIGHT
+            || v.sealed > v.count
+            || matches!(v.stage, Stage::Complete) && (v.sealed != v.count || !v.seal.is_empty())
+            || !matches!(v.stage, Stage::Seal | Stage::Complete)
+                && (v.sealed != 0 || !v.seal.is_empty())
             || v.path
                 .iter()
                 .enumerate()
@@ -857,6 +999,8 @@ impl NativeStore {
                         pending: None,
                         path: Vec::new(),
                         stage: Stage::Input,
+                        seal: Vec::new(),
+                        sealed: 0,
                     },
                 ),
             };
@@ -985,7 +1129,16 @@ impl NativeStore {
                         } else if build.count != 0 {
                             return Err(bad("native object missing completed root"));
                         }
-                        build.stage = Stage::Complete;
+                        build.seal = build
+                            .root
+                            .map(|class| Branch {
+                                class,
+                                start: 0,
+                                count: build.count,
+                            })
+                            .into_iter()
+                            .collect();
+                        build.stage = Stage::Seal;
                     }
                 }
                 Stage::Search(Some(id)) => {
@@ -1039,6 +1192,8 @@ impl NativeStore {
                         .identity();
                     let n = Node {
                         class: id,
+                        first_ordinal: p.field.ordinal,
+                        lexical_start: None,
                         key: p.field.clone(),
                         value: p.value.clone(),
                         left: None,
@@ -1098,6 +1253,53 @@ impl NativeStore {
                         );
                         build.pending = None;
                         build.stage = Stage::Input;
+                    }
+                }
+                Stage::Seal => {
+                    if let Some(branch) = build.seal.pop() {
+                        let mut n = node(&tx, &b, branch.class, &mut m)?;
+                        let (left, right) = checked(&tx, &b, &n, &mut m)?;
+                        if n.count != branch.count
+                            || n.lexical_start.is_some()
+                            || branch.end()? > build.count
+                        {
+                            return Err(bad("native object seal cursor/subtree changed"));
+                        }
+                        let rank = branch
+                            .start
+                            .checked_add(count(&left))
+                            .ok_or_else(|| bad("native object seal rank overflow"))?;
+                        build.sealed = build
+                            .sealed
+                            .checked_add(1)
+                            .ok_or_else(|| bad("native object seal count overflow"))?;
+                        if build.sealed > build.count {
+                            return Err(bad("native object seal exceeds qualified node count"));
+                        }
+                        n.lexical_start = Some(branch.start);
+                        save_node(&tx, &b, &n, &mut m)?;
+                        if let Some(right) = right {
+                            build.seal.push(Branch {
+                                class: right.class,
+                                start: rank + 1,
+                                count: right.count,
+                            });
+                        }
+                        if let Some(left) = left {
+                            build.seal.push(Branch {
+                                class: left.class,
+                                start: branch.start,
+                                count: left.count,
+                            });
+                        }
+                        if build.seal.len() >= HEIGHT {
+                            return Err(bad("native object seal exceeds AVL height"));
+                        }
+                    } else {
+                        if build.sealed != build.count {
+                            return Err(bad("native object seal ended before all nodes"));
+                        }
+                        build.stage = Stage::Complete;
                     }
                 }
                 Stage::Identity | Stage::Complete => {}
@@ -1215,6 +1417,7 @@ impl NativeStore {
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<ObjectPageStep> {
+        cursor.valid()?;
         let mut m = Meter::default();
         let mut next = cursor.clone();
         let latch = std::cell::Cell::new(false);
@@ -1238,24 +1441,6 @@ impl NativeStore {
         if cancelled() {
             return Ok(result(m, Outcome::Deferred, cursor.clone(), None));
         }
-        if cursor.complete && cursor.seeking && cursor.rank < cursor.object.count
-            || cursor.complete
-                && !cursor.seeking
-                && (cursor.at.is_some() || !cursor.path.is_empty())
-            || !cursor.complete && cursor.seeking && cursor.at.is_none()
-        {
-            return Err(bad("native object page completion state disagrees"));
-        }
-        if cursor.path.len() >= HEIGHT
-            || cursor
-                .path
-                .iter()
-                .enumerate()
-                .any(|(i, id)| cursor.path[..i].contains(id))
-            || cursor.at.is_some_and(|id| cursor.path.contains(&id))
-        {
-            return Err(bad("native object page path is cyclic or too high"));
-        }
         if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
             return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
         }
@@ -1272,46 +1457,74 @@ impl NativeStore {
             }
             let mut selected = None;
             if !next.complete {
-                if let Some(id) = next.at {
-                    let n = node(&tx, b, id, &mut m)?;
-                    let (l, _) = checked(&tx, b, &n, &mut m)?;
-                    if next.seeking {
-                        let left = count(&l);
-                        if next.rank < left {
-                            next.path.push(id);
-                            next.at = n.left;
-                        } else if next.rank == left {
-                            next.seeking = false;
-                            next.at = n.right;
-                            selected = Some(n);
-                        } else {
-                            next.rank -= left + 1;
-                            next.at = n.right;
-                            if next.at.is_none() {
-                                return Err(bad("native object rank/tree count disagrees"));
-                            }
-                        }
-                    } else if n.left.is_some() {
-                        next.path.push(id);
-                        next.at = n.left;
-                    } else {
-                        next.at = n.right;
+                if let Some(branch) = next.at.clone() {
+                    let n = node(&tx, b, branch.class, &mut m)?;
+                    let (left, right) = checked(&tx, b, &n, &mut m)?;
+                    if n.count != branch.count || n.lexical_start != Some(branch.start) {
+                        return Err(bad("native object active subtree count changed"));
+                    }
+                    let rank = branch
+                        .start
+                        .checked_add(count(&left))
+                        .ok_or_else(|| bad("native object rank overflow"))?;
+                    let right = right.as_ref().map(|n| Branch {
+                        class: n.class,
+                        start: rank + 1,
+                        count: n.count,
+                    });
+                    let left = left.as_ref().map(|n| Branch {
+                        class: n.class,
+                        start: branch.start,
+                        count: n.count,
+                    });
+                    if next.next_rank < rank {
+                        next.path.push(Frame {
+                            branch,
+                            rank,
+                            right,
+                        });
+                        next.at = left;
+                    } else if next.next_rank == rank {
+                        next.next_rank += 1;
+                        next.seeking = false;
+                        next.at = right;
                         selected = Some(n);
+                    } else if next.seeking {
+                        next.at = right;
+                    } else {
+                        return Err(bad("native object page skipped an unconsumed key"));
                     }
-                } else if let Some(id) = next.path.pop() {
-                    if next.seeking {
-                        return Err(bad("native object seek ended without target"));
+                } else if let Some(frame) = next.path.pop() {
+                    if next.seeking || frame.rank != next.next_rank {
+                        return Err(bad("native object page ancestor rank changed"));
                     }
-                    let n = node(&tx, b, id, &mut m)?;
-                    checked(&tx, b, &n, &mut m)?;
-                    next.at = n.right;
+                    let n = node(&tx, b, frame.branch.class, &mut m)?;
+                    let (left, right) = checked(&tx, b, &n, &mut m)?;
+                    let rank = frame
+                        .branch
+                        .start
+                        .checked_add(count(&left))
+                        .ok_or_else(|| bad("native object ancestor rank overflow"))?;
+                    let right = right.as_ref().map(|n| Branch {
+                        class: n.class,
+                        start: rank + 1,
+                        count: n.count,
+                    });
+                    if n.lexical_start != Some(frame.branch.start)
+                        || n.count != frame.branch.count
+                        || rank != frame.rank
+                        || right != frame.right
+                    {
+                        return Err(bad("native object page ancestor edge changed"));
+                    }
+                    next.next_rank += 1;
+                    next.at = right;
                     selected = Some(n);
                 } else {
-                    next.complete = true;
+                    return Err(bad("native object page ended before its qualified count"));
                 }
-                if !next.seeking && next.at.is_none() && next.path.is_empty() {
-                    next.complete = true;
-                }
+                next.complete = next.next_rank == next.object.count;
+                next.valid()?;
             }
             if let Some(n) = &selected {
                 entry_current(&tx, repair, b, n, &mut m)?;
@@ -1369,5 +1582,274 @@ impl NativeStore {
             value: n.value,
         });
         Ok(result(m, Outcome::Written, next, entry))
+    }
+}
+
+/// Background native-map continuation. Native serde_json preserve_order emits a
+/// key at its FIRST physical insertion, selecting its LAST physical value.
+/// Duplicates advance this cursor without an entry; callers checkpoint every
+/// step and must never drain an unfinished object inside a foreground request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObjectNativeCursor {
+    object: QualifiedObject,
+    after: Option<u64>,
+    emitted: u64,
+    complete: bool,
+}
+impl ObjectNativeCursor {
+    pub(crate) fn begin(object: &QualifiedObject) -> Self {
+        Self {
+            object: object.clone(),
+            after: None,
+            emitted: 0,
+            complete: false,
+        }
+    }
+    fn valid(&self) -> io::Result<()> {
+        if (self.object.count == 0) != self.object.root.is_none()
+            || self.emitted > self.object.count
+            || self.after.is_none() && self.emitted != 0
+            || self.after.is_some() && self.emitted == 0
+            || self.complete && self.emitted != self.object.count
+        {
+            return Err(bad("native insertion-order cursor state disagrees"));
+        }
+        if let Some(after) = self.after {
+            seq_u64(after)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug)]
+pub(crate) struct ObjectNativeStep {
+    pub(crate) outcome: Outcome,
+    pub(crate) work: RepairWork,
+    pub(crate) cursor: ObjectNativeCursor,
+    pub(crate) entry: Option<ObjectEntry>,
+    pub(crate) complete: bool,
+    pub(crate) sql_vm_steps: i32,
+}
+fn native_first(
+    db: &Connection,
+    repair: &Repair,
+    b: &Binding,
+    n: &Node,
+    m: &mut Meter,
+) -> io::Result<()> {
+    let (first, _, vm) = native_classes::qualified_field_at(
+        db,
+        repair,
+        b.record.record,
+        n.first_ordinal,
+        &mut m.work,
+    )?;
+    m.vm += vm;
+    let (text, vm) = native_classes::qualified_identity_at(
+        db,
+        repair,
+        b.record.record,
+        n.first_ordinal,
+        &mut m.work,
+    )?;
+    m.vm += vm;
+    if !first.key
+        || first.location.parent != Some(b.object.address)
+        || text
+            .as_ref()
+            .is_none_or(|t| t.original() != b.record.original || t.identity() != n.class)
+    {
+        return Err(bad("native object first insertion/class changed"));
+    }
+    Ok(())
+}
+impl NativeStore {
+    pub(crate) fn original_object_native_step(
+        &self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        cursor: &ObjectNativeCursor,
+        records: &crate::query_source::Records<'_>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<ObjectNativeStep> {
+        cursor.valid()?;
+        let mut next = cursor.clone();
+        let mut m = Meter::default();
+        let latch = std::cell::Cell::new(false);
+        let cancelled = || {
+            if cancelled() {
+                latch.set(true);
+            }
+            latch.get()
+        };
+        let result = |m: Meter,
+                      outcome: Outcome,
+                      cursor: ObjectNativeCursor,
+                      entry: Option<ObjectEntry>| ObjectNativeStep {
+            outcome,
+            work: m.work,
+            complete: cursor.complete,
+            cursor,
+            entry,
+            sql_vm_steps: m.vm,
+        };
+        if cancelled() {
+            return Ok(result(m, Outcome::Deferred, cursor.clone(), None));
+        }
+        if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
+            return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+        }
+        let b = &cursor.object.binding;
+        let mut observed_input = None;
+        let mut observed_node = None;
+        let selected = {
+            let tx = self
+                .connection
+                .unchecked_transaction()
+                .map_err(io::Error::other)?;
+            if !current(&tx, job, witness, repair, b, closure, &mut m)?
+                || !handle_current(&tx, &cursor.object, &mut m)?
+            {
+                return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+            }
+            // Exactly one indexed physical input key, not a loop that drains
+            // duplicate keys or decodes a complete object/key String.
+            let input = next_key(&tx, b, cursor.after, repair, &mut m)?;
+            match input {
+                None => {
+                    if next.emitted != next.object.count {
+                        return Err(bad("native insertion cursor ended before all keys"));
+                    }
+                    next.complete = true;
+                    None
+                }
+                Some(input) => {
+                    if next.complete {
+                        return Err(bad(
+                            "native insertion cursor completed before physical input end",
+                        ));
+                    }
+                    let (text, vm) = native_classes::qualified_identity_at(
+                        &tx,
+                        repair,
+                        b.record.record,
+                        input.field.ordinal,
+                        &mut m.work,
+                    )?;
+                    m.vm += vm;
+                    let text = text
+                        .ok_or_else(|| bad("native insertion key identity remains unqualified"))?;
+                    let n = node(&tx, b, text.identity(), &mut m)?;
+                    if n.lexical_start
+                        .and_then(|start| start.checked_add(n.count))
+                        .is_none_or(|end| end > cursor.object.count)
+                    {
+                        return Err(bad("native insertion tree is not sealed"));
+                    }
+                    checked(&tx, b, &n, &mut m)?;
+                    native_first(&tx, repair, b, &n, &mut m)?;
+                    entry_current(&tx, repair, b, &n, &mut m)?;
+                    if input.field.ordinal < n.first_ordinal {
+                        return Err(bad("native insertion key precedes its first ordinal"));
+                    }
+                    observed_input = Some((input.field.clone(), text));
+                    observed_node = Some(n.clone());
+                    next.after = Some(input.field.ordinal);
+                    if input.field.ordinal == n.first_ordinal {
+                        next.emitted = next
+                            .emitted
+                            .checked_add(1)
+                            .ok_or_else(|| bad("native insertion output count overflow"))?;
+                        if next.emitted > next.object.count {
+                            return Err(bad("native insertion output exceeds qualified count"));
+                        }
+                        Some(n)
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        next.valid()?;
+        verify_member_anchor(records, repair, &mut m.work)?;
+        records.finish()?;
+        if cancelled() {
+            return Ok(result(m, Outcome::Deferred, cursor.clone(), None));
+        }
+        if !self.runtime_current(&job.spec)? {
+            return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+        }
+        {
+            let tx = self
+                .connection
+                .unchecked_transaction()
+                .map_err(io::Error::other)?;
+            if !current(&tx, job, witness, repair, b, closure, &mut m)?
+                || !handle_current(&tx, &cursor.object, &mut m)?
+            {
+                return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+            }
+            if let Some(n) = &observed_node {
+                let now = node(&tx, b, n.class, &mut m)?;
+                if !same(&now, n)? {
+                    return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+                }
+                native_first(&tx, repair, b, n, &mut m)?;
+                entry_current(&tx, repair, b, n, &mut m)?;
+            }
+        }
+        if let Some((field, text)) = &observed_input {
+            let (now, _, vm) = native_classes::qualified_field_at(
+                &self.connection,
+                repair,
+                b.record.record,
+                field.ordinal,
+                &mut m.work,
+            )?;
+            m.vm += vm;
+            let (identity, vm) = native_classes::qualified_identity_at(
+                &self.connection,
+                repair,
+                b.record.record,
+                field.ordinal,
+                &mut m.work,
+            )?;
+            m.vm += vm;
+            if !same(field, &now)? || identity.as_ref() != Some(text) {
+                return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+            }
+        }
+        if !closure(&self.connection, job.id).map_err(io::Error::other)?
+            || !self.runtime_current(&job.spec)?
+            || !job_current(&self.connection, job).map_err(io::Error::other)?
+            || !check_source(&self.connection, witness).map_err(io::Error::other)?
+            || !repair_current(&self.connection, repair).map_err(io::Error::other)?
+            || !admitted_original(&self.connection, job, witness).map_err(io::Error::other)?
+            || !same(&binding(&self.connection, repair, &b.object, &mut m)?, b)?
+            || !handle_current(&self.connection, &cursor.object, &mut m)?
+        {
+            return Ok(result(m, Outcome::Conflict, cursor.clone(), None));
+        }
+        if cancelled() {
+            return Ok(result(m, Outcome::Deferred, cursor.clone(), None));
+        }
+        bounded_json(&next, STATE_BYTES).map_err(io::Error::other)?;
+        let entry = selected.map(|n| ObjectEntry {
+            key: OriginalText::qualified(b.record.original, n.class),
+            physical_key: n.key,
+            value: n.value,
+        });
+        Ok(result(
+            m,
+            if entry.is_some() || next.complete {
+                Outcome::Written
+            } else {
+                Outcome::Deferred
+            },
+            next,
+            entry,
+        ))
     }
 }

@@ -100,7 +100,7 @@ fn object_decode(f: &Fixture, r: &Repair, bytes: &[u8], entry: &ObjectEntry) -> 
     )
 }
 #[test]
-fn object_iterator_matches_native_last_duplicate_and_decoded_lexical_order() {
+fn object_iterator_lexical_metadata_matches_sorted_native_last_duplicate_values() {
     let bytes="{\"z\":0,\"a\":1,\"\\u0061\":2,\"\":3,\"\\u0000\":4,\"é\":5,\"😀\":6,\"nested\":{\"z\":0,\"a\":1,\"a\":2},\"arr\":[{\"x\":1}],\"s\":\"\"}\n".as_bytes();
     let oracle: Value = serde_json::from_slice(bytes).unwrap();
     let mut f = object_fixture(bytes);
@@ -115,12 +115,13 @@ fn object_iterator_matches_native_last_duplicate_and_decoded_lexical_order() {
         .iter()
         .map(|e| object_decode(&f, &r, bytes, e))
         .collect();
-    let expected: Vec<_> = oracle
+    let mut expected: Vec<_> = oracle
         .as_object()
         .unwrap()
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(actual, expected);
     let nested = f.member(&r, "nested");
     let child = object_build(&mut f, &r, &nested);
@@ -128,12 +129,13 @@ fn object_iterator_matches_native_last_duplicate_and_decoded_lexical_order() {
         .iter()
         .map(|e| object_decode(&f, &r, bytes, e))
         .collect();
-    let expected: Vec<_> = oracle["nested"]
+    let mut expected: Vec<_> = oracle["nested"]
         .as_object()
         .unwrap()
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(actual, expected);
     // Every object in this record reuses the exact completed record map.
     let before: i64 = f
@@ -233,8 +235,21 @@ fn object_iterator_giant_common_prefix_huge_value_cancellation_and_reopen() {
         .iter()
         .map(|e| object_decode(&f, &r, &bytes, e))
         .collect();
+    let mut expected: Vec<_> = oracle
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(actual, expected);
+    let (native, _) = object_native_entries(&f, &r, &object);
+    let native: Vec<_> = native
+        .iter()
+        .map(|e| object_decode(&f, &r, &bytes, e))
+        .collect();
     assert_eq!(
-        actual,
+        native,
         oracle
             .as_object()
             .unwrap()
@@ -242,6 +257,7 @@ fn object_iterator_giant_common_prefix_huge_value_cancellation_and_reopen() {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Vec<_>>()
     );
+
     let cursor = ObjectPageCursor::seek(&object, 1);
     let step = f
         .store
@@ -417,6 +433,57 @@ fn object_iterator_fixed_one_member_seek_work_grows_only_with_tree_height() {
                 vm.load(Ordering::Relaxed)
             );
         }
+
+        let vm = Arc::new(AtomicUsize::new(0));
+        let observed = vm.clone();
+        f.store.connection.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let calls = provider.calls.load(Ordering::SeqCst);
+        let bytes_read = provider.bytes_read.load(Ordering::SeqCst);
+        let native = {
+            let records = f.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            f.store
+                .original_object_native_step(
+                    &f.job,
+                    &f.source,
+                    &r,
+                    &ObjectNativeCursor::begin(&o),
+                    &records,
+                    &|_, _| Ok(true),
+                    &|| false,
+                )
+                .unwrap()
+        };
+        f.store.connection.progress_handler(0, None::<fn() -> bool>);
+        check_object_work(&native.work);
+        if size == 0 {
+            assert!(native.complete && native.entry.is_none());
+        } else {
+            assert_eq!(
+                object_decode(&f, &r, &bytes, &native.entry.unwrap()),
+                (format!("key{:05}", size - 1), Value::from(size - 1))
+            );
+        }
+        let calls = provider.calls.load(Ordering::SeqCst) - calls;
+        let bytes_read = provider.bytes_read.load(Ordering::SeqCst) - bytes_read;
+        assert!(vm.load(Ordering::Relaxed) <= 100_000);
+        assert!(calls <= 16);
+        assert!(bytes_read <= 16 * crate::source_chunks::SIZE);
+        eprintln!(
+            "native object size={size} first sql_vm={} rows={} metadata={} logical_native={} actual_provider_calls={calls} actual_provider_bytes={bytes_read}",
+            vm.load(Ordering::Relaxed),
+            native.work.metadata_rows,
+            native.work.metadata_bytes,
+            native.work.native_bytes
+        );
         assert_eq!(
             reads,
             super::super::super::super::FILE_READS.with(Cell::get)
@@ -797,4 +864,556 @@ fn object_iterator_called_retirement_precedes_classes_and_never_decodes_old_stat
             .unwrap();
         assert_eq!(count, 0);
     }
+}
+
+fn object_native_entries(
+    f: &Fixture,
+    r: &Repair,
+    o: &QualifiedObject,
+) -> (Vec<ObjectEntry>, usize) {
+    let mut cursor = ObjectNativeCursor::begin(o);
+    let mut entries = Vec::new();
+    let mut pending = 0;
+    for _ in 0..100_000 {
+        let s = f
+            .store
+            .original_object_native_step(
+                &f.job,
+                &f.source,
+                r,
+                &cursor,
+                &f.sources.reader(),
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        check_object_work(&s.work);
+        assert_ne!(s.outcome, Outcome::Conflict);
+        cursor = serde_json::from_slice(&serde_json::to_vec(&s.cursor).unwrap()).unwrap();
+        if let Some(entry) = s.entry {
+            entries.push(entry);
+        } else if !s.complete {
+            pending += 1;
+            assert_eq!(s.outcome, Outcome::Deferred);
+        }
+        if s.complete {
+            return (entries, pending);
+        }
+    }
+    panic!("native insertion-order iteration did not complete")
+}
+#[test]
+fn object_iterator_native_preserves_first_insertion_and_last_duplicate_values() {
+    let bytes="{\"z\":0,\"a\":1,\"\\u007a\":2,\"\":3,\"\\u0000\":4,\"é\":5,\"😀\":6,\"nested\":{\"z\":0,\"a\":1,\"z\":2},\"arr\":[{\"x\":1}]}\n".as_bytes();
+    let oracle: Value = serde_json::from_slice(bytes).unwrap();
+    let mut f = object_fixture(bytes);
+    let r = f.qualified_record();
+    let root = f
+        .store
+        .original_root(&f.job, &f.source, &r)
+        .unwrap()
+        .unwrap();
+    let object = object_build(&mut f, &r, &root);
+    let (entries, pending) = object_native_entries(&f, &r, &object);
+    assert_eq!(pending, 1);
+    let actual: Vec<_> = entries
+        .iter()
+        .map(|e| object_decode(&f, &r, bytes, e))
+        .collect();
+    let expected: Vec<_> = oracle
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(actual[0], ("z".into(), Value::from(2)));
+    let nested = f.member(&r, "nested");
+    let child = object_build(&mut f, &r, &nested);
+    let (entries, pending) = object_native_entries(&f, &r, &child);
+    assert_eq!(pending, 1);
+    let actual: Vec<_> = entries
+        .iter()
+        .map(|e| object_decode(&f, &r, bytes, e))
+        .collect();
+    let expected: Vec<_> = oracle["nested"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert_eq!(actual, expected);
+}
+#[test]
+fn object_iterator_native_many_duplicates_are_one_bounded_pending_step_each() {
+    use std::sync::atomic::Ordering;
+    let bytes = format!(
+        "{{\"z\":0,{},\"a\":9}}\n",
+        (1..=128)
+            .map(|i| format!("\"\\u007a\":{i}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+    .into_bytes();
+    let mut f = object_fixture(&bytes);
+    let r = f.qualified_record();
+    let root = f
+        .store
+        .original_root(&f.job, &f.source, &r)
+        .unwrap()
+        .unwrap();
+    let object = object_build(&mut f, &r, &root);
+    let provider = InterleavingReader::new(
+        reference(&f.sources.reader(), &f.source).unwrap(),
+        &bytes,
+        None,
+        |_| {},
+    );
+    fs::remove_file(&f.source.source.path).unwrap();
+    let mut cursor = ObjectNativeCursor::begin(&object);
+    let mut pending = 0;
+    let mut entries = Vec::new();
+    for attempt in 0..200 {
+        let before = provider.calls.load(Ordering::SeqCst);
+        let s = {
+            let records = f.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            f.store
+                .original_object_native_step(
+                    &f.job,
+                    &f.source,
+                    &r,
+                    &cursor,
+                    &records,
+                    &|_, _| Ok(true),
+                    &|| false,
+                )
+                .unwrap()
+        };
+        check_object_work(&s.work);
+        assert!(provider.calls.load(Ordering::SeqCst) - before <= 16);
+        assert_eq!(
+            s.work.native_bytes, 1,
+            "native iteration does not decode or replay keys"
+        );
+        cursor = serde_json::from_slice(&serde_json::to_vec(&s.cursor).unwrap()).unwrap();
+        if let Some(entry) = s.entry {
+            entries.push(object_decode(&f, &r, &bytes, &entry));
+        } else if !s.complete {
+            pending += 1;
+            assert_eq!(s.outcome, Outcome::Deferred);
+        }
+        if s.complete {
+            break;
+        }
+        if attempt % 11 == 0 {
+            f.store = NativeStore::open(&f.options).unwrap();
+        }
+    }
+    assert_eq!(pending, 128);
+    assert_eq!(
+        entries,
+        vec![("z".into(), Value::from(128)), ("a".into(), Value::from(9))]
+    );
+}
+#[test]
+fn object_iterator_native_copilot_report_order_matches_actual_snapshot_short_circuit() {
+    let report = |input: u64| {
+        format!(
+            "{{\"usage\":{{\"inputTokens\":{input},\"outputTokens\":0,\"cacheReadTokens\":0,\"cacheWriteTokens\":0,\"reasoningTokens\":0}}}}"
+        )
+    };
+    for tail in [
+        format!("\"z\":{},\"a\":{}", report(8), report(1)),
+        format!(
+            "\"z\":{},\"a\":{},\"b\":{{\"usage\":null}}",
+            report(u64::MAX),
+            report(1)
+        ),
+        format!(
+            "\"z\":{{\"usage\":null}},\"a\":{},\"\\u007a\":{}",
+            report(1),
+            report(8)
+        ),
+    ] {
+        let bytes = format!("{{\"modelMetrics\":{{{tail}}}}}\n").into_bytes();
+        let oracle: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut f = object_fixture(&bytes);
+        let r = f.qualified_record();
+        let models = f.member(&r, "modelMetrics");
+        let object = object_build(&mut f, &r, &models);
+        let (entries, _) = object_native_entries(&f, &r, &object);
+        let actual: Vec<_> = entries
+            .iter()
+            .map(|e| object_decode(&f, &r, &bytes, e))
+            .collect();
+        let expected: Vec<_> = oracle["modelMetrics"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(actual, expected);
+        let mut rebuilt = serde_json::Map::new();
+        for (k, v) in actual {
+            rebuilt.insert(k, v);
+        }
+        let data = serde_json::json!({"modelMetrics":Value::Object(rebuilt)});
+        let expected = std::panic::catch_unwind(|| crate::copilot::snapshot(&oracle));
+        let actual = std::panic::catch_unwind(|| crate::copilot::snapshot(&data));
+        match (expected, actual) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            (Err(_), Err(_)) => {}
+            _ => panic!("native report order changed overflow/invalid short circuit"),
+        }
+    }
+}
+#[test]
+fn object_iterator_resumed_lexical_cursor_refuses_omitted_paths_before_provider_io() {
+    use std::sync::atomic::Ordering;
+    let bytes = b"{\"a\":0,\"b\":1,\"c\":2,\"d\":3,\"e\":4,\"f\":5,\"g\":6}\n";
+    let mut f = object_fixture(bytes);
+    let r = f.qualified_record();
+    let root = f
+        .store
+        .original_root(&f.job, &f.source, &r)
+        .unwrap()
+        .unwrap();
+    let object = object_build(&mut f, &r, &root);
+    let provider = InterleavingReader::new(
+        reference(&f.sources.reader(), &f.source).unwrap(),
+        bytes,
+        None,
+        |_| {},
+    );
+    let mut cursor = ObjectPageCursor::seek(&object, 0);
+    let mut examples = Vec::new();
+    for _ in 0..40 {
+        let s = f
+            .store
+            .original_object_page_step(
+                &f.job,
+                &f.source,
+                &r,
+                &cursor,
+                &f.sources.reader(),
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        cursor = s.cursor;
+        let value = serde_json::to_value(&cursor).unwrap();
+        if !value["path"].as_array().unwrap().is_empty() {
+            examples.push(value);
+        }
+        if s.complete {
+            break;
+        }
+    }
+    assert!(examples.iter().any(|v| v["at"].is_null()));
+    assert!(examples.iter().any(|v| !v["at"].is_null()));
+    for value in &examples {
+        for mutation in ["drop", "end", "rank", "branch", "earlycomplete"] {
+            let mut bad = value.clone();
+            match mutation {
+                "drop" => bad["path"] = serde_json::json!([]),
+                "end" => {
+                    bad["path"] = serde_json::json!([]);
+                    bad["at"] = Value::Null;
+                    bad["seeking"] = Value::Bool(false);
+                }
+                "rank" => bad["next_rank"] = Value::from(object.len() + 1),
+                "branch" => {
+                    if !bad["at"].is_null() {
+                        bad["at"]["count"] = Value::from(object.len() + 1)
+                    } else {
+                        bad["path"][0]["rank"] = Value::from(object.len() + 1)
+                    }
+                }
+                "earlycomplete" => bad["complete"] = Value::Bool(true),
+                _ => unreachable!(),
+            }
+            let malformed: ObjectPageCursor = serde_json::from_value(bad).unwrap();
+            let before = provider.calls.load(Ordering::SeqCst);
+            let records = f.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            assert!(
+                f.store
+                    .original_object_page_step(
+                        &f.job,
+                        &f.source,
+                        &r,
+                        &malformed,
+                        &records,
+                        &|_, _| Ok(true),
+                        &|| false
+                    )
+                    .is_err(),
+                "mutation={mutation}"
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+        }
+    }
+    let mut huge = examples[0].clone();
+    let frame = huge["path"][0].clone();
+    huge["path"] = Value::Array(vec![frame; 10_000]);
+    assert!(
+        serde_json::from_value::<ObjectPageCursor>(huge).is_err(),
+        "deserialization must stop before allocating an unbounded path"
+    );
+}
+#[test]
+fn object_iterator_seal_resumes_once_and_same_size_forged_subtree_refuses() {
+    use std::sync::atomic::Ordering;
+    let bytes = b"{\"a\":0,\"b\":1,\"c\":2,\"d\":3,\"e\":4,\"f\":5,\"g\":6}\n";
+    let mut f = object_fixture(bytes);
+    let r = f.qualified_record();
+    let root = f
+        .store
+        .original_root(&f.job, &f.source, &r)
+        .unwrap()
+        .unwrap();
+    let mut sealed_one = false;
+    for _ in 0..1000 {
+        let s = f
+            .store
+            .original_object_step(
+                &f.job,
+                &f.source,
+                &r,
+                &root,
+                &f.sources.reader(),
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        check_object_work(&s.work);
+        assert!(s.sql_vm_steps > 0);
+        assert!(s.object.is_none());
+        let state: Option<String> = f
+            .store
+            .connection
+            .query_row(
+                "SELECT metadata FROM native_original_objects WHERE original=?1",
+                [r.original.as_slice()],
+                |v| v.get(0),
+            )
+            .optional()
+            .unwrap();
+        if state.as_ref().is_some_and(|v| {
+            let value: Value = serde_json::from_str(v).unwrap();
+            value["stage"] == "Seal" && value["sealed"] == 1
+        }) {
+            sealed_one = true;
+            break;
+        }
+    }
+    assert!(sealed_one);
+    let before: String = f
+        .store
+        .connection
+        .query_row(
+            "SELECT metadata FROM native_original_objects WHERE original=?1",
+            [r.original.as_slice()],
+            |v| v.get(0),
+        )
+        .unwrap();
+    let checks = Cell::new(0);
+    let cancelled = f
+        .store
+        .original_object_step(
+            &f.job,
+            &f.source,
+            &r,
+            &root,
+            &f.sources.reader(),
+            &|_, _| Ok(true),
+            &|| {
+                let at = checks.get() + 1;
+                checks.set(at);
+                at == 3
+            },
+        )
+        .unwrap();
+    assert_eq!(checks.get(), 3);
+    assert_eq!(cancelled.outcome, Outcome::Deferred);
+    assert_eq!(
+        before,
+        f.store
+            .connection
+            .query_row(
+                "SELECT metadata FROM native_original_objects WHERE original=?1",
+                [r.original.as_slice()],
+                |v| v.get::<_, String>(0)
+            )
+            .unwrap()
+    );
+    f.store = NativeStore::open(&f.options).unwrap();
+    let object = object_build(&mut f, &r, &root);
+    let state: String = f
+        .store
+        .connection
+        .query_row(
+            "SELECT metadata FROM native_original_objects WHERE original=?1",
+            [r.original.as_slice()],
+            |v| v.get(0),
+        )
+        .unwrap();
+    let state: Value = serde_json::from_str(&state).unwrap();
+    assert_eq!(state["sealed"], 7);
+    let again = object_build(&mut f, &r, &root);
+    assert_eq!(
+        serde_json::to_value(&object).unwrap(),
+        serde_json::to_value(&again).unwrap(),
+        "complete lookup must not repeat sealing"
+    );
+    // At rank4 the remaining correct subtree is e/f/g. A same-sized old
+    // subtree a/b/c must not masquerade at that interval and complete by count.
+    let cursor = ObjectPageCursor::seek(&object, 4);
+    let mut value = serde_json::to_value(&cursor).unwrap();
+    let root_class = value["at"]["class"].as_u64().unwrap();
+    let metadata: String = f
+        .store
+        .connection
+        .query_row(
+            "SELECT metadata FROM native_original_object_nodes WHERE original=?1 AND class=?2",
+            params![r.original.as_slice(), root_class as i64],
+            |v| v.get(0),
+        )
+        .unwrap();
+    let node: Value = serde_json::from_str(&metadata).unwrap();
+    let left = node["left"].as_u64().unwrap();
+    let right = node["right"].as_u64().unwrap();
+    let right_cursor = {
+        let s = f
+            .store
+            .original_object_page_step(
+                &f.job,
+                &f.source,
+                &r,
+                &cursor,
+                &f.sources.reader(),
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        s.cursor
+    };
+    value = serde_json::to_value(&right_cursor).unwrap();
+    assert_eq!(value["at"]["class"], right);
+    assert_eq!(value["at"]["count"], 3);
+    value["at"]["class"] = Value::from(left);
+    let forged: ObjectPageCursor = serde_json::from_value(value).unwrap();
+    let provider = InterleavingReader::new(
+        reference(&f.sources.reader(), &f.source).unwrap(),
+        bytes,
+        None,
+        |_| {},
+    );
+    let records = f.sources.reader_with(Some((
+        &provider,
+        crate::SessionSourceReadMode::ProviderOnly,
+    )));
+    assert!(
+        f.store
+            .original_object_page_step(
+                &f.job,
+                &f.source,
+                &r,
+                &forged,
+                &records,
+                &|_, _| Ok(true),
+                &|| false
+            )
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn object_iterator_native_cancellation_generation_and_final_owner_fences() {
+    let bytes = b"{\"z\":0,\"a\":1,\"z\":2}\n";
+    let mut f = object_fixture(bytes);
+    let r = f.qualified_record();
+    let root = f
+        .store
+        .original_root(&f.job, &f.source, &r)
+        .unwrap()
+        .unwrap();
+    let object = object_build(&mut f, &r, &root);
+    let cursor = ObjectNativeCursor::begin(&object);
+    let source = reference(&f.sources.reader(), &f.source).unwrap();
+    let provider = InterleavingReader::new(source.clone(), bytes, None, |_| {});
+    let records = f.sources.reader_with(Some((
+        &provider,
+        crate::SessionSourceReadMode::ProviderOnly,
+    )));
+    let checks = Cell::new(0);
+    let cancelled = f
+        .store
+        .original_object_native_step(
+            &f.job,
+            &f.source,
+            &r,
+            &cursor,
+            &records,
+            &|_, _| Ok(true),
+            &|| {
+                let at = checks.get() + 1;
+                checks.set(at);
+                at == 2
+            },
+        )
+        .unwrap();
+    assert_eq!(cancelled.outcome, Outcome::Deferred);
+    assert!(cancelled.entry.is_none());
+    assert_eq!(
+        serde_json::to_value(cancelled.cursor).unwrap(),
+        serde_json::to_value(&cursor).unwrap()
+    );
+    let changing = InterleavingReader::new(source, bytes, Some(0), |_| {});
+    let records = f.sources.reader_with(Some((
+        &changing,
+        crate::SessionSourceReadMode::ProviderOnly,
+    )));
+    assert!(
+        f.store
+            .original_object_native_step(
+                &f.job,
+                &f.source,
+                &r,
+                &cursor,
+                &records,
+                &|_, _| Ok(true),
+                &|| false
+            )
+            .is_err()
+    );
+    let calls = Cell::new(0);
+    let closure = |db: &Connection, _| {
+        let at = calls.get() + 1;
+        calls.set(at);
+        if at == 3 {
+            db.execute(
+                "UPDATE session_catalog SET last_ms=last_ms+1 WHERE session_key='chosen'",
+                [],
+            )?;
+        }
+        Ok(true)
+    };
+    let records = f.sources.reader_with(Some((
+        &provider,
+        crate::SessionSourceReadMode::ProviderOnly,
+    )));
+    let changed = f
+        .store
+        .original_object_native_step(&f.job, &f.source, &r, &cursor, &records, &closure, &|| {
+            false
+        })
+        .unwrap();
+    assert_eq!(changed.outcome, Outcome::Conflict);
+    assert!(changed.entry.is_none());
 }
