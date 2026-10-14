@@ -4027,11 +4027,6 @@ impl SqliteStore {
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
         }
-        if changes.is_none()
-            && let Some((file_id, _)) = found
-        {
-            clear(&transaction, file_id)?;
-        }
         write_index_changes(&transaction, path, ledger, index, changes, expected)?;
         transaction.commit()?;
         Ok(Outcome::Written)
@@ -4061,6 +4056,14 @@ impl SqliteStore {
                         // visible; neither the claim nor its proof is replaced.
                         let already_removed:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1 AND reason='removed')",[path],|row|row.get(0))?;
                         if !already_removed {
+                            native_query::candidate_delta::capture(
+                                &transaction,
+                                path,
+                                Some(&found),
+                                None,
+                                None,
+                                None,
+                            )?;
                             invalidate_catalog_source(&transaction, path, "removed")?;
                         }
                         continue;
@@ -4072,6 +4075,14 @@ impl SqliteStore {
                 (Err(error), _) => return Err(error),
             }
             // By path, never decoding the row: an undecodable one goes too.
+            native_query::candidate_delta::capture(
+                &transaction,
+                path,
+                expected.as_ref(),
+                None,
+                None,
+                None,
+            )?;
             for table in [
                 "events",
                 "signals",
@@ -5541,6 +5552,22 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
     let started = measurements.start();
+    // Capture old point facts before either a complete clear or row upserts.
+    // Cuts/resets reference immutable old candidate payload ranges; they never
+    // enumerate the old suffix in this writer transaction.
+    native_query::candidate_delta::capture(
+        transaction,
+        path,
+        expected,
+        Some(ledger),
+        Some(index),
+        changes,
+    )?;
+    if changes.is_none()
+        && let Some((file_id, _)) = ledger_row(transaction, path)?
+    {
+        clear(transaction, file_id)?;
+    }
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
     let started = measurements.start();
