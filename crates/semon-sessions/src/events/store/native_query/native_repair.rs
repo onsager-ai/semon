@@ -16,6 +16,7 @@ use crate::json_string::native_record::{
 mod native_activity;
 mod native_admission;
 mod native_classes;
+mod native_claude_usage;
 mod native_compare;
 mod native_controller;
 mod native_copilot;
@@ -43,6 +44,7 @@ pub(crate) type OriginalHeaderField = crate::events::native_harness::header::Fie
 pub(crate) type OriginalHeaderValue = crate::events::native_harness::header::Value<OriginalText>;
 pub(crate) type UsageRowStep = native_usage::UsageRowStep;
 pub(crate) type CopilotRecordStep = native_controller::CopilotRecordStep;
+pub(crate) type ClaudeUsageStep = native_claude_usage::ClaudeUsageStep;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -55,6 +57,19 @@ pub(crate) const REPAIR_FORMAT: u32 = 3;
 const PREVIOUS_REPAIR_PARSER: u32 = 24;
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_original_claude_usage_step (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_claude_usage (
+ original BLOB NOT NULL, identity INTEGER NOT NULL, metadata TEXT NOT NULL,
+ PRIMARY KEY(original,identity)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_claude_usage_records (
+ original BLOB NOT NULL, identity INTEGER NOT NULL, uuid INTEGER NOT NULL,
+ PRIMARY KEY(original,identity,uuid)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_harness (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
@@ -3817,6 +3832,163 @@ mod tests {
                     .unwrap()
                     .0
                     .is_none()
+            );
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_claude_usage_replaces_native_reports_with_bounded_uuid_union() {
+        use crate::events::native_harness::claude_usage::{Observation, Store};
+        for size in [0usize, 128, 1024, 8192, 200_000] {
+            let id = "message-".repeat(size);
+            let record = serde_json::json!({"type":"assistant","uuid":"record-uuid","timestamp":"2026-10-15T00:00:00Z","message":{"id":id,"model":"native-model","usage":{"input_tokens":13,"output_tokens":17,"cache_creation_input_tokens":9,"cache_read_input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":2},"server_tool_use":{"web_search_requests":3},"speed":"fast","service_tier":"native-tier"}}});
+            let time = crate::events::record_time(&record);
+            let mut complete = FileIndex::default();
+            crate::events::claude(&mut complete, &record, 0);
+            let expected = &complete.usage_by_id[&id];
+            let bytes = format!("{}\n", serde_json::to_string(&record).unwrap());
+            let mut fixture = Fixture::new(bytes.as_bytes());
+            let repair = fixture.qualified_record();
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                assert!(attempts < 256);
+                let stopped = fixture
+                    .store
+                    .original_claude_usage_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        time,
+                        &fixture.sources.reader(),
+                        &|| true,
+                    )
+                    .unwrap();
+                assert_eq!(stopped.work.native_bytes, 0);
+                let step = fixture
+                    .store
+                    .original_claude_usage_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        time,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_ne!(step.outcome, Outcome::Conflict);
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                if step.complete {
+                    break;
+                }
+            }
+            let metadata: String = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT metadata FROM native_original_claude_usage WHERE original=?1",
+                    params![repair.original.as_slice()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let report: Observation<OriginalText> = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(report.tokens, expected.tokens);
+            assert_eq!(report.model_tokens, expected.model_tokens);
+            let actual = &report.billing;
+            let expected = &expected.billing;
+            assert_eq!(
+                (
+                    actual.input,
+                    actual.output,
+                    actual.cache_read,
+                    actual.cache_write_5m,
+                    actual.cache_write_1h,
+                    actual.web_search_requests,
+                    actual.prompt_size,
+                    actual.timestamp,
+                    actual.split_unknown
+                ),
+                (
+                    expected.input,
+                    expected.output,
+                    expected.cache_read,
+                    expected.cache_write_5m,
+                    expected.cache_write_1h,
+                    expected.web_search_requests,
+                    expected.prompt_size,
+                    expected.timestamp,
+                    expected.split_unknown
+                )
+            );
+            for (text, literal) in [
+                (report.model.as_ref().unwrap(), "native-model"),
+                (report.uuid.as_ref().unwrap(), "record-uuid"),
+                (actual.speed.as_ref().unwrap(), "fast"),
+                (actual.service_tier.as_ref().unwrap(), "native-tier"),
+            ] {
+                loop {
+                    let step = fixture
+                        .store
+                        .original_text_literal_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            text,
+                            literal,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    fixture.store = NativeStore::open(&fixture.options).unwrap();
+                    if let Some(matches) = step.matches {
+                        assert!(matches);
+                        break;
+                    }
+                }
+            }
+            // Typed synthetic prior UUID identities isolate the storage kernel's
+            // history bound. Full source/record interning is checked above.
+            let history = size.min(8192);
+            {
+                let tx = fixture.store.connection.transaction().unwrap();
+                for n in 0..history {
+                    tx.execute(
+                        "INSERT INTO native_original_claude_usage_records VALUES(?1,?2,?3)",
+                        params![
+                            repair.original.as_slice(),
+                            seq_u64(report.identity.identity()).unwrap(),
+                            1_000_000 + n as i64
+                        ],
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let mut replacement = report.clone();
+            replacement.tokens.output = 23;
+            let mut events =
+                native_events::Events::read_only(&fixture.store.connection, repair.original);
+            events.claude_report(replacement.clone()).unwrap();
+            let work = events.work();
+            assert_eq!(work.metadata_rows, 2);
+            assert!(work.metadata_bytes < 4096);
+            assert_eq!(fixture.store.connection.query_row("SELECT count(*) FROM native_original_claude_usage_records WHERE original=?1 AND identity=?2",params![repair.original.as_slice(),seq_u64(report.identity.identity()).unwrap()],|row|row.get::<_,i64>(0)).unwrap(),history as i64+1);
+            let value:String=fixture.store.connection.query_row("SELECT metadata FROM native_original_claude_usage WHERE original=?1 AND identity=?2",params![repair.original.as_slice(),seq_u64(report.identity.identity()).unwrap()],|row|row.get(0)).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Observation<OriginalText>>(&value).unwrap(),
+                replacement
+            );
+            assert!(
+                fixture
+                    .store
+                    .original_event_facts(&fixture.job, &fixture.source, &repair)
+                    .is_err(),
+                "usage cannot certify missing native body/header/source work"
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
         }

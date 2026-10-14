@@ -5,6 +5,7 @@
 //! the new request, rather than admitting a prefix of that request as complete.
 
 pub(crate) mod activity;
+pub(crate) mod claude_usage;
 pub(crate) mod copilot;
 pub(crate) mod copilot_admission;
 pub(crate) mod copilot_metadata;

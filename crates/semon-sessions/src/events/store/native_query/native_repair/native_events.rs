@@ -37,6 +37,46 @@ impl Borrow<u64> for Text {
     }
 }
 
+impl crate::events::native_harness::claude_usage::Store for Events<'_> {
+    type Text = Text;
+    type Error = io::Error;
+    fn claude_report(
+        &mut self,
+        report: crate::events::native_harness::claude_usage::Observation<Text>,
+    ) -> io::Result<()> {
+        if [
+            Some(&report.identity),
+            report.uuid.as_ref(),
+            report.model.as_ref(),
+            report.billing.speed.as_ref(),
+            report.billing.service_tier.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|text| text.original() != self.original)
+        {
+            return Err(io::Error::other("native Claude usage changed Original"));
+        }
+        let state = bounded_json(&report, STATE_BYTES).map_err(io::Error::other)?;
+        self.account(1, state.len())?;
+        self.db.execute("INSERT INTO native_original_claude_usage VALUES(?1,?2,?3) ON CONFLICT(original,identity) DO UPDATE SET metadata=excluded.metadata",params![self.original.as_slice(),seq_u64(report.identity.identity())?,state]).map_err(io::Error::other)?;
+        if let Some(uuid) = report.uuid {
+            self.account(1, 16)?;
+            self.db
+                .execute(
+                    "INSERT OR IGNORE INTO native_original_claude_usage_records VALUES(?1,?2,?3)",
+                    params![
+                        self.original.as_slice(),
+                        seq_u64(report.identity.identity())?,
+                        seq_u64(uuid.identity())?
+                    ],
+                )
+                .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct Events<'a> {
     db: &'a Connection,
     original: [u8; 32],
