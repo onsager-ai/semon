@@ -237,6 +237,45 @@ fn generation(db: &Connection) -> Result<String, QueryError> {
     .map_err(unavailable)
 }
 
+fn native_turn_alias(turn: &str, from: &str, to: &str, row: &CatalogRow) -> Option<String> {
+    let (file, offset) = turn.strip_prefix(&format!("{from}:"))?.rsplit_once(':')?;
+    if !row.native_ids.iter().any(|id| id == file) {
+        return None;
+    }
+    Some(crate::model::turn_stage::turn_id(
+        to,
+        file,
+        offset.parse().ok()?,
+        None,
+    ))
+}
+
+fn remap_turn(turn: &mut Value, from: &str, to: &str, row: &CatalogRow) {
+    if turn["start"].is_null()
+        && let Some(id) = turn["id"]
+            .as_str()
+            .and_then(|id| native_turn_alias(id, from, to, row))
+    {
+        turn["id"] = json!(id);
+    }
+    if turn["sid"] == from {
+        turn["sid"] = json!(to);
+    }
+}
+
+fn physical_unchanged(
+    db: &Connection,
+    options: &Options,
+    identity: Option<&crate::overview_repair::physical_identity::Identity>,
+) -> Result<(), QueryError> {
+    if let Some(identity) = identity
+        && !identity.unchanged(db, options).map_err(unavailable)?
+    {
+        return Err(unavailable("Native physical identity publication changed"));
+    }
+    Ok(())
+}
+
 fn qualify_virtual_aliases(summary: &mut Value, context: &[CatalogRow], alias: Option<&str>) {
     let Some(alias) = alias else {
         return;
@@ -619,16 +658,13 @@ fn read_inner(
 ) -> Result<Option<Value>, QueryError> {
     #[cfg(test)]
     SLOTS.with(|slots| slots.set(0));
-    // Raw aliases can change under a physical file window. Only exact native
-    // Catalog identities enter this pager; their context is qualified below.
+    // Raw aliases can change under a physical file window. Their exact native
+    // ownership and complete source/relationship membership are qualified below.
     let requested = args["id"].as_str().expect("validated focused id");
     let suffixed = requested != key
         && requested
             .rsplit_once('@')
             .is_some_and(|(owner, _)| owner == key);
-    if requested != key && !suffixed {
-        return Ok(None);
-    }
     let mut db = Connection::open_with_flags(
         EventCache::path(&options.cache),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -649,16 +685,40 @@ fn read_inner(
     if projection_generation.as_deref() != Some(&catalog_generation) {
         return Ok(None);
     }
-    let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
+    let mut history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
     let text = match history.as_ref() {
         Some(text) => Some(text.clone()),
         None => tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1", [key], |row|row.get::<_,Option<String>>(0))
             .optional().map_err(unavailable)?.flatten(),
     };
-    let Some(text) = text else {
+    let Some(mut text) = text else {
         tx.commit().map_err(unavailable)?;
         return virtual_read(options, key, args, provider, mode, now);
     };
+    let physical = if search.is_none() {
+        crate::overview_repair::physical_identity::resolve(&tx, options, key, now)
+            .map_err(unavailable)?
+    } else {
+        None
+    };
+    let key = physical
+        .as_ref()
+        .map_or(key, |identity| identity.owner.key.as_str());
+    let served = physical
+        .as_ref()
+        .map_or(key, |identity| identity.canonical.as_str());
+    if physical.is_some() {
+        history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
+        text = match &history {
+            Some(text) => text.clone(),
+            None => tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM session_catalog WHERE session_key=?1",[key],|r|r.get::<_,Option<String>>(0)).map_err(unavailable)?.ok_or_else(||unavailable("Native physical owner metadata exceeds its read budget"))?,
+        };
+        if requested != served {
+            return Err(QueryError::unknown_session(requested));
+        }
+    } else if requested != key && !suffixed {
+        return Ok(None);
+    }
     let row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
@@ -680,6 +740,7 @@ fn read_inner(
     // or provisional context keeps the native window resolver.
     if options.scan_window
         && !options.all
+        && physical.is_none()
         && !crate::overview_repair::query_window_context_current(&tx, options, key, now)
             .map_err(unavailable)?
     {
@@ -733,7 +794,20 @@ fn read_inner(
         return Err(unavailable("Native transcript source generation changed"));
     }
     let position = |name: &str| integer(args, name).map(|value| value.max(0) as usize);
-    let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
+    let mut turn_anchor = string(args, "turn");
+    if served != key
+        && let Some(turn) = &turn_anchor
+    {
+        if let Some(stored) = native_turn_alias(turn, served, key, &row) {
+            turn_anchor = Some(stored);
+        } else if native_turn_alias(turn, key, served, &row).is_some() {
+            return Err(QueryError::new(
+                "unknown_turn",
+                format!("session {served:?} has no turn {turn:?}"),
+            ));
+        }
+    }
+    let anchor = tx::Anchor::of(position("before"), position("after"), turn_anchor)
         .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
     let (forward, from) = match &anchor {
         tx::Anchor::Last => (false, total),
@@ -753,7 +827,10 @@ fn read_inner(
                 usize::try_from(first.ok_or_else(|| {
                     QueryError::new(
                         "unknown_turn",
-                        format!("session {key:?} has no turn {turn:?}"),
+                        format!(
+                            "session {served:?} has no turn {:?}",
+                            args["turn"].as_str().unwrap_or(turn)
+                        ),
                     )
                 })?)
                 .map_err(unavailable)?,
@@ -764,7 +841,7 @@ fn read_inner(
     // Read proof pages and root witnesses only for touched byte ranges. Each
     // request-owned source retains at most one decoded hash page.
     let session = args["_session"] == true;
-    let context = if search.is_some() || session {
+    let context = if physical.is_none() && (search.is_some() || session) {
         crate::overview_repair::query_context(&tx, key).map_err(unavailable)?
     } else {
         vec![row.clone()]
@@ -945,6 +1022,9 @@ fn read_inner(
                         crate::model::MSG_MAX
                     ));
                 }
+                if served != key {
+                    remap_turn(&mut turn, key, served, &row);
+                }
                 turns.push(turn);
             }
             if texts.len() < 64 {
@@ -984,7 +1064,14 @@ fn read_inner(
                 {
                     continue;
                 }
-                let handoff = edge(&db, id, &context, &records, &bytes_left)?;
+                let mut handoff = edge(&db, id, &context, &records, &bytes_left)?;
+                if served != key {
+                    for endpoint in ["from", "to"] {
+                        if handoff[endpoint] == key {
+                            handoff[endpoint] = json!(served);
+                        }
+                    }
+                }
                 metadata_bytes += handoff.to_string().len();
                 if metadata_bytes > 8 * 1024 * 1024 {
                     return Err(unavailable(
@@ -1054,11 +1141,18 @@ fn read_inner(
                 return Err(unavailable("Native query recipes changed"));
             }
         }
-        let current = crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?;
-        if serde_json::to_value(&current).map_err(unavailable)?
-            != serde_json::to_value(&context).map_err(unavailable)?
-        {
-            return Err(unavailable("Native query relationship publication changed"));
+        physical_unchanged(&snapshot, options, physical.as_ref())?;
+        if physical.is_none() {
+            let current =
+                crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?;
+            if serde_json::to_value(&current).map_err(unavailable)?
+                != serde_json::to_value(&context).map_err(unavailable)?
+            {
+                return Err(unavailable("Native query relationship publication changed"));
+            }
+        }
+        if served != key {
+            summary["id"] = json!(served);
         }
         qualify_virtual_aliases(&mut summary, &context, args["_machine_alias"].as_str());
         return Ok(Some(json!({"now":now,"session":summary})));
@@ -1241,6 +1335,12 @@ fn read_inner(
             .map(|(index, saved)| {
                 let mut slot = saved.restore();
                 observation.apply(saved, &mut slot, low + index);
+                if served != key {
+                    slot.turn = slot.turn.as_deref().map(|turn| {
+                        native_turn_alias(turn, key, served, &row)
+                            .unwrap_or_else(|| turn.to_owned())
+                    });
+                }
                 slot
             })
             .collect();
@@ -1253,7 +1353,7 @@ fn read_inner(
                 bounded: false,
             },
             tx::PageWindow {
-                sid: key,
+                sid: served,
                 slots: &slots,
                 start: low,
                 total,
@@ -1285,6 +1385,7 @@ fn read_inner(
         headers,
         &slot_generation,
     )?;
+    physical_unchanged(&snapshot, options, physical.as_ref())?;
     snapshot.commit().map_err(unavailable)?;
     if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != runtime {
         return Err(unavailable(
