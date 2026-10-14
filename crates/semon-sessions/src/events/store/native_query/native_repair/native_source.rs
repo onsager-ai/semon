@@ -15,7 +15,7 @@ pub(crate) struct OriginalEventFacts {
     pub(crate) signals: usize,
     pub(crate) seed: TimeSeed,
 }
-fn source_ready(
+pub(super) fn source_ready(
     db: &Connection,
     job: &Job,
     witness: &SourceWitness,

@@ -4,6 +4,7 @@
 //! reset therefore advances through exact indexed occurrences before appending
 //! the new request, rather than admitting a prefix of that request as complete.
 
+pub(crate) mod activity;
 pub(crate) mod copilot;
 pub(crate) mod copilot_admission;
 pub(crate) mod header;

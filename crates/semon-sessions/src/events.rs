@@ -3136,22 +3136,19 @@ impl BusyUpdate {
         } else {
             busy.partition_point(|interval| interval.0 <= time)
         };
-        let left = position
-            .checked_sub(1)
-            .filter(|&at| i128::from(time) - i128::from(busy[at].1) <= i128::from(BUSY_GAP_MS));
-        let right = busy.get(position).filter(|interval| {
-            i128::from(interval.0) - i128::from(time) <= i128::from(BUSY_GAP_MS)
-        });
-        let first = left.unwrap_or(position);
-        let remove = usize::from(left.is_some()) + usize::from(right.is_some());
-        let interval = (
-            left.map_or(time, |at| busy[at].0),
-            right.map_or_else(
-                || left.map_or(time, |at| busy[at].1.max(time)),
-                |interval| interval.1.max(time),
-            ),
+        let change = native_harness::activity::cluster(
+            position.checked_sub(1).map(|at| busy[at]),
+            busy.get(position).copied(),
+            time,
         );
-        let changed = remove != 1 || busy[first] != interval;
+        let first = if change.left.is_some() {
+            position - 1
+        } else {
+            position
+        };
+        let remove = usize::from(change.left.is_some()) + usize::from(change.right.is_some());
+        let interval = change.interval;
+        let changed = change.changed;
         Self {
             first,
             remove,
@@ -4063,8 +4060,9 @@ fn activity(summary: &mut FileIndex, time: Option<i64>) {
         }
         // Earliest and latest, not first and last line: lines aren't always
         // written in time order.
-        summary.first = Some(summary.first.map_or(time, |first| first.min(time)));
-        summary.last = Some(summary.last.map_or(time, |last| last.max(time)));
+        let (first, last) = native_harness::activity::bounds(summary.first, summary.last, time);
+        summary.first = Some(first);
+        summary.last = Some(last);
     }
 }
 
