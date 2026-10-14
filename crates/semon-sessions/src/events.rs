@@ -244,6 +244,8 @@ pub(crate) struct DirtyRows {
     pub(crate) before_extras: usize,
     pub(crate) before_signals: usize,
     pub(crate) before_codex_usage: usize,
+    pub(crate) before_busy: usize,
+    pub(crate) links: BTreeSet<(String, String)>,
 }
 
 impl DirtyRows {
@@ -253,6 +255,7 @@ impl DirtyRows {
             before_extras: index.extras.len(),
             before_signals: index.signals.len(),
             before_codex_usage: index.codex_usage_events.len(),
+            before_busy: index.busy.len(),
             ..Self::default()
         }
     }
@@ -277,6 +280,21 @@ impl DirtyRows {
                 .filter(|id| old.usage_by_id.get(*id) != new.usage_by_id.get(*id))
                 .cloned()
                 .collect(),
+            links: [
+                ("session", &old.links.session_ids, &new.links.session_ids),
+                (
+                    "continued",
+                    &old.links.continued_in,
+                    &new.links.continued_in,
+                ),
+                ("bridge", &old.links.bridges, &new.links.bridges),
+            ]
+            .into_iter()
+            .flat_map(|(kind, old, new)| {
+                new.symmetric_difference(old)
+                    .map(move |id| (kind.to_owned(), id.clone()))
+            })
+            .collect(),
             ..Self::begin(old)
         }
     }
@@ -4324,18 +4342,30 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
     if let Some(id) = field(record, "session_id")
         && Some(id) != field(record, "sessionId")
     {
-        summary.links.session_ids.insert(id.to_owned());
+        if summary.links.session_ids.insert(id.to_owned())
+            && let Some(dirty) = &mut summary.dirty_rows
+        {
+            dirty.links.insert(("session".into(), id.to_owned()));
+        }
     }
     match field(record, "type") {
         Some("continued-in") => {
             if let Some(id) = field(record, "continuedInSessionId") {
-                summary.links.continued_in.insert(id.to_owned());
+                if summary.links.continued_in.insert(id.to_owned())
+                    && let Some(dirty) = &mut summary.dirty_rows
+                {
+                    dirty.links.insert(("continued".into(), id.to_owned()));
+                }
             }
             return;
         }
         Some("bridge-session") => {
             if let Some(id) = field(record, "bridgeSessionId") {
-                summary.links.bridges.insert(id.to_owned());
+                if summary.links.bridges.insert(id.to_owned())
+                    && let Some(dirty) = &mut summary.dirty_rows
+                {
+                    dirty.links.insert(("bridge".into(), id.to_owned()));
+                }
             }
             return;
         }
