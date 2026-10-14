@@ -345,6 +345,7 @@ fn part(
     at: u64,
     end: u64,
     work: &mut RepairWork,
+    allowance: usize,
 ) -> io::Result<Option<crate::SessionSourceRange>> {
     if at > end || end > repair.source.offset {
         return Err(io::Error::other(
@@ -354,7 +355,12 @@ fn part(
     if at == end {
         return Ok(None);
     }
-    let maximum = usize::try_from((end - at).min(64 * 1024)).map_err(io::Error::other)?;
+    let maximum = usize::try_from((end - at).min(64 * 1024))
+        .map_err(io::Error::other)?
+        .min(allowance);
+    if maximum == 0 {
+        return Ok(None);
+    }
     let pin = repair
         .cursor
         .pin
@@ -435,9 +441,40 @@ impl NativeStore {
         records: &crate::query_source::Records<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<IdentityStep> {
+        self.original_identity_step_with_budget(
+            job,
+            witness,
+            repair,
+            ordinal,
+            records,
+            cancelled,
+            crate::SESSION_SOURCE_CHUNK_MAX,
+            ROWS,
+        )
+    }
+
+    /// The enclosing record action reserves its event/cursor writes and passes
+    /// only remaining work. Both comparison inputs and empty/cached anchors
+    /// share this allowance; qualification/coverage semantics are unchanged.
+    pub(crate) fn original_identity_step_with_budget(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        ordinal: u64,
+        records: &crate::query_source::Records<'_>,
+        cancelled: &dyn Fn() -> bool,
+        native_allowance: usize,
+        metadata_rows_allowance: usize,
+    ) -> io::Result<IdentityStep> {
+        let native_allowance = native_allowance.min(crate::SESSION_SOURCE_CHUNK_MAX);
+        let metadata_rows_allowance = metadata_rows_allowance.min(ROWS);
         let mut work = RepairWork::default();
         let mut meter = IdentityMeter::default();
-        if cancelled() {
+        // At most seven descriptor/candidate reads and four seal writes occur
+        // in one identity transition. Reserve their unchanged bounded envelope
+        // before executing SQL or provider I/O, rather than rejecting after it.
+        if cancelled() || native_allowance == 0 || metadata_rows_allowance < 12 {
             return Ok(meter.step(Outcome::Deferred, work, None));
         }
         meter.fence_checks += 1;
@@ -577,19 +614,37 @@ impl NativeStore {
             let in_newer_range = cursor.range.as_ref().is_some_and(|range| {
                 candidate.class > range.after && candidate.class <= range.through
             });
+            let left_end = absolute(repair.cursor.record_at, &field)?.1;
+            let right_end = absolute(candidate.record, &candidate.field)?.1;
+            let sides =
+                usize::from(compare.left.at < left_end) + usize::from(compare.right.at < right_end);
+            // A JSON scalar can occupy twelve native bytes (a surrogate pair).
+            // Leave enough for each nonempty side; a small exhausted outer
+            // step defers before I/O and retries with a fresh full allowance.
+            if native_allowance < 12 * sides || work.metadata_rows + 4 > metadata_rows_allowance {
+                return Ok(meter.step(Outcome::Deferred, work, None));
+            }
+            let left_allowance = if sides == 2 {
+                native_allowance / 2
+            } else {
+                native_allowance
+            };
             let left = part(
                 records,
                 repair,
                 compare.left.at,
-                absolute(repair.cursor.record_at, &field)?.1,
+                left_end,
                 &mut work,
+                left_allowance,
             )?;
+            let remaining = native_allowance.saturating_sub(work.native_bytes);
             let right = part(
                 records,
                 repair,
                 compare.right.at,
-                absolute(candidate.record, &candidate.field)?.1,
+                right_end,
                 &mut work,
+                remaining,
             )?;
             compare.step(
                 left.as_ref().map_or(&[][..], |part| part.bytes.as_ref()),
@@ -639,6 +694,9 @@ impl NativeStore {
             }
         }
         if work.range_requests == 0 {
+            if work.metadata_rows + 4 > metadata_rows_allowance {
+                return Ok(meter.step(Outcome::Deferred, work, None));
+            }
             meter.fence_checks += 1;
             verify_member_anchor(records, repair, &mut work)?
         }
@@ -725,9 +783,9 @@ impl NativeStore {
             work.metadata_rows += 1;
             work.metadata_bytes += meter.serialized_cursor_bytes;
         }
-        if work.metadata_rows > ROWS
+        if work.metadata_rows > metadata_rows_allowance
             || work.metadata_bytes > BYTES
-            || work.native_bytes > crate::SESSION_SOURCE_CHUNK_MAX
+            || work.native_bytes > native_allowance
         {
             return Err(io::Error::other(
                 "native identity step exceeds bounded work",

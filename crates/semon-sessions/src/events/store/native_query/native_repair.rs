@@ -3001,6 +3001,116 @@ mod tests {
     }
 
     #[test]
+    fn native_identity_shares_the_outer_native_budget_after_cached_anchors() {
+        let value = "α".repeat(100_000);
+        let bytes = format!(
+            "{{\"a\":{0},\"b\":{0},\"type\":\"session.start\"}}\n",
+            serde_json::to_string(&value).unwrap()
+        );
+        let mut fixture = Fixture::new(bytes.as_bytes());
+        let reads = super::super::super::super::FILE_READS.with(Cell::get);
+        let repair = fixture.qualified_record();
+        let a = fixture.member(&repair, "a");
+        let b = fixture.member(&repair, "b");
+        let kind = fixture.member(&repair, "type");
+        let expected = fixture.identity(&repair, a.ordinal);
+        fixture
+            .store
+            .original_literal_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                kind.ordinal,
+                "session.start",
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        for (native, rows) in [(0, ROWS), (1, 11)] {
+            let step = fixture
+                .store
+                .original_identity_step_with_budget(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    b.ordinal,
+                    &fixture.sources.reader(),
+                    &|| false,
+                    native,
+                    rows,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            assert_eq!(step.work.native_bytes, 0);
+            assert_eq!(step.work.metadata_rows, 0);
+        }
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            assert!(
+                attempts < 128,
+                "bounded comparison must make durable progress"
+            );
+            let member = fixture
+                .store
+                .original_member_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    fixture
+                        .store
+                        .original_root(&fixture.job, &fixture.source, &repair)
+                        .unwrap()
+                        .unwrap()
+                        .address,
+                    "type",
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            let literal = fixture
+                .store
+                .original_literal_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    kind.ordinal,
+                    "session.start",
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            let prior = member.work.native_bytes + literal.work.native_bytes;
+            assert_eq!(prior, 2);
+            let step = fixture
+                .store
+                .original_identity_step_with_budget(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    b.ordinal,
+                    &fixture.sources.reader(),
+                    &|| false,
+                    crate::SESSION_SOURCE_CHUNK_MAX - prior,
+                    ROWS - 12,
+                )
+                .unwrap();
+            assert!(prior + step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+            assert!(step.work.metadata_rows <= ROWS - 12);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            if let Some(actual) = step.text {
+                assert_eq!(actual, expected);
+                break;
+            }
+        }
+        assert!(attempts > 1);
+        assert_eq!(
+            super::super::super::super::FILE_READS.with(Cell::get),
+            reads
+        );
+    }
+
+    #[test]
     fn native_identity_cached_handle_and_vm_work_stay_bounded_with_class_history() {
         let bytes = b"{\"a\":\"cached\",\"b\":\"other\"}\n";
         for history in [0usize, 128, 1024, 8192] {
