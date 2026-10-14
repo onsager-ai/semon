@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
 pub(crate) mod native_event;
+pub(crate) mod native_harness;
 pub(crate) mod native_producer;
 pub(crate) mod store;
 pub(crate) use store::open_regular;
@@ -4982,10 +4983,14 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                 .enumerate()
             {
                 let id = field(request, "toolCallId").filter(|id| !id.is_empty());
-                if let Some(indices) = id.and_then(|id| summary.tool_ids.get(id)).cloned() {
-                    for index in indices {
-                        if let Some(event) = summary.event_mut(index) {
-                            event.r = None;
+                if let Some(id) = id {
+                    let mut after = None;
+                    loop {
+                        match native_producer::complete(native_harness::copilot_reset_reply_step(
+                            summary, id, after,
+                        )) {
+                            native_harness::Reset::Progress(sequence) => after = Some(sequence),
+                            native_harness::Reset::Complete => break,
                         }
                     }
                 }
@@ -5010,33 +5015,29 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
             let Some(id) = field(data, "toolCallId") else {
                 return;
             };
-            if summary
-                .tool_ids
-                .get(id)
-                .is_none_or(|indices| indices.len() != 1)
-            {
+            let Some(target) =
+                native_producer::complete(native_harness::copilot_completion_target(summary, id))
+            else {
                 return;
-            }
+            };
             let success = data.get("success").and_then(Value::as_bool);
             let exit = data
                 .get("shellExecution")
                 .and_then(|s| s.get("exitCode"))
                 .and_then(Value::as_i64);
             let denied = data.get("error").and_then(|e| field(e, "code")) == Some("denied");
-            let mut flags = if denied { DENIED } else { 0 };
-            if success.is_none()
-                || (summary
-                    .tool_ids
-                    .get(id)
-                    .and_then(|v| v.first())
-                    .and_then(|i| summary.events.get(*i))
-                    .and_then(|e| e.n.as_deref())
-                    == Some("bash")
-                    && exit.is_none()
-                    && success == Some(true))
-            {
-                flags |= UNKNOWN;
-            }
+            let reply = native_harness::copilot_completion_reply::<String>(
+                offset,
+                time,
+                success,
+                exit,
+                denied,
+                summary
+                    .events
+                    .get(target)
+                    .and_then(|event| event.n.as_deref())
+                    == Some("bash"),
+            );
             if denied {
                 note(
                     summary,
@@ -5047,13 +5048,7 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                     call_index(summary, id),
                 );
             }
-            resolve(summary, id, |_| Reply {
-                o: offset,
-                t: time,
-                e: success == Some(false) || exit.is_some_and(|code| code != 0),
-                f: flags,
-                ..Default::default()
-            });
+            resolve(summary, id, |_| reply.into());
         }
         "abort" => {
             // No toolCallId: retain cancellation; pending calls remain unknown.
