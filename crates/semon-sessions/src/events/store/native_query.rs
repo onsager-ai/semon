@@ -3126,6 +3126,253 @@ mod tests {
             tx.commit().unwrap();
         }
     }
+    fn rank_fixture(cached: bool) -> (Fixture, Job) {
+        let mut fixture = Fixture::new(0);
+        fixture.options.proc_root = fixture.root.join("proc");
+        fixture.store.options.proc_root = fixture.options.proc_root.clone();
+        let job = fixture.admitted();
+        if cached {
+            let result = fixture
+                .store
+                .rank_guard(&job, "1", "0", &[], &|_, _| Ok(true), &|| false)
+                .unwrap();
+            assert_eq!(result.0, Outcome::Written);
+        }
+        let job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        (fixture, job)
+    }
+    fn rank_rows(fixture: &Fixture) -> Vec<(String, String, i64)> {
+        let mut query = fixture
+            .store
+            .connection
+            .prepare("SELECT identity,metadata,refs FROM native_rank_nodes ORDER BY identity")
+            .unwrap();
+        query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn rank_mutation_final_callbacks_fence_actual_runtime_before_and_after_commit() {
+        for cached in [false, true] {
+            for callback in [2, 3] {
+                let (mut fixture, job) = rank_fixture(cached);
+                let before = rank_rows(&fixture);
+                let runtime = fixture.options.claude_json.clone();
+                let calls = Cell::new(0);
+                let result = fixture
+                    .store
+                    .rank_guard(
+                        &job,
+                        "2",
+                        "0",
+                        &[],
+                        &|_, _| {
+                            calls.set(calls.get() + 1);
+                            if calls.get() == callback {
+                                fs::write(&runtime, b"{\"runtime\":\"changed\"}").unwrap();
+                            }
+                            Ok(true)
+                        },
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    result.0,
+                    Outcome::Conflict,
+                    "cached={cached} callback={callback}"
+                );
+                assert!(result.1.is_none());
+                assert_eq!(calls.get(), callback);
+                if callback == 2 {
+                    assert_eq!(rank_rows(&fixture), before);
+                    assert_eq!(
+                        fixture
+                            .store
+                            .reload(&job.spec.view_key)
+                            .unwrap()
+                            .unwrap()
+                            .revision,
+                        job.revision
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_mutation_transient_final_cancellation_rolls_back_native_nodes_and_revision() {
+        for cached in [false, true] {
+            let (mut fixture, job) = rank_fixture(cached);
+            let before = rank_rows(&fixture);
+            let calls = Cell::new(0);
+            let transient = Cell::new(false);
+            let result = fixture
+                .store
+                .rank_guard(
+                    &job,
+                    "2",
+                    "0",
+                    &[],
+                    &|_, _| {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == 2 {
+                            transient.set(true);
+                        }
+                        Ok(true)
+                    },
+                    &|| transient.replace(false),
+                )
+                .unwrap();
+            assert_eq!(result.0, Outcome::Deferred);
+            assert!(result.1.is_none());
+            assert_eq!(calls.get(), 2);
+            assert_eq!(rank_rows(&fixture), before);
+            assert_eq!(
+                fixture
+                    .store
+                    .reload(&job.spec.view_key)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                job.revision
+            );
+        }
+    }
+
+    #[test]
+    fn rank_mutation_rechecks_wal_owner_after_releasing_its_write_snapshot() {
+        for cached in [false, true] {
+            let (mut fixture, job) = rank_fixture(cached);
+            let other = Connection::open(super::super::super::EventCache::path(
+                &fixture.options.cache,
+            ))
+            .unwrap();
+            let key = fixture.row.key.clone();
+            let calls = Cell::new(0);
+            let result = fixture.store.rank_guard(&job,"2","0",&[],&|_,_| {
+                calls.set(calls.get()+1);
+                if calls.get()==3 {
+                    other.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','changed-after-release') WHERE session_key=?1",[&key])?;
+                }
+                Ok(true)
+            },&||false).unwrap();
+            assert_eq!(calls.get(), 3);
+            assert_eq!(result.0, Outcome::Conflict);
+            assert!(result.1.is_none());
+            assert_eq!(
+                fixture
+                    .store
+                    .reload(&job.spec.view_key)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                job.revision + 1
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_cursor_runtime_callback_rolls_back_and_errors_keep_full_vm_receipt() {
+        use super::super::native_rank::{CandidateRoot, transaction_error_vm_steps};
+        for cached in [false, true] {
+            let (mut fixture, job) = rank_fixture(false);
+            let (_, root) = fixture
+                .store
+                .rank_guard(&job, "0", "0", &[], &|_, _| Ok(true), &|| false)
+                .unwrap();
+            let root = CandidateRoot::empty(root.unwrap().0);
+            let mut job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+            if cached {
+                let step = fixture
+                    .store
+                    .candidate_tree_begin_update(
+                        &job,
+                        "previous",
+                        &root,
+                        [0; 69],
+                        None,
+                        "native-v1",
+                        &|_, _| Ok(true),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Written);
+                job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+                let error = fixture
+                    .store
+                    .candidate_tree_begin_update(
+                        &job,
+                        "previous",
+                        &root,
+                        [0; 69],
+                        None,
+                        "native-v1",
+                        &|_, _| Ok(true),
+                        &|| false,
+                    )
+                    .unwrap_err();
+                assert!(transaction_error_vm_steps(&error).is_some_and(|steps| steps > 0));
+            }
+            let before: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_rank_candidate_cursors",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let runtime = fixture.options.claude_json.clone();
+            let calls = Cell::new(0);
+            let step = fixture
+                .store
+                .candidate_tree_begin_update(
+                    &job,
+                    "changed",
+                    &root,
+                    [0; 69],
+                    None,
+                    "native-v1",
+                    &|_, _| {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == 2 {
+                            fs::write(&runtime, b"{\"runtime\":\"changed\"}").unwrap();
+                        }
+                        Ok(true)
+                    },
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Conflict);
+            assert!(step.complete.is_none());
+            assert!(step.work.sqlite_vm_steps > 0);
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM native_rank_candidate_cursors",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .reload(&job.spec.view_key)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                job.revision
+            );
+        }
+    }
+
     fn write_generation(path: &Path, bytes: &[u8]) -> Ledger {
         fs::write(path, bytes).unwrap();
         Ledger {
