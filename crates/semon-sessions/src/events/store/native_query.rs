@@ -1932,16 +1932,18 @@ mod tests {
                 prefix: Sha256::digest(&bytes).into(),
                 tail: Sha256::digest(&bytes[bytes.len().saturating_sub(4096)..]).into(),
             };
-            let mut index = FileIndex::default();
-            index.events = (0..=earlier)
-                .map(|seq| Event {
-                    k: Kind::A,
-                    o: (seq * 8) as u64,
-                    t: Some(seq as i64),
-                    id: Some(format!("native-{seq}")),
-                    ..Event::default()
-                })
-                .collect();
+            let mut index = FileIndex {
+                events: (0..=earlier)
+                    .map(|seq| Event {
+                        k: Kind::A,
+                        o: (seq * 8) as u64,
+                        t: Some(seq as i64),
+                        id: Some(format!("native-{seq}")),
+                        ..Event::default()
+                    })
+                    .collect(),
+                ..FileIndex::default()
+            };
             index.extras.push(Event {
                 k: Kind::Think,
                 o: 0,
