@@ -137,6 +137,7 @@ fn thread_writes() -> Option<ThreadWrites> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 struct WriteSample {
     thread: Option<ThreadWrites>,
     cache: Option<SqliteCache>,
@@ -203,6 +204,188 @@ fn wal_change(after: Option<u64>, before: Option<u64>) -> Option<i128> {
     after
         .zip(before)
         .map(|(after, before)| i128::from(after) - i128::from(before))
+}
+
+/// Four fixed captures, with work clocks strictly between captures. Counter
+/// intervals include sampling perturbation; sample costs are never subtracted
+/// from cache/kernel counters. WAL changes describe extent, not device writes.
+/// Work clocks exclude captures, but retain residual boundary bookkeeping,
+/// clock-call and scheduling perturbation; sample_us only times WriteSample.
+pub(crate) struct CatalogCommitBoundary(Option<CatalogCommitState>);
+
+struct CatalogCommitState {
+    producer: String,
+    wal: std::path::PathBuf,
+    samples: [Option<WriteSample>; 4],
+    work_us: [u128; 3],
+    started: Option<Instant>,
+    captures: usize,
+    clocks: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CatalogCommitInterval {
+    work_us: u128,
+    cache: Option<SqliteCache>,
+    thread: Option<ThreadWrites>,
+    wal_extent_change: Option<i128>,
+}
+
+impl CatalogCommitInterval {
+    fn between(before: WriteSample, after: WriteSample, work_us: u128) -> Self {
+        Self {
+            work_us,
+            cache: after.cache.zip(before.cache).and_then(|(a, b)| a.delta(b)),
+            thread: after
+                .thread
+                .zip(before.thread)
+                .and_then(|(a, b)| a.delta(b)),
+            wal_extent_change: wal_change(after.wal, before.wal),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CatalogCommitRecord {
+    intervals: [CatalogCommitInterval; 3],
+    captures: usize,
+    clock_observations: usize,
+    sampling_us: u128,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CATALOG_TIMING_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static CATALOG_COMMIT_RECORDS: std::cell::RefCell<Option<Vec<CatalogCommitRecord>>> = const { std::cell::RefCell::new(None) };
+    static CATALOG_COMMIT_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+impl CatalogCommitBoundary {
+    pub(crate) fn new(enabled: bool, index: &Path) -> Self {
+        Self(enabled.then(|| {
+            let mut wal = index.as_os_str().to_os_string();
+            wal.push("-wal");
+            CatalogCommitState {
+                producer: id(index),
+                wal: wal.into(),
+                samples: [None; 4],
+                work_us: [0; 3],
+                started: None,
+                captures: 0,
+                clocks: 0,
+            }
+        }))
+    }
+
+    // Called after slots, before COMMIT, after COMMIT, then after restoration.
+    // This observer does no formatting/output between boundaries. Each WriteSample
+    // uses two clock observations; the three work spans use two apiece. Cache
+    // status reads can short-circuit, so no inferred status-call count is given.
+    pub(crate) fn capture(&mut self, connection: &rusqlite::Connection) {
+        let Some(state) = &mut self.0 else { return };
+        let index = state.captures;
+        assert!(index < 4, "Catalog has four fixed commit boundaries");
+        if let Some(started) = state.started.take() {
+            state.work_us[index - 1] = started.elapsed().as_micros();
+            state.clocks += 1;
+        }
+        state.samples[index] = Some(WriteSample::read(&state.wal, connection));
+        state.clocks += 2;
+        state.captures += 1;
+        if index < 3 {
+            state.started = Some(Instant::now());
+            state.clocks += 1;
+        }
+        #[cfg(test)]
+        CATALOG_COMMIT_COUNTS.with(|counts| counts.set((state.captures, state.clocks)));
+    }
+
+    // The caller only consumes this after Written AND timeout restoration.
+    // This final aggregate is outside its own postcommit work/counter window.
+    pub(crate) fn committed(self) {
+        let Some(state) = self.0 else { return };
+        let [Some(a), Some(b), Some(c), Some(d)] = state.samples else {
+            return;
+        };
+        let record = CatalogCommitRecord {
+            intervals: [
+                CatalogCommitInterval::between(a, b, state.work_us[0]),
+                CatalogCommitInterval::between(b, c, state.work_us[1]),
+                CatalogCommitInterval::between(c, d, state.work_us[2]),
+            ],
+            captures: state.captures,
+            clock_observations: state.clocks,
+            sampling_us: [a, b, c, d].iter().map(|sample| sample.sample_us).sum(),
+        };
+        #[cfg(test)]
+        CATALOG_COMMIT_RECORDS.with(|records| {
+            if let Some(records) = &mut *records.borrow_mut() {
+                records.push(record.clone());
+            }
+        });
+        for (phase, interval) in ["tail", "commit", "postcommit"]
+            .into_iter()
+            .zip(&record.intervals)
+        {
+            eprintln!(
+                "semon sessions native: producer={} catalog_commit_boundary={phase} publication=committed io_scope=calling_thread work_us={} cache_delta={:?} io_delta={:?} wal_extent_change_bytes={:?} captures={} clock_observations={} sampling_us={} counter_windows_include_sampling=true postcommit_includes_existing_diagnostics=true",
+                state.producer,
+                interval.work_us,
+                interval.cache,
+                interval.thread,
+                interval.wal_extent_change,
+                record.captures,
+                record.clock_observations,
+                record.sampling_us
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod catalog_commit_tests {
+    use super::*;
+
+    pub(crate) struct Recording;
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            CATALOG_TIMING_OVERRIDE.with(|value| value.set(None));
+            CATALOG_COMMIT_RECORDS.with(|records| *records.borrow_mut() = None);
+            CATALOG_COMMIT_COUNTS.with(|counts| counts.set((0, 0)));
+        }
+    }
+
+    pub(crate) fn recording(enabled: bool) -> Recording {
+        CATALOG_TIMING_OVERRIDE.with(|value| assert!(value.replace(Some(enabled)).is_none()));
+        CATALOG_COMMIT_RECORDS.with(|records| *records.borrow_mut() = Some(Vec::new()));
+        CATALOG_COMMIT_COUNTS.with(|counts| counts.set((0, 0)));
+        Recording
+    }
+
+    pub(crate) fn assert_written(enabled: bool) {
+        let records =
+            CATALOG_COMMIT_RECORDS.with(|records| records.borrow().as_ref().unwrap().clone());
+        let counts = CATALOG_COMMIT_COUNTS.with(std::cell::Cell::get);
+        if enabled {
+            assert_eq!(records.len(), 1);
+            assert_eq!(counts, (4, 14));
+            assert_eq!(records[0].captures, 4);
+            assert_eq!(records[0].clock_observations, 14);
+        } else {
+            assert!(records.is_empty());
+            assert_eq!(counts, (0, 0));
+        }
+    }
+
+    pub(crate) fn assert_uncommitted() {
+        CATALOG_COMMIT_RECORDS
+            .with(|records| assert!(records.borrow().as_ref().unwrap().is_empty()));
+    }
+
+    pub(crate) fn counts() -> (usize, usize) {
+        CATALOG_COMMIT_COUNTS.with(std::cell::Cell::get)
+    }
 }
 
 /// Numerical-only fixed boundaries for the conditional Catalog traversal test.
@@ -430,6 +613,10 @@ impl WriteActivity {
 }
 
 pub(crate) fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = CATALOG_TIMING_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
     std::env::var("SEMON_BUILD_TIMING").is_ok_and(|value| value == "1")
 }
 
@@ -1362,12 +1549,99 @@ mod tests {
     }
 
     #[test]
+    fn catalog_commit_intervals_keep_unavailable_reset_and_zero_distinct() {
+        let cache = SqliteCache {
+            spill: 3,
+            write: 5,
+            hit: 7,
+            miss: 11,
+            temp_spill_bytes: Some(13),
+        };
+        let thread = ThreadWrites {
+            wchar: 17,
+            syscw: 19,
+            write_bytes: 23,
+            cancelled_write_bytes: 29,
+        };
+        let before = WriteSample {
+            thread: Some(thread),
+            cache: Some(cache),
+            wal: Some(8),
+            sample_us: 31,
+        };
+        let zero = CatalogCommitInterval::between(before, before, 37);
+        assert_eq!(
+            zero.work_us, 37,
+            "work time is explicit, independent of sample cost"
+        );
+        assert_eq!(
+            zero.cache,
+            Some(SqliteCache {
+                spill: 0,
+                write: 0,
+                hit: 0,
+                miss: 0,
+                temp_spill_bytes: Some(0)
+            })
+        );
+        assert_eq!(
+            zero.thread,
+            Some(ThreadWrites {
+                wchar: 0,
+                syscw: 0,
+                write_bytes: 0,
+                cancelled_write_bytes: 0
+            })
+        );
+        assert_eq!(zero.wal_extent_change, Some(0));
+        let after = WriteSample {
+            cache: None,
+            thread: None,
+            wal: None,
+            sample_us: 41,
+        };
+        let unavailable = CatalogCommitInterval::between(before, after, 0);
+        assert!(unavailable.cache.is_none());
+        assert!(unavailable.thread.is_none());
+        assert!(unavailable.wal_extent_change.is_none());
+        let reset = WriteSample {
+            cache: Some(SqliteCache { write: 4, ..cache }),
+            thread: Some(ThreadWrites {
+                write_bytes: 22,
+                ..thread
+            }),
+            wal: Some(2),
+            sample_us: 43,
+        };
+        let reset = CatalogCommitInterval::between(before, reset, 0);
+        assert!(reset.cache.is_none());
+        assert!(reset.thread.is_none());
+        assert_eq!(reset.wal_extent_change, Some(-6));
+        let optional_reset = WriteSample {
+            cache: Some(SqliteCache {
+                temp_spill_bytes: Some(12),
+                ..cache
+            }),
+            ..before
+        };
+        let optional_reset = CatalogCommitInterval::between(before, optional_reset, 0);
+        assert!(optional_reset.cache.is_some());
+        assert!(optional_reset.cache.unwrap().temp_spill_bytes.is_none());
+    }
+
+    #[test]
     fn disabled_diagnostics_retain_no_observation_or_measurements() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         let mut activity =
             WriteActivity::new(false, Path::new("/unused"), "index_initial", &connection);
         activity.stage("rows", &connection);
         assert!(activity.0.is_none());
+        let mut boundary = CatalogCommitBoundary::new(false, Path::new("/unused"));
+        for _ in 0..4 {
+            boundary.capture(&connection);
+        }
+        assert!(boundary.0.is_none());
+        boundary.committed();
         let mut measurements = Measurements::default();
         assert!(measurements.start().is_none());
         measurements.record("chunks_prepare", None, 1);
