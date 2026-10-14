@@ -110,6 +110,20 @@ impl<T> NativeReply<T> {
     }
 }
 impl<T> NativeEvent<T> {
+    pub(crate) fn text_refs(&self) -> [Option<&T>; 7] {
+        [
+            self.id.as_ref(),
+            self.n.as_ref(),
+            self.u.as_ref(),
+            self.r.as_ref().and_then(|reply| reply.m.as_ref()),
+            self.peer.as_ref().and_then(|peer| peer.sock.as_ref()),
+            self.peer.as_ref().and_then(|peer| peer.start.as_ref()),
+            self.y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .and_then(|reply| reply.m.as_ref()),
+        ]
+    }
     /// Candidate/position/time reducers use the native scalar fields. Text
     /// identity, native copy equality and relation placement remain explicit
     /// descriptor operations at their existing owners; absence here is never
