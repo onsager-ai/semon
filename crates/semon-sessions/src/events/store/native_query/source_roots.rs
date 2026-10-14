@@ -20,7 +20,7 @@ pub(crate) struct Epoch {
 
 impl Epoch {
     fn current(&self, db: &Connection) -> rusqlite::Result<bool> {
-        db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE singleton=1 AND resetting=0 AND phase='publication' AND epoch=?1 AND generation IS ?2 AND revision=?3 AND runtime=?4)", params![self.epoch,self.base_generation,self.source_revision,self.runtime], |row|row.get(0))
+        db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE singleton=1 AND resetting=0 AND phase='publication' AND epoch=?1 AND generation IS ?2 AND revision=?3 AND runtime=?4 AND generation IS (SELECT value FROM meta WHERE key='catalog_generation'))", params![self.epoch,self.base_generation,self.source_revision,self.runtime], |row|row.get(0))
     }
 }
 
@@ -272,5 +272,69 @@ impl NativeStore {
         self.connection.progress_handler(0, None::<fn() -> bool>);
         work.sqlite_vm_steps = steps.load(Ordering::Relaxed);
         result.map(|outcome| (outcome, work))
+    }
+}
+
+/// This check grants no reader authority. The generic rank transaction checks
+/// the exact job revision/source witnesses; this adds the source-only namespace,
+/// admission shape and semantic publication epoch.
+pub(in crate::events::store) fn scope_current(
+    db: &Connection,
+    stage: &SourceStage,
+) -> rusqlite::Result<bool> {
+    Ok(stage.job.spec.view_key.starts_with(PREFIX)
+        && stage.job.spec.catalog_generation.is_none()
+        && stage.job.spec.runtime == stage.epoch.runtime
+        && stage.epoch.current(db)?
+        && db.query_row("SELECT EXISTS(SELECT 1 FROM native_query_jobs WHERE job=?1 AND sources=1 AND owners=0 AND phase IN ('capture','entries','metadata','finish'))",[stage.job.id],|row|row.get::<_,bool>(0))?)
+}
+
+impl NativeStore {
+    /// Final source producer fence outside the write snapshot. The last
+    /// external callback is followed by owned checks and cancellation again.
+    /// Unlike recheck_closure(), this typed operation never grants Query Ready.
+    pub(in crate::events::store) fn recheck_source_closure(
+        &self,
+        stage: &SourceStage,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<(Outcome, u64)> {
+        let steps = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&steps);
+        self.connection.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let result = (|| {
+            if cancelled() {
+                return Ok(Outcome::Deferred);
+            }
+            if !self.runtime_current(&stage.job.spec)?
+                || !scope_current(&self.connection, stage).map_err(io::Error::other)?
+                || !job_current(&self.connection, &stage.job).map_err(io::Error::other)?
+                || !closure(&self.connection, stage.job.id).map_err(io::Error::other)?
+            {
+                return Ok(Outcome::Conflict);
+            }
+            if cancelled() {
+                return Ok(Outcome::Deferred);
+            }
+            if !self.runtime_current(&stage.job.spec)?
+                || !scope_current(&self.connection, stage).map_err(io::Error::other)?
+                || !job_current(&self.connection, &stage.job).map_err(io::Error::other)?
+            {
+                return Ok(Outcome::Conflict);
+            }
+            Ok(if cancelled() {
+                Outcome::Deferred
+            } else {
+                Outcome::Written
+            })
+        })();
+        self.connection.progress_handler(0, None::<fn() -> bool>);
+        result.map(|outcome| (outcome, steps.load(Ordering::Relaxed)))
     }
 }

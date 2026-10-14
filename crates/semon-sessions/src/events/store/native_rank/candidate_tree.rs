@@ -1809,6 +1809,347 @@ mod tests {
         serde_json::from_str(result.value.as_deref().unwrap()).unwrap()
     }
 
+    fn unpublished_stage(fixture: &mut Fixture) -> native_query::source_roots::SourceStage {
+        let epoch = native_query::source_roots::Epoch {
+            epoch: 91,
+            base_generation: Some("candidate-tree-one".into()),
+            source_revision: 93,
+            runtime: fixture.spec.runtime.clone(),
+        };
+        fixture.store.connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) VALUES(1,?1,'publication',?2,?3,?4)",params![epoch.epoch,epoch.base_generation,epoch.runtime,epoch.source_revision]).unwrap();
+        let witness = fixture
+            .store
+            .source_witness(&fixture.row.sources[0])
+            .unwrap();
+        fixture
+            .store
+            .begin_source_roots(&epoch, &[witness])
+            .unwrap()
+            .unwrap()
+    }
+    fn refresh_source_stage(
+        fixture: &Fixture,
+        stage: &mut native_query::source_roots::SourceStage,
+    ) {
+        stage.job = fixture
+            .store
+            .reload(&stage.job.spec.view_key)
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn source_neighbor_is_resumable_structural_and_does_not_grant_query_ready() {
+        let mut fixture = Fixture::new();
+        let mut root = CandidateRoot::empty(fixture.empty.clone());
+        let mut keys = Vec::new();
+        // A deliberately deep content-address suffix exercises durable seek
+        // continuation beyond one24-node attempt. Facts remain opaque here.
+        for position in 0..80 {
+            let mut entry = test_entry(position, 0, 0);
+            entry.guard = vec![(0, true)];
+            entry.candidate = [0; 32];
+            entry.candidate[position / 8] = 1 << (7 - position % 8);
+            entry.key[..37].fill(0);
+            entry.key[37..].copy_from_slice(&entry.candidate);
+            let leaf = fixture.graph_leaf(&entry, 0);
+            root = fixture.update(&root, entry.key, Some(leaf), "facts-v1").0;
+            keys.push(entry.key);
+        }
+        keys.sort();
+        fixture.ready();
+        let hidden = fixture
+            .store
+            .candidate_tree_seek(
+                &fixture.job,
+                &root,
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                0,
+                &facts_count,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(hidden.outcome, CandidateReadOutcome::Qualified);
+        assert!(hidden.value.is_none());
+        let mut stage = unpublished_stage(&mut fixture);
+        let query = fixture
+            .store
+            .candidate_tree_seek(
+                &stage.job,
+                &root,
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                0,
+                &|_| Ok(1),
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(query.outcome, CandidateReadOutcome::Conflict);
+        let begin = fixture
+            .store
+            .candidate_tree_source_begin_neighbor(
+                &stage,
+                "neighbor",
+                &root,
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(begin.outcome, Outcome::Written);
+        refresh_source_stage(&fixture, &mut stage);
+        let mut attempts = 0;
+        let selected = loop {
+            let step = fixture
+                .store
+                .candidate_tree_source_advance_neighbor(&stage, "neighbor", &valid_closure, &|| {
+                    false
+                })
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            assert!(step.work.sql_reads + step.work.sql_writes <= STEP_ROWS);
+            assert!(step.work.metadata_bytes <= STEP_BYTES);
+            assert!(step.work.sqlite_vm_steps > 0);
+            attempts += 1;
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            refresh_source_stage(&fixture, &mut stage);
+            if step.complete {
+                break step.point.unwrap();
+            }
+            assert!(attempts < 32);
+        };
+        assert!(attempts > 1);
+        assert_eq!(selected.key, keys[0]);
+        // Begin itself is replay-safe, including a completed result receipt.
+        let replay = fixture
+            .store
+            .candidate_tree_source_begin_neighbor(
+                &stage,
+                "neighbor",
+                &root,
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(replay.point.unwrap(), selected);
+        refresh_source_stage(&fixture, &mut stage);
+        assert!(
+            fixture
+                .store
+                .candidate_tree_source_begin_neighbor(
+                    &stage,
+                    "neighbor",
+                    &root,
+                    &[255; KEY_BYTES],
+                    CandidateDirection::Forward,
+                    &valid_closure,
+                    &|| false
+                )
+                .is_err()
+        );
+        refresh_source_stage(&fixture, &mut stage);
+        fixture
+            .store
+            .candidate_tree_source_begin_neighbor(
+                &stage,
+                "back",
+                &root,
+                &keys[40],
+                CandidateDirection::Backward,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        refresh_source_stage(&fixture, &mut stage);
+        let found = loop {
+            let step = fixture
+                .store
+                .candidate_tree_source_advance_neighbor(&stage, "back", &valid_closure, &|| false)
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            refresh_source_stage(&fixture, &mut stage);
+            if step.complete {
+                break step.point.unwrap();
+            }
+        };
+        assert_eq!(found.key, keys[40]);
+        assert_eq!(stage.job.phase, "capture");
+        assert!(
+            fixture
+                .store
+                .ready(&stage.job.spec.view_key, &valid_closure)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn source_update_resume_preserves_cursor_and_completed_replay_is_deterministic() {
+        let mut fixture = Fixture::new();
+        let old = test_entry(0, 0, 0);
+        let old_leaf = fixture.graph_leaf(&old, 0);
+        let empty = CandidateRoot::empty(fixture.empty.clone());
+        let root = fixture
+            .update(&empty, old.key, Some(old_leaf), "facts-v1")
+            .0;
+        let next = test_entry(1, 1, 0);
+        let leaf = fixture.graph_leaf(&next, 0);
+        let mut stage = unpublished_stage(&mut fixture);
+        let mut completed = Vec::new();
+        for _ in 0..2 {
+            let step = fixture
+                .store
+                .candidate_tree_source_begin_update(
+                    &stage,
+                    "source-update",
+                    &root,
+                    next.key,
+                    Some(leaf.clone()),
+                    "facts-v1",
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            refresh_source_stage(&fixture, &mut stage);
+            let cursor: String = fixture.store.connection.query_row("SELECT metadata FROM native_rank_candidate_cursors WHERE job=?1 AND cursor='source-update'",[stage.job.id],|r|r.get(0)).unwrap();
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            let step = fixture
+                .store
+                .candidate_tree_source_begin_update(
+                    &stage,
+                    "source-update",
+                    &root,
+                    next.key,
+                    Some(leaf.clone()),
+                    "facts-v1",
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Written);
+            refresh_source_stage(&fixture, &mut stage);
+            let resumed: String = fixture.store.connection.query_row("SELECT metadata FROM native_rank_candidate_cursors WHERE job=?1 AND cursor='source-update'",[stage.job.id],|r|r.get(0)).unwrap();
+            assert_eq!(resumed, cursor);
+            let mut different = next.key;
+            different[0] ^= 1;
+            assert!(
+                fixture
+                    .store
+                    .candidate_tree_source_begin_update(
+                        &stage,
+                        "source-update",
+                        &root,
+                        different,
+                        Some(leaf.clone()),
+                        "facts-v1",
+                        &valid_closure,
+                        &|| false
+                    )
+                    .is_err()
+            );
+            refresh_source_stage(&fixture, &mut stage);
+            let result = loop {
+                let step = fixture
+                    .store
+                    .candidate_tree_source_advance_update(
+                        &stage,
+                        "source-update",
+                        "facts-v1",
+                        &combine_facts,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Written);
+                assert!(step.work.sql_reads + step.work.sql_writes <= STEP_ROWS);
+                assert!(step.work.metadata_bytes <= STEP_BYTES);
+                refresh_source_stage(&fixture, &mut stage);
+                if let Some(root) = step.complete {
+                    break root;
+                }
+            };
+            completed.push(result);
+        }
+        assert_eq!(completed[0], completed[1]);
+        assert_eq!(stage.job.phase, "capture");
+        let query = fixture
+            .store
+            .candidate_tree_seek(
+                &stage.job,
+                &completed[0],
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                0,
+                &|_| Ok(1),
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(query.outcome, CandidateReadOutcome::Conflict);
+    }
+
+    #[test]
+    fn source_neighbor_latches_cancellation_and_rechecks_epoch_after_snapshot_release() {
+        let mut fixture = Fixture::new();
+        let entry = test_entry(0, 0, 0);
+        let leaf = fixture.graph_leaf(&entry, 0);
+        let empty = CandidateRoot::empty(fixture.empty.clone());
+        let root = fixture.update(&empty, entry.key, Some(leaf), "facts-v1").0;
+        let mut stage = unpublished_stage(&mut fixture);
+        fixture
+            .store
+            .candidate_tree_source_begin_neighbor(
+                &stage,
+                "cancel",
+                &root,
+                &[0; KEY_BYTES],
+                CandidateDirection::Forward,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        refresh_source_stage(&fixture, &mut stage);
+        let revision = stage.job.revision;
+        let calls = Cell::new(0);
+        let once = || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            call == 2
+        };
+        let step = fixture
+            .store
+            .candidate_tree_source_advance_neighbor(&stage, "cancel", &valid_closure, &once)
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Deferred);
+        assert!(!step.complete && step.point.is_none());
+        refresh_source_stage(&fixture, &mut stage);
+        assert_eq!(stage.job.revision, revision);
+        let external = Cell::new(0);
+        let changed = |db: &Connection, _| {
+            let call = external.get() + 1;
+            external.set(call);
+            if call == 3 {
+                db.execute("UPDATE catalog_semantic_stage SET revision=revision+1", [])?;
+            }
+            Ok(true)
+        };
+        let step = fixture
+            .store
+            .candidate_tree_source_advance_neighbor(&stage, "cancel", &changed, &|| false)
+            .unwrap();
+        assert_eq!(external.get(), 3);
+        assert_eq!(step.outcome, Outcome::Conflict);
+        assert!(!step.complete && step.point.is_none());
+        assert!(step.work.sqlite_vm_steps > 0);
+    }
+
     #[test]
     fn candidate_and_orthogonal_cleanup_share_receipt_and_preserve_imported_roots() {
         use super::super::orthogonal;
@@ -3928,6 +4269,31 @@ impl NativeStore {
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<CandidateStep> {
+        self.candidate_tree_begin_update_internal(
+            job,
+            cursor,
+            root,
+            key,
+            replacement,
+            combine_version,
+            closure,
+            cancelled,
+            false,
+        )
+    }
+
+    fn candidate_tree_begin_update_internal(
+        &mut self,
+        job: &Job,
+        cursor: &str,
+        root: &CandidateRoot,
+        key: [u8; KEY_BYTES],
+        replacement: Option<CandidateLeaf>,
+        combine_version: &str,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        resume: bool,
+    ) -> io::Result<CandidateStep> {
         cursor_name(cursor)?;
         if combine_version.is_empty() || combine_version.len() > 256 || !root_valid(root) {
             return Err(invalid("candidate tree update inputs are invalid"));
@@ -3971,9 +4337,22 @@ impl NativeStore {
                     graph.bind(&leaf.aggregate)?;
                 }
                 if tree.cursor_exists(cursor)? {
-                    return Err(invalid("candidate tree cursor already exists"));
+                    if !resume {
+                        return Err(invalid("candidate tree cursor already exists"));
+                    }
+                    let old: UpdateState = serde_json::from_str(&tree.read_cursor(cursor)?)
+                        .map_err(io::Error::other)?;
+                    if !old.valid()
+                        || old.version != state.version
+                        || old.root != state.root
+                        || old.key != state.key
+                        || old.replacement != state.replacement
+                    {
+                        return Err(invalid("source candidate update request changed"));
+                    }
+                } else {
+                    tree.put_cursor(cursor, &text)?;
                 }
-                tree.put_cursor(cursor, &text)?;
                 tree.work.add_graph(&graph.work);
                 if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
                     return Err(invalid("candidate tree begin step exceeds work budget"));
@@ -4920,4 +5299,368 @@ fn prepare_at_leaf(
     state.current = None;
     state.prepared = true;
     Ok(())
+}
+
+/// One unpublished, structural neighbor search. No conditional graph is
+/// evaluated: even an invisible candidate participates in native tie order.
+/// Source qualification and readiness remain separate from public Query reads.
+#[derive(Clone, Debug)]
+pub(crate) struct SourceNeighborStep {
+    pub(crate) outcome: Outcome,
+    pub(crate) complete: bool,
+    pub(crate) point: Option<CandidatePoint>,
+    pub(crate) work: CandidateWork,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceNeighbor {
+    version: String,
+    root: CandidateRoot,
+    bound: Vec<u8>,
+    forward: bool,
+    current: Option<CandidateNodeId>,
+    siblings: Vec<CandidateNodeId>,
+    complete: bool,
+    result: Option<CandidateNodeId>,
+}
+impl SourceNeighbor {
+    fn valid(&self) -> bool {
+        self.version == "native-source-neighbor/v1"
+            && root_valid(&self.root)
+            && self.bound.len() == KEY_BYTES
+            && self.siblings.len() <= MAX_DEPTH
+            && self.siblings.iter().all(CandidateNodeId::valid)
+            && self.current.as_ref().is_none_or(CandidateNodeId::valid)
+            && self.result.as_ref().is_none_or(CandidateNodeId::valid)
+            && (self.complete || self.result.is_none())
+            && self.siblings.iter().enumerate().all(|(index, id)| {
+                !self.siblings[..index].contains(id) && self.current.as_ref() != Some(id)
+            })
+            && (!self.complete || self.current.is_none() && self.siblings.is_empty())
+    }
+}
+
+fn source_neighbor_point(
+    tree: &mut TreeDb<'_>,
+    state: &SourceNeighbor,
+) -> io::Result<Option<CandidatePoint>> {
+    if !state.complete {
+        return Ok(None);
+    }
+    match &state.result {
+        Some(id) => match tree.read_node(id)? {
+            CandidateNode::Leaf {
+                key,
+                candidate,
+                aggregate,
+                payload,
+            } => Ok(Some(CandidatePoint {
+                key: fixed_key(&key)?,
+                leaf: CandidateLeaf {
+                    candidate,
+                    aggregate,
+                    payload,
+                },
+            })),
+            _ => Err(invalid("source neighbor result is not a leaf")),
+        },
+        None => Ok(None),
+    }
+}
+
+impl NativeStore {
+    /// Save or resume the exact same neighbor request. Replaying begin after a
+    /// crash preserves its durable path; another request cannot steal a cursor.
+    pub(crate) fn candidate_tree_source_begin_neighbor(
+        &mut self,
+        stage: &native_query::source_roots::SourceStage,
+        cursor: &str,
+        root: &CandidateRoot,
+        bound: &[u8; KEY_BYTES],
+        direction: CandidateDirection,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<SourceNeighborStep> {
+        cursor_name(cursor)?;
+        if !root_valid(root) {
+            return Err(invalid("invalid source neighbor root"));
+        }
+        let input = SourceNeighbor {
+            version: "native-source-neighbor/v1".into(),
+            root: root.clone(),
+            bound: bound.to_vec(),
+            forward: matches!(direction, CandidateDirection::Forward),
+            current: root.tree.clone(),
+            siblings: Vec::new(),
+            complete: root.tree.is_none(),
+            result: None,
+        };
+        self.source_neighbor_transaction(stage, closure, cancelled, |tree, graph, _| {
+            tree.bind_root(root, graph)?;
+            if tree.cursor_exists(cursor)? {
+                let state: SourceNeighbor =
+                    serde_json::from_str(&tree.read_cursor(cursor)?).map_err(io::Error::other)?;
+                if !state.valid()
+                    || state.root != input.root
+                    || state.bound != input.bound
+                    || state.forward != input.forward
+                {
+                    return Err(invalid("source neighbor request changed"));
+                }
+                let point = source_neighbor_point(tree, &state)?;
+                Ok((state.complete, point))
+            } else {
+                tree.put_cursor(cursor, &encoded(&input, CURSOR_BYTES)?)?;
+                Ok((input.complete, None))
+            }
+        })
+    }
+
+    /// At most24 structural-node reads per attempt, plus fixed cursor/binding
+    /// controls. Both row work and complete-connection SQLite VM are returned.
+    /// A completed cursor survives reopen until the producer job is retired.
+    pub(crate) fn candidate_tree_source_advance_neighbor(
+        &mut self,
+        stage: &native_query::source_roots::SourceStage,
+        cursor: &str,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<SourceNeighborStep> {
+        cursor_name(cursor)?;
+        self.source_neighbor_transaction(stage, closure, cancelled, |tree, _, cancelled| {
+            let mut state: SourceNeighbor =
+                serde_json::from_str(&tree.read_cursor(cursor)?).map_err(io::Error::other)?;
+            if !state.valid() || !tree.root_bound(&state.root)? {
+                return Err(invalid("invalid source neighbor cursor"));
+            }
+            for _ in 0..24 {
+                if cancelled() {
+                    break;
+                }
+                if state.complete {
+                    break;
+                }
+                let Some(id) = state.current.take() else {
+                    state.current = state.siblings.pop();
+                    if state.current.is_none() {
+                        state.complete = true;
+                    }
+                    continue;
+                };
+                if tree.work.metadata_bytes + 2 * NODE_BYTES + CURSOR_BYTES > STEP_BYTES {
+                    state.current = Some(id);
+                    break;
+                }
+                match tree.read_node(&id)? {
+                    CandidateNode::Leaf { key, .. } => {
+                        let eligible = if state.forward {
+                            key >= state.bound
+                        } else {
+                            key <= state.bound
+                        };
+                        if eligible {
+                            state.result = Some(id);
+                            state.complete = true;
+                            state.siblings.clear();
+                        } else {
+                            state.current = state.siblings.pop();
+                        }
+                    }
+                    CandidateNode::Branch {
+                        left,
+                        right,
+                        min,
+                        max,
+                        ..
+                    } => {
+                        let outside = if state.forward {
+                            max < state.bound
+                        } else {
+                            min > state.bound
+                        };
+                        if outside {
+                            state.current = state.siblings.pop();
+                        } else {
+                            if state.siblings.len() == MAX_DEPTH {
+                                return Err(invalid("source neighbor path exceeds trie depth"));
+                            }
+                            state.siblings.push(if state.forward {
+                                right.clone()
+                            } else {
+                                left.clone()
+                            });
+                            state.current = Some(if state.forward { left } else { right });
+                        }
+                    }
+                }
+                if state.current.is_none() && state.siblings.is_empty() && state.result.is_none() {
+                    state.complete = true;
+                }
+            }
+            let point = source_neighbor_point(tree, &state)?;
+            tree.put_cursor(cursor, &encoded(&state, CURSOR_BYTES)?)?;
+            Ok((state.complete, point))
+        })
+    }
+
+    fn source_neighbor_transaction(
+        &mut self,
+        stage: &native_query::source_roots::SourceStage,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        operation: impl FnOnce(
+            &mut TreeDb<'_>,
+            &mut Graph<'_>,
+            &dyn Fn() -> bool,
+        ) -> io::Result<(bool, Option<CandidatePoint>)>,
+    ) -> io::Result<SourceNeighborStep> {
+        let cancellation_seen = Cell::new(false);
+        let latched = || {
+            if cancelled() {
+                cancellation_seen.set(true);
+            }
+            cancellation_seen.get()
+        };
+        let qualified = |db: &Connection, id| {
+            Ok(native_query::source_roots::scope_current(db, stage)? && closure(db, id)?)
+        };
+        let captured = RefCell::new(CandidateWork::default());
+        let (mut outcome, result, vm) =
+            self.rank_transaction_measured(&stage.job, &qualified, &latched, |db, id| {
+                let mut tree = TreeDb {
+                    db,
+                    job: id,
+                    work: CandidateWork::default(),
+                };
+                let mut graph = Graph {
+                    db,
+                    job: id,
+                    work: super::Work::default(),
+                };
+                let value = operation(&mut tree, &mut graph, &latched)?;
+                tree.work.add_graph(&graph.work);
+                if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
+                    return Err(invalid("source neighbor step exceeds metadata budget"));
+                }
+                *captured.borrow_mut() = tree.work.clone();
+                Ok((value, tree.work))
+            })?;
+        let ((complete, point), mut work) =
+            result.unwrap_or(((false, None), captured.into_inner()));
+        work.sqlite_vm_steps = vm;
+        if outcome == Outcome::Written {
+            let (checked, steps) = self.source_mutation_final_fence(stage, closure, &latched)?;
+            work.sqlite_vm_steps += steps;
+            outcome = checked;
+        }
+        let admitted = outcome == Outcome::Written;
+        Ok(SourceNeighborStep {
+            outcome,
+            complete: admitted && complete,
+            point: if admitted { point } else { None },
+            work,
+        })
+    }
+}
+
+impl NativeStore {
+    pub(crate) fn candidate_tree_source_begin_update(
+        &mut self,
+        stage: &native_query::source_roots::SourceStage,
+        cursor: &str,
+        root: &CandidateRoot,
+        key: [u8; KEY_BYTES],
+        replacement: Option<CandidateLeaf>,
+        combine_version: &str,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<CandidateStep> {
+        let seen = Cell::new(false);
+        let latched = || {
+            if cancelled() {
+                seen.set(true);
+            }
+            seen.get()
+        };
+        let qualified = |db: &Connection, id| {
+            Ok(native_query::source_roots::scope_current(db, stage)? && closure(db, id)?)
+        };
+        let mut step = self.candidate_tree_begin_update_internal(
+            &stage.job,
+            cursor,
+            root,
+            key,
+            replacement,
+            combine_version,
+            &qualified,
+            &latched,
+            true,
+        )?;
+        if step.outcome == Outcome::Written {
+            let (outcome, steps) = self.source_mutation_final_fence(stage, closure, &latched)?;
+            step.work.sqlite_vm_steps += steps;
+            step.outcome = outcome;
+            if outcome != Outcome::Written {
+                step.complete = None;
+            }
+        }
+        Ok(step)
+    }
+
+    pub(crate) fn candidate_tree_source_advance_update(
+        &mut self,
+        stage: &native_query::source_roots::SourceStage,
+        cursor: &str,
+        combine_version: &str,
+        combine: &dyn Fn(&str, &str) -> io::Result<String>,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<CandidateStep> {
+        let seen = Cell::new(false);
+        let latched = || {
+            if cancelled() {
+                seen.set(true);
+            }
+            seen.get()
+        };
+        let qualified = |db: &Connection, id| {
+            Ok(native_query::source_roots::scope_current(db, stage)? && closure(db, id)?)
+        };
+        let mut step = self.candidate_tree_advance_update(
+            &stage.job,
+            cursor,
+            combine_version,
+            combine,
+            &qualified,
+            &latched,
+        )?;
+        if step.outcome == Outcome::Written {
+            let (outcome, steps) = self.source_mutation_final_fence(stage, closure, &latched)?;
+            step.work.sqlite_vm_steps += steps;
+            step.outcome = outcome;
+            if outcome != Outcome::Written {
+                step.complete = None;
+            }
+        }
+        Ok(step)
+    }
+
+    fn source_mutation_final_fence(
+        &self,
+        stage: &native_query::source_roots::SourceStage,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<(Outcome, u64)> {
+        let mut fresh = native_query::source_roots::SourceStage {
+            job: stage.job.clone(),
+            epoch: stage.epoch.clone(),
+        };
+        fresh.job.revision = fresh
+            .job
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("source producer job revision overflow"))?;
+        self.recheck_source_closure(&fresh, closure, cancelled)
+    }
 }
