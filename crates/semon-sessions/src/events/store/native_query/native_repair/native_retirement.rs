@@ -28,6 +28,15 @@ const TABLES: &[(&str, &str, bool)] = &[
     ("native_original_tag", "record_offset,ordinal", true),
     ("native_original_copilot_admission", "record_offset", true),
     ("native_original_header", "field", true),
+    ("native_original_activity", "original", true),
+    ("native_original_busy", "start_ms", true),
+    ("native_original_record_time", "record_offset", true),
+    ("native_original_copilot_metadata", "record_offset", true),
+    (
+        "native_original_copilot_usage_row",
+        "record_offset,report_address",
+        true,
+    ),
     (
         "native_original_members",
         "record_offset,parent_offset,name",
