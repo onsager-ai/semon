@@ -10,7 +10,7 @@ pub(crate) const BYTES: usize = 1024 * 1024;
 const STATE_BYTES: usize = 64 * 1024;
 // Rebuildable private Query metadata is versioned independently from the
 // public native Event Index schema28 and the native parser/custody contract.
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 const SCHEMA_KEY: &str = "native_query_schema";
 
 pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
@@ -3649,6 +3649,177 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn native_query_private_five_reopen_installs_original_schema_without_rebinding_evidence() {
+        let mut fixture = Fixture::new(0);
+        let source = fixture.source();
+        let session_key = fixture.row.key.clone();
+        let archive_key = archive_index_key(fixture.row.sources[0].path.to_str().unwrap());
+        let header_key = format!("history_original_header:{}", fixture.row.key);
+        let metadata = json(&fixture.row).unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO session_history_catalog VALUES(?1,?2)",
+                params![fixture.row.key, metadata],
+            )
+            .unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "INSERT INTO session_history_slot_parts VALUES(?1,0,0,?2)",
+                params![fixture.row.key, b"original-custody-part".as_slice()],
+            )
+            .unwrap();
+        for key in [&archive_key, &header_key] {
+            fixture
+                .store
+                .connection
+                .execute(
+                    "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                    params![key, metadata],
+                )
+                .unwrap();
+        }
+        let retained = |db: &Connection| {
+            let history: String = db
+                .query_row(
+                    "SELECT metadata FROM session_history_catalog WHERE session_key=?1",
+                    [&session_key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let part: Vec<u8> = db.query_row(
+                "SELECT bytes FROM session_history_slot_parts WHERE session_key=?1 AND slot=0 AND part=0",
+                [&session_key], |row| row.get(0),
+            ).unwrap();
+            let markers: Vec<String> = [&archive_key, &header_key]
+                .into_iter()
+                .map(|key| {
+                    db.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
+                        row.get(0)
+                    })
+                    .unwrap()
+                })
+                .collect();
+            (history, part, markers)
+        };
+        let before = retained(&fixture.store.connection);
+        let reads = super::super::super::FILE_READS.with(Cell::get);
+        // Exercise both actual reopen entry points against the prior private
+        // version, whose native public schema and parser were already current.
+        for via_native_store in [true, false] {
+            fixture
+                .store
+                .connection
+                .execute_batch(
+                    "DROP TABLE native_original_fields; DROP TABLE native_original_nodes;
+                 DROP TABLE native_original_records; DROP TABLE native_original_tokens;
+                 DROP TABLE native_original_repairs;
+                 UPDATE meta SET value='5' WHERE key='native_query_schema';",
+                )
+                .unwrap();
+            assert_eq!(schema_version(&fixture.store.connection).unwrap(), Some(5));
+            assert_eq!(
+                versions(&fixture.store.connection).unwrap(),
+                (28, Some(super::super::super::CACHE_VERSION))
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'native_original_*'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0
+            );
+            fixture.store = if via_native_store {
+                NativeStore::open(&fixture.options).unwrap()
+            } else {
+                let (store, _) = SqliteStore::attempt_scoped(
+                    &super::super::super::EventCache::path(&fixture.options.cache),
+                    None,
+                    true,
+                )
+                .unwrap();
+                NativeStore {
+                    connection: store.connection,
+                    options: fixture.options.clone(),
+                }
+            };
+            assert_eq!(
+                schema_version(&fixture.store.connection).unwrap(),
+                Some(SCHEMA_VERSION)
+            );
+            assert_eq!(
+                versions(&fixture.store.connection).unwrap(),
+                (28, Some(super::super::super::CACHE_VERSION))
+            );
+            for (name, kind) in [
+                ("native_original_repairs", "table"),
+                ("native_original_tokens", "table"),
+                ("native_original_records", "table"),
+                ("native_original_nodes", "table"),
+                ("native_original_fields", "table"),
+                ("native_original_node_parent", "index"),
+                ("native_original_node_key", "index"),
+                ("native_original_node_element", "index"),
+                ("native_original_field_candidate", "index"),
+                ("native_original_field_pending", "index"),
+            ] {
+                assert!(
+                    fixture
+                        .store
+                        .connection
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1 AND type=?2)",
+                            params![name, kind],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap(),
+                    "missing Original {kind} {name}"
+                );
+            }
+            assert_eq!(retained(&fixture.store.connection), before);
+            assert_eq!(fixture.source().ledger, source.ledger);
+            assert_eq!(
+                fixture
+                    .store
+                    .events_page(&fixture.source(), false, None)
+                    .unwrap()
+                    .rows,
+                vec![(0, fixture.index.events[0].clone())]
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .events_page(&fixture.source(), true, None)
+                    .unwrap()
+                    .rows,
+                vec![(0, fixture.index.extras[0].clone())]
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .signals_page(&fixture.source(), None)
+                    .unwrap()
+                    .rows,
+                vec![(0, fixture.index.signals[0].clone())]
+            );
+            assert_eq!(
+                crate::history_projection::catalog(&fixture.store.connection, &fixture.row.key)
+                    .unwrap(),
+                Some(metadata.clone())
+            );
+        }
+        assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
     }
 
     #[test]
