@@ -6,11 +6,49 @@ use crate::model::summary::{CatalogRow, CatalogSource};
 pub(crate) const ROWS: usize = 64;
 pub(crate) const BYTES: usize = 1024 * 1024;
 const STATE_BYTES: usize = 64 * 1024;
+// Rebuildable private Query metadata is versioned independently from the
+// public native Event Index schema28 and the native parser/custody contract.
+pub(super) const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_KEY: &str = "native_query_schema";
+
+pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
+    let value: Option<String> = db
+        .query_row("SELECT value FROM meta WHERE key=?1", [SCHEMA_KEY], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    value
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .map_err(|_| invalid("invalid native private schema version"))
+        })
+        .transpose()
+}
+fn private_current(db: &Connection) -> rusqlite::Result<bool> {
+    Ok(current(db)? && schema_version(db)? == Some(SCHEMA_VERSION))
+}
+
+pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
+    if schema_version(db)?.is_some_and(|version| version > SCHEMA_VERSION) {
+        return Err(invalid("native private schema is newer"));
+    }
+    // Current and History tables have already been initialized by their native
+    // owners. Never install these private-meta indexes in standalone Trace.
+    db.execute_batch("DROP TRIGGER IF EXISTS native_catalog_owner_update;")?;
+    db.execute_batch(SCHEMA)?;
+    db.execute_batch(super::native_rank::SCHEMA)?;
+    db.execute(
+        "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![SCHEMA_KEY, SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
 fn source_fact_generation(ledger: &Ledger) -> rusqlite::Result<String> {
     Ok(format!("interval-v2:{}", json(ledger)?))
 }
 fn source_order_generation(ledger: &Ledger) -> rusqlite::Result<String> {
-    Ok(format!("order-v1:{}", json(ledger)?))
+    Ok(format!("order-v2:{}", json(ledger)?))
 }
 #[cfg(test)]
 thread_local! {
@@ -21,6 +59,50 @@ thread_local! {
 }
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_source_busy (
+    file_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_busy_intervals (
+    file_id INTEGER NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY(file_id,start)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_links (
+    file_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('session','continued','bridge')),
+    native_id TEXT NOT NULL,
+    PRIMARY KEY(file_id,kind,native_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_facts (
+    file_id INTEGER PRIMARY KEY,
+    generation TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    extras INTEGER NOT NULL,
+    signals INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS native_source_event_times (
+    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, t INTEGER NOT NULL,
+    PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_copy_events (
+    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, identity TEXT NOT NULL,
+    PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_source_copy_identity ON native_source_copy_events(file_id,identity,seq);
+CREATE TABLE IF NOT EXISTS native_source_order_facts (
+    file_id INTEGER PRIMARY KEY, generation TEXT NOT NULL,
+    first_seq INTEGER, first_ms INTEGER,
+    CHECK((first_seq IS NULL)=(first_ms IS NULL))
+) STRICT;
+CREATE TABLE IF NOT EXISTS native_source_event_positions (
+    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, o INTEGER NOT NULL,
+    PRIMARY KEY(file_id,o,seq), UNIQUE(file_id,seq)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_catalog_owner_versions (
  session_key TEXT NOT NULL, scope TEXT NOT NULL, generation INTEGER NOT NULL,
  PRIMARY KEY(session_key,scope)
@@ -29,7 +111,6 @@ CREATE TRIGGER IF NOT EXISTS native_catalog_owner_insert AFTER INSERT ON session
  INSERT INTO native_catalog_owner_versions VALUES(NEW.session_key,'current',1) ON CONFLICT(session_key,scope) DO UPDATE SET generation=generation+1;
 END;
 CREATE TRIGGER IF NOT EXISTS native_catalog_owner_update AFTER UPDATE ON session_catalog
- WHEN NEW.metadata IS NOT OLD.metadata OR NEW.session_key IS NOT OLD.session_key OR NEW.lifecycle IS NOT OLD.lifecycle OR NEW.harness IS NOT OLD.harness OR NEW.parent_key IS NOT OLD.parent_key OR NEW.repo IS NOT OLD.repo OR NEW.last_ms IS NOT OLD.last_ms
 BEGIN
  INSERT INTO native_catalog_owner_versions VALUES(OLD.session_key,'current',1) ON CONFLICT(session_key,scope) DO UPDATE SET generation=generation+1;
  INSERT INTO native_catalog_owner_versions SELECT NEW.session_key,'current',1 WHERE NEW.session_key IS NOT OLD.session_key ON CONFLICT(session_key,scope) DO UPDATE SET generation=generation+1;
@@ -313,7 +394,7 @@ fn capture_source(db: &Connection, source: &CatalogSource) -> rusqlite::Result<S
     })
 }
 fn check_source(db: &Connection, expected: &SourceWitness) -> rusqlite::Result<bool> {
-    if !current(db)? {
+    if !private_current(db)? {
         return Ok(false);
     }
     let actual = capture_source(db, &expected.source)?;
@@ -891,7 +972,7 @@ impl NativeStore {
 }
 
 fn spec_current(db: &Connection, spec: &JobSpec) -> rusqlite::Result<bool> {
-    if !current(db)? {
+    if !private_current(db)? {
         return Ok(false);
     }
     let Some(expected) = &spec.catalog_generation else {
@@ -1589,7 +1670,7 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        if !current(&tx).map_err(io::Error::other)? {
+        if !private_current(&tx).map_err(io::Error::other)? {
             return Err(io::Error::other("native store version changed"));
         }
         capture_source(&tx, source).map_err(io::Error::other)
@@ -1599,7 +1680,7 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        if !current(&tx).map_err(io::Error::other)? {
+        if !private_current(&tx).map_err(io::Error::other)? {
             return Err(io::Error::other("native store version changed"));
         }
         let identity = crate::query_projection::identity(row);
@@ -1832,8 +1913,27 @@ impl NativeStore {
             .unchecked_transaction()
             .map_err(io::Error::other)?;
         let file = self.selected_file(witness)?;
+        let ready: Option<String> = tx
+            .query_row(
+                "SELECT generation FROM native_source_order_facts WHERE file_id=?1",
+                [file],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        let expected = witness
+            .ledger
+            .as_ref()
+            .map(source_order_generation)
+            .transpose()
+            .map_err(io::Error::other)?;
+        if ready.is_none() || ready != expected {
+            return Err(io::Error::other(
+                "native offset primitives require bounded repair",
+            ));
+        }
         let seq: Option<i64> = tx.query_row(
-            "SELECT seq FROM events WHERE file_id=?1 AND extra=0 AND o<=?2 ORDER BY o DESC,seq DESC LIMIT 1",
+            "SELECT seq FROM native_source_event_positions WHERE file_id=?1 AND o<=?2 ORDER BY o DESC,seq DESC LIMIT 1",
             params![file, offset as i64], |r| r.get(0),
         ).optional().map_err(io::Error::other)?;
         let seq = seq.unwrap_or(0);
@@ -1907,6 +2007,9 @@ pub(super) fn write_source_facts(
     complete: bool,
     expected: Option<&Ledger>,
 ) -> rusqlite::Result<()> {
+    if !private_current(tx)? {
+        return Err(invalid("native private producer schema changed"));
+    }
     let file: i64 = tx.query_row("SELECT file_id FROM files WHERE path=?1", [path], |r| {
         r.get(0)
     })?;
@@ -1998,6 +2101,10 @@ fn write_order_facts(
             "DELETE FROM native_source_copy_events WHERE file_id=?1",
             [file],
         )?;
+        tx.execute(
+            "DELETE FROM native_source_event_positions WHERE file_id=?1",
+            [file],
+        )?;
     }
     changed(
         changes.before_events,
@@ -2006,6 +2113,7 @@ fn write_order_facts(
         |seq, event| {
             #[cfg(test)]
             ORDER_FACT_VISITS.with(|n| n.set(n.get() + 1));
+            tx.execute("INSERT INTO native_source_event_positions VALUES(?1,?2,?3) ON CONFLICT(file_id,seq) DO UPDATE SET o=excluded.o",params![file,seq_int(seq),int(event.o)])?;
             if let Some(time) = event.t {
                 tx.execute("INSERT INTO native_source_event_times VALUES(?1,?2,?3) ON CONFLICT(file_id,seq) DO UPDATE SET t=excluded.t",params![file,seq_int(seq),time])?;
             } else {
@@ -2031,6 +2139,10 @@ fn write_order_facts(
             )?;
             tx.execute(
                 "DELETE FROM native_source_copy_events WHERE file_id=?1 AND seq>=?2",
+                params![file, seq_int(cut)],
+            )?;
+            tx.execute(
+                "DELETE FROM native_source_event_positions WHERE file_id=?1 AND seq>=?2",
                 params![file, seq_int(cut)],
             )?;
             Ok(())
@@ -3533,6 +3645,181 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn native_query_private_initialization_preserves_native_schema_and_existing_objects() {
+        let mut fixture = Fixture::new(0);
+        let ledger = fixture.source().ledger;
+        fixture.store.connection.execute_batch("CREATE TEMP TABLE private_temp_sentinel(value TEXT); INSERT INTO private_temp_sentinel VALUES('unchanged'); CREATE TEMP TRIGGER private_temp_trigger AFTER INSERT ON private_temp_sentinel BEGIN SELECT 1; END;").unwrap();
+        fixture
+            .store
+            .connection
+            .execute("DELETE FROM meta WHERE key=?1", [SCHEMA_KEY])
+            .unwrap();
+        let objects = |db: &Connection| {
+            db.prepare("SELECT name,type,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' UNION ALL SELECT name,type,sql FROM sqlite_temp_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name,type,sql").unwrap().query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let before = objects(&fixture.store.connection);
+        let reads = super::super::super::FILE_READS.with(Cell::get);
+        assert!(
+            current(&fixture.store.connection).unwrap(),
+            "legacy native28 evidence stays readable before private initialization"
+        );
+        assert!(matches!(
+            init(&mut fixture.store.connection).unwrap(),
+            Init::Ready
+        ));
+        assert_eq!(objects(&fixture.store.connection), before);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            28
+        );
+        assert_eq!(
+            schema_version(&fixture.store.connection).unwrap(),
+            Some(SCHEMA_VERSION)
+        );
+        assert_eq!(fixture.source().ledger, ledger);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT value FROM private_temp_sentinel", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "unchanged"
+        );
+        assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                params![SCHEMA_KEY, (SCHEMA_VERSION + 1).to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            init(&mut fixture.store.connection).unwrap(),
+            Init::Newer
+        ));
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            28
+        );
+        assert_eq!(objects(&fixture.store.connection), before);
+    }
+
+    #[test]
+    fn native_query_unchanged_native_catalog_publication_keeps_repair_witnesses() {
+        let mut fixture = Fixture::new(0);
+        let job = fixture.admitted();
+        let row = &fixture.row;
+        let updated = fixture
+            .store
+            .connection
+            .execute(
+                &format!("{CATALOG_INSERT}(?1,'current',?2,?3,?4,?5,?6){CATALOG_CONFLICT}"),
+                params![
+                    row.key,
+                    row.last.unwrap(),
+                    row.harness,
+                    row.repo,
+                    row.parent,
+                    json(row).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(updated, 0);
+        assert!(fixture.store.recheck(&job).unwrap());
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE session_catalog SET last_ms=last_ms+1 WHERE session_key=?1",
+                [&row.key],
+            )
+            .unwrap();
+        assert!(
+            !fixture.store.recheck(&job).unwrap(),
+            "an independent scalar selection change remains fenced"
+        );
+    }
+
+    #[test]
+    fn native_query_old_private_initialization_does_not_index_growing_native_history() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let mut vm = Vec::new();
+        for earlier in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(earlier);
+            fixture.store.connection.execute_batch("DROP TABLE native_source_event_positions; DELETE FROM meta WHERE key='native_query_schema'; UPDATE native_source_order_facts SET generation=replace(generation,'order-v2:','order-v1:');").unwrap();
+            let reads = super::super::super::FILE_READS.with(Cell::get);
+            let observed = Arc::new(AtomicUsize::new(0));
+            let counted = observed.clone();
+            fixture.store.connection.progress_handler(
+                1,
+                Some(move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            assert!(matches!(
+                init(&mut fixture.store.connection).unwrap(),
+                Init::Ready
+            ));
+            vm.push(observed.load(Ordering::Relaxed));
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM events WHERE extra=0", [], |r| r
+                        .get::<_, usize>(0))
+                    .unwrap(),
+                earlier + 1
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM native_source_event_positions",
+                        [],
+                        |r| r.get::<_, usize>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            assert!(
+                fixture
+                    .store
+                    .source_header(&fixture.source())
+                    .unwrap()
+                    .unwrap()
+                    .time_seed
+                    .is_none()
+            );
+            assert!(
+                fixture
+                    .store
+                    .event_before_offset(&fixture.source(), 0)
+                    .is_err()
+            );
+        }
+        assert!(
+            vm.windows(2).all(|pair| pair[0] == pair[1]),
+            "private initializer SQLite VM work {vm:?}"
         );
     }
 }
