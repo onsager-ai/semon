@@ -1063,6 +1063,43 @@ mod tests {
     }
 
     #[test]
+    fn ready_continued_order_uses_indexed_atoms_instead_of_manual_counter() {
+        for has_continued in [false, true] {
+            let mut fixture = Fixture::new("chosen", &[], &[]);
+            if has_continued {
+                fixture.index.links.continued_in.insert("next".into());
+                let tx = fixture.store.connection.unchecked_transaction().unwrap();
+                write_index_changes(
+                    &tx,
+                    fixture.witness.source.path.to_str().unwrap(),
+                    fixture.witness.ledger.as_ref().unwrap(),
+                    &fixture.index,
+                    None,
+                    None,
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            let root = fixture.prepare();
+            for counter in [0, 1] {
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "UPDATE native_physical_profiles SET continued=?2 WHERE root=?1",
+                        params![root.0.as_slice(), counter],
+                    )
+                    .unwrap();
+                let source = fixture
+                    .store
+                    .physical_profile_base(&fixture.witness)
+                    .unwrap();
+                assert_eq!(source.continued_empty, !has_continued);
+            }
+        }
+    }
+
+    #[test]
     fn descriptor_atom_count_and_required_parts_refuse_corrupt_ready_metadata() {
         let fixture = Fixture::new("chosen", &[], &[]);
         let root = fixture.prepare();
@@ -2661,7 +2698,7 @@ impl NativeStore {
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        let (root,first,descriptor,continued,revision,original,next):(Vec<u8>,Option<i64>,String,i64,i64,Option<Vec<u8>>,i64)=tx.query_row("SELECT CASE WHEN octet_length(p.root)=32 THEN p.root END,b.first_ms,CASE WHEN octet_length(p.descriptor)<=?3 THEN p.descriptor END,p.continued,p.revision,CASE WHEN p.original IS NULL OR octet_length(p.original)=32 THEN p.original ELSE zeroblob(0) END,p.next_atom FROM native_physical_bindings b JOIN native_physical_profiles p ON p.root=b.root WHERE b.source=?1 AND p.path=?2 AND p.phase='ready' AND p.continued>=0",params![source_key(&witness.source)?.as_slice(),witness.source.path.to_str(),i64::try_from(descriptor_bound(witness)).map_err(io::Error::other)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(io::Error::other)?;
+        let (root,first,descriptor,has_continued,revision,original,next):(Vec<u8>,Option<i64>,String,bool,i64,Option<Vec<u8>>,i64)=tx.query_row("SELECT CASE WHEN octet_length(p.root)=32 THEN p.root END,b.first_ms,CASE WHEN octet_length(p.descriptor)<=?3 THEN p.descriptor END,EXISTS(SELECT 1 FROM native_physical_atoms WHERE root=p.root AND kind='continued' AND complete=1 LIMIT 1),p.revision,CASE WHEN p.original IS NULL OR octet_length(p.original)=32 THEN p.original ELSE zeroblob(0) END,p.next_atom FROM native_physical_bindings b JOIN native_physical_profiles p ON p.root=b.root WHERE b.source=?1 AND p.path=?2 AND p.phase='ready' AND p.continued>=0",params![source_key(&witness.source)?.as_slice(),witness.source.path.to_str(),i64::try_from(descriptor_bound(witness)).map_err(io::Error::other)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(io::Error::other)?;
         let root = ProfileRoot(
             root.try_into()
                 .map_err(|_| io::Error::other("invalid physical root"))?,
@@ -2709,7 +2746,7 @@ impl NativeStore {
             role: descriptor.role,
             scan_order: descriptor.scan_order,
             first,
-            continued_empty: continued == 0,
+            continued_empty: !has_continued,
             turns_truncated: false,
         })
     }
