@@ -1174,56 +1174,115 @@ impl NativeStore {
         if job.phase != "finish"
             || !job_current(&tx, job).map_err(io::Error::other)?
             || !completed(&tx, job.id).map_err(io::Error::other)?
+            || !job_current(&tx, job).map_err(io::Error::other)?
+            || crate::native_evidence::query_runtime_generation(&self.options)? != job.spec.runtime
         {
             return Ok(Outcome::Conflict);
         }
+        if cancelled() {
+            return Ok(Outcome::Deferred);
+        }
         tx.execute("INSERT INTO native_query_ready VALUES(?1,?2,?3) ON CONFLICT(view_key) DO UPDATE SET job=excluded.job,metadata=excluded.metadata",params![job.spec.view_key,job.id,metadata]).map_err(io::Error::other)?;
-        tx.execute(
-            "UPDATE native_query_jobs SET phase='ready',revision=revision+1 WHERE job=?1",
-            [job.id],
-        )
-        .map_err(io::Error::other)?;
+        if tx.execute("UPDATE native_query_jobs SET phase='ready',revision=revision+1 WHERE job=?1 AND revision=?2 AND phase='finish'",params![job.id,job.revision]).map_err(io::Error::other)? != 1 {
+            return Ok(Outcome::Conflict);
+        }
         if cancelled() {
             return Ok(Outcome::Deferred);
         }
         tx.commit().map_err(io::Error::other)?;
-        Ok(Outcome::Written)
+        let mut advanced = job.clone();
+        advanced.phase = "ready".into();
+        advanced.revision += 1;
+        let checked = (|| -> io::Result<Outcome> {
+            if !completed(&self.connection, job.id).map_err(io::Error::other)?
+                || !job_current(&self.connection, &advanced).map_err(io::Error::other)?
+                || !self.runtime_current(&job.spec)?
+            {
+                return Ok(Outcome::Conflict);
+            }
+            if cancelled() {
+                return Ok(Outcome::Deferred);
+            }
+            Ok(Outcome::Written)
+        })();
+        if !matches!(&checked, Ok(Outcome::Written)) {
+            self.withdraw_qualification(&advanced, &metadata)?;
+        }
+        checked
     }
+
+    /// Withdraw only the pointer this attempt just published. A newer owner,
+    /// revision or qualification cannot be removed by an old post-I/O failure.
+    fn withdraw_qualification(&mut self, job: &Job, metadata: &str) -> io::Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        let removed=tx.execute("DELETE FROM native_query_ready WHERE view_key=?1 AND job=?2 AND metadata=?3 AND EXISTS(SELECT 1 FROM native_query_jobs WHERE job=?2 AND phase='ready' AND revision=?4)",params![job.spec.view_key,job.id,metadata,job.revision]).map_err(io::Error::other)?;
+        if removed != 0 {
+            tx.execute("UPDATE native_query_jobs SET phase='cleanup',revision=revision+1 WHERE job=?1 AND phase='ready' AND revision=?2",params![job.id,job.revision]).map_err(io::Error::other)?;
+        }
+        tx.commit().map_err(io::Error::other)
+    }
+
     pub(crate) fn ready(
         &self,
         view_key: &str,
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
     ) -> io::Result<Option<(Job, Value)>> {
+        self.ready_with_cancel(view_key, closure, &|| false)
+    }
+
+    pub(crate) fn ready_with_cancel(
+        &self,
+        view_key: &str,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<Option<(Job, Value)>> {
+        if cancelled() {
+            return Ok(None);
+        }
         let Some(job) = read_job(&self.connection, view_key).map_err(io::Error::other)? else {
             return Ok(None);
         };
         if job.phase != "ready" || !self.runtime_current(&job.spec)? {
             return Ok(None);
-        };
+        }
         let tx = self
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
-        if !job_current(&tx, &job).map_err(io::Error::other)? {
-            return Ok(None);
-        };
-        if !closure(&tx, job.id).map_err(io::Error::other)? {
+        if !job_current(&tx, &job).map_err(io::Error::other)?
+            || !closure(&tx, job.id).map_err(io::Error::other)?
+        {
             return Ok(None);
         }
-        let text: Option<String> = tx
-            .query_row(
-                "SELECT metadata FROM native_query_ready WHERE view_key=?1 AND job=?2",
-                params![view_key, job.id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(io::Error::other)?;
-        text.map(|text| {
-            serde_json::from_str(&text)
-                .map(|value| (job, value))
-                .map_err(io::Error::other)
-        })
-        .transpose()
+        let text:Option<Option<String>>=tx.query_row(
+            "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM native_query_ready WHERE view_key=?1 AND job=?2",
+            params![view_key,job.id],|row|row.get(0),
+        ).optional().map_err(io::Error::other)?;
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        let text =
+            text.ok_or_else(|| io::Error::other("native Ready metadata exceeds its stored width"))?;
+        let metadata: Value = serde_json::from_str(&text).map_err(io::Error::other)?;
+        if !closure(&tx, job.id).map_err(io::Error::other)?
+            || !job_current(&tx, &job).map_err(io::Error::other)?
+            || crate::native_evidence::query_runtime_generation(&self.options)? != job.spec.runtime
+            || cancelled()
+        {
+            return Ok(None);
+        }
+        tx.commit().map_err(io::Error::other)?;
+        if !closure(&self.connection, job.id).map_err(io::Error::other)?
+            || !job_current(&self.connection, &job).map_err(io::Error::other)?
+            || !self.runtime_current(&job.spec)?
+            || cancelled()
+        {
+            return Ok(None);
+        }
+        Ok(Some((job, metadata)))
     }
     pub(crate) fn cleanup(&mut self, job: &Job) -> io::Result<Outcome> {
         self.cleanup_with_work(job).map(|attempt| attempt.outcome)
@@ -1481,7 +1540,8 @@ fn cleanup_witnesses(
 }
 
 fn read_job(db: &Connection, key: &str) -> rusqlite::Result<Option<Job>> {
-    db.query_row("SELECT job,version,catalog_generation,runtime,phase,revision,cursor,state FROM native_query_jobs WHERE view_key=?1",[key],|r|{
+    db.query_row("SELECT job,version,CASE WHEN octet_length(catalog_generation)<=65536 THEN catalog_generation END,CASE WHEN octet_length(runtime)<=65536 THEN runtime END,CASE WHEN octet_length(phase)<=65536 THEN phase END,revision,CASE WHEN octet_length(cursor)<=65536 THEN cursor END,CASE WHEN octet_length(state)<=65536 THEN state END,(catalog_generation IS NULL OR octet_length(catalog_generation)<=65536) AND octet_length(runtime)<=65536 AND octet_length(phase)<=65536 AND octet_length(cursor)<=65536 AND octet_length(state)<=65536 FROM native_query_jobs WHERE view_key=?1",[key],|r|{
+        if !r.get::<_,bool>(8)? {return Err(rusqlite::Error::InvalidQuery);}
         let state:String=r.get(7)?;
         Ok(Job{id:r.get(0)?,spec:JobSpec{view_key:key.into(),version:r.get(1)?,catalog_generation:r.get(2)?,runtime:r.get(3)?},phase:r.get(4)?,revision:r.get(5)?,cursor:r.get(6)?,state:from_json(7,&state)?})
     }).optional()
@@ -3370,6 +3430,266 @@ mod tests {
                     .revision,
                 job.revision
             );
+        }
+    }
+
+    fn finish_fixture(retry: bool) -> (Fixture, Job) {
+        let (mut fixture, job) = rank_fixture(false);
+        assert_eq!(
+            fixture
+                .store
+                .checkpoint(&job, "finish", "finished", &Value::Null, &[], &|| false)
+                .unwrap(),
+            Outcome::Written
+        );
+        let job = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+        if retry {
+            assert_eq!(
+                fixture
+                    .store
+                    .qualify(
+                        &job,
+                        &serde_json::json!({"complete":true}),
+                        &|_, _| Ok(false),
+                        &|| false
+                    )
+                    .unwrap(),
+                Outcome::Conflict
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .reload(&job.spec.view_key)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                job.revision
+            );
+        }
+        (fixture, job)
+    }
+    fn ready_pointer_count(fixture: &Fixture) -> i64 {
+        fixture
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM native_query_ready", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+    #[test]
+    fn qualification_refuses_final_runtime_changes_and_withdraws_postcommit_pointer() {
+        for retry in [false, true] {
+            for callback in [1, 2] {
+                let (mut fixture, job) = finish_fixture(retry);
+                let runtime = fixture.options.claude_json.clone();
+                let calls = Cell::new(0);
+                let outcome = fixture
+                    .store
+                    .qualify(
+                        &job,
+                        &serde_json::json!({"complete":true}),
+                        &|_, _| {
+                            calls.set(calls.get() + 1);
+                            if calls.get() == callback {
+                                fs::write(&runtime, b"{\"runtime\":\"changed\"}").unwrap();
+                            }
+                            Ok(true)
+                        },
+                        &|| false,
+                    )
+                    .unwrap();
+                assert_eq!(outcome, Outcome::Conflict);
+                assert_eq!(calls.get(), callback);
+                assert_eq!(ready_pointer_count(&fixture), 0);
+                let after = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+                assert_eq!(
+                    after.phase,
+                    if callback == 1 { "finish" } else { "cleanup" }
+                );
+                assert_eq!(
+                    after.revision,
+                    job.revision + if callback == 1 { 0 } else { 2 }
+                );
+                assert!(
+                    fixture
+                        .store
+                        .ready(&job.spec.view_key, &|_, _| Ok(true))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+    #[test]
+    fn qualification_transient_cancellation_cannot_leave_a_ready_pointer() {
+        for retry in [false, true] {
+            for callback in [1, 2] {
+                let (mut fixture, job) = finish_fixture(retry);
+                let calls = Cell::new(0);
+                let transient = Cell::new(false);
+                let outcome = fixture
+                    .store
+                    .qualify(
+                        &job,
+                        &Value::Null,
+                        &|_, _| {
+                            calls.set(calls.get() + 1);
+                            if calls.get() == callback {
+                                transient.set(true);
+                            }
+                            Ok(true)
+                        },
+                        &|| transient.replace(false),
+                    )
+                    .unwrap();
+                assert_eq!(outcome, Outcome::Deferred);
+                assert_eq!(calls.get(), callback);
+                assert_eq!(ready_pointer_count(&fixture), 0);
+                let after = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
+                assert_eq!(
+                    after.revision,
+                    job.revision + if callback == 1 { 0 } else { 2 }
+                );
+            }
+        }
+    }
+    #[test]
+    fn qualification_full_closure_sees_a_new_wal_owner_after_snapshot_release() {
+        let (mut fixture, job) = finish_fixture(false);
+        let other = Connection::open(super::super::super::EventCache::path(
+            &fixture.options.cache,
+        ))
+        .unwrap();
+        let key = fixture.row.key.clone();
+        let mut related = fixture.row.clone();
+        related.key = "new-related".into();
+        related.parent = Some(key.clone());
+        let calls = Cell::new(0);
+        let outcome=fixture.store.qualify(&job,&Value::Null,&|db,_| {
+            calls.set(calls.get()+1);
+            if calls.get()==2 {
+                other.execute("INSERT INTO session_catalog(session_key,parent_key,last_ms,harness,metadata) VALUES(?1,?2,?3,?4,?5)",params![related.key,key,related.last.unwrap(),related.harness,json(&related).unwrap()])?;
+            }
+            db.query_row("SELECT NOT EXISTS(SELECT 1 FROM session_catalog WHERE parent_key=?1)",[&key],|row|row.get(0))
+        },&||false).unwrap();
+        assert_eq!(outcome, Outcome::Conflict);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(ready_pointer_count(&fixture), 0);
+        assert_eq!(
+            fixture
+                .store
+                .reload(&job.spec.view_key)
+                .unwrap()
+                .unwrap()
+                .phase,
+            "cleanup"
+        );
+    }
+    #[test]
+    fn ready_reads_fence_final_callbacks_and_guard_metadata_before_decode() {
+        for cached in [false, true] {
+            for callback in [2, 3] {
+                let (mut fixture, job) = finish_fixture(false);
+                fixture
+                    .store
+                    .qualify(
+                        &job,
+                        &serde_json::json!({"complete":true}),
+                        &|_, _| Ok(true),
+                        &|| false,
+                    )
+                    .unwrap();
+                if cached {
+                    assert!(
+                        fixture
+                            .store
+                            .ready(&job.spec.view_key, &|_, _| Ok(true))
+                            .unwrap()
+                            .is_some()
+                    );
+                }
+                let calls = Cell::new(0);
+                let runtime = fixture.options.claude_json.clone();
+                let value = fixture
+                    .store
+                    .ready(&job.spec.view_key, &|_, _| {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == callback {
+                            fs::write(&runtime, b"{\"runtime\":\"changed\"}").unwrap();
+                        }
+                        Ok(true)
+                    })
+                    .unwrap();
+                assert!(value.is_none());
+                assert_eq!(calls.get(), callback);
+            }
+        }
+        for column in ["runtime", "phase", "catalog_generation", "cursor", "state"] {
+            let (fixture, job) = finish_fixture(false);
+            fixture
+                .store
+                .connection
+                .execute(
+                    &format!("UPDATE native_query_jobs SET {column}=?2 WHERE job=?1"),
+                    params![job.id, "x".repeat(STATE_BYTES + 1)],
+                )
+                .unwrap();
+            assert!(
+                fixture.store.reload(&job.spec.view_key).is_err(),
+                "unguarded {column}"
+            );
+        }
+        let (mut fixture, job) = finish_fixture(false);
+        fixture
+            .store
+            .qualify(&job, &Value::Null, &|_, _| Ok(true), &|| false)
+            .unwrap();
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE native_query_ready SET metadata=?1",
+                ["x".repeat(STATE_BYTES + 1)],
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .ready(&job.spec.view_key, &|_, _| Ok(true))
+                .is_err()
+        );
+    }
+    #[test]
+    fn ready_reads_recheck_new_membership_after_release_and_latch_cancellation() {
+        for cancel in [false, true] {
+            let (mut fixture, job) = finish_fixture(false);
+            fixture
+                .store
+                .qualify(&job, &Value::Null, &|_, _| Ok(true), &|| false)
+                .unwrap();
+            let other = Connection::open(super::super::super::EventCache::path(
+                &fixture.options.cache,
+            ))
+            .unwrap();
+            let key = fixture.row.key.clone();
+            let mut related = fixture.row.clone();
+            related.key = "new-related".into();
+            related.parent = Some(key.clone());
+            let calls = Cell::new(0);
+            let transient = Cell::new(false);
+            let value=fixture.store.ready_with_cancel(&job.spec.view_key,&|db,_| {
+                calls.set(calls.get()+1);
+                if calls.get()==3 {
+                    if cancel {transient.set(true);}else {
+                        other.execute("INSERT INTO session_catalog(session_key,parent_key,last_ms,harness,metadata) VALUES(?1,?2,?3,?4,?5)",params![related.key,key,related.last.unwrap(),related.harness,json(&related).unwrap()])?;
+                    }
+                }
+                db.query_row("SELECT NOT EXISTS(SELECT 1 FROM session_catalog WHERE parent_key=?1)",[&key],|row|row.get(0))
+            },&||transient.replace(false)).unwrap();
+            assert!(value.is_none());
+            assert_eq!(calls.get(), 3);
+            assert!(!transient.get());
         }
     }
 
