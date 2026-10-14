@@ -226,13 +226,37 @@ mod tests {
             })
             .unwrap()
     }
-    fn database() -> Connection {
-        let mut db = Connection::open_in_memory().unwrap();
+    struct Database {
+        root: PathBuf,
+        db: Connection,
+    }
+    impl std::ops::Deref for Database {
+        type Target = Connection;
+        fn deref(&self) -> &Connection {
+            &self.db
+        }
+    }
+    impl Drop for Database {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+    fn database() -> Database {
+        let root = std::env::temp_dir().join(format!(
+            "semon-native-rank-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut db = Connection::open(root.join("index.sqlite3")).unwrap();
         assert!(matches!(
             super::super::init(&mut db).unwrap(),
             super::super::Init::Ready
         ));
-        db
+        Database { root, db }
     }
 
     #[test]
@@ -1155,6 +1179,13 @@ impl NativeStore {
             };
             if graph.get(&identity)?.is_some() {
                 return Err(failure("native rank Apply cursor already exists"));
+            }
+            // Import predecessor inputs in the same transaction as the
+            // cursor. Their former publication can retire before the next
+            // step; persisting IDs alone would not retain their node graph.
+            for root in [input.left, input.right, input.identity] {
+                graph.node(root)?;
+                graph.bind(root)?;
             }
             graph.put(&identity, &encoded(&state)?)
         })?;
