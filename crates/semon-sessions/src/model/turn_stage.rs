@@ -1,0 +1,368 @@
+//! The native turn-end reducer, shared by complete and paged producers.
+//! Only content-free observations survive a page boundary. Entries and sent
+//! handoffs remain in the producer's indexed output, not in reducer state.
+use super::{End, ToolState};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum Content {
+    Assistant,
+    Tool { state: ToolState },
+    Operation { state: ToolState },
+    Handoff { id: String, failed: bool },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToYou {
+    pub(crate) id: String,
+    pub(crate) waiting: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EndFacts {
+    has_handoff: bool,
+    has_assistant: bool,
+    last_content: Option<Content>,
+    last_to_you: Option<ToYou>,
+    completed_at: Option<i64>,
+}
+
+/// Group identity is independent of whether the group's eventual end emits a
+/// turn. A gap closes the current group; incoming entries always start one.
+/// Incoming-handoff deduplication belongs to the producer's indexed membership
+/// set, so this cursor never retains all handoff IDs or entry positions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GroupCursor {
+    current: Option<usize>,
+    next: usize,
+}
+
+impl GroupCursor {
+    pub(crate) fn push(&mut self, gap: bool, incoming: bool) -> Option<(usize, bool)> {
+        if gap {
+            self.current = None;
+            return None;
+        }
+        let starts = incoming || self.current.is_none();
+        if starts {
+            self.current = Some(self.next);
+            self.next += 1;
+        }
+        Some((self.current.expect("native group is open"), starts))
+    }
+}
+
+impl EndFacts {
+    pub(crate) fn push(
+        &mut self,
+        content: Option<Content>,
+        handoff: bool,
+        to_you: Option<ToYou>,
+        completed_at: Option<i64>,
+    ) {
+        self.has_handoff |= handoff;
+        if let Some(content) = content {
+            self.has_assistant |= matches!(content, Content::Assistant);
+            self.last_content = Some(content);
+        }
+        if to_you.is_some() {
+            self.last_to_you = to_you;
+        }
+        self.completed_at = self.completed_at.max(completed_at);
+    }
+
+    pub(crate) fn finish(
+        &self,
+        start: Option<(bool, bool)>,
+        user: bool,
+        last: bool,
+        waiting_for: Option<&str>,
+        state: &str,
+        live_yield: impl FnOnce() -> bool,
+    ) -> Option<End> {
+        if start.is_none() && !user && self.last_content.is_none() && !self.has_handoff {
+            return None;
+        }
+        let make = |st, why, h| {
+            Some(End {
+                at: if !matches!(st, "work" | "wait")
+                    && !matches!(why, "unfinished_step" | "no_reply")
+                {
+                    self.completed_at
+                } else {
+                    None
+                },
+                st,
+                why,
+                h,
+            })
+        };
+        if last && let Some(waiting_for) = waiting_for {
+            return make(
+                "wait",
+                if waiting_for == "permission prompt" {
+                    "permission"
+                } else {
+                    "input"
+                },
+                None,
+            );
+        }
+        if last && state == "work" {
+            return make("work", "working", None);
+        }
+        if let Some(to_you) = &self.last_to_you {
+            return make(
+                if to_you.waiting { "wait" } else { "done" },
+                "toyou",
+                Some(to_you.id.clone()),
+            );
+        }
+        if start.is_some_and(|(failed, _)| failed) {
+            return make("err", "failed", None);
+        }
+        match &self.last_content {
+            Some(
+                Content::Tool {
+                    state: ToolState::Err,
+                    ..
+                }
+                | Content::Operation {
+                    state: ToolState::Err,
+                },
+            ) => {
+                return make("err", "failed_step", None);
+            }
+            Some(Content::Tool {
+                state: ToolState::Pending,
+            }) if !live_yield() => {
+                return make("err", "unfinished_step", None);
+            }
+            Some(Content::Handoff { id, failed: true }) => {
+                return make("err", "handoff_failed", Some(id.clone()));
+            }
+            _ => {}
+        }
+        if start.is_some_and(|(_, returned)| returned) {
+            return make("done", "returned", None);
+        }
+        if self.has_assistant {
+            return make("done", "replied", None);
+        }
+        make("idle", "no_reply", None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_turn_end_survives_page_and_process_boundaries() {
+        let mut facts = EndFacts::default();
+        facts.push(Some(Content::Assistant), false, None, Some(20));
+        let mut facts: EndFacts =
+            serde_json::from_str(&serde_json::to_string(&facts).unwrap()).unwrap();
+        // An incoming handoff is not outgoing content, but still keeps an
+        // otherwise empty native group. An older reply time cannot undo the
+        // observed completion of an earlier member.
+        facts.push(None, true, None, None);
+        facts.push(
+            Some(Content::Tool {
+                state: ToolState::Unknown,
+            }),
+            false,
+            None,
+            Some(10),
+        );
+        assert_eq!(
+            facts.finish(None, true, false, None, "done", || false),
+            Some(End {
+                at: Some(20),
+                st: "done",
+                why: "replied",
+                h: None,
+            })
+        );
+        assert_eq!(
+            facts.finish(None, true, true, Some("permission prompt"), "work", || {
+                false
+            }),
+            Some(End {
+                at: None,
+                st: "wait",
+                why: "permission",
+                h: None,
+            })
+        );
+    }
+
+    #[test]
+    fn native_turn_end_keeps_handoff_and_pending_priorities() {
+        let mut facts = EndFacts::default();
+        assert!(
+            facts
+                .finish(None, false, true, None, "work", || false)
+                .is_none()
+        );
+        facts.push(None, true, None, None);
+        assert_eq!(
+            facts
+                .finish(None, false, false, None, "done", || false)
+                .unwrap()
+                .why,
+            "no_reply"
+        );
+        facts.push(
+            Some(Content::Tool {
+                state: ToolState::Pending,
+            }),
+            false,
+            None,
+            Some(8),
+        );
+        assert_eq!(
+            facts.finish(Some((false, true)), false, false, None, "done", || false),
+            Some(End {
+                at: None,
+                st: "err",
+                why: "unfinished_step",
+                h: None,
+            })
+        );
+        facts.push(
+            Some(Content::Tool {
+                state: ToolState::Pending,
+            }),
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            facts
+                .finish(Some((false, true)), false, false, None, "work", || true)
+                .unwrap()
+                .why,
+            "returned"
+        );
+        facts.push(
+            Some(Content::Handoff {
+                id: "toyou".into(),
+                failed: true,
+            }),
+            true,
+            Some(ToYou {
+                id: "toyou".into(),
+                waiting: false,
+            }),
+            None,
+        );
+        assert_eq!(
+            facts.finish(Some((true, false)), false, false, None, "done", || false),
+            Some(End {
+                at: Some(8),
+                st: "done",
+                why: "toyou",
+                h: Some("toyou".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn native_turn_end_residency_stays_fixed_with_long_turns() {
+        for count in [0, 128, 1024, 8192] {
+            let mut facts = EndFacts::default();
+            for _ in 0..count {
+                facts.push(Some(Content::Assistant), false, None, Some(3));
+            }
+            facts.push(Some(Content::Assistant), false, None, Some(4));
+            let encoded = serde_json::to_string(&facts).unwrap();
+            assert!(encoded.len() < 256, "turn reducer retained its members");
+            assert_eq!(
+                facts.finish(None, true, false, None, "done", || false),
+                Some(End {
+                    at: Some(4),
+                    st: "done",
+                    why: "replied",
+                    h: None,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn native_group_cursor_preserves_gaps_and_unemitted_group_order() {
+        let mut cursor = GroupCursor::default();
+        assert_eq!(cursor.push(false, false), Some((0, true)));
+        for _ in 0..8192 {
+            assert_eq!(cursor.push(false, false), Some((0, false)));
+        }
+        let mut cursor: GroupCursor =
+            serde_json::from_str(&serde_json::to_string(&cursor).unwrap()).unwrap();
+        assert_eq!(cursor.push(true, false), None);
+        assert_eq!(cursor.push(true, false), None);
+        assert_eq!(cursor.push(false, false), Some((1, true)));
+        assert_eq!(cursor.push(false, true), Some((2, true)));
+        assert_eq!(cursor.push(false, false), Some((2, false)));
+        assert!(serde_json::to_string(&cursor).unwrap().len() < 64);
+    }
+
+    #[test]
+    fn native_turn_end_resolves_only_the_needed_final_yield() {
+        let mut facts = EndFacts::default();
+        facts.push(
+            Some(Content::Tool {
+                state: ToolState::Pending,
+            }),
+            false,
+            None,
+            None,
+        );
+        let not_needed = || panic!("native yield observation crossed end precedence");
+        assert_eq!(
+            facts
+                .finish(None, true, true, Some("input needed"), "work", not_needed)
+                .unwrap()
+                .why,
+            "input"
+        );
+        assert_eq!(
+            facts
+                .finish(None, true, true, None, "work", not_needed)
+                .unwrap()
+                .why,
+            "working"
+        );
+        assert_eq!(
+            facts
+                .finish(Some((true, false)), true, false, None, "done", not_needed)
+                .unwrap()
+                .why,
+            "failed"
+        );
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            facts
+                .finish(None, true, false, None, "done", || {
+                    calls.set(calls.get() + 1);
+                    false
+                })
+                .unwrap()
+                .why,
+            "unfinished_step"
+        );
+        assert_eq!(calls.get(), 1);
+        facts.push(Some(Content::Assistant), false, None, Some(8));
+        assert_eq!(
+            facts
+                .finish(None, true, false, None, "done", not_needed)
+                .unwrap()
+                .why,
+            "replied"
+        );
+    }
+}
