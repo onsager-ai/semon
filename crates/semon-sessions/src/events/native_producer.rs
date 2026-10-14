@@ -6,7 +6,8 @@
 //! requires a complete source index. Point reads return one metadata event;
 //! turn closure visits at most 64 pending calls per resumable step.
 
-use super::{Event, FileIndex, Kind, Reply, UNKNOWN};
+use super::{Event, FileIndex, Kind, POLLS_MAX, Reply, STDIN, UNKNOWN, YIELDS_MAX};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 pub(crate) const CLOSE_PAGE: usize = 64;
@@ -35,6 +36,117 @@ pub(crate) trait ToolStore {
     /// Exactly one open code-mode pending call, otherwise None. Indexed
     /// implementations need at most two matching rows to establish ambiguity.
     fn unique_open_code_mode(&self) -> Result<Option<usize>, Self::Error>;
+}
+
+/// Native yields already have a fixed 64-session bound, with session IDs at
+/// most 64 bytes. Durable adapters may retain this scalar native state; event
+/// payloads and completed operation history remain point/indexed reads.
+pub(crate) trait YieldStore: ToolStore {
+    fn yields(&self) -> &BTreeMap<String, usize>;
+    fn yields_mut(&mut self) -> &mut BTreeMap<String, usize>;
+    fn operation_after(&self, parent: usize, offset: u64) -> Result<bool, Self::Error>;
+}
+
+pub(crate) fn fold_yield<S: YieldStore>(
+    store: &mut S,
+    index: usize,
+    session: Option<String>,
+    offset: u64,
+) -> Result<(), S::Error> {
+    let Some(mut event) = store.event(index)? else {
+        return Ok(());
+    };
+    let (call_offset, flags, linked) = (event.o, event.script, event.poll);
+    let failed = event.r.as_ref().is_some_and(|reply| reply.e);
+    let operations = store.operation_after(index, call_offset)?;
+    let known = session
+        .as_ref()
+        .filter(|_| flags & STDIN != 0)
+        .and_then(|session| store.yields().get(session).copied())
+        .filter(|start| *start < index);
+    if operations || failed {
+        event.poll = None;
+        store.replace_event(index, event)?;
+        if let Some(start) = known {
+            push_poll(store, start, offset)?;
+        }
+        return Ok(());
+    }
+    let ended_here = if let Some(start) = linked {
+        store
+            .event(start)?
+            .and_then(|found| found.y)
+            .and_then(|yielded| yielded.done)
+            .filter(|done| done.o > call_offset)
+            .map(|_| start)
+    } else {
+        None
+    };
+    let start = match session {
+        None => ended_here,
+        Some(_) if known.is_some() => known,
+        Some(_) if ended_here.is_some() => ended_here,
+        Some(session) => {
+            if store.yields().len() >= YIELDS_MAX
+                && !store.yields().contains_key(&session)
+                && let Some(oldest) = store
+                    .yields()
+                    .iter()
+                    .min_by_key(|(_, start)| **start)
+                    .map(|(session, _)| session.clone())
+            {
+                store.yields_mut().remove(&oldest);
+            }
+            store.yields_mut().insert(session, index);
+            event.poll = None;
+            event.y = Some(Box::default());
+            store.replace_event(index, event)?;
+            return Ok(());
+        }
+    };
+    let Some(start) = start.filter(|start| *start < index) else {
+        event.poll = None;
+        store.replace_event(index, event)?;
+        return Ok(());
+    };
+    event.poll = Some(start);
+    store.replace_event(index, event)?;
+    push_poll(store, start, offset)
+}
+
+pub(crate) fn push_poll<S: ToolStore>(
+    store: &mut S,
+    start: usize,
+    offset: u64,
+) -> Result<(), S::Error> {
+    if let Some(mut event) = store.event(start)?
+        && let Some(yielded) = event.y.as_mut()
+    {
+        if yielded.polls.len() < POLLS_MAX {
+            yielded.polls.push(offset);
+        } else {
+            yielded.cut = true;
+        }
+        store.replace_event(start, event)?;
+    }
+    Ok(())
+}
+
+impl YieldStore for FileIndex {
+    fn yields(&self) -> &BTreeMap<String, usize> {
+        &self.yields
+    }
+    fn yields_mut(&mut self) -> &mut BTreeMap<String, usize> {
+        &mut self.yields
+    }
+    fn operation_after(&self, parent: usize, offset: u64) -> Result<bool, Infallible> {
+        Ok(self
+            .extras
+            .iter()
+            .rev()
+            .take_while(|extra| extra.o > offset)
+            .any(|extra| extra.k == Kind::Operation && extra.parent == Some(parent)))
+    }
 }
 
 pub(crate) fn resolve<S: ToolStore>(
@@ -281,6 +393,54 @@ mod tests {
             let reply = source.events[0].r.as_ref().unwrap();
             assert_eq!(reply.e, padding == 511);
             assert_eq!(reply.f & UNKNOWN == 0, padding == 511);
+        }
+    }
+
+    #[test]
+    fn operation_and_failed_poll_keep_native_output_links() {
+        for failed in [false, true] {
+            let mut source = FileIndex::default();
+            complete(tool_event(
+                &mut source,
+                Event {
+                    k: Kind::Tool,
+                    o: 10,
+                    id: Some("start".into()),
+                    code_mode: true,
+                    code_mode_open: true,
+                    r: Some(Reply::default()),
+                    ..Event::default()
+                },
+            ));
+            complete(fold_yield(&mut source, 0, Some("123".into()), 20));
+            complete(tool_event(
+                &mut source,
+                Event {
+                    k: Kind::Tool,
+                    o: 30,
+                    id: Some("poll".into()),
+                    code_mode: true,
+                    code_mode_open: true,
+                    script: STDIN,
+                    r: Some(Reply {
+                        e: failed,
+                        ..Reply::default()
+                    }),
+                    ..Event::default()
+                },
+            ));
+            if !failed {
+                source.extras.push(Event {
+                    k: Kind::Operation,
+                    o: 40,
+                    parent: Some(1),
+                    ..Event::default()
+                });
+            }
+            complete(fold_yield(&mut source, 1, Some("123".into()), 50));
+            assert_eq!(source.events[1].poll, None);
+            assert_eq!(source.events[0].y.as_ref().unwrap().polls, vec![50]);
+            assert_eq!(source.yields.get("123"), Some(&0));
         }
     }
 
