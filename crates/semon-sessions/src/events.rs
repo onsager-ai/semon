@@ -4097,16 +4097,15 @@ fn number(value: &Value, key: &str) -> u64 {
 pub(crate) fn claude(summary: &mut FileIndex, record: &Value, offset: u64) {
     claude_events(summary, record, offset);
     if let Some(uuid) = field(record, "uuid") {
-        let indices: Vec<_> = summary
-            .events
-            .iter()
-            .enumerate()
-            .rev()
-            .take_while(|(_, event)| event.o == offset)
-            .map(|(index, _)| index)
-            .collect();
-        for index in indices {
-            summary.event_mut(index).expect("event exists").u = Some(uuid.to_owned());
+        let identity = uuid.to_owned();
+        let mut before = None;
+        loop {
+            match native_producer::complete(native_harness::claude_record_identity_step(
+                summary, offset, &identity, before,
+            )) {
+                native_harness::RecordIdentity::Progress(sequence) => before = Some(sequence),
+                native_harness::RecordIdentity::Complete => break,
+            }
         }
     }
 }

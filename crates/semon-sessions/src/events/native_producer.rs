@@ -389,7 +389,12 @@ pub(super) fn close_complete(source: &mut FileIndex) {
     // once for every page of pending calls.
     let pending: Vec<_> = source.pending.values().copied().collect();
     for page in pending.chunks(CLOSE_PAGE) {
-        complete(close_code_mode_page(source, page));
+        let mut after = 0;
+        while after < page.len() {
+            after = complete(super::native_harness::codex_boundary_step(
+                source, page, after,
+            ));
+        }
     }
 }
 

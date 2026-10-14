@@ -278,6 +278,57 @@ mod tests {
     use crate::events::native_producer;
 
     #[test]
+    fn native_turn_boundary_closes_full_64_call_window_in_bounded_substeps() {
+        use crate::events::native_harness::{CLOSE_STEP, codex_boundary_step};
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let original = [11; 32];
+        let mut pending = Vec::new();
+        for class in 0..native_producer::CLOSE_PAGE {
+            let tx = db.transaction().unwrap();
+            let mut events = Events::new(&tx, original).unwrap();
+            let sequence = events.event_count().unwrap();
+            native_producer::tool_event(
+                &mut events,
+                NativeEvent {
+                    k: Kind::Tool,
+                    id: Some(Text {
+                        class: class as u64,
+                    }),
+                    code_mode: true,
+                    code_mode_open: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            pending.push(sequence);
+            tx.commit().unwrap();
+        }
+        let mut after = 0;
+        while after < pending.len() {
+            let tx = db.transaction().unwrap();
+            let mut events = Events::new(&tx, original).unwrap();
+            let next = codex_boundary_step(&mut events, &pending, after).unwrap();
+            assert!(next - after <= CLOSE_STEP);
+            assert!(events.work().metadata_rows <= 37);
+            assert!(events.work().metadata_bytes < 16384);
+            tx.commit().unwrap();
+            // The subrecord address survives connection replacement. Pending
+            // attribution remains intact until a later native result resolves it.
+            after = next;
+        }
+        let mut events = Events::new(&db, original).unwrap();
+        for class in 0..native_producer::CLOSE_PAGE {
+            let event = events.event(class).unwrap().unwrap();
+            assert!(!event.code_mode_open);
+            assert!(event.r.is_none());
+            assert_eq!(events.pending(&(class as u64)).unwrap(), Some(class));
+            // Reinstantiate accounting between point observations.
+            events = Events::new(&db, original).unwrap();
+        }
+    }
+
+    #[test]
     fn copilot_ambiguity_reset_is_indexed_resumable_and_matches_native_reference() {
         use crate::events::native_harness::{
             Reset, copilot_completion_target, copilot_reset_reply_step,
