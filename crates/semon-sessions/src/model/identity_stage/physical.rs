@@ -96,7 +96,7 @@ fn root(parents: &mut HashMap<String, String>, key: &str) -> String {
 /// strings can exceed a page; this API never materializes those strings.
 pub(crate) fn select<E>(
     sources: &[PhysicalSource],
-    mut adjacent: impl FnMut(ProfileRoot, ProfileRoot) -> Result<bool, E>,
+    edges: impl IntoIterator<Item = (ProfileRoot, ProfileRoot)>,
     mut minimum_order: impl FnMut(ProfileRoot, ProfileRoot) -> Result<std::cmp::Ordering, E>,
 ) -> Result<PhysicalSelection, E> {
     let mut order: Vec<_> = (0..sources.len()).collect();
@@ -107,15 +107,14 @@ pub(crate) fn select<E>(
         .filter(|i| sources[*i].role == PhysicalRole::Top)
         .collect();
     let mut parents = HashMap::new();
-    for (position, &a) in top.iter().enumerate() {
-        for &b in &top[..position] {
-            if adjacent(sources[a].profile, sources[b].profile)? {
-                let a = root(&mut parents, &sources[a].native_id);
-                let b = root(&mut parents, &sources[b].native_id);
-                if a != b {
-                    let (low, high) = if a < b { (a, b) } else { (b, a) };
-                    parents.insert(high, low);
-                }
+    let admitted: BTreeMap<_, _> = top.iter().map(|i| (sources[*i].profile, *i)).collect();
+    for (a, b) in edges {
+        if let (Some(&a), Some(&b)) = (admitted.get(&a), admitted.get(&b)) {
+            let a = root(&mut parents, &sources[a].native_id);
+            let b = root(&mut parents, &sources[b].native_id);
+            if a != b {
+                let (low, high) = if a < b { (a, b) } else { (b, a) };
+                parents.insert(high, low);
             }
         }
     }
@@ -142,18 +141,22 @@ pub(crate) fn select<E>(
                 &b.native_id,
             ))
         });
-        // Fallible insertion sort preserves native minimum-raw component order
-        // without collecting raw atoms or concealing comparison errors.
-        let mut position = lineages.len();
-        for (i, (other, _)) in lineages.iter().enumerate() {
-            if minimum_order(minimum, *other)?.is_lt() {
-                position = i;
-                break;
-            }
-        }
-        lineages.insert(position, (minimum, group));
+        lineages.push((minimum, group));
     }
-    let mut groups: Vec<Vec<usize>> = lineages.into_iter().map(|(_, group)| group).collect();
+    let mut lineage_order: Vec<_> = (0..lineages.len()).collect();
+    fallible_sort(&mut lineage_order, &mut |a, b| {
+        minimum_order(lineages[*a].0, lineages[*b].0)
+    })?;
+    let mut lineages: Vec<_> = lineages.into_iter().map(Some).collect();
+    let mut groups: Vec<Vec<usize>> = lineage_order
+        .into_iter()
+        .map(|i| {
+            lineages[i]
+                .take()
+                .expect("unique native lineage permutation")
+                .1
+        })
+        .collect();
     groups.extend(
         order
             .into_iter()
@@ -201,6 +204,34 @@ pub(crate) fn select<E>(
         components,
         aliases,
     })
+}
+
+fn fallible_sort<T: Clone, E>(
+    values: &mut [T],
+    compare: &mut impl FnMut(&T, &T) -> Result<std::cmp::Ordering, E>,
+) -> Result<(), E> {
+    if values.len() < 2 {
+        return Ok(());
+    }
+    let midpoint = values.len() / 2;
+    let (left, right) = values.split_at_mut(midpoint);
+    fallible_sort(left, compare)?;
+    fallible_sort(right, compare)?;
+    let (mut a, mut b) = (0, midpoint);
+    let mut merged = Vec::with_capacity(values.len());
+    while a < midpoint && b < values.len() {
+        if compare(&values[a], &values[b])?.is_gt() {
+            merged.push(values[b].clone());
+            b += 1;
+        } else {
+            merged.push(values[a].clone());
+            a += 1;
+        }
+    }
+    merged.extend_from_slice(&values[a..midpoint]);
+    merged.extend_from_slice(&values[b..]);
+    values.clone_from_slice(&merged);
+    Ok(())
 }
 
 /// Exactly the complete history scanner's skipped-Top filename rule.
@@ -290,11 +321,17 @@ mod tests {
         let index = |root: ProfileRoot| {
             usize::try_from(u64::from_be_bytes(root.0[..8].try_into().unwrap())).unwrap()
         };
-        let selected = select::<std::convert::Infallible>(
-            &sources,
-            |a, b| Ok(!stars[index(a)].is_disjoint(&stars[index(b)])),
-            |a, b| Ok(stars[index(a)].first().cmp(&stars[index(b)].first())),
-        )
+        let mut edges = Vec::new();
+        for a in 0..sources.len() {
+            for b in 0..a {
+                if !stars[a].is_disjoint(&stars[b]) {
+                    edges.push((sources[a].profile, sources[b].profile));
+                }
+            }
+        }
+        let selected = select::<std::convert::Infallible>(&sources, edges, |a, b| {
+            Ok(stars[index(a)].first().cmp(&stars[index(b)].first()))
+        })
         .unwrap();
         let options = crate::Options::default();
         let source = crate::query_source::Sources::capture(&options, std::iter::empty()).unwrap();
@@ -428,6 +465,37 @@ mod tests {
                 &BTreeSet::from(["tail".into()]),
             );
         }
+    }
+
+    #[test]
+    fn sparse_selection_orders_8192_sources_without_all_pairs() {
+        let count = 8192usize;
+        let sources: Vec<_> = (0..count)
+            .rev()
+            .map(|i| {
+                let id = format!("native-{i:05}");
+                let mut root = [0u8; 32];
+                root[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                PhysicalSource {
+                    profile: ProfileRoot(root),
+                    native_id: id.clone(),
+                    role: PhysicalRole::Top,
+                    scan_order: NativeScanOrder::new(PhysicalRole::Top, Path::new(&id)),
+                    first: None,
+                    continued_empty: true,
+                    turns_truncated: false,
+                }
+            })
+            .collect();
+        let mut comparisons = 0usize;
+        let selection = select::<std::convert::Infallible>(&sources, std::iter::empty(), |a, b| {
+            comparisons += 1;
+            Ok(a.cmp(&b))
+        })
+        .unwrap();
+        assert_eq!(selection.components.len(), count);
+        assert_eq!(selection.components[0].key, "native-00000");
+        assert!(comparisons <= count * 13);
     }
 
     #[test]
