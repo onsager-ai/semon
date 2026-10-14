@@ -15,8 +15,21 @@ fn seq(value: usize) -> io::Result<i64> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Text {
+pub(crate) struct Text {
+    original: [u8; 32],
     class: u64,
+}
+impl Text {
+    // Only the exact native comparison owner may create production text.
+    pub(super) fn qualified(original: [u8; 32], class: u64) -> Self {
+        Self { original, class }
+    }
+    pub(crate) fn original(&self) -> [u8; 32] {
+        self.original
+    }
+    pub(crate) fn identity(&self) -> u64 {
+        self.class
+    }
 }
 impl Borrow<u64> for Text {
     fn borrow(&self) -> &u64 {
@@ -74,6 +87,19 @@ impl<'a> Events<'a> {
             .transpose()
             .map_err(io::Error::other)
     }
+    fn qualified_event(&self, event: &NativeEvent<Text>) -> io::Result<()> {
+        if event
+            .text_refs()
+            .into_iter()
+            .flatten()
+            .any(|text| text.original != self.original)
+        {
+            return Err(io::Error::other(
+                "native text identity belongs to a different Original",
+            ));
+        }
+        Ok(())
+    }
 }
 impl ToolStore for Events<'_> {
     type Error = io::Error;
@@ -109,6 +135,7 @@ impl ToolStore for Events<'_> {
         .transpose()
     }
     fn replace_event(&mut self, sequence: usize, event: NativeEvent<Text>) -> io::Result<()> {
+        self.qualified_event(&event)?;
         let text = bounded_json(&event, STATE_BYTES).map_err(io::Error::other)?;
         self.account(2, text.len() + 32)?;
         self.db.execute("UPDATE native_original_events SET is_tool=?3,identity=?4,code_mode=?5,code_mode_open=?6,metadata=?7 WHERE original=?1 AND sequence=?2",params![self.original.as_slice(),seq(sequence)?,event.k==Kind::Tool,event.id.as_ref().map(|id|seq_u64(id.class)).transpose()?,event.code_mode,event.code_mode_open,text]).map_err(io::Error::other)?;
@@ -120,6 +147,7 @@ impl ToolStore for Events<'_> {
         Ok(())
     }
     fn append_event(&mut self, event: NativeEvent<Text>) -> io::Result<usize> {
+        self.qualified_event(&event)?;
         let sequence = self.event_count()?;
         let next = sequence
             .checked_add(1)
@@ -237,7 +265,7 @@ mod tests {
         db.execute_batch(SCHEMA).unwrap();
         let original = [7; 32];
         let mut events = Events::new(&db, original).unwrap();
-        let id = Text { class: 1 };
+        let id = Text::qualified(original, 1);
         native_producer::tool_event(
             &mut events,
             NativeEvent {

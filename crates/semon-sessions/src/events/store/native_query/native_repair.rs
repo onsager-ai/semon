@@ -13,7 +13,11 @@ use crate::json_string::native_record::{
     Container, Cursor as RecordCursor, Literal, Location, Span, Token,
 };
 
+mod native_classes;
 mod native_events;
+pub(crate) use native_classes::IdentityStep;
+pub(crate) use native_classes::Representative as OriginalTextRepresentative;
+pub(crate) use native_events::Text as OriginalText;
 
 pub(crate) const REPAIR_FORMAT: u32 = 2;
 // The pre-format namespace was published with parser 24. Its key must stay
@@ -21,6 +25,18 @@ pub(crate) const REPAIR_FORMAT: u32 = 2;
 const PREVIOUS_REPAIR_PARSER: u32 = 24;
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_original_classes (
+ original BLOB NOT NULL, class INTEGER NOT NULL, record_offset INTEGER NOT NULL,
+ ordinal INTEGER NOT NULL, digest BLOB NOT NULL, decoded_bytes INTEGER NOT NULL,
+ PRIMARY KEY(original,class)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_original_class_candidates
+ ON native_original_classes(original,digest,decoded_bytes,class DESC);
+CREATE TABLE IF NOT EXISTS native_original_identities (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset,ordinal)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_event_state (
  original BLOB PRIMARY KEY, event_count INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -2344,6 +2360,99 @@ mod tests {
         job: Job,
     }
     impl Fixture {
+        fn qualified_record(&mut self) -> Repair {
+            let mut repair = self
+                .store
+                .begin_original_repair(&self.job, &self.source, &self.sources.reader(), &|| false)
+                .unwrap()
+                .unwrap();
+            while repair.cursor.phase != Phase::FoldRecord {
+                self.store
+                    .original_lex_step(
+                        &self.job,
+                        &self.source,
+                        &repair,
+                        &self.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                self.store = NativeStore::open(&self.options).unwrap();
+                repair = self
+                    .store
+                    .reload_original_repair(&self.job, &self.source, &self.sources.reader())
+                    .unwrap()
+                    .unwrap();
+            }
+            loop {
+                let step = self
+                    .store
+                    .original_fields_step(
+                        &self.job,
+                        &self.source,
+                        &repair,
+                        &self.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                self.store = NativeStore::open(&self.options).unwrap();
+                repair = self
+                    .store
+                    .reload_original_repair(&self.job, &self.source, &self.sources.reader())
+                    .unwrap()
+                    .unwrap();
+                if step.outcome == Outcome::Written {
+                    return repair;
+                }
+            }
+        }
+        fn member(&mut self, repair: &Repair, name: &str) -> OriginalNode {
+            let root = self
+                .store
+                .original_root(&self.job, &self.source, repair)
+                .unwrap()
+                .unwrap();
+            loop {
+                let step = self
+                    .store
+                    .original_member_step(
+                        &self.job,
+                        &self.source,
+                        repair,
+                        root.address,
+                        name,
+                        &self.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                if step.complete {
+                    return step.node.unwrap();
+                }
+                self.store = NativeStore::open(&self.options).unwrap();
+            }
+        }
+        fn identity(&mut self, repair: &Repair, ordinal: u64) -> OriginalText {
+            loop {
+                let step = self
+                    .store
+                    .original_identity_step(
+                        &self.job,
+                        &self.source,
+                        repair,
+                        ordinal,
+                        &self.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.metadata_rows <= ROWS);
+                assert!(step.work.metadata_bytes <= BYTES);
+                assert!(step.work.range_requests <= 2);
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                if let Some(text) = step.text {
+                    return text;
+                }
+                self.store = NativeStore::open(&self.options).unwrap();
+            }
+        }
         fn new(bytes: &[u8]) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "semon-original-repair-{}-{}",
@@ -2453,6 +2562,98 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn exact_original_classes_match_independent_native_strings_and_refuse_hash_collisions() {
+        for size in [0, 128, 1024, 8192, 100_000] {
+            let prefix = "α".repeat(size + 1);
+            let first = format!("{prefix}a");
+            let different = format!("{prefix}b");
+            let encoded = serde_json::to_string(&first).unwrap();
+            let escaped = encoded.replace('α', "\\u03b1");
+            let bytes = format!(
+                "{{\"a\":{encoded},\"b\":{escaped},\"c\":{}}}\n",
+                serde_json::to_string(&different).unwrap()
+            );
+            let oracle: Value = serde_json::from_str(&bytes).unwrap();
+            assert!(oracle["a"] == oracle["b"]);
+            assert!(oracle["a"] != oracle["c"]);
+            let mut fixture = Fixture::new(bytes.as_bytes());
+            let reads = super::super::super::super::FILE_READS.with(Cell::get);
+            let repair = fixture.qualified_record();
+            let a = fixture.member(&repair, "a");
+            let b = fixture.member(&repair, "b");
+            let c = fixture.member(&repair, "c");
+            let calls = Cell::new(0);
+            let cancelled = || {
+                calls.set(calls.get() + 1);
+                calls.get() == 3
+            };
+            let cancelled_step = fixture
+                .store
+                .original_identity_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    a.ordinal,
+                    &fixture.sources.reader(),
+                    &cancelled,
+                )
+                .unwrap();
+            assert_eq!(cancelled_step.outcome, Outcome::Deferred);
+            assert!(cancelled_step.text.is_none());
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                0
+            );
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            let first = fixture.identity(&repair, a.ordinal);
+            let second = fixture.identity(&repair, b.ordinal);
+            assert_eq!(first, second);
+            assert_eq!(first.original(), repair.original);
+            // Force the indexed candidate filter to report a collision. Only
+            // complete retained byte comparison may decide semantic equality.
+            let (sha256,length):(Vec<u8>,i64)=fixture.store.connection.query_row("SELECT digest,decoded_bytes FROM native_original_fields WHERE original=?1 AND record_offset=0 AND ordinal=?2",params![repair.original.as_slice(),c.ordinal as i64],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+            fixture.store.connection.execute("UPDATE native_original_classes SET digest=?3,decoded_bytes=?4 WHERE original=?1 AND class=?2",params![repair.original.as_slice(),first.identity() as i64,sha256,length]).unwrap();
+            let third = fixture.identity(&repair, c.ordinal);
+            assert_ne!(first, third);
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row("SELECT count(*) FROM native_original_classes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                2
+            );
+            let cached = fixture
+                .store
+                .original_identity_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    b.ordinal,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(cached.text, Some(second));
+            assert_eq!(cached.work.range_requests, 1);
+            assert_eq!(cached.work.native_bytes, 1);
+            assert!(serde_json::to_vec(&third).unwrap().len() < 256);
+            assert_eq!(
+                super::super::super::super::FILE_READS.with(Cell::get),
+                reads
+            );
         }
     }
 
