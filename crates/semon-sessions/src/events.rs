@@ -3667,75 +3667,24 @@ fn ident_char(c: char) -> bool {
 /// unescaped, or `None` for a template with `${…}`; and where it ends. An
 /// unterminated literal ends at the end of `text`.
 fn read_literal(text: &str, start: usize) -> (Option<String>, usize) {
-    let mut chars = text[start..].char_indices();
-    let Some((_, quote)) = chars.next() else {
+    use crate::json_string::native_js::{Cursor, Quote};
+    let Some(quote) = text[start..].chars().next().and_then(Quote::of) else {
         return (None, text.len());
     };
+    let mut cursor = Cursor::new(quote);
+    let mut at = start + 1;
     let mut value = String::new();
-    let mut plain = true;
-    // Hex digits only: `from_str_radix` would also take a leading `+`.
-    let hex = |digits: &str| {
-        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
+    while at < text.len() {
+        let step = cursor
+            .step(&text[at..], true, 32 * 1024)
+            .expect("native literal budget");
+        at += step.consumed;
+        value.push_str(&step.output);
+        if cursor.complete {
+            return (cursor.plain.then_some(value), at);
         }
-        u32::from_str_radix(digits, 16).ok()
-    };
-    while let Some((at, c)) = chars.next() {
-        match c {
-            _ if c == quote => return (plain.then_some(value), start + at + c.len_utf8()),
-            '$' if quote == '`' && text[start + at..].starts_with("${") => plain = false,
-            '\\' => {
-                let Some((_, escaped)) = chars.next() else {
-                    break;
-                };
-                let rest = chars.as_str();
-                let code = match escaped {
-                    'n' => Some('\n'),
-                    't' => Some('\t'),
-                    'r' => Some('\r'),
-                    'b' => Some('\u{8}'),
-                    'f' => Some('\u{c}'),
-                    'v' => Some('\u{b}'),
-                    '0' => Some('\0'),
-                    '\n' => None,
-                    'x' => {
-                        let code = rest.get(..2).and_then(hex).and_then(char::from_u32);
-                        if code.is_some() {
-                            chars.nth(1);
-                        }
-                        code.or(Some('x'))
-                    }
-                    'u' if rest.starts_with('{') => {
-                        // `{`, at most six digits and `}`: never a scan
-                        // of the rest of the script.
-                        let close = rest
-                            .char_indices()
-                            .take(8)
-                            .find(|(_, c)| *c == '}')
-                            .map(|(close, _)| close);
-                        let code = close
-                            .and_then(|close| hex(&rest[1..close]))
-                            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'));
-                        if let (Some(close), Some(_)) = (close, code) {
-                            chars.nth(close);
-                        }
-                        code.or(Some('u'))
-                    }
-                    'u' => {
-                        let code = rest
-                            .get(..4)
-                            .and_then(hex)
-                            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'));
-                        if code.is_some() {
-                            chars.nth(3);
-                        }
-                        code.or(Some('u'))
-                    }
-                    other => Some(other),
-                };
-                value.extend(code);
-            }
-            _ => value.push(c),
+        if step.consumed == 0 {
+            break;
         }
     }
     (None, text.len())

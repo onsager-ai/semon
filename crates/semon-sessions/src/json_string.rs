@@ -7,6 +7,7 @@
 //! verified checkpoint or a prior chunk's cursor. A raw offset is not authority
 //! or proof of a scalar boundary. No prefix or complete record is needed here.
 pub(crate) mod native_identity;
+pub(crate) mod native_js;
 pub(crate) mod native_number;
 pub(crate) mod native_record;
 pub(crate) mod native_scan;
@@ -231,7 +232,14 @@ pub fn decode_json_string_layered_chunk(
     })
 }
 
-fn layered_scalar(bytes: &[u8], layers: u8, at_end: bool) -> io::Result<Option<(char, usize)>> {
+pub(crate) fn layered_scalar(
+    bytes: &[u8],
+    layers: u8,
+    at_end: bool,
+) -> io::Result<Option<(char, usize)>> {
+    if !matches!(layers, 1 | 2) {
+        return Err(invalid());
+    }
     if layers == 1 {
         return scalar(bytes, at_end);
     }
