@@ -22,7 +22,7 @@ pub(crate) struct Location {
     pub(crate) key: Option<Span>,
     pub(crate) index: Option<u64>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Token {
     Begin {
         at: u64,
