@@ -44,6 +44,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("DROP TRIGGER IF EXISTS native_catalog_owner_update;")?;
     db.execute_batch(SCHEMA)?;
     db.execute_batch(super::native_rank::SCHEMA)?;
+    db.execute_batch(super::native_rank::CANDIDATE_TREE_SCHEMA)?;
     db.execute_batch(native_repair::SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -5344,6 +5345,12 @@ mod tests {
             "native_original_signals",
             "native_original_positions",
             "native_original_literal",
+            "native_original_timestamp",
+            "native_rank_candidate_nodes",
+            "native_rank_candidate_bindings",
+            "native_rank_candidate_roots",
+            "native_rank_candidate_cursors",
+            "native_rank_candidate_applies",
             "native_original_copilot_started",
             "native_original_copilot_seen",
         ];
@@ -5515,6 +5522,14 @@ mod tests {
                 ("native_original_signals", "table"),
                 ("native_original_positions", "table"),
                 ("native_original_literal", "table"),
+                ("native_original_timestamp", "table"),
+                ("native_rank_candidate_nodes", "table"),
+                ("native_rank_candidate_bindings", "table"),
+                ("native_rank_candidate_roots", "table"),
+                ("native_rank_candidate_cursors", "table"),
+                ("native_rank_candidate_applies", "table"),
+                ("native_rank_candidate_unused", "index"),
+                ("native_rank_candidate_cursor_job", "index"),
                 ("native_original_copilot_started", "table"),
                 ("native_original_copilot_seen", "table"),
                 ("native_original_signal_kind", "index"),
