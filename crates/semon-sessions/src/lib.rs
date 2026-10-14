@@ -1,4 +1,6 @@
 mod native_prefix;
+#[cfg(test)]
+mod test_allocations;
 pub use native_prefix::codex_native_id_prefix;
 use std::{
     collections::{BTreeMap, BTreeSet},
