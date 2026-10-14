@@ -1072,6 +1072,7 @@ impl Geometry<'_> {
         self.work.sql_reads += 1;
         self.work.vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
         drop(statement);
+        self.work.metadata_bytes += old.as_ref().and_then(Option::as_ref).map_or(0, String::len);
         let next = root.node.as_ref().map(Id::identity);
         if old.as_ref().and_then(Option::as_ref) == next.as_ref() && old.is_some() {
             return Ok(());
@@ -1079,6 +1080,7 @@ impl Geometry<'_> {
         if let Some(id) = &root.node {
             self.reference(id, 1)?;
         }
+        self.work.metadata_bytes += next.as_ref().map_or(0, String::len);
         self.execute("INSERT INTO native_orthogonal_roots VALUES(?1,?2,?3) ON CONFLICT(job,name) DO UPDATE SET identity=excluded.identity", params![self.job, name, next])?;
         if let Some(Some(old)) = old {
             self.reference(&Id::parse(&old)?, -1)?;
@@ -1169,8 +1171,11 @@ impl NativeStore {
                     && previous.version == state.version
                     && previous.identity == state.identity
                 {
+                    let cursor_bytes = geometry.work.max_live_node_bytes;
                     attempted = Measure {
-                        geometry: geometry.work.clone(),
+                        geometry: geometry.work,
+                        cursor_bytes,
+                        resident_bytes: cursor_bytes + 3 * NODE_BYTES,
                         ..Measure::default()
                     };
                     return Ok((
@@ -1178,10 +1183,7 @@ impl NativeStore {
                             scalar_bytes: previous.root.scalar_bytes,
                             node: previous.outer.result.clone(),
                         }),
-                        Measure {
-                            geometry: geometry.work,
-                            ..Measure::default()
-                        },
+                        attempted.clone(),
                     ));
                 }
                 if !previous.complete {
@@ -1946,6 +1948,7 @@ impl NativeStore {
                 return Err(failure("orthogonal import exceeds work budget"));
             }
             attempted = Measure {
+                resident_bytes: geometry.work.max_live_node_bytes + 3 * NODE_BYTES,
                 geometry: geometry.work,
                 ..Measure::default()
             };
@@ -2407,7 +2410,7 @@ mod tests {
                 .unwrap();
             assert_eq!(result.outcome, Outcome::Written);
             self.reload();
-            let mut total = Work::default();
+            let mut total = result.work.geometry;
             for _ in 0..2_000_000 {
                 let result = self
                     .store
@@ -2423,6 +2426,13 @@ mod tests {
                 total.sql_writes += result.work.geometry.sql_writes;
                 total.apply_visits += result.work.geometry.apply_visits;
                 total.nodes_written += result.work.geometry.nodes_written;
+                total.metadata_bytes += result.work.geometry.metadata_bytes;
+                total.vm_steps += result.work.geometry.vm_steps;
+                total.memo_hits += result.work.geometry.memo_hits;
+                total.max_stack = total.max_stack.max(result.work.geometry.max_stack);
+                total.max_live_node_bytes = total
+                    .max_live_node_bytes
+                    .max(result.work.geometry.max_live_node_bytes);
                 self.reload();
                 if let Some(root) = result.root {
                     return (root, total);
@@ -2510,10 +2520,15 @@ mod tests {
             let mut fixture = Fixture::new();
             let root = fixture.populate(earlier);
             let point = fixture.point(8193);
+            let full_reads = crate::events::FILE_READS.with(Cell::get);
             let (root, work) = fixture.mutate(&root, &point.order, Some(&point));
             appends.push(work.rows());
             fixture.qualify();
-            let full_reads = crate::events::FILE_READS.with(Cell::get);
+            assert_eq!(
+                crate::events::FILE_READS.with(Cell::get),
+                full_reads,
+                "append loaded a complete selected Index"
+            );
             let rectangle = Rectangle {
                 order: Bounds::default(),
                 scalar: Bounds {
@@ -2865,6 +2880,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.outcome, Outcome::Written);
+        fixture.reload();
+        let repeated = fixture
+            .store
+            .orthogonal_begin(
+                &fixture.job,
+                Mutation {
+                    name: "native",
+                    root: &root,
+                    order: &point.order,
+                    point: Some(&point),
+                    version: "native-facts-merge-v1",
+                    identity: &fixture.identity,
+                },
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(repeated.outcome, Outcome::Written);
+        assert!(
+            repeated.work.cursor_bytes > 0 && repeated.work.resident_bytes > 0,
+            "idempotent admission lost decoded cursor residency"
+        );
         fixture.reload();
         let before_cursor: String = fixture
             .store
