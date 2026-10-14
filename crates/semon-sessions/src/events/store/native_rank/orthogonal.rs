@@ -60,6 +60,9 @@ impl Id {
             && self.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
     fn parse(identity: &str) -> io::Result<Self> {
+        if !(87..=89).contains(&identity.len()) {
+            return Err(failure("orthogonal root identity exceeds native width"));
+        }
         let mut parts = identity
             .strip_prefix(&format!("{PREFIX}node/"))
             .ok_or_else(|| failure("orthogonal root identity is invalid"))?
@@ -81,7 +84,11 @@ impl Id {
         if parts.next().is_some() {
             return Err(failure("orthogonal root identity has trailing parts"));
         }
-        Ok(Self { axis, bit, digest })
+        let id = Self { axis, bit, digest };
+        if id.axis > 1 || !id.valid(width(id.axis, 12), id.axis) || id.identity() != identity {
+            return Err(failure("orthogonal root identity is not canonical"));
+        }
+        Ok(id)
     }
 }
 
@@ -240,10 +247,100 @@ struct Geometry<'a> {
     db: &'a Connection,
     job: i64,
     scalar: usize,
+    cancellation: Option<&'a dyn Fn() -> bool>,
     work: Work,
 }
 
+// Guard every physical text column in SQL before requesting a Rust String.
+// NULL is a legitimate absent edge; it is never the oversize sentinel alone.
+const GEOMETRY_COLUMNS_VALID: &str = "(zero IS NULL OR octet_length(zero) BETWEEN 87 AND 89) AND (one IS NULL OR octet_length(one) BETWEEN 87 AND 89) AND (secondary IS NULL OR octet_length(secondary) BETWEEN 87 AND 89) AND (aggregate IS NULL OR octet_length(aggregate) BETWEEN 79 AND 80) AND octet_length(metadata)<=65536";
+
+fn physical_node(db: &Connection, id: &Id, work: &mut Work) -> io::Result<Option<(TreeNode, i64)>> {
+    if id.axis > 1 || !id.valid(width(id.axis, 12), id.axis) {
+        return Err(failure("invalid orthogonal node address"));
+    }
+    let guard = GEOMETRY_COLUMNS_VALID;
+    let sql = format!(
+        "SELECT CASE WHEN {guard} THEN metadata END,CASE WHEN {guard} THEN zero END,CASE WHEN {guard} THEN one END,CASE WHEN {guard} THEN secondary END,CASE WHEN {guard} THEN aggregate END,({guard}),refs FROM native_orthogonal_nodes WHERE identity=?1"
+    );
+    let mut statement = db.prepare_cached(&sql).map_err(io::Error::other)?;
+    statement.reset_status(rusqlite::StatementStatus::VmStep);
+    let row: Option<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+        i64,
+    )> = statement
+        .query_row([id.identity()], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .optional()
+        .map_err(io::Error::other)?;
+    work.sql_reads += 1;
+    work.vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
+    let Some((text, zero, one, secondary, aggregate, valid, refs)) = row else {
+        return Ok(None);
+    };
+    if !valid || refs < 0 {
+        return Err(failure("orthogonal physical row exceeds native widths"));
+    }
+    let text = text.ok_or_else(|| failure("orthogonal metadata is absent"))?;
+    work.metadata_bytes += text.len()
+        + [&zero, &one, &secondary, &aggregate]
+            .into_iter()
+            .flatten()
+            .map(String::len)
+            .sum::<usize>();
+    work.max_live_node_bytes = work.max_live_node_bytes.max(text.len());
+    let node: TreeNode = serde_json::from_str(&text).map_err(io::Error::other)?;
+    if !(node.valid(id.axis, 9) || node.valid(id.axis, 12)) || address(id.axis, &node, &text) != *id
+    {
+        return Err(failure("orthogonal node identity or order changed"));
+    }
+    let expected = match &node {
+        TreeNode::Branch { zero, one, .. } => (Some(zero.identity()), Some(one.identity())),
+        _ => (None, None),
+    };
+    if (zero, one) != expected
+        || secondary != node.secondary().map(Id::identity)
+        || aggregate != node.aggregate().map(NodeId::identity)
+    {
+        return Err(failure(
+            "orthogonal physical edges disagree with native metadata",
+        ));
+    }
+    Ok(Some((node, refs)))
+}
+
+fn physical_graph(db: &Connection, id: &NodeId, work: &mut Work) -> io::Result<()> {
+    let mut graph = Graph {
+        db,
+        job: 0,
+        work: Work::default(),
+    };
+    let result = graph.node(id).map(|_| ());
+    work.sql_reads += graph.work.sql_reads;
+    work.metadata_bytes += graph.work.metadata_bytes;
+    work.vm_steps += graph.work.vm_steps;
+    work.max_live_node_bytes = work.max_live_node_bytes.max(graph.work.max_live_node_bytes);
+    result
+}
+
 impl Geometry<'_> {
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation.is_some_and(|cancelled| cancelled())
+    }
     fn execute(&mut self, sql: &str, parameters: impl rusqlite::Params) -> io::Result<usize> {
         let mut statement = self.db.prepare_cached(sql).map_err(io::Error::other)?;
         statement.reset_status(rusqlite::StatementStatus::VmStep);
@@ -253,29 +350,15 @@ impl Geometry<'_> {
         Ok(changed)
     }
     fn read(&mut self, id: &Id) -> io::Result<TreeNode> {
-        if !id.valid(width(id.axis, self.scalar), id.axis) || id.axis > 1 {
-            return Err(failure("invalid orthogonal node address"));
-        }
-        let mut statement = self.db.prepare_cached("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM native_orthogonal_nodes WHERE identity=?1").map_err(io::Error::other)?;
-        statement.reset_status(rusqlite::StatementStatus::VmStep);
-        let text: Option<Option<String>> = statement
-            .query_row([id.identity()], |row| row.get(0))
-            .optional()
-            .map_err(io::Error::other)?;
-        self.work.sql_reads += 1;
-        self.work.vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
-        let text = text
-            .flatten()
-            .ok_or_else(|| failure("orthogonal node absent or over budget"))?;
-        self.work.metadata_bytes += text.len();
-        self.work.max_live_node_bytes = self.work.max_live_node_bytes.max(text.len());
-        let node: TreeNode = serde_json::from_str(&text).map_err(io::Error::other)?;
-        if !node.valid(id.axis, self.scalar) || address(id.axis, &node, &text) != *id {
-            return Err(failure("orthogonal node identity or order changed"));
+        let (node, _) = physical_node(self.db, id, &mut self.work)?
+            .ok_or_else(|| failure("orthogonal node absent"))?;
+        if !node.valid(id.axis, self.scalar) {
+            return Err(failure("orthogonal node scalar family changed"));
         }
         Ok(node)
     }
     fn reference(&mut self, id: &Id, delta: i64) -> io::Result<()> {
+        self.read(id)?;
         if self.execute(
             "UPDATE native_orthogonal_nodes SET refs=refs+?2 WHERE identity=?1",
             params![id.identity(), delta],
@@ -308,6 +391,7 @@ impl Geometry<'_> {
                 self.reference(child, 1)?;
             }
             if let Some(aggregate) = aggregate {
+                physical_graph(self.db, aggregate, &mut self.work)?;
                 if self.execute(
                     "UPDATE native_rank_nodes SET refs=refs+1 WHERE identity=?1",
                     [aggregate.identity()],
@@ -317,6 +401,7 @@ impl Geometry<'_> {
                 }
             }
         }
+        self.read(&id)?;
         Ok(id)
     }
 }
@@ -1062,16 +1147,22 @@ impl Geometry<'_> {
     fn bind(&mut self, name: &str, root: &Root) -> io::Result<()> {
         let mut statement = self
             .db
-            .prepare_cached("SELECT identity FROM native_orthogonal_roots WHERE job=?1 AND name=?2")
+            .prepare_cached("SELECT CASE WHEN identity IS NULL OR octet_length(identity) BETWEEN 87 AND 89 THEN identity END,(identity IS NULL OR octet_length(identity) BETWEEN 87 AND 89) FROM native_orthogonal_roots WHERE job=?1 AND name=?2")
             .map_err(io::Error::other)?;
         statement.reset_status(rusqlite::StatementStatus::VmStep);
-        let old: Option<Option<String>> = statement
-            .query_row(params![self.job, name], |row| row.get(0))
+        let old: Option<(Option<String>, bool)> = statement
+            .query_row(params![self.job, name], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()
             .map_err(io::Error::other)?;
         self.work.sql_reads += 1;
         self.work.vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
         drop(statement);
+        if old.as_ref().is_some_and(|(_, valid)| !*valid) {
+            return Err(failure("orthogonal root identity exceeds native width"));
+        }
+        let old = old.map(|(identity, _)| identity);
         self.work.metadata_bytes += old.as_ref().and_then(Option::as_ref).map_or(0, String::len);
         let next = root.node.as_ref().map(Id::identity);
         if old.as_ref().and_then(Option::as_ref) == next.as_ref() && old.is_some() {
@@ -1161,6 +1252,7 @@ impl NativeStore {
                 db,
                 job: id,
                 scalar: input.root.scalar_bytes,
+                cancellation: None,
                 work: Work::default(),
             };
             let previous = geometry.state(input.name)?;
@@ -1249,6 +1341,7 @@ impl NativeStore {
                 db,
                 job: id,
                 scalar: 9,
+                cancellation: None,
                 work: Work::default(),
             };
             let previous = geometry
@@ -1368,9 +1461,12 @@ impl Geometry<'_> {
             job: self.job,
             work: Work::default(),
         };
-        let facts = graph.evaluate(root, included)?;
+        let cancelled = self.cancellation;
+        let facts = graph.evaluate_cancelled(root, included, &|| {
+            cancelled.is_some_and(|callback| callback())
+        })?;
         self.add_graph_work(graph.work);
-        Ok(facts)
+        Ok(facts.unwrap_or_default())
     }
     fn inner_range(
         &mut self,
@@ -1384,6 +1480,9 @@ impl Geometry<'_> {
         let mut output = empty.to_owned();
         let mut stack = vec![root.clone()];
         while let Some(id) = stack.pop() {
+            if self.cancellation_requested() {
+                return Ok(output);
+            }
             let node = self.read(&id)?;
             let (low, high) = node.range(1);
             match bounds.covers(&low[..self.scalar], &high[..self.scalar]) {
@@ -1397,6 +1496,9 @@ impl Geometry<'_> {
                         .work
                         .max_live_node_bytes
                         .max(output.len() + facts.len());
+                    if self.cancellation_requested() {
+                        return Ok(output);
+                    }
                     output = combine(&output, &facts)?;
                     if output.len() > NODE_BYTES {
                         return Err(failure("orthogonal native range facts exceed budget"));
@@ -1433,6 +1535,9 @@ impl Geometry<'_> {
         let mut output = empty.to_owned();
         let mut stack: Vec<Id> = root.into_iter().cloned().collect();
         while let Some(id) = stack.pop() {
+            if self.cancellation_requested() {
+                return Ok(output);
+            }
             let node = self.read(&id)?;
             let (low, high) = node.range(0);
             match rectangle.order.covers(&low, &high) {
@@ -1453,6 +1558,9 @@ impl Geometry<'_> {
                         .work
                         .max_live_node_bytes
                         .max(output.len() + facts.len());
+                    if self.cancellation_requested() {
+                        return Ok(output);
+                    }
                     output = combine(&output, &facts)?;
                     if output.len() > NODE_BYTES {
                         return Err(failure("orthogonal native rectangle facts exceed budget"));
@@ -1489,7 +1597,11 @@ impl Geometry<'_> {
     ) -> io::Result<Option<Selected>> {
         let combine = algebra.combine;
         let count = algebra.count;
-        let total = count(&self.range(root, rectangle, included, empty, combine)?)?;
+        let facts = self.range(root, rectangle, included, empty, combine)?;
+        if self.cancellation_requested() {
+            return Ok(None);
+        }
+        let total = count(&facts)?;
         if rank >= total {
             return Ok(None);
         }
@@ -1497,6 +1609,9 @@ impl Geometry<'_> {
             .cloned()
             .ok_or_else(|| failure("orthogonal nonempty count has no root"))?;
         for _ in 0..=ORDER_BYTES * 8 {
+            if self.cancellation_requested() {
+                return Ok(None);
+            }
             match self.read(&id)? {
                 TreeNode::Leaf { point, .. } => {
                     return Ok(Some(Selected {
@@ -1508,8 +1623,11 @@ impl Geometry<'_> {
                     bit: at, zero, one, ..
                 } => {
                     self.children(0, &zero, &one, at)?;
-                    let left =
-                        count(&self.range(Some(&zero), rectangle, included, empty, combine)?)?;
+                    let facts = self.range(Some(&zero), rectangle, included, empty, combine)?;
+                    if self.cancellation_requested() {
+                        return Ok(None);
+                    }
+                    let left = count(&facts)?;
                     if rank < left {
                         id = zero;
                     } else {
@@ -1550,6 +1668,7 @@ pub(crate) struct ReadInput<'a> {
     pub(crate) rectangle: &'a Rectangle,
     pub(crate) included: u64,
     pub(crate) empty: &'a str,
+    pub(crate) cancelled: &'a dyn Fn() -> bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1568,50 +1687,102 @@ pub(super) fn cleanup(
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<(usize, bool)> {
-    if budget == 0 {
-        return Ok((0, false));
+    cleanup_with_work(db, job, budget, bytes).map(|step| (step.removed, step.complete))
+}
+pub(super) fn cleanup_with_work(
+    db: &Connection,
+    job: i64,
+    budget: usize,
+    bytes: &mut usize,
+) -> rusqlite::Result<Cleanup> {
+    let removed_budget = budget;
+    let budget = STEP_ROWS;
+    let initial = *bytes;
+    let mut work = Work::default();
+    macro_rules! finish {
+        ($complete:expr) => {{
+            *bytes = initial
+                .checked_sub(work.metadata_bytes)
+                .ok_or_else(|| invalid("orthogonal cleanup exceeded byte budget"))?;
+            return Ok(Cleanup {
+                removed: work.sql_writes,
+                complete: $complete,
+                work,
+            });
+        }};
     }
-    let mut used = 1;
-    if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='native_orthogonal_gc')",[],|row|row.get::<_,bool>(0))? {
-        return Ok((used,true));
+    if removed_budget == 0 {
+        finish!(false);
+    }
+    let exists=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='native_orthogonal_gc')",[],|row|row.get::<_,bool>(0))?;
+    work.sql_reads += 1;
+    if !exists {
+        finish!(true);
+    }
+    if work.rows() == budget {
+        finish!(false);
+    }
+    let empty=db.query_row("SELECT NOT EXISTS(SELECT 1 FROM native_orthogonal_frames WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_orthogonal_work WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_orthogonal_roots WHERE job=?1) AND NOT EXISTS(SELECT 1 FROM native_orthogonal_gc WHERE job=?1)",[job],|row|row.get::<_,bool>(0))?;
+    work.sql_reads += 1;
+    if empty {
+        finish!(true);
     }
     loop {
-        if used + 2 > budget {
-            return Ok((used, false));
+        if work.rows() + 2 > budget || work.sql_writes + 1 > removed_budget {
+            finish!(false);
         }
-        let frame: Option<(String, i64, i64, i64)> = db.query_row("SELECT name,family,depth,octet_length(metadata)+octet_length(name)+32 FROM native_orthogonal_frames WHERE job=?1 ORDER BY name,family,depth LIMIT 1", [job], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-        used += 1;
-        let Some((name, family, depth, length)) = frame else {
+        if initial - work.metadata_bytes < NODE_BYTES + 256 + 32 {
+            finish!(false);
+        }
+        let record:Option<(Option<String>,i64,i64,i64,bool)>=db.query_row("SELECT CASE WHEN octet_length(name) BETWEEN 1 AND 256 AND octet_length(metadata)<=65536 THEN name END,family,depth,octet_length(metadata)+octet_length(name)+32,(octet_length(name) BETWEEN 1 AND 256 AND octet_length(metadata)<=65536) FROM native_orthogonal_frames WHERE job=?1 ORDER BY name,family,depth LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((name, family, depth, length, valid)) = record else {
             break;
         };
-        let length =
-            usize::try_from(length).map_err(|_| invalid("invalid orthogonal cleanup length"))?;
-        if length > *bytes {
-            return Ok((used, false));
+        if !valid || !(0..=2).contains(&family) || !(0..=648).contains(&depth) {
+            return Err(invalid("orthogonal cleanup frame exceeds native widths"));
         }
+        let name = name.ok_or_else(|| invalid("orthogonal cleanup frame name absent"))?;
+        work.metadata_bytes +=
+            usize::try_from(length).map_err(|_| invalid("invalid orthogonal frame length"))?;
         db.execute("DELETE FROM native_orthogonal_frames WHERE job=?1 AND name=?2 AND family=?3 AND depth=?4",params![job,name,family,depth])?;
-        used += 1;
-        *bytes -= length;
+        work.sql_writes += 1;
     }
     loop {
-        if used + 2 > budget {
-            return Ok((used, false));
+        if work.rows() + 2 > budget
+            || work.sql_writes + 1 > removed_budget
+            || initial - work.metadata_bytes < NODE_BYTES + 256
+        {
+            finish!(false);
         }
-        let record: Option<(String,Option<String>)> = db.query_row("SELECT name,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM native_orthogonal_work WHERE job=?1 ORDER BY name LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-        used += 1;
-        let Some((name, text)) = record else {
+        let record:Option<(Option<String>,Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(name) BETWEEN 1 AND 256 AND octet_length(metadata)<=65536 THEN name END,CASE WHEN octet_length(name) BETWEEN 1 AND 256 AND octet_length(metadata)<=65536 THEN metadata END,(octet_length(name) BETWEEN 1 AND 256 AND octet_length(metadata)<=65536) FROM native_orthogonal_work WHERE job=?1 ORDER BY name LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((name, text, valid)) = record else {
             break;
         };
-        let text = text.ok_or_else(|| invalid("orthogonal cleanup cursor exceeds budget"))?;
+        if !valid {
+            return Err(invalid("orthogonal cleanup cursor exceeds native widths"));
+        }
+        let name = name.ok_or_else(|| invalid("orthogonal cleanup cursor name absent"))?;
+        let text = text.ok_or_else(|| invalid("orthogonal cleanup cursor absent"))?;
+        work.metadata_bytes += name.len() + text.len();
         let state: Update = serde_json::from_str(&text)
             .map_err(|_| invalid("orthogonal cleanup cursor is invalid"))?;
         if !state.valid() {
             return Err(invalid("orthogonal cleanup cursor is invalid"));
         }
         let refs = state.refs();
-        let length = text.len() + name.len();
-        if used + 1 + 2 * refs.len() > budget || length > *bytes {
-            return Ok((used, false));
+        if work.rows() + 3 * refs.len() + 1 > budget
+            || work.sql_writes + 2 * refs.len() + 1 > removed_budget
+            || initial - work.metadata_bytes < refs.len() * (NODE_BYTES + 4 * 89)
+        {
+            finish!(false);
+        }
+        // Validate all dependencies before changing the first reference.
+        for id in refs.values() {
+            physical_node(db, id, &mut work)
+                .map_err(|_| invalid("orthogonal cleanup cursor dependency is corrupt"))?
+                .ok_or_else(|| invalid("orthogonal cleanup cursor dependency absent"))?;
         }
         for id in refs.values() {
             if db.execute(
@@ -1621,30 +1792,39 @@ pub(super) fn cleanup(
             {
                 return Err(invalid("orthogonal cleanup dependency absent"));
             }
+            work.sql_writes += 1;
             db.execute("INSERT INTO native_orthogonal_gc SELECT ?1,identity FROM native_orthogonal_nodes WHERE identity=?2 AND refs=0 ON CONFLICT(job,identity) DO NOTHING",params![job,id.identity()])?;
-            used += 2;
+            work.sql_writes += 1;
         }
         db.execute(
             "DELETE FROM native_orthogonal_work WHERE job=?1 AND name=?2",
             params![job, name],
         )?;
-        used += 1;
-        *bytes -= length;
+        work.sql_writes += 1;
     }
     loop {
-        if used + 4 > budget {
-            return Ok((used, false));
+        if work.rows() + 5 > budget
+            || work.sql_writes + 3 > removed_budget
+            || initial - work.metadata_bytes < NODE_BYTES + 5 * 89 + 256
+        {
+            finish!(false);
         }
-        let record: Option<(String,Option<String>)> = db.query_row("SELECT name,identity FROM native_orthogonal_roots WHERE job=?1 ORDER BY name LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-        used += 1;
-        let Some((name, identity)) = record else {
+        let record:Option<(Option<String>,Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(name) BETWEEN 1 AND 256 AND (identity IS NULL OR octet_length(identity) BETWEEN 87 AND 89) THEN name END,CASE WHEN octet_length(name) BETWEEN 1 AND 256 AND (identity IS NULL OR octet_length(identity) BETWEEN 87 AND 89) THEN identity END,(octet_length(name) BETWEEN 1 AND 256 AND (identity IS NULL OR octet_length(identity) BETWEEN 87 AND 89)) FROM native_orthogonal_roots WHERE job=?1 ORDER BY name LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((name, identity, valid)) = record else {
             break;
         };
-        let length = name.len() + identity.as_ref().map_or(0, String::len);
-        if length > *bytes {
-            return Ok((used, false));
+        if !valid {
+            return Err(invalid("orthogonal cleanup root exceeds native widths"));
         }
+        let name = name.ok_or_else(|| invalid("orthogonal cleanup root name absent"))?;
+        work.metadata_bytes += name.len() + identity.as_ref().map_or(0, String::len);
         if let Some(identity) = identity {
+            let id =
+                Id::parse(&identity).map_err(|_| invalid("orthogonal cleanup root invalid"))?;
+            physical_node(db, &id, &mut work)
+                .map_err(|_| invalid("orthogonal cleanup root corrupt"))?
+                .ok_or_else(|| invalid("orthogonal cleanup root absent"))?;
             if db.execute(
                 "UPDATE native_orthogonal_nodes SET refs=refs-1 WHERE identity=?1",
                 [&identity],
@@ -1652,70 +1832,104 @@ pub(super) fn cleanup(
             {
                 return Err(invalid("orthogonal cleanup root absent"));
             }
+            work.sql_writes += 1;
             db.execute("INSERT INTO native_orthogonal_gc SELECT ?1,identity FROM native_orthogonal_nodes WHERE identity=?2 AND refs=0 ON CONFLICT(job,identity) DO NOTHING",params![job,identity])?;
-            used += 2;
+            work.sql_writes += 1;
         }
         db.execute(
             "DELETE FROM native_orthogonal_roots WHERE job=?1 AND name=?2",
             params![job, name],
         )?;
-        used += 1;
-        *bytes -= length;
+        work.sql_writes += 1;
     }
     loop {
-        // A reclaimed node has at most three geometry edges and one Graph edge.
-        if used + 10 > budget {
-            return Ok((used, false));
+        // The exact largest valid unit is an outer branch: one queue read,
+        // parent plus three child reads, two deletes and six edge writes =13.
+        // Each decoded row is <=64KiB plus at most four native-width IDs.
+        if work.rows() + 13 > budget
+            || work.sql_writes + 8 > removed_budget
+            || initial - work.metadata_bytes < 4 * (NODE_BYTES + 4 * 89) + 89
+        {
+            if work.rows() == budget {
+                finish!(false);
+            }
+            let remains = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_orthogonal_gc WHERE job=?1)",
+                [job],
+                |row| row.get::<_, bool>(0),
+            )?;
+            work.sql_reads += 1;
+            finish!(!remains);
         }
-        let record: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>)> = db.query_row("SELECT g.identity,n.zero,n.one,n.secondary,n.aggregate,n.refs FROM native_orthogonal_gc g LEFT JOIN native_orthogonal_nodes n ON n.identity=g.identity WHERE g.job=?1 ORDER BY g.identity LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
-        used += 1;
-        let Some((identity, zero, one, secondary, aggregate, refs)) = record else {
-            return Ok((used, true));
+        let record:Option<(Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity) BETWEEN 87 AND 89 THEN identity END,(octet_length(identity) BETWEEN 87 AND 89) FROM native_orthogonal_gc WHERE job=?1 ORDER BY identity LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((identity, valid)) = record else {
+            finish!(true);
         };
-        let length = identity.len()
-            + 8
-            + [&zero, &one, &secondary, &aggregate]
-                .into_iter()
-                .flatten()
-                .map(String::len)
-                .sum::<usize>();
-        if length > *bytes {
-            return Ok((used, false));
+        if !valid {
+            return Err(invalid(
+                "orthogonal cleanup garbage address exceeds native width",
+            ));
+        }
+        let identity =
+            identity.ok_or_else(|| invalid("orthogonal cleanup garbage address absent"))?;
+        work.metadata_bytes += identity.len();
+        let id = Id::parse(&identity)
+            .map_err(|_| invalid("orthogonal cleanup garbage address invalid"))?;
+        let row = physical_node(db, &id, &mut work)
+            .map_err(|_| invalid("orthogonal cleanup immutable node corrupt"))?;
+        let mut children = Vec::new();
+        let mut aggregate = None;
+        if let Some((node, 0)) = &row {
+            if let TreeNode::Branch { zero, one, .. } = node {
+                children.extend([zero.clone(), one.clone()]);
+            }
+            children.extend(node.secondary().cloned());
+            aggregate = node.aggregate().cloned();
+            for child in &children {
+                physical_node(db, child, &mut work)
+                    .map_err(|_| invalid("orthogonal cleanup immutable child corrupt"))?
+                    .ok_or_else(|| invalid("orthogonal cleanup immutable child absent"))?;
+            }
+            if let Some(aggregate) = &aggregate {
+                physical_graph(db, aggregate, &mut work)
+                    .map_err(|_| invalid("orthogonal cleanup immutable Graph corrupt"))?;
+            }
         }
         db.execute(
             "DELETE FROM native_orthogonal_gc WHERE job=?1 AND identity=?2",
             params![job, identity],
         )?;
-        used += 1;
-        if refs == Some(0) {
+        work.sql_writes += 1;
+        if matches!(row, Some((_, 0))) {
             db.execute(
                 "DELETE FROM native_orthogonal_nodes WHERE identity=?1 AND refs=0",
                 [&identity],
             )?;
-            used += 1;
-            for child in [zero, one, secondary].into_iter().flatten() {
+            work.sql_writes += 1;
+            for child in children {
                 if db.execute(
                     "UPDATE native_orthogonal_nodes SET refs=refs-1 WHERE identity=?1",
-                    [&child],
+                    [child.identity()],
                 )? != 1
                 {
                     return Err(invalid("orthogonal cleanup child absent"));
                 }
-                db.execute("INSERT INTO native_orthogonal_gc SELECT ?1,identity FROM native_orthogonal_nodes WHERE identity=?2 AND refs=0 ON CONFLICT(job,identity) DO NOTHING",params![job,child])?;
-                used += 2;
+                work.sql_writes += 1;
+                db.execute("INSERT INTO native_orthogonal_gc SELECT ?1,identity FROM native_orthogonal_nodes WHERE identity=?2 AND refs=0 ON CONFLICT(job,identity) DO NOTHING",params![job,child.identity()])?;
+                work.sql_writes += 1;
             }
             if let Some(aggregate) = aggregate {
                 if db.execute(
                     "UPDATE native_rank_nodes SET refs=refs-1 WHERE identity=?1",
-                    [aggregate],
+                    [aggregate.identity()],
                 )? != 1
                 {
-                    return Err(invalid("orthogonal cleanup Graph child absent"));
+                    return Err(invalid("orthogonal cleanup Graph absent"));
                 }
-                used += 1;
+                work.sql_writes += 1;
             }
         }
-        *bytes -= length;
     }
 }
 
@@ -1750,17 +1964,24 @@ impl NativeStore {
         {
             return Err(failure("invalid orthogonal read bounds"));
         }
+        let latched = std::cell::Cell::new(false);
+        let cancelled = || {
+            let requested = latched.get() || (input.cancelled)();
+            latched.set(requested);
+            requested
+        };
         let meter = vm_meter(&self.connection);
         let mut attempted = Measure::default();
         let result = (|| {
-            if job.phase != "ready" || !self.runtime_current(&job.spec)? {
+            if cancelled() || job.phase != "ready" || !self.runtime_current(&job.spec)? {
                 return Ok(None);
             }
             let tx = self
                 .connection
                 .unchecked_transaction()
                 .map_err(io::Error::other)?;
-            if !native_query::job_current(&tx, job).map_err(io::Error::other)?
+            if cancelled()
+                || !native_query::job_current(&tx, job).map_err(io::Error::other)?
                 || !closure(&tx, job.id).map_err(io::Error::other)?
             {
                 return Ok(None);
@@ -1769,6 +1990,7 @@ impl NativeStore {
                 db: &tx,
                 job: job.id,
                 scalar: input.root.scalar_bytes,
+                cancellation: Some(&cancelled),
                 work: Work::default(),
             };
             if !geometry.bound(input.name, input.root)? {
@@ -1783,7 +2005,8 @@ impl NativeStore {
                 geometry: geometry.work,
                 ..Measure::default()
             };
-            if !native_query::job_current(&tx, job).map_err(io::Error::other)?
+            if cancelled()
+                || !native_query::job_current(&tx, job).map_err(io::Error::other)?
                 || !closure(&tx, job.id).map_err(io::Error::other)?
                 || !self.runtime_current(&job.spec)?
             {
@@ -1792,8 +2015,10 @@ impl NativeStore {
             tx.commit().map_err(io::Error::other)?;
             // Releasing the read snapshot is necessary: a peer commit during
             // metadata I/O must not pass both checks in an old WAL snapshot.
-            if !self.recheck(job)?
+            if cancelled()
+                || !self.recheck(job)?
                 || !closure(&self.connection, job.id).map_err(io::Error::other)?
+                || cancelled()
             {
                 return Ok(None);
             }
@@ -1863,13 +2088,17 @@ impl NativeStore {
             ..input
         };
         self.orthogonal_read(job, ranged, closure, |geometry| {
-            count(&geometry.range(
+            let facts = geometry.range(
                 input.root.node.as_ref(),
                 &rectangle,
                 input.included,
                 input.empty,
                 combine,
-            )?)
+            )?;
+            if geometry.cancellation_requested() {
+                return Ok(0);
+            }
+            count(&facts)
         })
     }
     pub(crate) fn orthogonal_seek(
@@ -1899,13 +2128,17 @@ impl NativeStore {
             },
             closure,
             |geometry| {
-                let total = count(&geometry.range(
+                let facts = geometry.range(
                     input.root.node.as_ref(),
                     &rectangle,
                     input.included,
                     input.empty,
                     combine,
-                )?)?;
+                )?;
+                if geometry.cancellation_requested() {
+                    return Ok(None);
+                }
+                let total = count(&facts)?;
                 if total == 0 {
                     return Ok(None);
                 }
@@ -1938,6 +2171,7 @@ impl NativeStore {
                 db,
                 job: id,
                 scalar: root.scalar_bytes,
+                cancellation: None,
                 work: Work::default(),
             };
             if let Some(root) = &root.node {
@@ -1959,9 +2193,10 @@ impl NativeStore {
         let (outcome, output) = result?;
         let mut work = output.unwrap_or(attempted);
         work.connection_vm_steps = measure.connection_vm_steps;
+        let root = (outcome == Outcome::Written).then(|| root.clone());
         Ok(UpdateResult {
             outcome,
-            root: (outcome == Outcome::Written).then(|| root.clone()),
+            root,
             work,
         })
     }
@@ -2028,6 +2263,45 @@ mod tests {
             key: (seq as i64, seq % 3, seq as u64, 0, 1),
             ordinal: seq as u64,
             identity: Sha256::digest(seq.to_be_bytes()).into(),
+        }
+    }
+
+    #[derive(Default)]
+    struct AppendWork {
+        total: Measure,
+        allocations: usize,
+        allocated_bytes: usize,
+        peak_bytes: usize,
+    }
+    impl AppendWork {
+        fn rows(&self) -> usize {
+            self.total.geometry.rows()
+        }
+        fn add(&mut self, work: Measure, calls: usize, bytes: usize) {
+            assert!(calls > 0, "operation allocated nothing");
+            assert!(
+                bytes <= 2 * STEP_BYTES,
+                "operation Rust allocation bytes: {bytes}"
+            );
+            let peak = crate::test_allocations::peak_bytes();
+            assert!(peak <= STEP_BYTES, "operation Rust heap high water: {peak}");
+            self.allocations += calls;
+            self.allocated_bytes += bytes;
+            self.peak_bytes = self.peak_bytes.max(peak);
+            self.total.connection_vm_steps += work.connection_vm_steps;
+            self.total.cursor_bytes = self.total.cursor_bytes.max(work.cursor_bytes);
+            self.total.resident_bytes = self.total.resident_bytes.max(work.resident_bytes);
+            let total = &mut self.total.geometry;
+            let work = work.geometry;
+            total.sql_reads += work.sql_reads;
+            total.sql_writes += work.sql_writes;
+            total.metadata_bytes += work.metadata_bytes;
+            total.vm_steps += work.vm_steps;
+            total.apply_visits += work.apply_visits;
+            total.memo_hits += work.memo_hits;
+            total.nodes_written += work.nodes_written;
+            total.max_stack = total.max_stack.max(work.max_stack);
+            total.max_live_node_bytes = total.max_live_node_bytes.max(work.max_live_node_bytes);
         }
     }
 
@@ -2255,6 +2529,7 @@ mod tests {
                 db: &tx,
                 job: self.job.id,
                 scalar: 9,
+                cancellation: None,
                 work: Work::default(),
             };
             let mut native_graph = Graph {
@@ -2277,6 +2552,7 @@ mod tests {
                 db: &tx,
                 job: self.job.id,
                 scalar: 12,
+                cancellation: None,
                 work: Work::default(),
             };
             let mut graph = Graph {
@@ -2391,10 +2667,10 @@ mod tests {
             tx.commit().unwrap();
             (root, base)
         }
-        fn mutate(&mut self, root: &Root, key: &[u8], point: Option<&Point>) -> (Root, Work) {
-            let result = self
-                .store
-                .orthogonal_begin(
+        fn mutate(&mut self, root: &Root, key: &[u8], point: Option<&Point>) -> (Root, AppendWork) {
+            let mut total = AppendWork::default();
+            let (result, calls, bytes) = crate::test_allocations::measure(|| {
+                self.store.orthogonal_begin(
                     &self.job,
                     Mutation {
                         name: "native",
@@ -2407,38 +2683,42 @@ mod tests {
                     &|_, _| Ok(true),
                     &|| false,
                 )
-                .unwrap();
+            });
+            let result = result.unwrap();
             assert_eq!(result.outcome, Outcome::Written);
-            self.reload();
-            let mut total = result.work.geometry;
+            total.add(result.work, calls, bytes);
+            self.reload_work(&mut total);
             for _ in 0..2_000_000 {
-                let result = self
-                    .store
-                    .orthogonal_advance(&self.job, "native", &combine, &|_, _| Ok(true), &|| false)
-                    .unwrap();
+                let (result, calls, bytes) = crate::test_allocations::measure(|| {
+                    self.store.orthogonal_advance(
+                        &self.job,
+                        "native",
+                        &combine,
+                        &|_, _| Ok(true),
+                        &|| false,
+                    )
+                });
+                let result = result.unwrap();
                 assert_eq!(result.outcome, Outcome::Written);
                 assert!(result.work.geometry.rows() <= STEP_ROWS);
                 assert!(result.work.geometry.metadata_bytes <= STEP_BYTES);
                 assert!(result.work.cursor_bytes <= NODE_BYTES);
                 assert!(result.work.resident_bytes <= STEP_BYTES);
                 assert!(result.work.connection_vm_steps >= result.work.geometry.vm_steps as u64);
-                total.sql_reads += result.work.geometry.sql_reads;
-                total.sql_writes += result.work.geometry.sql_writes;
-                total.apply_visits += result.work.geometry.apply_visits;
-                total.nodes_written += result.work.geometry.nodes_written;
-                total.metadata_bytes += result.work.geometry.metadata_bytes;
-                total.vm_steps += result.work.geometry.vm_steps;
-                total.memo_hits += result.work.geometry.memo_hits;
-                total.max_stack = total.max_stack.max(result.work.geometry.max_stack);
-                total.max_live_node_bytes = total
-                    .max_live_node_bytes
-                    .max(result.work.geometry.max_live_node_bytes);
-                self.reload();
+                total.add(result.work, calls, bytes);
+                self.reload_work(&mut total);
                 if let Some(root) = result.root {
                     return (root, total);
                 }
             }
             panic!("durable geometry failed eventual progress");
+        }
+        fn reload_work(&mut self, total: &mut AppendWork) {
+            let meter = vm_meter(&self.store.connection);
+            let (_, calls, bytes) = crate::test_allocations::measure(|| self.reload());
+            let mut work = Measure::default();
+            finish_meter(&self.store.connection, &meter, &mut work);
+            total.add(work, calls, bytes);
         }
         fn qualify(&mut self) {
             assert_eq!(
@@ -2516,6 +2796,10 @@ mod tests {
     fn orthogonal_native_rectangles_and_fixed_page_match_independent_reference_as_history_grows() {
         let mut rows = Vec::new();
         let mut appends = Vec::new();
+        let mut page_vm = Vec::new();
+        let mut append_vm = Vec::new();
+        let mut page_allocations = Vec::new();
+        let mut append_allocations = Vec::new();
         for earlier in [0, 128, 1024, 8192] {
             let mut fixture = Fixture::new();
             let root = fixture.populate(earlier);
@@ -2523,6 +2807,8 @@ mod tests {
             let full_reads = crate::events::FILE_READS.with(Cell::get);
             let (root, work) = fixture.mutate(&root, &point.order, Some(&point));
             appends.push(work.rows());
+            append_vm.push(work.total.connection_vm_steps);
+            append_allocations.push(work.allocated_bytes);
             fixture.qualify();
             assert_eq!(
                 crate::events::FILE_READS.with(Cell::get),
@@ -2553,6 +2839,7 @@ mod tests {
                     rectangle: &rectangle,
                     included: mask,
                     empty: &serde_json::to_string(&Facts::default()).unwrap(),
+                    cancelled: &|| false,
                 };
                 let (actual, work) = fixture
                     .store
@@ -2584,10 +2871,10 @@ mod tests {
                 rectangle: &tail,
                 included: u64::MAX,
                 empty: &serde_json::to_string(&Facts::default()).unwrap(),
+                cancelled: &|| false,
             };
-            let (selected, work) = fixture
-                .store
-                .orthogonal_select(
+            let (attempt, calls, allocated) = crate::test_allocations::measure(|| {
+                fixture.store.orthogonal_select(
                     &fixture.job,
                     input,
                     0,
@@ -2597,9 +2884,12 @@ mod tests {
                     },
                     &|_, _| Ok(true),
                 )
-                .unwrap()
-                .qualified()
-                .unwrap();
+            });
+            let (selected, work) = attempt.unwrap().qualified().unwrap();
+            assert!(calls > 0 && allocated <= 2 * STEP_BYTES);
+            assert!(crate::test_allocations::peak_bytes() <= STEP_BYTES);
+            page_allocations.push(allocated);
+            page_vm.push(work.connection_vm_steps);
             let selected = selected.unwrap();
             assert_eq!(selected.point.candidate, point.candidate);
             assert_eq!(selected.within, 0);
@@ -2644,6 +2934,36 @@ mod tests {
             appends[3] <= 4 * appends[2] + 128,
             "append became a prefix rewrite: {appends:?}"
         );
+        assert!(
+            page_vm.iter().all(|vm| *vm <= 2_000_000),
+            "complete fixed-page SQL VM: {page_vm:?}"
+        );
+        assert!(
+            page_vm[3] <= 4 * page_vm[2] + 32_000,
+            "fixed-page SQL VM grew with a prefix: {page_vm:?}"
+        );
+        assert!(
+            append_vm.iter().all(|vm| *vm <= 100_000_000),
+            "complete append SQL VM: {append_vm:?}"
+        );
+        assert!(
+            append_vm[3] <= 4 * append_vm[2] + 128_000,
+            "append SQL VM grew with a prefix: {append_vm:?}"
+        );
+        assert!(
+            page_allocations[3] <= 4 * page_allocations[2] + 64 * 1024,
+            "page allocations grew with history: {page_allocations:?}"
+        );
+        assert!(
+            append_allocations
+                .iter()
+                .all(|bytes| *bytes <= 1024 * STEP_BYTES),
+            "append cumulative Rust bytes: {append_allocations:?}"
+        );
+        assert!(
+            append_allocations[3] <= 4 * append_allocations[2] + STEP_BYTES,
+            "append allocations grew with a prefix: {append_allocations:?}"
+        );
     }
 
     #[test]
@@ -2678,6 +2998,7 @@ mod tests {
             rectangle: &rectangle,
             included: u64::MAX ^ 2,
             empty: &empty,
+            cancelled: &|| false,
         };
         let (facts, _) = fixture
             .store
@@ -3024,6 +3345,7 @@ mod tests {
             rectangle: &rectangle,
             included: u64::MAX,
             empty: &empty,
+            cancelled: &|| false,
         };
         assert!(
             fixture
@@ -3106,6 +3428,7 @@ mod tests {
             rectangle: &rectangle,
             included: u64::MAX ^ 2,
             empty: &empty,
+            cancelled: &|| false,
         };
         let (facts, _) = fixture
             .store
@@ -3286,6 +3609,7 @@ mod tests {
                         rectangle: &rectangle,
                         included,
                         empty: &empty,
+                        cancelled: &|| false,
                     },
                     &combine,
                     &|_, _| Ok(true),
@@ -3384,6 +3708,7 @@ mod tests {
                         rectangle: &rectangle,
                         included: u64::MAX,
                         empty: &empty,
+                        cancelled: &|| false,
                     },
                     &combine,
                     &fence,
@@ -3447,6 +3772,7 @@ mod tests {
                 db: &fixture.store.connection,
                 job: fixture.job.id,
                 scalar: 12,
+                cancellation: None,
                 work: Work::default(),
             };
             let mut geometry = geometry;
@@ -3461,6 +3787,7 @@ mod tests {
                 db: &fixture.store.connection,
                 job: fixture.job.id,
                 scalar: 12,
+                cancellation: None,
                 work: Work::default(),
             };
             geometry
@@ -3500,6 +3827,7 @@ mod tests {
                 db: &tx,
                 job: fixture.job.id,
                 scalar: 12,
+                cancellation: None,
                 work: Work::default(),
             };
             geometry.save("inner-kernel", None, &kernel).unwrap();
@@ -3513,6 +3841,7 @@ mod tests {
                 db: &tx,
                 job: fixture.job.id,
                 scalar: 12,
+                cancellation: None,
                 work: Work::default(),
             };
             let previous = geometry.state("inner-kernel").unwrap().unwrap();
@@ -3554,6 +3883,7 @@ mod tests {
             db: &fixture.store.connection,
             job: fixture.job.id,
             scalar: 12,
+            cancellation: None,
             work: Work::default(),
         };
         let aggregate = geometry.read(result).unwrap().aggregate().unwrap().clone();
@@ -3589,5 +3919,532 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+    #[test]
+    fn orthogonal_all_read_apis_latch_mid_graph_cancellation_and_reopen_cleanly() {
+        let mut fixture = Fixture::new();
+        let root = fixture.populate(128);
+        fixture.qualify();
+        let empty = serde_json::to_string(&Facts::default()).unwrap();
+        let rectangle = Rectangle::default();
+        let reads = crate::events::FILE_READS.with(Cell::get);
+        for operation in 0..4 {
+            let calls = Cell::new(0);
+            let cancel = || {
+                let n = calls.get() + 1;
+                calls.set(n);
+                n == 6
+            };
+            let input = ReadInput {
+                name: "native",
+                root: &root,
+                rectangle: &rectangle,
+                included: u64::MAX,
+                empty: &empty,
+                cancelled: &cancel,
+            };
+            let edge = Edge {
+                key: order(128).encoded().to_vec(),
+                inclusive: true,
+            };
+            let algebra = Algebra {
+                combine: &combine,
+                count: &count,
+            };
+            let ((refused, work), allocations, bytes) =
+                crate::test_allocations::measure(|| match operation {
+                    0 => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_rectangle(&fixture.job, input, &combine, &|_, _| Ok(true))
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                    1 => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_select(&fixture.job, input, 0, algebra, &|_, _| Ok(true))
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                    2 => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_rank(&fixture.job, input, &edge, algebra, &|_, _| Ok(true))
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                    _ => {
+                        let attempt = fixture
+                            .store
+                            .orthogonal_seek(&fixture.job, input, &edge, false, algebra, &|_, _| {
+                                Ok(true)
+                            })
+                            .unwrap();
+                        (attempt.value.is_none(), attempt.work)
+                    }
+                });
+            assert!(
+                refused,
+                "read operation {operation} published a partial result"
+            );
+            assert_eq!(calls.get(), 6, "cancellation pulse was not latched");
+            assert!(
+                work.geometry.sql_reads >= 4,
+                "cancellation did not reach actual Graph I/O"
+            );
+            assert!(
+                work.connection_vm_steps > 0
+                    && work.connection_vm_steps >= work.geometry.vm_steps as u64
+            );
+            assert!(
+                allocations > 0
+                    && bytes <= 2 * STEP_BYTES
+                    && crate::test_allocations::peak_bytes() <= STEP_BYTES
+            );
+            let options = fixture.store.options.clone();
+            fixture.store = NativeStore::open(&options).unwrap();
+            fixture.reload();
+            let (actual, _) = fixture
+                .store
+                .orthogonal_rectangle(
+                    &fixture.job,
+                    ReadInput {
+                        cancelled: &|| false,
+                        ..input
+                    },
+                    &combine,
+                    &|_, _| Ok(true),
+                )
+                .unwrap()
+                .qualified()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&actual).unwrap(),
+                serde_json::to_value(reference(128, u64::MAX, &rectangle)).unwrap()
+            );
+        }
+        assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+    }
+
+    #[test]
+    fn orthogonal_physical_text_guards_reject_before_multimegabyte_rust_allocations() {
+        for target in [
+            "bind",
+            "frame-name",
+            "work-name",
+            "root-name",
+            "root-id",
+            "gc-id",
+            "zero",
+            "one",
+            "secondary",
+            "aggregate",
+            "graph-absent",
+            "graph-present",
+        ] {
+            let mut fixture = Fixture::new();
+            let root = fixture.populate(4);
+            let giant = "!".repeat(4 * STEP_BYTES);
+            let id = root.node.as_ref().unwrap().identity();
+            assert!(Id::parse(&id.replacen("node/0/", "node/00/", 1)).is_err());
+            match target {
+                "bind" | "root-id" => {
+                    fixture.store.connection.execute("UPDATE native_orthogonal_roots SET identity=?2 WHERE job=?1 AND name='native'",params![fixture.job.id,giant]).unwrap();
+                }
+                "frame-name" => {
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            "INSERT INTO native_orthogonal_frames VALUES(?1,?2,0,0,'{}')",
+                            params![fixture.job.id, giant],
+                        )
+                        .unwrap();
+                }
+                "work-name" => {
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            "INSERT INTO native_orthogonal_work VALUES(?1,?2,'{}')",
+                            params![fixture.job.id, giant],
+                        )
+                        .unwrap();
+                }
+                "root-name" => {
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            "INSERT INTO native_orthogonal_roots VALUES(?1,?2,NULL)",
+                            params![fixture.job.id, giant],
+                        )
+                        .unwrap();
+                }
+                "gc-id" => {
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            "INSERT INTO native_orthogonal_gc VALUES(?1,?2)",
+                            params![fixture.job.id, giant],
+                        )
+                        .unwrap();
+                }
+                "graph-absent" | "graph-present" => {
+                    let column = if target == "graph-absent" {
+                        "absent"
+                    } else {
+                        "present"
+                    };
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            &format!("UPDATE native_rank_nodes SET {column}=?2 WHERE identity=?1"),
+                            params![fixture.identity.identity(), giant],
+                        )
+                        .unwrap();
+                }
+                column => {
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            &format!(
+                                "UPDATE native_orthogonal_nodes SET {column}=?2 WHERE identity=?1"
+                            ),
+                            params![id, giant],
+                        )
+                        .unwrap();
+                }
+            }
+            let (rejected, calls, allocated) = crate::test_allocations::measure(|| {
+                if target == "bind" {
+                    let tx = fixture.store.connection.unchecked_transaction().unwrap();
+                    let mut geometry = Geometry {
+                        db: &tx,
+                        job: fixture.job.id,
+                        scalar: 9,
+                        cancellation: None,
+                        work: Work::default(),
+                    };
+                    geometry.bind("native", &root).is_err()
+                } else if target.starts_with("graph-") {
+                    let mut graph = Graph {
+                        db: &fixture.store.connection,
+                        job: fixture.job.id,
+                        work: Work::default(),
+                    };
+                    graph.node(&fixture.identity).is_err()
+                } else if matches!(target, "zero" | "one" | "secondary" | "aggregate") {
+                    let mut geometry = Geometry {
+                        db: &fixture.store.connection,
+                        job: fixture.job.id,
+                        scalar: 9,
+                        cancellation: None,
+                        work: Work::default(),
+                    };
+                    geometry.read(root.node.as_ref().unwrap()).is_err()
+                } else {
+                    let tx = fixture.store.connection.unchecked_transaction().unwrap();
+                    let mut bytes = STEP_BYTES;
+                    cleanup(&tx, fixture.job.id, STEP_ROWS, &mut bytes).is_err()
+                }
+            });
+            assert!(rejected, "unguarded physical text in {target}");
+            assert!(
+                calls > 0 && allocated < STEP_BYTES,
+                "decoded giant physical text in {target}: {allocated}"
+            );
+            assert!(
+                crate::test_allocations::peak_bytes() < STEP_BYTES,
+                "giant live Rust payload in {target}"
+            );
+        }
+        // Genuine NULL is qualified absence, including an empty named root.
+        let mut fixture = Fixture::new();
+        let root = Root::empty(9).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .orthogonal_import(&fixture.job, "empty", &root, &|_, _| Ok(true), &|| false)
+                .unwrap()
+                .outcome,
+            Outcome::Written
+        );
+        fixture.reload();
+        fixture.qualify();
+        let empty = serde_json::to_string(&Facts::default()).unwrap();
+        let attempt = fixture
+            .store
+            .orthogonal_rectangle(
+                &fixture.job,
+                ReadInput {
+                    name: "empty",
+                    root: &root,
+                    rectangle: &Rectangle::default(),
+                    included: u64::MAX,
+                    empty: &empty,
+                    cancelled: &|| false,
+                },
+                &combine,
+                &|_, _| Ok(true),
+            )
+            .unwrap();
+        assert_eq!(count(&attempt.value.unwrap()).unwrap(), 0);
+    }
+
+    #[test]
+    fn orthogonal_and_shared_graph_congruence_refuse_redirected_live_references_atomically() {
+        for target in ["geometry-aggregate", "geometry-zero", "graph-descendant"] {
+            let mut fixture = Fixture::new();
+            let root = fixture.populate(8);
+            let source = fixture
+                .store
+                .source_witness(&fixture.row.sources[0])
+                .unwrap();
+            let owner = fixture.store.owner_witness(&fixture.row).unwrap();
+            let spec = native_query::JobSpec {
+                view_key: "unrelated-live".into(),
+                ..fixture.job.spec.clone()
+            };
+            let other = fixture.store.begin(&spec).unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .admit(&other, &[source], &[owner], "complete")
+                    .unwrap(),
+                Outcome::Written
+            );
+            let other = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+            let victim = Graph {
+                db: &fixture.store.connection,
+                job: other.id,
+                work: Work::default(),
+            }
+            .intern(Node::Terminal {
+                facts: serde_json::to_string(&native(9000)).unwrap(),
+            })
+            .unwrap();
+            let victim_geometry = {
+                let mut geometry = Geometry {
+                    db: &fixture.store.connection,
+                    job: other.id,
+                    scalar: 9,
+                    cancellation: None,
+                    work: Work::default(),
+                };
+                let mut point = fixture.point(9000);
+                point.facts = victim.clone();
+                let id = geometry.leaf(0, point).unwrap();
+                geometry
+                    .bind(
+                        "victim",
+                        &Root {
+                            scalar_bytes: 9,
+                            node: Some(id.clone()),
+                        },
+                    )
+                    .unwrap();
+                id
+            };
+            // A second owner retains the complete predecessor too. Cleanup must
+            // protect both its shared root and unrelated victim references.
+            let imported = fixture
+                .store
+                .orthogonal_import(&other, "imported", &root, &|_, _| Ok(true), &|| false)
+                .unwrap();
+            assert_eq!(imported.outcome, Outcome::Written);
+            let graph_refs = |fixture: &Fixture| {
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT refs FROM native_rank_nodes WHERE identity=?1",
+                        [victim.identity()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            };
+            let before_graph = graph_refs(&fixture);
+            let before_geometry: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT refs FROM native_orthogonal_nodes WHERE identity=?1",
+                    [victim_geometry.identity()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            // A distinct predecessor-only root is retired; the other owner
+            // retains the original complete root and unrelated victim.
+            let retired = if target.starts_with("geometry-") {
+                fixture.populate(4)
+            } else {
+                root.clone()
+            };
+            let mut geometry = Geometry {
+                db: &fixture.store.connection,
+                job: fixture.job.id,
+                scalar: 9,
+                cancellation: None,
+                work: Work::default(),
+            };
+            let root_id = retired.node.as_ref().unwrap();
+            let node = geometry.read(root_id).unwrap();
+            if target == "geometry-zero" {
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "UPDATE native_orthogonal_nodes SET zero=?2 WHERE identity=?1",
+                        params![root_id.identity(), victim_geometry.identity()],
+                    )
+                    .unwrap();
+                assert!(geometry.read(root_id).is_err());
+            } else if target == "geometry-aggregate" {
+                let inner = node.secondary().unwrap();
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "UPDATE native_orthogonal_nodes SET aggregate=?2 WHERE identity=?1",
+                        params![inner.identity(), victim.identity()],
+                    )
+                    .unwrap();
+                // The child itself, not a whole selected transcript, is checked.
+                assert!(geometry.read(inner).is_err());
+            } else {
+                // Corrupt a descendant's valid-width physical edge while keeping
+                // its native metadata/hash untouched. The shared Graph cleanup
+                // owner must validate it before any descendant reference release.
+                let terminal = Graph {
+                    db: &fixture.store.connection,
+                    job: fixture.job.id,
+                    work: Work::default(),
+                }
+                .intern(Node::Terminal {
+                    facts: serde_json::to_string(&native(777)).unwrap(),
+                })
+                .unwrap();
+                let descendant = Graph {
+                    db: &fixture.store.connection,
+                    job: fixture.job.id,
+                    work: Work::default(),
+                }
+                .intern(Node::Decision {
+                    source: 1,
+                    absent: fixture.identity.clone(),
+                    present: terminal,
+                })
+                .unwrap();
+                let ancestor = Graph {
+                    db: &fixture.store.connection,
+                    job: fixture.job.id,
+                    work: Work::default(),
+                }
+                .intern(Node::Decision {
+                    source: 0,
+                    absent: fixture.identity.clone(),
+                    present: descendant.clone(),
+                })
+                .unwrap();
+                assert_ne!(ancestor, descendant);
+                for id in [&ancestor, &descendant] {
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            "DELETE FROM native_rank_bindings WHERE job=?1 AND identity=?2",
+                            params![fixture.job.id, id.identity()],
+                        )
+                        .unwrap();
+                    fixture
+                        .store
+                        .connection
+                        .execute(
+                            "UPDATE native_rank_nodes SET refs=refs-1 WHERE identity=?1",
+                            [id.identity()],
+                        )
+                        .unwrap();
+                }
+
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "UPDATE native_rank_nodes SET present=?2 WHERE identity=?1",
+                        params![descendant.identity(), victim.identity()],
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                fixture.store.restart(&fixture.job).unwrap(),
+                Outcome::Written
+            );
+            let mut refused = false;
+            for _ in 0..1000 {
+                let old = fixture
+                    .store
+                    .reload(&fixture.job.spec.view_key)
+                    .unwrap()
+                    .unwrap();
+                if fixture.store.cleanup(&old).is_err() {
+                    refused = true;
+                    break;
+                }
+            }
+            assert!(
+                refused,
+                "redirected physical references were released in {target}"
+            );
+            assert_eq!(
+                graph_refs(&fixture),
+                before_graph,
+                "unrelated Graph refs changed in {target}"
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT refs FROM native_orthogonal_nodes WHERE identity=?1",
+                        [victim_geometry.identity()],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                before_geometry,
+                "unrelated geometry refs changed"
+            );
+            fixture.job = fixture.store.reload(&spec.view_key).unwrap().unwrap();
+            fixture.qualify();
+            let empty = serde_json::to_string(&Facts::default()).unwrap();
+            let rectangle = Rectangle::default();
+            let (actual, _) = fixture
+                .store
+                .orthogonal_rectangle(
+                    &fixture.job,
+                    ReadInput {
+                        name: "imported",
+                        root: &root,
+                        rectangle: &rectangle,
+                        included: u64::MAX,
+                        empty: &empty,
+                        cancelled: &|| false,
+                    },
+                    &combine,
+                    &|_, _| Ok(true),
+                )
+                .unwrap()
+                .qualified()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&actual).unwrap(),
+                serde_json::to_value(reference(8, u64::MAX, &rectangle)).unwrap(),
+                "live imported root changed after refusing {target}"
+            );
+        }
     }
 }

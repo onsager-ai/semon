@@ -50,110 +50,179 @@ CREATE INDEX IF NOT EXISTS native_rank_memo_identity ON native_rank_memos(identi
 /// Called by the existing private repair cleanup owner. Memo rows are removed
 /// before their job bindings: a shared memo can never name an already-collected
 /// result while another transaction is importing that result.
+pub(super) struct Cleanup {
+    pub(super) removed: usize,
+    pub(super) complete: bool,
+    pub(super) work: Work,
+}
+/// Compatibility API: the budget/result counts removals/reference writes.
+/// New producer callers consume cleanup_with_work for actual metadata work.
 pub(super) fn cleanup(
     db: &Connection,
     job: i64,
     budget: usize,
     bytes: &mut usize,
 ) -> rusqlite::Result<(usize, bool)> {
-    let (mut used, tree_complete) = candidate_tree::cleanup(db, job, budget, bytes)?;
-    if !tree_complete || used >= budget {
-        return Ok((used, false));
+    let (used, complete) = candidate_tree::cleanup(db, job, budget, bytes)?;
+    if !complete || used == budget { return Ok((used, false)); }
+    cleanup_with_work(db, job, budget - used, bytes).map(|step| (used + step.removed, step.complete))
+}
+pub(super) fn cleanup_with_work(
+    db: &Connection,
+    job: i64,
+    budget: usize,
+    bytes: &mut usize,
+) -> rusqlite::Result<Cleanup> {
+    let step = orthogonal::cleanup_with_work(db, job, budget, bytes)?;
+    let mut removed = step.removed;
+    let mut work = step.work;
+    macro_rules! finish {
+        ($complete:expr) => {
+            return Ok(Cleanup {
+                removed,
+                complete: $complete,
+                work,
+            })
+        };
     }
-    let (orthogonal_removed, orthogonal_complete) =
-        orthogonal::cleanup(db, job, budget - used, bytes)?;
-    used += orthogonal_removed;
-    if !orthogonal_complete || used >= budget {
-        return Ok((used, false));
+    macro_rules! exhausted {()=>{{
+        if work.rows()<STEP_ROWS {
+            let remains=db.query_row("SELECT EXISTS(SELECT 1 FROM native_rank_memos WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_bindings WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_nodes WHERE refs=0)",[job],|row|row.get::<_,bool>(0))?;work.sql_reads+=1;finish!(!remains);
+        }
+        finish!(false);
+    }}}
+    if !step.complete {
+        finish!(false);
     }
-    let mut q = db.prepare("SELECT identity,octet_length(metadata)+octet_length(identity) FROM native_rank_memos WHERE job=?1 ORDER BY identity LIMIT ?2")?;
-    let records = q
-        .query_map(params![job, (budget - used) as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (identity, length) in records {
-        if length > *bytes || used == budget {
+    loop {
+        if removed == budget || work.rows() + 2 > STEP_ROWS {
+            exhausted!();
+        }
+        let record:Option<(Option<String>,i64,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity)=77 AND octet_length(metadata)<=65536 THEN identity END,octet_length(metadata)+octet_length(identity),(octet_length(identity)=77 AND octet_length(metadata)<=65536) FROM native_rank_memos WHERE job=?1 ORDER BY identity LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((identity, length, valid)) = record else {
             break;
+        };
+        if !valid {
+            return Err(invalid("native rank cleanup memo exceeds native widths"));
+        }
+        let identity =
+            identity.ok_or_else(|| invalid("native rank cleanup memo identity absent"))?;
+        let length = usize::try_from(length)
+            .map_err(|_| invalid("invalid native rank cleanup memo length"))?;
+        if length > *bytes {
+            finish!(false);
         }
         db.execute(
             "DELETE FROM native_rank_memos WHERE job=?1 AND identity=?2",
             params![job, identity],
         )?;
         *bytes -= length;
-        used += 1;
+        work.metadata_bytes += length;
+        work.sql_writes += 1;
+        removed += 1;
     }
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_memos WHERE job=?1)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok((used, false));
-    }
-    let mut q = db.prepare(
-        "SELECT identity FROM native_rank_bindings WHERE job=?1 ORDER BY identity LIMIT ?2",
-    )?;
-    let bindings = q
-        .query_map(params![job, (budget - used) / 2], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for identity in bindings {
-        if identity.len() > *bytes {
-            break;
+    loop {
+        if removed + 2 > budget || work.rows() + 4 > STEP_ROWS {
+            exhausted!();
         }
+        let record:Option<(Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity) BETWEEN 79 AND 80 THEN identity END,(octet_length(identity) BETWEEN 79 AND 80) FROM native_rank_bindings WHERE job=?1 ORDER BY identity LIMIT 1",[job],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((identity, valid)) = record else {
+            break;
+        };
+        if !valid {
+            return Err(invalid("native rank cleanup binding exceeds native width"));
+        }
+        let identity = identity.ok_or_else(|| invalid("native rank cleanup binding absent"))?;
+        if *bytes < NODE_BYTES + 3 * 80 {
+            finish!(false);
+        }
+        let id =
+            NodeId::parse(&identity).map_err(|_| invalid("native rank cleanup binding invalid"))?;
+        let mut graph = Graph {
+            db,
+            job,
+            work: Work::default(),
+        };
+        graph
+            .node(&id)
+            .map_err(|_| invalid("native rank cleanup binding node corrupt"))?;
         db.execute(
             "DELETE FROM native_rank_bindings WHERE job=?1 AND identity=?2",
             params![job, identity],
         )?;
-        if db.execute(
-            "UPDATE native_rank_nodes SET refs=refs-1 WHERE identity=?1",
-            [&identity],
-        )? != 1
-        {
-            return Err(invalid("native rank cleanup dependency is absent"));
+        work.sql_writes += 1;
+        graph
+            .references_validated(&id.identity(), -1)
+            .map_err(|_| invalid("native rank cleanup binding dependency absent"))?;
+        *bytes -= identity.len() + graph.work.metadata_bytes;
+        work.metadata_bytes += identity.len();
+        work.add(graph.work);
+        removed += 2;
+    }
+    loop {
+        // One key, parent and two child reads, parent delete and two ref writes.
+        if removed + 3 > budget || work.rows() + 7 > STEP_ROWS {
+            exhausted!();
         }
-        *bytes -= identity.len();
-        used += 2;
-    }
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_bindings WHERE job=?1)",
-        [job],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Ok((used, false));
-    }
-    // Each removed node can expose its two children as unused. Seek again,
-    // rather than decode a recursive historical graph or run cascading DELETE.
-    while budget - used >= 3 {
-        let record: Option<(String,Option<String>,Option<String>,usize)> = db.query_row("SELECT identity,absent,present,octet_length(metadata)+octet_length(identity)+COALESCE(octet_length(absent),0)+COALESCE(octet_length(present),0) FROM native_rank_nodes WHERE refs=0 ORDER BY identity LIMIT 1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        let Some((identity, absent, present, length)) = record else {
-            break;
+        let record:Option<(Option<String>,bool)>=db.query_row("SELECT CASE WHEN octet_length(identity) BETWEEN 79 AND 80 THEN identity END,(octet_length(identity) BETWEEN 79 AND 80) FROM native_rank_nodes WHERE refs=0 ORDER BY identity LIMIT 1",[],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        work.sql_reads += 1;
+        let Some((identity, valid)) = record else {
+            finish!(true);
         };
-        if length > *bytes {
-            break;
+        if !valid {
+            return Err(invalid(
+                "native rank cleanup node identity exceeds native width",
+            ));
+        }
+        let identity =
+            identity.ok_or_else(|| invalid("native rank cleanup node identity absent"))?;
+        if *bytes < 3 * (NODE_BYTES + 2 * 80) + 80 {
+            finish!(false);
+        }
+        let id = NodeId::parse(&identity)
+            .map_err(|_| invalid("native rank cleanup node identity invalid"))?;
+        let mut graph = Graph {
+            db,
+            job,
+            work: Work::default(),
+        };
+        let (node, refs) = graph
+            .physical_node(&id)
+            .map_err(|_| invalid("native rank cleanup immutable node corrupt"))?;
+        if refs != 0 {
+            return Err(invalid(
+                "native rank cleanup immutable node gained references",
+            ));
+        }
+        let children = match node {
+            Node::Terminal { .. } => Vec::new(),
+            Node::Decision {
+                absent, present, ..
+            } => vec![absent, present],
+        };
+        for child in &children {
+            graph
+                .node(child)
+                .map_err(|_| invalid("native rank cleanup immutable child corrupt"))?;
         }
         db.execute(
             "DELETE FROM native_rank_nodes WHERE identity=?1 AND refs=0",
             [&identity],
         )?;
-        used += 1;
-        for child in [absent, present].into_iter().flatten() {
-            if db.execute(
-                "UPDATE native_rank_nodes SET refs=refs-1 WHERE identity=?1",
-                [&child],
-            )? != 1
-            {
-                return Err(invalid("native rank cleanup child is absent"));
-            }
-            used += 1;
+        work.sql_writes += 1;
+        removed += 1;
+        for child in children {
+            graph
+                .references_validated(&child.identity(), -1)
+                .map_err(|_| invalid("native rank cleanup child dependency absent"))?;
+            removed += 1;
         }
-        *bytes -= length;
+        *bytes -= identity.len() + graph.work.metadata_bytes;
+        work.metadata_bytes += identity.len();
+        work.add(graph.work);
     }
-    let complete = !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_nodes WHERE refs=0)",
-        [],
-        |r| r.get::<_, bool>(0),
-    )?;
-    Ok((used, complete))
 }
 
 #[cfg(test)]
@@ -410,6 +479,129 @@ mod tests {
     }
 
     #[test]
+    fn native_rank_cleanup_preserves_four_write_progress_and_reports_all_metadata_work() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let db = database();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(ORTHOGONAL_SCHEMA).unwrap();
+        let mut graph = Graph {
+            db: &db,
+            job: 1,
+            work: Work::default(),
+        };
+        let absent = graph
+            .intern(Node::Terminal {
+                facts: "absent".into(),
+            })
+            .unwrap();
+        let present = graph
+            .intern(Node::Terminal {
+                facts: "present".into(),
+            })
+            .unwrap();
+        let decision = graph
+            .intern(Node::Decision {
+                source: 0,
+                absent,
+                present,
+            })
+            .unwrap();
+        assert!(NodeId::parse(&decision.identity().replacen("node/0/", "node/00/", 1)).is_err());
+        let mut complete = false;
+        for _ in 0..32 {
+            let mut bytes = STEP_BYTES;
+            let vm = Arc::new(AtomicUsize::new(0));
+            let observed = vm.clone();
+            db.progress_handler(
+                1,
+                Some(move || {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let (step, calls, allocated) =
+                crate::test_allocations::measure(|| cleanup_with_work(&db, 1, 4, &mut bytes));
+            db.progress_handler(0, None::<fn() -> bool>);
+            let step = step.unwrap();
+            assert!(step.removed <= 4);
+            assert_eq!(step.removed, step.work.sql_writes);
+            assert!(step.work.rows() <= STEP_ROWS);
+            assert_eq!(step.work.metadata_bytes + bytes, STEP_BYTES);
+            assert!(step.work.sql_reads > 0);
+            assert!(vm.load(Ordering::Relaxed) >= step.work.rows());
+            assert!(vm.load(Ordering::Relaxed) <= 250_000);
+            assert!(calls > 0 && allocated <= 2 * STEP_BYTES);
+            assert!(crate::test_allocations::peak_bytes() <= STEP_BYTES);
+            if step.complete {
+                complete = true;
+                break;
+            }
+            assert!(
+                step.removed > 0,
+                "four-write cleanup failed eventual progress"
+            );
+        }
+        assert!(complete);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_rank_nodes", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        // The compatibility result continues to mean removals, not all reads.
+        let mut bytes = STEP_BYTES;
+        assert_eq!(cleanup(&db, 1, 4, &mut bytes).unwrap(), (0, true));
+    }
+
+    #[test]
+    fn native_rank_cleanup_guards_physical_text_before_rust_allocation() {
+        for target in ["memo-id", "memo-metadata", "binding-id", "node-id"] {
+            let db = database();
+            db.execute_batch(SCHEMA).unwrap();
+            db.execute_batch(ORTHOGONAL_SCHEMA).unwrap();
+            let giant = "!".repeat(4 * STEP_BYTES);
+            match target {
+                "memo-id" => {
+                    db.execute("INSERT INTO native_rank_memos VALUES(1,?1,'{}')", [&giant])
+                        .unwrap();
+                }
+                "memo-metadata" => {
+                    db.execute(
+                        "INSERT INTO native_rank_memos VALUES(1,?1,?2)",
+                        params![format!("{ROW_PREFIX}memo/{}", "0".repeat(64)), giant],
+                    )
+                    .unwrap();
+                }
+                "binding-id" => {
+                    db.execute("INSERT INTO native_rank_bindings VALUES(1,?1)", [&giant])
+                        .unwrap();
+                }
+                _ => {
+                    db.execute(
+                        "INSERT INTO native_rank_nodes VALUES(?1,64,'{}',NULL,NULL,0)",
+                        [&giant],
+                    )
+                    .unwrap();
+                }
+            }
+            let (rejected, calls, bytes) = crate::test_allocations::measure(|| {
+                let tx = db.unchecked_transaction().unwrap();
+                let mut bytes = STEP_BYTES;
+                cleanup_with_work(&tx, 1, STEP_ROWS, &mut bytes).is_err()
+            });
+            assert!(rejected, "unguarded cleanup column {target}");
+            assert!(
+                calls > 0 && bytes < STEP_BYTES,
+                "giant cleanup allocation in {target}: {bytes}"
+            );
+            assert!(crate::test_allocations::peak_bytes() < STEP_BYTES);
+        }
+    }
+
+    #[test]
     fn native_rank_immutable_roots_survive_old_job_cleanup_without_prefix_copy() {
         let db = database();
         let mut original = Graph {
@@ -485,6 +677,25 @@ pub(crate) struct NodeId {
 }
 
 impl NodeId {
+    fn parse(identity: &str) -> io::Result<Self> {
+        if !(79..=80).contains(&identity.len()) {
+            return Err(failure("native rank identity exceeds width"));
+        }
+        let text = identity
+            .strip_prefix(&format!("{ROW_PREFIX}node/"))
+            .ok_or_else(|| failure("invalid native rank identity prefix"))?;
+        let (level, digest) = text
+            .split_once('/')
+            .ok_or_else(|| failure("invalid native rank identity"))?;
+        let id = Self {
+            level: level.parse().map_err(io::Error::other)?,
+            digest: digest.into(),
+        };
+        if !id.valid() || id.identity() != identity {
+            return Err(failure("invalid native rank identity"));
+        }
+        Ok(id)
+    }
     fn valid(&self) -> bool {
         self.level <= VARIABLES
             && self.digest.len() == 64
@@ -631,6 +842,17 @@ impl Work {
     fn rows(&self) -> usize {
         self.sql_reads + self.sql_writes
     }
+    fn add(&mut self, other: Work) {
+        self.sql_reads += other.sql_reads;
+        self.sql_writes += other.sql_writes;
+        self.metadata_bytes += other.metadata_bytes;
+        self.vm_steps += other.vm_steps;
+        self.apply_visits += other.apply_visits;
+        self.memo_hits += other.memo_hits;
+        self.nodes_written += other.nodes_written;
+        self.max_stack = self.max_stack.max(other.max_stack);
+        self.max_live_node_bytes = self.max_live_node_bytes.max(other.max_live_node_bytes);
+    }
 }
 
 pub(crate) struct Advance {
@@ -736,19 +958,72 @@ impl Graph<'_> {
         self.work.vm_steps += i64::from(q.get_status(rusqlite::StatementStatus::VmStep));
         Ok(())
     }
-    fn node(&mut self, id: &NodeId) -> io::Result<Node> {
+    fn physical_node(&mut self, id: &NodeId) -> io::Result<(Node, i64)> {
         if !id.valid() {
             return Err(failure("invalid native rank node address"));
         }
-        let text = self
-            .get(&id.identity())?
-            .ok_or_else(|| failure("native rank node is absent"))?;
-        let node: Node = serde_json::from_str(&text).map_err(io::Error::other)?;
-        if !node.valid() || node_identity(&node, &text) != *id {
-            return Err(failure("native rank node identity or ordering changed"));
+        let guard = "(absent IS NULL OR octet_length(absent) BETWEEN 79 AND 80) AND (present IS NULL OR octet_length(present) BETWEEN 79 AND 80) AND octet_length(metadata)<=65536";
+        let sql = format!(
+            "SELECT CASE WHEN {guard} THEN metadata END,CASE WHEN {guard} THEN absent END,CASE WHEN {guard} THEN present END,({guard}),refs,level FROM native_rank_nodes WHERE identity=?1"
+        );
+        let mut statement = self.db.prepare_cached(&sql).map_err(io::Error::other)?;
+        statement.reset_status(rusqlite::StatementStatus::VmStep);
+        let row: Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            bool,
+            i64,
+            u8,
+        )> = statement
+            .query_row([id.identity()], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .optional()
+            .map_err(io::Error::other)?;
+        self.work.sql_reads += 1;
+        self.work.vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
+        let Some((text, absent, present, valid, refs, level)) = row else {
+            return Err(failure("native rank node absent"));
+        };
+        if !valid || refs < 0 {
+            return Err(failure("native rank physical row exceeds native widths"));
         }
+        let text = text.ok_or_else(|| failure("native rank metadata absent"))?;
+        self.work.metadata_bytes += text.len()
+            + [&absent, &present]
+                .into_iter()
+                .flatten()
+                .map(String::len)
+                .sum::<usize>();
         self.work.max_live_node_bytes = self.work.max_live_node_bytes.max(text.len());
-        Ok(node)
+        let node: Node = serde_json::from_str(&text).map_err(io::Error::other)?;
+        let expected = match &node {
+            Node::Decision {
+                absent, present, ..
+            } => (Some(absent.identity()), Some(present.identity())),
+            _ => (None, None),
+        };
+        if !node.valid()
+            || node_identity(&node, &text) != *id
+            || level != id.level
+            || (absent, present) != expected
+        {
+            return Err(failure(
+                "native rank physical edges disagree with native metadata",
+            ));
+        }
+        Ok((node, refs))
+    }
+    fn node(&mut self, id: &NodeId) -> io::Result<Node> {
+        self.physical_node(id).map(|(node, _)| node)
     }
     fn intern(&mut self, node: Node) -> io::Result<NodeId> {
         if let Node::Decision {
@@ -756,6 +1031,7 @@ impl Graph<'_> {
         } = &node
             && absent == present
         {
+            self.bind(absent)?;
             return Ok(absent.clone());
         }
         if !node.valid() {
@@ -788,6 +1064,10 @@ impl Graph<'_> {
         Ok(id)
     }
     fn references(&mut self, identity: &str, delta: i64) -> io::Result<()> {
+        self.node(&NodeId::parse(identity)?)?;
+        self.references_validated(identity, delta)
+    }
+    fn references_validated(&mut self, identity: &str, delta: i64) -> io::Result<()> {
         let mut q = self
             .db
             .prepare_cached("UPDATE native_rank_nodes SET refs=refs+?2 WHERE identity=?1")
@@ -804,6 +1084,7 @@ impl Graph<'_> {
         Ok(())
     }
     fn bind(&mut self, id: &NodeId) -> io::Result<()> {
+        self.node(id)?;
         let mut q = self.db.prepare_cached("INSERT INTO native_rank_bindings VALUES(?1,?2) ON CONFLICT(job,identity) DO NOTHING").map_err(io::Error::other)?;
         q.reset_status(rusqlite::StatementStatus::VmStep);
         let changed = q
@@ -813,7 +1094,7 @@ impl Graph<'_> {
         self.work.vm_steps += i64::from(q.get_status(rusqlite::StatementStatus::VmStep));
         drop(q);
         if changed != 0 {
-            self.references(&id.identity(), 1)?;
+            self.references_validated(&id.identity(), 1)?;
         }
         Ok(())
     }
@@ -941,14 +1222,26 @@ impl Graph<'_> {
         Ok(())
     }
     fn evaluate(&mut self, root: &NodeId, included: u64) -> io::Result<String> {
+        self.evaluate_cancelled(root, included, &|| false)?
+            .ok_or_else(|| failure("uncancelled native rank evaluation refused"))
+    }
+    fn evaluate_cancelled(
+        &mut self,
+        root: &NodeId,
+        included: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<Option<String>> {
         let mut id = root.clone();
         let mut previous = None;
         for _ in 0..=VARIABLES {
+            if cancelled() {
+                return Ok(None);
+            }
             if previous.is_some_and(|source| id.level <= source) {
                 return Err(failure("native rank decision cycle"));
             }
             match self.node(&id)? {
-                Node::Terminal { facts } => return Ok(facts),
+                Node::Terminal { facts } => return Ok((!cancelled()).then_some(facts)),
                 Node::Decision {
                     source,
                     absent,
@@ -1094,7 +1387,7 @@ impl NativeStore {
         }
         // The paged API below admits the full64-source guard. This convenience
         // method is for callers whose native context fits one write group.
-        if guard.len() * 5 + 6 > STEP_ROWS {
+        if guard.len() * 8 + 8 > STEP_ROWS {
             return Err(failure("native rank guard requires paged admission"));
         }
         self.rank_transaction(job, closure, cancelled, |db, id| {
@@ -1121,7 +1414,7 @@ impl NativeStore {
                     present,
                 })?;
             }
-            if graph.work.metadata_bytes > STEP_BYTES {
+            if graph.work.rows() > STEP_ROWS || graph.work.metadata_bytes > STEP_BYTES {
                 return Err(failure("native rank guard metadata budget exceeded"));
             }
             Ok((result, graph.work))
@@ -1191,7 +1484,7 @@ impl NativeStore {
                 return Err(failure("native rank guard cursor is invalid"));
             }
             while state.remaining > 0
-                && graph.work.rows() + 6 <= STEP_ROWS
+                && graph.work.rows() + 9 <= STEP_ROWS
                 && graph.work.metadata_bytes + 2 * NODE_BYTES <= STEP_BYTES
             {
                 let (source, included) = state.decisions[state.remaining - 1];
