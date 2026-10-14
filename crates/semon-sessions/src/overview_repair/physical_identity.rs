@@ -32,6 +32,7 @@ struct Headers {
     trace: Option<String>,
     slots: Option<String>,
     history: Option<String>,
+    points: Option<String>,
 }
 
 fn headers(db: &Connection, row: &CatalogRow) -> io::Result<Headers> {
@@ -50,6 +51,8 @@ fn headers(db: &Connection, row: &CatalogRow) -> io::Result<Headers> {
         trace: generation("session_trace_headers")?,
         slots: generation("session_slot_projections")?,
         history: generation("session_history_projections")?,
+        points: crate::events::store::native_query::point_publication::header(db, row)
+            .map_err(failure)?,
     })
 }
 

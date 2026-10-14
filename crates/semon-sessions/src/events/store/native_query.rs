@@ -9,6 +9,7 @@ use crate::model::{
 pub(super) mod candidate_delta;
 mod native_repair;
 pub(crate) mod physical_profile;
+pub(crate) mod point_publication;
 pub(crate) mod source_roots;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
 pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
@@ -57,6 +58,7 @@ pub(super) fn initialize(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(native_repair::OBJECT_SCHEMA)?;
     db.execute_batch(physical_profile::SCHEMA)?;
     db.execute_batch(candidate_delta::SCHEMA)?;
+    db.execute_batch(point_publication::SCHEMA)?;
     db.execute(
         "INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![SCHEMA_KEY, SCHEMA_VERSION.to_string()],
@@ -6320,6 +6322,12 @@ mod tests {
             "native_orthogonal_work",
             "native_orthogonal_frames",
             "native_orthogonal_gc",
+            "native_point_publications",
+            "native_point_owners",
+            "native_point_sources",
+            "native_point_relations",
+            "native_point_postings",
+            "native_point_heads",
             "native_candidate_changes",
             "native_candidate_interests",
             "native_original_copilot_started",
@@ -6557,6 +6565,13 @@ mod tests {
                 ("native_orthogonal_work", "table"),
                 ("native_orthogonal_frames", "table"),
                 ("native_orthogonal_gc", "table"),
+                ("native_point_publications", "table"),
+                ("native_point_owners", "table"),
+                ("native_point_sources", "table"),
+                ("native_point_relations", "table"),
+                ("native_point_postings", "table"),
+                ("native_point_heads", "table"),
+                ("native_point_owner_publication", "index"),
                 ("native_candidate_changes", "table"),
                 ("native_candidate_interests", "table"),
                 ("native_candidate_change_path", "index"),

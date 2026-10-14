@@ -6395,6 +6395,7 @@ pub(crate) struct PreparedSources {
     /// Exact native message discovery hints; overflow requires durable staging.
     pub(crate) message_dependencies: Option<Vec<String>>,
     pub(crate) relationships: relation_stage::Context,
+    pub(crate) native_points: relation_stage::PointPublication,
     pub(crate) indexed_sources: Vec<(String, summary::CatalogSource)>,
     pub(crate) indexed_native_parents: Vec<(String, String, String)>,
     pub(crate) withdrawals: Vec<relation_stage::Withdrawal>,
@@ -6606,6 +6607,7 @@ pub(crate) fn prepare_semantic_index_sources(
         transcripts: Vec::new(),
         pids: BTreeSet::new(),
         relationships: relation_stage::Context::default(),
+        native_points: relation_stage::PointPublication::default(),
     })
 }
 
@@ -7550,8 +7552,8 @@ fn build_sources_inner(
     }
     match target {
         BuildTarget::Sources => {
-            let relationships =
-                relation_stage::Context::capture(&builder, published_facts.as_ref());
+            let (relationships, native_points) =
+                relation_stage::Context::capture_publication(&builder, published_facts.as_ref());
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
             let mut message_dependencies = Some(Vec::new());
@@ -7619,6 +7621,7 @@ fn build_sources_inner(
                     .collect(),
                 relationships,
                 message_dependencies,
+                native_points,
                 indexed_sources: Vec::new(),
                 indexed_native_parents: Vec::new(),
                 withdrawals: Vec::new(),
@@ -7626,8 +7629,11 @@ fn build_sources_inner(
         }
         BuildTarget::Catalog => {
             let publication_started = std::time::Instant::now();
+            let (_, native_points) =
+                relation_stage::Context::capture_publication(&builder, published_facts.as_ref());
             let generation = cache.publish_catalog_projection_fenced(
                 &crate::slot_projection::Publication {
+                    points: Some(&native_points),
                     rows: catalog.as_deref().unwrap_or_default(),
                     transcripts: slot_projections.as_deref(),
                 },
@@ -7825,6 +7831,7 @@ fn build_sources_inner(
         if let Some(catalog) = catalog {
             cache.publish_session_projection(
                 &crate::slot_projection::Publication {
+                    points: None,
                     rows: &catalog,
                     transcripts: slot_projections.as_deref(),
                 },
@@ -7976,6 +7983,7 @@ fn build_sources_inner(
         if let Some(catalog) = catalog {
             cache.publish_session_projection(
                 &crate::slot_projection::Publication {
+                    points: None,
                     rows: &catalog,
                     transcripts: slot_projections.as_deref(),
                 },

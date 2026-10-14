@@ -89,6 +89,15 @@ pub(crate) struct Context {
     pub(crate) background_ends: Vec<(Location, Location)>,
 }
 
+/// Native point decisions captured before output recipes/window trimming.
+/// Catalog publication owns their atomic generation; readers never infer them
+/// from a finalized transcript or recapture an old source from Current.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PointPublication {
+    pub(crate) relations: BTreeMap<String, Relation>,
+    pub(crate) background_ends: Vec<(Location, Location)>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Selector {
     NativeKey {
@@ -228,6 +237,32 @@ pub(crate) struct Stub {
     pub(crate) harness: String,
     pub(crate) start: i64,
     pub(crate) last: i64,
+}
+
+impl Relation {
+    pub(crate) fn scalar(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            kind: self.kind.clone(),
+            from: self.from.clone(),
+            to: self.to.clone(),
+            target: self.target.clone(),
+            at: self.at,
+            done: self.done,
+            status: self.status.clone(),
+            has_result: self.has_result,
+            unmatched: self.unmatched,
+            ambiguous: self.ambiguous,
+            placements: Vec::new(),
+            heads: Vec::new(),
+            after: Vec::new(),
+            previews: self.previews.clone(),
+            order: self.order.clone(),
+            explicit_previews: self.explicit_previews,
+            native_order: self.native_order,
+            stubs: self.stubs.clone(),
+        }
+    }
 }
 
 fn static_state(value: &str) -> io::Result<&'static str> {
@@ -399,6 +434,24 @@ impl Context {
         observed: Option<&BTreeMap<String, SessionFacts>>,
     ) -> Self {
         Self::capture_inner(builder, observed, false)
+    }
+
+    pub(super) fn capture_publication(
+        builder: &Builder<'_>,
+        observed: Option<&BTreeMap<String, SessionFacts>>,
+    ) -> (Self, PointPublication) {
+        let mut all = Self::capture_points(builder, observed);
+        let points = PointPublication {
+            relations: std::mem::take(&mut all.relations),
+            background_ends: std::mem::take(&mut all.background_ends),
+        };
+        all.relations = points
+            .relations
+            .iter()
+            .filter(|(_, relation)| matches!(relation.kind.as_str(), "spawn" | "relay"))
+            .map(|(id, relation)| (id.clone(), relation.clone()))
+            .collect();
+        (all, points)
     }
 
     /// Indexed candidate publication retains every native placement kind.

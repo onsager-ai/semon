@@ -606,6 +606,7 @@ mod tests {
         publish(
             &tx,
             &Publication {
+                points: None,
                 rows: &[current.clone()],
                 transcripts: Some(&[crate::slot_projection::Projection {
                     key: current.key.clone(),

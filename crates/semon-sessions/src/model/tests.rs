@@ -11096,3 +11096,214 @@ fn native_point_relationship_capture_retains_absolute_addresses_all_kinds_and_pl
         serde_json::to_value(restored).unwrap()
     );
 }
+
+#[test]
+fn native_point_owner_publishes_atomically_with_catalog_and_serves_indexed_all_kind_postings() {
+    for history in [0usize, 128, 1024, 8192] {
+        let home = Home::new();
+        let mut records = vec![human("owner", ts(0, 0), "private native prompt sentinel")];
+        records.extend(
+            (0..history).map(|_| assistant("owner", ts(0, 1), vec![text("native response")])),
+        );
+        records.push(assistant(
+            "owner",
+            ts(0, 2),
+            vec![tool(
+                "question-call",
+                "AskUserQuestion",
+                json!({"questions":[{"question":"private question sentinel","options":[]}]}),
+            )],
+        ));
+        home.top("owner", &records);
+        let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+        let inputs = crate::inputs(&home.options).unwrap();
+        let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+        assert!(
+            prepared
+                .native_points
+                .relations
+                .values()
+                .any(|relation| relation.kind == "ask")
+        );
+        assert!(
+            prepared
+                .native_points
+                .relations
+                .values()
+                .any(|relation| relation.kind == "toyou")
+        );
+        let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+        assert_eq!(outcome, crate::events::Outcome::Written);
+        let store =
+            crate::events::store::native_query::NativeStore::open_read(&home.options).unwrap();
+        let owner = prepared.rows.iter().find(|row| row.key == "owner").unwrap();
+        let publication = store.point_publication(owner).unwrap().unwrap();
+        let connection =
+            rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+                .unwrap();
+        let recorded: String = connection
+            .query_row(
+                "SELECT catalog_generation FROM native_point_publications WHERE publication=?1",
+                [publication.publication],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(Some(recorded), generation);
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let builds = BUILDS.with(std::cell::Cell::get);
+        let mut decoded = 0;
+        for relation in prepared.native_points.relations.values() {
+            let actual = store
+                .native_point_relation(&publication, &relation.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(relation.scalar()).unwrap()
+            );
+            for placement in &relation.placements {
+                let witness = store.source_witness(&placement.at.source).unwrap();
+                let page = store
+                    .native_point_postings(&publication, &witness, placement.at.seq.unwrap(), None)
+                    .unwrap();
+                assert!(page.complete);
+                assert!(
+                    page.work.decoded_rows <= 64
+                        && page.work.metadata_bytes <= 1024 * 1024
+                        && page.work.vm_steps > 0
+                );
+                let found = page
+                    .rows
+                    .iter()
+                    .find(|point| point.phase == 0 && point.relation == relation.id)
+                    .unwrap();
+                assert_eq!(Some(found.ordinal), placement.ordinal);
+                assert_eq!(found.outgoing, Some(placement.outgoing));
+                assert!(found.background_call.is_none());
+                decoded += page.work.decoded_rows;
+            }
+        }
+        assert!(
+            decoded <= 4,
+            "point metadata decoded historical prefix: {history}"
+        );
+        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), loads);
+        assert_eq!(BUILDS.with(std::cell::Cell::get), builds);
+        let texts: Vec<String> = connection
+            .prepare("SELECT metadata FROM native_point_relations WHERE publication=?1")
+            .unwrap()
+            .query_map([publication.publication], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.contains("private native prompt sentinel")
+                    && !text.contains("private question sentinel"))
+        );
+        connection
+            .execute(
+                "UPDATE native_point_owners SET publication=publication+1000000 WHERE owner=?1",
+                [&publication.owner],
+            )
+            .unwrap();
+        assert!(!store.point_publication_current(&publication).unwrap());
+        assert!(
+            store
+                .native_point_relation(
+                    &publication,
+                    &prepared.native_points.relations.keys().next().unwrap()
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn native_point_publication_failure_rolls_back_catalog_headers_postings_and_epoch() {
+    let home = Home::new();
+    home.top(
+        "owner",
+        &[human("owner", ts(0, 0), "private native prompt sentinel")],
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let inputs = crate::inputs(&home.options).unwrap();
+    let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_native_point BEFORE INSERT ON native_point_postings BEGIN SELECT RAISE(ABORT,'point failure'); END;").unwrap();
+    assert!(cache.publish_partial_catalog_fenced(&prepared).is_err());
+    for table in [
+        "session_catalog",
+        "native_point_publications",
+        "native_point_owners",
+        "native_point_sources",
+        "native_point_relations",
+        "native_point_postings",
+        "native_point_heads",
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "partial {table}"
+        );
+    }
+    assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key IN ('native_point_epoch','catalog_generation'))",[],|row|row.get::<_,bool>(0)).unwrap());
+}
+
+#[test]
+fn native_point_owner_reuses_selected_publication_across_unrelated_native_handoff_indices() {
+    let home = Home::new();
+    home.top(
+        "selected",
+        &[human("selected", ts(0, 0), "selected prompt")],
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let row: summary::CatalogRow = serde_json::from_str(
+        &db.query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='selected'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = crate::events::store::native_query::NativeStore::open_read(&home.options).unwrap();
+    let original = store.point_publication(&row).unwrap().unwrap();
+    observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(store.point_publication(&row).unwrap().unwrap(), original);
+    // This native owner allocates before selected, shifting global H indices.
+    home.top(
+        "a-before-selected",
+        &[human("a-before-selected", ts(0, 0), "unrelated prompt")],
+    );
+    observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    assert!(store.point_publication_current(&original).unwrap());
+    assert_eq!(store.point_publication(&row).unwrap().unwrap(), original);
+}
