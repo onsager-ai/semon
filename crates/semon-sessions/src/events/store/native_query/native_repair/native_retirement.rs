@@ -23,6 +23,9 @@ const TABLES: &[(&str, &str, bool)] = &[
         "record_offset,ordinal,literal",
         true,
     ),
+    ("native_original_timestamp", "record_offset,ordinal", true),
+    ("native_original_copilot_body", "record_offset", true),
+    ("native_original_tag", "record_offset,ordinal", true),
     (
         "native_original_members",
         "record_offset,parent_offset,name",
@@ -68,6 +71,7 @@ pub(super) fn enqueue(
                 row.get::<_, bool>(0)
             })
             .map_err(io::Error::other)?
+            || native_compare::has_rows(db, obsolete.as_slice())?
         {
             db.execute(
                 "INSERT OR IGNORE INTO native_original_retirements VALUES(?1,?2,0)",
@@ -199,6 +203,22 @@ pub(super) fn advance(
     work.cleanup_vm_steps += vm_steps;
     work.metadata_rows += 1;
     work.metadata_bytes += optional_names.len() * 8;
+    // Pair receipts depend on either Original endpoint. Retire a bounded batch
+    // through both endpoint indexes before discarding either side's classes or
+    // lexical evidence. Committed deletions are the durable progress marker.
+    if native_compare::retire(&tx, &obsolete, &mut work)? {
+        if cancelled() {
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
+        }
+        tx.commit().map_err(io::Error::other)?;
+        return Ok(RepairStep {
+            outcome: Outcome::Deferred,
+            work,
+        });
+    }
     while index < TABLES.len() {
         let (table, columns, optional) = TABLES[index];
         if optional

@@ -382,6 +382,52 @@ fn part(
     Ok(Some(part))
 }
 
+/// Shared representative validation with explicit point-read work for consumers.
+/// Source/publication/closure fences remain with the owning caller transaction.
+pub(super) fn representative_at(
+    db: &Connection,
+    repair: &Repair,
+    text: &OriginalText,
+    work: &mut RepairWork,
+) -> io::Result<(Representative, i32)> {
+    if text.original() != repair.original {
+        return Err(io::Error::other(
+            "native text representative Original changed",
+        ));
+    }
+    let mut query = db.prepare("SELECT record_offset,ordinal FROM native_original_classes WHERE original=?1 AND class=?2").map_err(io::Error::other)?;
+    let (record, ordinal): (i64, i64) = query
+        .query_row(
+            params![repair.original.as_slice(), seq_u64(text.identity())?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(io::Error::other)?;
+    work.metadata_rows += 1;
+    work.metadata_bytes += 16;
+    let mut meter = IdentityMeter::default();
+    meter.statement(&query);
+    let record = u64::try_from(record).map_err(io::Error::other)?;
+    let (field, receipt) = field_at(
+        db,
+        repair,
+        record,
+        u64::try_from(ordinal).map_err(io::Error::other)?,
+        work,
+        &mut meter,
+    )?;
+    Ok((
+        Representative {
+            original: repair.original,
+            source: repair.source.clone(),
+            class: text.identity(),
+            record,
+            field,
+            receipt,
+        },
+        meter.class_sql_vm_steps,
+    ))
+}
+
 impl NativeStore {
     pub(crate) fn original_text_representative(
         &self,
@@ -408,27 +454,9 @@ impl NativeStore {
                 "native text representative dependencies changed",
             ));
         }
-        let (record,ordinal):(i64,i64)=tx.query_row("SELECT record_offset,ordinal FROM native_original_classes WHERE original=?1 AND class=?2",params![repair.original.as_slice(),seq_u64(text.identity())?],|row|Ok((row.get(0)?,row.get(1)?))).map_err(io::Error::other)?;
-        let record = u64::try_from(record).map_err(io::Error::other)?;
-        let mut work = RepairWork::default();
-        let mut meter = IdentityMeter::default();
-        let (field, receipt) = field_at(
-            &tx,
-            repair,
-            record,
-            u64::try_from(ordinal).map_err(io::Error::other)?,
-            &mut work,
-            &mut meter,
-        )?;
-        Ok(Representative {
-            original: repair.original,
-            source: repair.source.clone(),
-            class: text.identity(),
-            record,
-            field,
-            receipt,
-        })
+        representative_at(&tx, repair, text, &mut RepairWork::default()).map(|value| value.0)
     }
+
     /// The record reducer asks for one value/key's exact identity handle. A
     /// giant native field may need many calls, each persisting only cursors.
     /// The ordinal identifies retained evidence, never a digest-only claim.

@@ -14,6 +14,7 @@ use crate::json_string::native_record::{
 };
 
 mod native_classes;
+mod native_compare;
 mod native_events;
 mod native_harness;
 mod native_retirement;
@@ -21,6 +22,8 @@ mod native_source;
 mod native_time;
 pub(crate) type IdentityStep = native_classes::IdentityStep;
 pub(crate) type OriginalTextRepresentative = native_classes::Representative;
+pub(super) use native_compare::SCHEMA as COMPARE_SCHEMA;
+pub(crate) use native_compare::{ComparisonSource, TextComparisonStep};
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -4617,7 +4620,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(step.outcome, Outcome::Deferred);
-            assert_eq!(step.work.metadata_rows, 63);
+            assert_eq!(step.work.metadata_rows, 64);
             assert!(step.work.metadata_bytes <= BYTES);
             assert!(step.work.cleanup_vm_steps < 4096);
             assert!(step.work.cleanup_key_bytes <= STATE_BYTES);
