@@ -24,6 +24,8 @@ try {
     await page.screenshot({ path: out + '/launch-desktop-light.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ colorScheme: 'dark' });
+    const closeMenu = page.getByRole('button', { name: 'Close menu', exact: true });
+    if (await closeMenu.isVisible()) await closeMenu.click();
     await page.screenshot({ path: out + '/launch-phone-dark.png', fullPage: true });
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
@@ -78,7 +80,7 @@ try {
       .getByRole('dialog', { name: 'Session Composer', exact: true })
       .getByRole('button', { name: 'Close', exact: true })
       .click();
-    await page.getByRole('button', { name: 'Back to sessions', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Sessions', exact: true }).click();
     await page.locator('[data-session-row="list"][data-id="' + sessionId + '"]').click();
     await page.locator('section[aria-label="Transcript"]').waitFor();
     await page.getByRole('button', { name: /^(Open Composer|Composer;)/ }).click();
