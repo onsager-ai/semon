@@ -473,6 +473,14 @@ mod tests {
                         serde_json::to_value(prefix).unwrap(),
                         serde_json::to_value(&expected).unwrap()
                     );
+                    let mut cursor = GroupCursor::default();
+                    cursor.advance(&summarize(&marks[..split])).unwrap();
+                    let mut cursor: GroupCursor =
+                        serde_json::from_str(&serde_json::to_string(&cursor).unwrap()).unwrap();
+                    let last = cursor.advance(&summarize(&marks[split..])).unwrap();
+                    let (starts, open) = reference(&marks, false);
+                    assert_eq!(cursor.next, starts.len());
+                    assert_eq!(last, open.then(|| starts.len() - 1));
                 }
             }
         }
@@ -511,7 +519,7 @@ mod tests {
             .enumerate()
             .filter_map(|(position, mark)| {
                 cursor
-                    .push(matches!(mark.entry.kind, EntryKind::Gap), mark.incoming)
+                    .push_mark(mark.clone())
                     .and_then(|(_, starts)| starts.then_some(position))
             })
             .collect();

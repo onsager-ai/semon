@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod description_stage;
 pub(crate) mod identity_stage;
+pub(crate) mod indexed_native;
 pub(crate) mod native_producer;
 pub(crate) mod native_stage;
 pub(crate) mod range_stage;
@@ -5385,9 +5386,10 @@ impl<'a> Builder<'a> {
         sent: &[usize],
         last: bool,
     ) -> Option<End> {
-        let mut facts = range_stage::Facts::default();
+        let mut facts = indexed_native::OrderedFacts::default();
         for position in members {
             let entry = &entries[*position];
+            let incoming = Some(position) == members.first() && (u || start.is_some());
             let outgoing = match entry.kind {
                 EntryKind::H(handoff) if sent.contains(&handoff) => {
                     let handoff = &self.handoffs[handoff].out;
@@ -5399,30 +5401,31 @@ impl<'a> Builder<'a> {
                 }
                 _ => None,
             };
-            native_producer::Candidate::observe(
-                &mut facts,
-                range_stage::Leaf {
-                    order: range_stage::Order {
-                        key: (
-                            0,
-                            0,
-                            u64::try_from(*position).expect("native entry position fits"),
-                            0,
-                            0,
-                        ),
-                        ordinal: 0,
-                        identity: [0; 32],
+            facts
+                .observe(
+                    range_stage::Leaf {
+                        order: range_stage::Order {
+                            key: (
+                                0,
+                                0,
+                                u64::try_from(*position).expect("native entry position fits"),
+                                0,
+                                0,
+                            ),
+                            ordinal: 0,
+                            identity: [0; 32],
+                        },
+                        entry,
+                        found: entry.at.map(|at| event(self.files, at)),
+                        outgoing,
+                        boundary: false,
+                        count: 0,
                     },
-                    entry,
-                    found: entry.at.map(|at| event(self.files, at)),
-                    outgoing,
-                    boundary: false,
-                    count: 0,
-                },
-            )
-            .expect("native member count fits");
+                    incoming,
+                )
+                .expect("native member count fits");
         }
-        facts.end.finish(
+        facts.native.end.finish(
             start.map(|handoff| {
                 let start = &self.handoffs[handoff].out;
                 (
@@ -5436,6 +5439,7 @@ impl<'a> Builder<'a> {
             self.sessions[index].out.state,
             || {
                 facts
+                    .native
                     .last_content_at()
                     .is_some_and(|at| self.live_yield(index, at))
             },
