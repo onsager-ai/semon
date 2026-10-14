@@ -2,10 +2,6 @@
 //! roots carry no Query/custody authority: the final reader imports them only
 //! after admitting the newly published complete source and owner witnesses.
 use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
 
 const PREFIX: &str = "native-source-root/v1/";
 
@@ -19,8 +15,8 @@ pub(crate) struct Epoch {
 }
 
 impl Epoch {
-    fn current(&self, db: &Connection) -> rusqlite::Result<bool> {
-        db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE singleton=1 AND resetting=0 AND phase='publication' AND epoch=?1 AND generation IS ?2 AND revision=?3 AND runtime=?4 AND generation IS (SELECT value FROM meta WHERE key='catalog_generation'))", params![self.epoch,self.base_generation,self.source_revision,self.runtime], |row|row.get(0))
+    pub(super) fn current(&self, db: &Connection) -> rusqlite::Result<bool> {
+        db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE singleton=1 AND resetting=0 AND phase='publication' AND epoch=?1 AND generation IS ?2 AND revision=?3 AND runtime=?4 AND generation IS (SELECT value FROM meta WHERE key='catalog_generation') AND revision=COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_source_revision'),0))", params![self.epoch,self.base_generation,self.source_revision,self.runtime], |row|row.get(0))
     }
 }
 
@@ -196,15 +192,7 @@ impl NativeStore {
             add_work(&mut work.closure, read.work)?;
             Ok(read.current && bounded)
         };
-        let steps = Arc::new(AtomicU64::new(0));
-        let observed = Arc::clone(&steps);
-        self.connection.progress_handler(
-            1,
-            Some(move || {
-                observed.fetch_add(1, Ordering::Relaxed);
-                false
-            }),
-        );
+        let measurement = super::vm_meter::begin(&self.connection);
         let result = (|| {
             if cancelled() {
                 return Ok(Outcome::Deferred);
@@ -269,8 +257,7 @@ impl NativeStore {
             tx.commit().map_err(io::Error::other)?;
             Ok(Outcome::Written)
         })();
-        self.connection.progress_handler(0, None::<fn() -> bool>);
-        work.sqlite_vm_steps = steps.load(Ordering::Relaxed);
+        work.sqlite_vm_steps = measurement.finish(&self.connection);
         result.map(|outcome| (outcome, work))
     }
 }
@@ -299,15 +286,7 @@ impl NativeStore {
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<(Outcome, u64)> {
-        let steps = Arc::new(AtomicU64::new(0));
-        let observed = Arc::clone(&steps);
-        self.connection.progress_handler(
-            1,
-            Some(move || {
-                observed.fetch_add(1, Ordering::Relaxed);
-                false
-            }),
-        );
+        let measurement = super::vm_meter::begin(&self.connection);
         let result = (|| {
             if cancelled() {
                 return Ok(Outcome::Deferred);
@@ -334,7 +313,7 @@ impl NativeStore {
                 Outcome::Written
             })
         })();
-        self.connection.progress_handler(0, None::<fn() -> bool>);
-        result.map(|outcome| (outcome, steps.load(Ordering::Relaxed)))
+        let steps = measurement.finish(&self.connection);
+        result.map(|outcome| (outcome, steps))
     }
 }

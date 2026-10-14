@@ -533,6 +533,64 @@ impl NativeEvidence {
                 ));
             }
         }
+        // Prepare one immutable source-address operation before Publication's
+        // legacy model adaptation. Work is durable in the native source job;
+        // losing this worker never loses a candidate or grants view readiness.
+        // The final forest/relationship publication still qualifies separately.
+        {
+            use crate::events::store::native_query::{ClosureRead, NativeStore, source_points};
+            let mut native = NativeStore::open(&self.options)?;
+            if let Some(tick) = native.source_point_publication_tick()? {
+                if !tick.complete {
+                    let Some(source) = tick.source else {
+                        let path = tick.path.as_deref().ok_or_else(|| {
+                            io::Error::other("native source withdrawal input absent")
+                        })?;
+                        let (_progress, _receipt) =
+                            native.source_point_withdrawal_step(&tick.epoch, path, &|| {
+                                self.closed.load(Ordering::Acquire)
+                            })?;
+                        work.pending_sources = true;
+                        cache.end_scan();
+                        cache.release_published_indexes();
+                        work.texts.release_published_derivations();
+                        return Ok(true);
+                    };
+                    let witness = native.source_witness(&source)?;
+                    let path = source.path.to_string_lossy().into_owned();
+                    let epoch = tick.epoch.epoch;
+                    let closure = |db: &rusqlite::Connection, _job| {
+                        let mut query=db.prepare("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage stage JOIN catalog_semantic_sources source ON source.source_path=?1 WHERE stage.singleton=1 AND stage.epoch=?2 AND stage.phase='publication' AND stage.resetting=0 AND source.index_done=1 AND source.identity_done=1 AND source.relation_done=1 AND source.withdrawal IS NULL)")?;
+                        let current =
+                            query.query_row(rusqlite::params![path, epoch], |row| row.get(0))?;
+                        Ok(ClosureRead {
+                            current,
+                            work: crate::events::store::native_query::Work {
+                                decoded_rows: 1,
+                                metadata_bytes: 1,
+                                vm_steps: query.get_status(rusqlite::StatementStatus::VmStep),
+                            },
+                        })
+                    };
+                    before_build()?;
+                    let (progress, _receipt) =
+                        native.source_points_step(&tick.epoch, &witness, &closure, &|| {
+                            self.closed.load(Ordering::Acquire)
+                        })?;
+                    work.pending_sources = true;
+                    cache.end_scan();
+                    cache.release_published_indexes();
+                    work.texts.release_published_derivations();
+                    if progress == source_points::Progress::Conflict {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "native source point observation changed",
+                        ));
+                    }
+                    return Ok(true);
+                }
+            }
+        }
         let Some(batch) = cache.semantic_batch(64)? else {
             return Ok(false);
         };

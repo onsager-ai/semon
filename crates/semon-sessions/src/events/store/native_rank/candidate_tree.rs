@@ -77,6 +77,9 @@ impl CandidateRoot {
     pub(crate) fn is_empty(&self) -> bool {
         self.tree.is_none()
     }
+    pub(crate) fn empty_graph(&self) -> NodeId {
+        self.empty.clone()
+    }
 }
 
 /// The point payload contains no candidate body or model-derived semantics.
@@ -1818,6 +1821,7 @@ mod tests {
             runtime: fixture.spec.runtime.clone(),
         };
         fixture.store.connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) VALUES(1,?1,'publication',?2,?3,?4)",params![epoch.epoch,epoch.base_generation,epoch.runtime,epoch.source_revision]).unwrap();
+        fixture.store.connection.execute("INSERT INTO meta VALUES('catalog_source_revision',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[epoch.source_revision.to_string()]).unwrap();
         let witness = fixture
             .store
             .source_witness(&fixture.row.sources[0])
