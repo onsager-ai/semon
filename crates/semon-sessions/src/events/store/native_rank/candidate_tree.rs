@@ -2414,6 +2414,257 @@ mod tests {
     }
 
     #[test]
+    fn candidate_tree_wal_peer_changes_are_rechecked_after_snapshot_release() {
+        for operation in ["select", "range", "seek"] {
+            for mutation in ["unchanged", "current", "owner", "job", "related"] {
+                let mut fixture = Fixture::new();
+                let entry = test_entry(0, 0, 0);
+                let leaf = fixture.graph_leaf_with_guard(&entry, 0, &[]);
+                let (root, _) = fixture.update(
+                    &CandidateRoot::empty(fixture.empty.clone()),
+                    entry.key,
+                    Some(leaf),
+                    "facts-v1",
+                );
+                fixture.ready();
+                fixture
+                    .store
+                    .connection
+                    .execute_batch("PRAGMA journal_mode=WAL")
+                    .unwrap();
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "INSERT INTO meta(key,value) VALUES('candidate_related','old')",
+                        [],
+                    )
+                    .unwrap();
+                let peer = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+                let peer_mode: String = peer
+                    .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(peer_mode.to_ascii_lowercase(), "wal");
+                let calls = Cell::new(0);
+                let snapshot_checks = Cell::new(0);
+                let callback_vm = Cell::new(0u64);
+                let closure = |db: &Connection, id: i64| -> rusqlite::Result<bool> {
+                    calls.set(calls.get() + 1);
+                    let current = native_query::job_current(db, &fixture.job)?;
+                    let mut q =
+                        db.prepare("SELECT value='old' FROM meta WHERE key='candidate_related'")?;
+                    q.reset_status(rusqlite::StatementStatus::VmStep);
+                    let related: bool = q.query_row([], |row| row.get(0))?;
+                    callback_vm.set(
+                        callback_vm.get() + q.get_status(rusqlite::StatementStatus::VmStep) as u64,
+                    );
+                    drop(q);
+                    if calls.get() <= 2 {
+                        assert!(
+                            current && related,
+                            "the original SQLite snapshot should remain coherent"
+                        );
+                        snapshot_checks.set(snapshot_checks.get() + 1);
+                    }
+                    if calls.get() == 1 {
+                        match mutation {
+                            "current" => {
+                                peer.execute(
+                                    "DELETE FROM session_catalog WHERE session_key=?1",
+                                    [&fixture.row.key],
+                                )?;
+                            }
+                            "owner" => {
+                                peer.execute("INSERT INTO native_catalog_owner_versions(session_key,scope,generation) VALUES(?1,'current',1) ON CONFLICT(session_key,scope) DO UPDATE SET generation=generation+1", [&fixture.row.key])?;
+                            }
+                            "job" => {
+                                peer.execute(
+                                    "UPDATE native_query_jobs SET revision=revision+1 WHERE job=?1",
+                                    [id],
+                                )?;
+                            }
+                            "related" => {
+                                peer.execute(
+                                    "UPDATE meta SET value='new' WHERE key='candidate_related'",
+                                    [],
+                                )?;
+                            }
+                            "unchanged" => {}
+                            _ => unreachable!(),
+                        }
+                    }
+                    // Both in-transaction callbacks deliberately return true,
+                    // despite the WAL peer's committed generation replacement.
+                    Ok(current && related)
+                };
+                let (outcome, returned, work) = match operation {
+                    "select" => {
+                        let read = fixture
+                            .store
+                            .candidate_tree_select(
+                                &fixture.job,
+                                &root,
+                                0,
+                                u64::MAX,
+                                &facts_count,
+                                &closure,
+                                &|| false,
+                            )
+                            .unwrap();
+                        (read.outcome, read.value.is_some(), read.work)
+                    }
+                    "range" => {
+                        let read = fixture
+                            .store
+                            .candidate_tree_range(
+                                &fixture.job,
+                                &root,
+                                &CandidateBounds::default(),
+                                u64::MAX,
+                                &combine_facts,
+                                &closure,
+                                &|| false,
+                            )
+                            .unwrap();
+                        (read.outcome, read.value.is_some(), read.work)
+                    }
+                    "seek" => {
+                        let read = fixture
+                            .store
+                            .candidate_tree_seek(
+                                &fixture.job,
+                                &root,
+                                &entry.key,
+                                CandidateDirection::Forward,
+                                u64::MAX,
+                                &facts_count,
+                                &closure,
+                                &|| false,
+                            )
+                            .unwrap();
+                        (read.outcome, read.value.is_some(), read.work)
+                    }
+                    _ => unreachable!(),
+                };
+                assert_eq!(snapshot_checks.get(), 2);
+                assert!(work.sql_reads > 0, "refusal lost attempted read work");
+                assert!(
+                    work.sqlite_vm_steps >= work.vm_steps as u64 + callback_vm.get(),
+                    "the progress hook omitted callback or post-snapshot SQL"
+                );
+                if mutation == "unchanged" {
+                    assert_eq!(outcome, CandidateReadOutcome::Qualified);
+                    assert!(returned);
+                    assert_eq!(calls.get(), 3, "external closure was not rechecked");
+                } else {
+                    assert_eq!(
+                        outcome,
+                        CandidateReadOutcome::Conflict,
+                        "{operation}/{mutation}"
+                    );
+                    assert!(
+                        !returned,
+                        "{operation}/{mutation} returned old-generation data"
+                    );
+                    assert!(!fixture.store.recheck(&fixture.job).unwrap() || mutation == "related");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_tree_meter_includes_post_snapshot_closure_sql() {
+        let mut fixture = Fixture::new();
+        let entry = test_entry(0, 0, 0);
+        let leaf = fixture.graph_leaf_with_guard(&entry, 0, &[]);
+        let (root, _) = fixture.update(
+            &CandidateRoot::empty(fixture.empty.clone()),
+            entry.key,
+            Some(leaf),
+            "facts-v1",
+        );
+        fixture.ready();
+        let mut receipts = Vec::new();
+        let external_vm = Cell::new(0u64);
+        for extra_sql in [false, true] {
+            let calls = Cell::new(0);
+            let closure = |db: &Connection, _: i64| -> rusqlite::Result<bool> {
+                calls.set(calls.get() + 1);
+                if extra_sql && calls.get() == 3 {
+                    // Fixed relationship-context stand-in executed only after
+                    // release; its actual VM receipt is the comparison oracle.
+                    let mut q = db.prepare("WITH RECURSIVE bounded(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM bounded WHERE n<127) SELECT sum(n) FROM bounded")?;
+                    q.reset_status(rusqlite::StatementStatus::VmStep);
+                    assert_eq!(q.query_row([], |row| row.get::<_, i64>(0))?, 8128);
+                    external_vm.set(q.get_status(rusqlite::StatementStatus::VmStep) as u64);
+                }
+                Ok(true)
+            };
+            let read = fixture
+                .store
+                .candidate_tree_select(
+                    &fixture.job,
+                    &root,
+                    0,
+                    u64::MAX,
+                    &facts_count,
+                    &closure,
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(read.outcome, CandidateReadOutcome::Qualified);
+            assert_eq!(calls.get(), 3);
+            receipts.push(read.work);
+        }
+        assert_eq!(receipts[0].sql_reads, receipts[1].sql_reads);
+        assert_eq!(receipts[0].vm_steps, receipts[1].vm_steps);
+        assert!(external_vm.get() > 0);
+        assert!(
+            receipts[1].sqlite_vm_steps >= receipts[0].sqlite_vm_steps + external_vm.get(),
+            "post-snapshot closure SQL was omitted from the complete operation receipt"
+        );
+    }
+
+    #[test]
+    fn candidate_tree_post_snapshot_callback_cancellation_is_latched() {
+        let mut fixture = Fixture::new();
+        let entry = test_entry(0, 0, 0);
+        let leaf = fixture.graph_leaf_with_guard(&entry, 0, &[]);
+        let (root, _) = fixture.update(
+            &CandidateRoot::empty(fixture.empty.clone()),
+            entry.key,
+            Some(leaf),
+            "facts-v1",
+        );
+        fixture.ready();
+        let calls = Cell::new(0);
+        let cancellation = Cell::new(false);
+        let closure = |_: &Connection, _: i64| -> rusqlite::Result<bool> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                cancellation.set(true);
+            }
+            Ok(true)
+        };
+        let result = fixture
+            .store
+            .candidate_tree_select(
+                &fixture.job,
+                &root,
+                0,
+                u64::MAX,
+                &facts_count,
+                &closure,
+                &|| cancellation.replace(false),
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(result.outcome, CandidateReadOutcome::Deferred);
+        assert!(result.value.is_none());
+        assert!(result.work.sql_reads > 0 && result.work.sqlite_vm_steps > 0);
+    }
+
+    #[test]
     fn candidate_tree_guards_every_materialized_node_column() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
@@ -3829,6 +4080,34 @@ impl NativeStore {
             });
         }
         tx.commit().map_err(io::Error::other)?;
+        // WAL writers can commit while both checks above still see the same
+        // old read snapshot. Release it before rechecking the owner's current
+        // witnesses and the caller's complete relationship closure. Recheck
+        // owned witnesses again after the callback, which may itself do I/O.
+        if latched_cancelled() {
+            return Ok(CandidateRead {
+                outcome: CandidateReadOutcome::Deferred,
+                value: None,
+                work,
+            });
+        }
+        let current = self.recheck(job)?
+            && closure(&self.connection, job.id).map_err(io::Error::other)?
+            && self.recheck(job)?;
+        if latched_cancelled() {
+            return Ok(CandidateRead {
+                outcome: CandidateReadOutcome::Deferred,
+                value: None,
+                work,
+            });
+        }
+        if !current {
+            return Ok(CandidateRead {
+                outcome: CandidateReadOutcome::Conflict,
+                value: None,
+                work,
+            });
+        }
         Ok(CandidateRead {
             outcome: CandidateReadOutcome::Qualified,
             value,
