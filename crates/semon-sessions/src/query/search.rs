@@ -65,6 +65,13 @@ impl Search {
         });
         order
     }
+    pub(super) fn since(&self) -> Option<i64> {
+        self.since
+    }
+    pub(super) fn eligible(&self, at: Option<i64>) -> bool {
+        self.since
+            .is_none_or(|since| at.is_some_and(|at| at >= since))
+    }
     pub(super) fn at_capacity(&self) -> bool {
         self.matches.len() >= self.limit || self.cache.bytes >= self.max_bytes
     }
@@ -89,6 +96,18 @@ impl Search {
         records
             .verify_all()
             .map_err(|error| QueryError::io(&error))?;
+        self.scan_range(served, transcript, 0, data, handoff_rows, records)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn scan_range(
+        &mut self,
+        served: &str,
+        transcript: &Transcript,
+        start: usize,
+        data: &crate::model::QueryData,
+        handoff_rows: &[Value],
+        records: &crate::query_source::Records<'_>,
+    ) -> Result<(), QueryError> {
         let handoffs: HashMap<&str, &Value> = handoff_rows
             .iter()
             .filter_map(|h| h["id"].as_str().map(|id| (id, h)))
@@ -154,7 +173,7 @@ impl Search {
             };
             let mut entry = json!({
                 "session": served,
-                "position": position,
+                "position": start + position,
                 "turn": slot.turn,
                 "kind": kind,
                 "part": part,

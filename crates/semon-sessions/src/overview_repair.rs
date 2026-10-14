@@ -477,6 +477,16 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
     Ok(Some((key, selected)))
 }
 
+pub(crate) fn query_context(db: &Connection, key: &str) -> io::Result<Vec<CatalogRow>> {
+    let selected = query_selection(db, key)?;
+    if selected.incomplete {
+        return Err(failure(
+            "Selected query relationship closure exceeds its source bound",
+        ));
+    }
+    Ok(selected.rows)
+}
+
 /// Whether the existing bounded identity/relationship closure survives a
 /// physical file window unchanged. A provisional Catalog cannot prove this.
 pub(crate) fn query_window_context_current(

@@ -82,9 +82,9 @@ Archive, source-custody and cleanup assertions remain.
 Required CI runs focused fixtures with `SEMON_BUILD_TIMING=0`, then retains the
 existing instrumented full suite. Record exact Source/Hub heads and tested merge
 trees; report the two executions separately. Cold completion emits latency,
-indexed/published sources, pending revisions, active stages, throughput and
-`optimization_10s_met`. Values over 10 s stay visible on every successful run
-without blocking release. Existing process I/O deltas and Index/WAL sizes remain.
+indexed/published sources, pending revisions, active stages and throughput.
+The user removed the 10 s objective on 2026-10-14; it is neither a gate nor a
+follow-up tuning target. Existing process I/O deltas and Index/WAL sizes remain.
 Process `VmHWM` includes fixture setup and other tests; kernel counters and WAL
 extents are not device I/O or producer live heap.
 
@@ -93,8 +93,9 @@ availability with asynchronous historical work. Repeated required-CI failures
 did not demonstrate unusable already-published reads. The provisional 30 s gate
 still requires complete indexing under identical resources. It does not relax
 source integrity, relationships, cancellation, restart, retention, authorization
-or durability. Track the 10 s objective through the benchmark and
-[producer measurements](scoped-catalog-producer.md).
+or durability. Preserve measured latency and the
+[producer measurements](scoped-catalog-producer.md), without a target-specific
+10 s indicator.
 
 Further SQLite/cache/WAL or statement tuning requires measured evidence affecting
 interactive responsiveness, incremental complexity, resource bounds,
@@ -102,8 +103,8 @@ correctness/durability or the 30 s budget. Expand diagnostics only for a specifi
 unresolved question.
 
 Physical/clipped query windows, alias/virtual/composite-history preparation,
-cold identity/uniqueness, received-copy/composer authority, over-budget retained
-custody transfer and final native/browser/PG/SSH/image qualification remain
+cold identity/uniqueness, received-copy/composer authority and final
+native/browser/PG/SSH/image qualification remain
 separate correctness and release questions. Passing this contract does not close
 them. Exact-pair results and remaining blockers belong in #380 and its integration
 PRs. Identify production-representative measurements separately from synthetic

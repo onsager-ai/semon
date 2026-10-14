@@ -431,6 +431,20 @@ impl Query {
             let reader = bounded
                 .as_ref()
                 .map(|reader| reader as &dyn crate::SessionSourceReader);
+            if super::transcript::search(
+                &source.options,
+                key,
+                &served,
+                reader,
+                mode,
+                now,
+                &mut search,
+            )? {
+                if search.stopped() {
+                    break;
+                }
+                continue;
+            }
             crate::overview_repair::with_query(&source.options, key, reader, mode, now, |data| {
                 let data = Arc::new(data);
                 let native_parts = self

@@ -43,6 +43,9 @@ pub(crate) struct Summary {
     source_generation: String,
 }
 impl Summary {
+    pub(crate) fn query_recipe(&self, id: &str) -> Value {
+        self.home["content"]["events"][id].clone()
+    }
     pub(crate) fn capture(
         key: &str,
         session: &Session,

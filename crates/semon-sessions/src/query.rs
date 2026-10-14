@@ -688,6 +688,7 @@ pub(crate) fn catalog_summaries<'a>(
             (
                 id.clone(),
                 json!({"summary":summary,
+                    "busy":session["busy"],
                     "recorded_status":facts.get(id).and_then(|f| f.recorded_status.as_deref()),
                     "state":session["state"], "last":session["last"],
                 }),
@@ -1060,6 +1061,33 @@ impl Query {
             .as_ref()
             .map(|reader| reader as &dyn crate::SessionSourceReader);
         let rendering = provider.map(|reader| (reader, mode));
+        if tool == "get_session"
+            && let Some(mut answer) =
+                transcript::session(&evidence.options, catalog_key, args, provider, mode, now)?
+        {
+            if self.sources.is_retired() {
+                return Err(QueryError::new("io", "native query source is closed"));
+            }
+            self.start = self
+                .sources
+                .machines
+                .iter()
+                .filter_map(|(_, source)| {
+                    crate::model::QueryData::identity(&source.options, now).window_start
+                })
+                .max();
+            if self.sources.machines.len() > 1 {
+                let labels = self.source_labels();
+                if let Some((_, label)) = labels
+                    .iter()
+                    .find(|(key, _)| key == source_key || (key.is_empty() && source_key == "local"))
+                {
+                    answer["session"]["machine"] = json!(label);
+                }
+            }
+            answer["window_start"] = json!(self.start);
+            return Ok(answer);
+        }
         if tool == "read_transcript"
             && let Some(mut answer) =
                 transcript::read(&evidence.options, catalog_key, args, provider, mode, now)?

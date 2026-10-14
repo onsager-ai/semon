@@ -63,6 +63,7 @@ mod model;
 mod parent_links;
 pub mod pricing;
 mod query;
+mod query_projection;
 mod read_path;
 pub(crate) use read_path::open_input;
 mod native_field;

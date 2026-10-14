@@ -4091,7 +4091,19 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
                 loads <= 4,
                 "focused Query loaded unrelated machine indexes: {loads}"
             );
-            assert!(query.evidence().parts[1].data.sessions.is_empty());
+            if let Some(native) = &query.native {
+                assert!(native.parts[1].data.sessions.is_empty());
+            } else {
+                assert!(
+                    query.sources.machines[1]
+                        .1
+                        .work
+                        .lock()
+                        .unwrap()
+                        .events
+                        .is_none()
+                );
+            }
         }
     }
 }
@@ -5308,4 +5320,119 @@ fn native_catalog_observer_transfers_one_evidence_owner_without_draining() {
             .is_err()
     );
     observer.close();
+}
+
+#[test]
+fn focused_tail_summary_and_stopped_search_do_not_prepare_growing_selected_history() {
+    let mut work = Vec::new();
+    for prefix in [0, 128, 1024] {
+        let home = Home::new("focused-growing-selected");
+        let mut records = vec![human("lead", ts(1, 0), "Fixed selected prompt")];
+        for n in 0..prefix {
+            records.push(assistant(
+                "lead",
+                ts(1, 1),
+                vec![text(&format!(
+                    "preceding reply {n}: {}",
+                    "history ".repeat(64)
+                ))],
+            ));
+        }
+        records.push(assistant(
+            "lead",
+            ts(23, 59),
+            vec![text("fixed tail needle")],
+        ));
+        home.top("lead", &records);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        drop(cache);
+        let tools = [
+            ("read_transcript", json!({"id":"lead","limit":1})),
+            ("get_session", json!({"id":"lead"})),
+            ("find", json!({"text":"needle","limit":1})),
+        ];
+        let expected: Vec<_> = tools
+            .iter()
+            .map(|(tool, args)| {
+                Query::from_sources(admitted(home.options.clone()))
+                    .call_at(tool, args, NOW)
+                    .unwrap()
+            })
+            .collect();
+        let archive = Arc::new(selected_archive(&home, 0));
+        let search_archive = archive.clone();
+        let factory = move |_: &str, _: &str| {
+            Ok(Box::new(SharedSearchArchive(search_archive.clone()))
+                as Box<dyn crate::SessionSourceReader>)
+        };
+        fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+        let mut measured = Vec::new();
+        for ((tool, args), expected) in tools.iter().zip(expected) {
+            let mut query = Query::from_sources(admitted(home.options.clone()));
+            let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let calls = archive.calls.load(Ordering::Relaxed);
+            let bytes = archive.read_bytes.load(Ordering::Relaxed);
+            let answer = if *tool == "find" {
+                query.call_catalog_at(
+                    "find",
+                    args,
+                    Some(&factory),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW,
+                )
+            } else {
+                query.call_selected_at(
+                    "local",
+                    "lead",
+                    tool,
+                    args,
+                    Some(archive.as_ref()),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW,
+                )
+            }
+            .unwrap();
+            assert_eq!(answer, expected, "{tool}: prefix={prefix}");
+            assert_eq!(
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                indexes,
+                "{tool} loaded a full Index"
+            );
+            assert!(
+                query.native.is_none(),
+                "{tool} prepared full selected history"
+            );
+            let slots = transcript::SLOTS.with(std::cell::Cell::get);
+            assert!(
+                slots <= if *tool == "find" { 64 } else { 3 },
+                "{tool}: {slots} slots"
+            );
+            measured.push((
+                archive.calls.load(Ordering::Relaxed) - calls,
+                archive.read_bytes.load(Ordering::Relaxed) - bytes,
+                slots,
+            ));
+        }
+        eprintln!("focused_selected prefix={prefix} work={measured:?}");
+        work.push(measured);
+    }
+    // Requests and prepared slots stay bounded; verified block bytes can differ
+    // at the final physical block boundary, never by the selected prefix length.
+    for measured in work {
+        for (calls, bytes, _) in measured {
+            assert!(calls <= 16, "provider request bound: {calls}");
+            assert!(
+                bytes <= 8 * crate::source_chunks::SIZE as u64,
+                "provider byte bound: {bytes}"
+            );
+        }
+    }
 }

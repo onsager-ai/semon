@@ -354,3 +354,37 @@ explicit migration before that cache is removed. Bounded relationship closure
 and authorized provider reads remain. Product Viewer model transport and complete
 compatibility Model construction are removed; global native reconciliation and
 unqualified selected semantic preparation remain distinct scaling costs.
+
+
+## Focused Query metadata and search
+
+Qualified physical `get_session` reads reuse the producer's exact summary and
+private Query turn/handoff recipes in the existing Index metadata region. They
+page content-free metadata and resolve only returned prompt/handoff fields.
+Public Trace rows, their digest and transport are unchanged. Private recipes
+are separated by native harness owner; their header binds the source vector,
+Query observation, trace generation and complete recipe counts. Publication and
+repair use the existing source/generation transaction. Reads recheck the header,
+relationship footprint, runtime and actual used bytes before returning.
+
+Qualified Catalog search reads at most 64 slot recipes per batch and scans newest
+first until its result/byte budget stops it. Handoff text resolves only when that
+slot is actually reached. Absolute slot addresses and existing stop semantics
+are retained. A late match legitimately scans earlier content; it does not first
+prepare the complete selected Event Index or transcript. Bodies, providers,
+verification state and the single preparation block belong to one request.
+
+Existing bounds remain: 64 sources in a relationship closure, 1 MiB per Catalog
+metadata value, 64 KiB per Query/slot recipe, 4 MiB for the complete content-free
+source-proof hash vectors, 8 MiB for the requested session result metadata, 64 MiB
+for native Query detail input, and 1,024 provider requests shared with final
+verification. Source proof vectors are still decoded in full within that cap;
+this is a bounded metadata support limit, not a completed lazy-proof migration.
+Over-budget or changed inputs return an explicit error.
+
+This does not complete all selected-window paths. A physical scan that omits a
+source can change canonical aliases and skipped-parent semantics. Those paths,
+virtual owners, unqualified composite retained histories and older publications
+without the new private recipes still use the existing selected native producer
+under its source/byte caps. The focused-read implementation gap therefore
+remains open; the caps do not establish history-independent small reads there.

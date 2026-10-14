@@ -29,6 +29,7 @@ CREATE INDEX IF NOT EXISTS session_trace_bookmark_owner ON session_trace_bookmar
 
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
+    query: Option<crate::query_projection::Projection>,
     session: Value,
     turns: Vec<Value>,
     edges: Vec<Value>,
@@ -92,6 +93,7 @@ impl Projection {
             "waiting_since": session.waiting_since,
         });
         Self {
+            query: Some(crate::query_projection::Projection::capture(turns,edges)),
             session: json!({"name":session.name,"harness":session.harness,"kind":session.kind,"state":session.state,"model":session.model,"start":session.start,"last":session.last,"tokens":session.tokens,"cost":session.cost,"busy":session.busy,"wait_edges":session.wait_edges,"wait_edges_truncated":session.wait_edges_truncated,"details":details}),
             turns: turns.iter().filter(|turn|turn.sid==key).map(|turn|json!({"id":turn.id,"sid":turn.sid,"start":turn.start,"u":turn.u,"at":turn.at,"end":turn.end,"sent":turn.sent,"last":turn.last})).collect(),
             edges: edges.iter().filter(|edge|edge.from==key || edge.to.as_deref()==Some(key)).map(|edge|json!({"id":edge.id,"kind":edge.kind,"ask":edge.ask,"from":edge.from,"to":edge.to,"at":edge.at,"done":edge.done,"status":edge.status,"declined":edge.declined,"unmatched":edge.unmatched,"ambiguous":edge.ambiguous,"brief_session":owners[&edge.id]["brief_session"],"result_session":owners[&edge.id]["result_session"]})).collect(),
@@ -186,6 +188,10 @@ pub(crate) fn publish_measured(
     let source = crate::retention::source_generation(&row.sources)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     measurements.record("trace_source_generation", started, 1);
+    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
+        query.publish(tx, row, summary, &digest)?;
+    }
+
     let changed = {
         let started = measurements.start();
         let mut statement=tx.prepare_cached("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation")?;
@@ -845,6 +851,7 @@ mod generation_tests {
 
     fn populated_projection() -> Projection {
         Projection {
+            query: None,
             session: ordered_session(),
             turns: vec![json!({"id":"turn","start":null,"at":1,"last":1})],
             edges: vec![
@@ -861,12 +868,14 @@ mod generation_tests {
     fn borrowed_trace_generation_keeps_legacy_bytes_and_order() {
         let populated = populated_projection();
         let empty = Projection {
+            query: None,
             session: json!({}),
             turns: Vec::new(),
             edges: Vec::new(),
             bookmarks: Vec::new(),
         };
         let null = Projection {
+            query: None,
             session: Value::Null,
             turns: vec![Value::Null, json!([]), json!({})],
             edges: vec![json!([i64::MIN, 1.25, false])],
