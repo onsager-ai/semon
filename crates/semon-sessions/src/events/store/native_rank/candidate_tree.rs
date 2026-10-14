@@ -85,6 +85,10 @@ impl CandidateRoot {
 pub(crate) struct CandidateLeaf {
     pub(crate) candidate: CandidateRef,
     pub(crate) aggregate: NodeId,
+    /// Opaque, content-free native point recipe. Immutable tree ownership keeps
+    /// it alive across root imports without copying a historical payload Vec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) payload: Option<String>,
 }
 
 /// Ordered inclusive native placement bounds. The caller builds these from
@@ -199,6 +203,8 @@ enum CandidateNode {
         key: Vec<u8>,
         candidate: CandidateRef,
         aggregate: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<String>,
     },
     Branch {
         split: u16,
@@ -242,6 +248,7 @@ impl CandidateNode {
                 key,
                 candidate,
                 aggregate,
+                ..
             } => {
                 key.len() == KEY_BYTES
                     && candidate.as_slice() == &key[KEY_BYTES - 32..]
@@ -1265,6 +1272,7 @@ mod tests {
             CandidateLeaf {
                 candidate: entry.candidate,
                 aggregate: result.unwrap().0,
+                payload: None,
             }
         }
 
@@ -1318,6 +1326,7 @@ mod tests {
             CandidateLeaf {
                 candidate: entry.candidate,
                 aggregate: result.expect("64-source graph guard exceeded its step bound"),
+                payload: None,
             }
         }
 
@@ -1473,6 +1482,7 @@ mod tests {
                         Some(CandidateLeaf {
                             candidate: identity,
                             aggregate: leaf.unwrap().0,
+                            payload: None,
                         }),
                         "native-forest-facts-v2",
                     )
@@ -2159,11 +2169,62 @@ mod tests {
     }
 
     #[test]
+    fn candidate_tree_payload_preserves_old_encoding_and_existing_cell_caps() {
+        let mut fixture = Fixture::new();
+        let first = test_entry(0, 10, 0);
+        let mut leaf = fixture.graph_leaf(&first, 0);
+        let original = CandidateNode::Leaf {
+            key: first.key.to_vec(),
+            candidate: first.candidate,
+            aggregate: leaf.aggregate.clone(),
+            payload: None,
+        };
+        let encoded = serde_json::to_string(&original).unwrap();
+        assert!(!encoded.contains("payload"));
+        let old: CandidateNode = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(serde_json::to_string(&old).unwrap(), encoded);
+        let root = CandidateRoot::empty(fixture.empty.clone());
+        let before = fixture.job.clone();
+        leaf.payload = Some("x".repeat(NODE_BYTES));
+        assert!(
+            fixture
+                .store
+                .candidate_tree_begin_update(
+                    &fixture.job,
+                    "oversized-point-payload",
+                    &root,
+                    first.key,
+                    Some(leaf),
+                    "facts-v1",
+                    &valid_closure,
+                    &|| false,
+                )
+                .is_err()
+        );
+        fixture.refresh();
+        assert_eq!(fixture.job.revision, before.revision);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_rank_candidate_cursors WHERE job=?1",
+                    [fixture.job.id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn candidate_tree_cursor_reopens_and_imported_root_survives_predecessor_cleanup() {
         let mut fixture = Fixture::new();
         let mut root = CandidateRoot::empty(fixture.empty.clone());
         let first = test_entry(0, 10, 0);
-        let first_leaf = fixture.graph_leaf(&first, 0);
+        let mut first_leaf = fixture.graph_leaf(&first, 0);
+        let point_payload = r#"{"version":1,"address":{"extra":false,"seq":0},"native_kind":"A"}"#;
+        first_leaf.payload = Some(point_payload.into());
         root = fixture
             .update(&root, first.key, Some(first_leaf), "facts-v1")
             .0;
@@ -2381,7 +2442,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.outcome, CandidateReadOutcome::Qualified);
-        assert_eq!(result.value.unwrap().key, first.key);
+        let point = result.value.unwrap();
+        assert_eq!(point.key, first.key);
+        assert_eq!(point.leaf.payload.as_deref(), Some(point_payload));
+        let seek = fixture
+            .store
+            .candidate_tree_seek(
+                &ready,
+                &imported_root,
+                &first.key,
+                CandidateDirection::Forward,
+                u64::MAX,
+                &facts_count,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(seek.outcome, CandidateReadOutcome::Qualified);
+        assert_eq!(
+            seek.value.unwrap().leaf.payload.as_deref(),
+            Some(point_payload)
+        );
     }
 
     #[test]
@@ -2896,6 +2977,7 @@ mod tests {
             key: vec![0; KEY_BYTES],
             candidate: [0; 32],
             aggregate: aggregate.clone(),
+            payload: None,
         };
         let metadata = encoded(&node, NODE_BYTES).unwrap();
         let id = candidate_id(&metadata);
@@ -3062,6 +3144,7 @@ mod tests {
                     key: items[0].key.to_vec(),
                     candidate: items[0].candidate,
                     aggregate: items[0].aggregate.clone(),
+                    payload: None,
                 },
                 graph,
             );
@@ -3414,11 +3497,13 @@ mod tests {
             key: left_key.to_vec(),
             candidate: [0; 32],
             aggregate: fixture.empty.clone(),
+            payload: None,
         };
         let right = CandidateNode::Leaf {
             key: right_key.to_vec(),
             candidate: [0; 32],
             aggregate: fixture.empty.clone(),
+            payload: None,
         };
         assert!(validate_children(0, &left, &right).is_err());
         let malformed = CandidateNode::Branch {
@@ -3485,6 +3570,7 @@ mod tests {
                     Some(CandidateLeaf {
                         candidate: [0; 32],
                         aggregate: replacement.aggregate,
+                        payload: None,
                     }),
                     "deep-facts-v1",
                     &valid_closure,
@@ -4108,6 +4194,7 @@ impl NativeStore {
                         key,
                         candidate,
                         aggregate,
+                        payload,
                     } => {
                         if active.len() > MAX_DEPTH + 1 {
                             return Err(invalid("candidate tree selection depth exceeded"));
@@ -4117,6 +4204,7 @@ impl NativeStore {
                             leaf: CandidateLeaf {
                                 candidate,
                                 aggregate,
+                                payload,
                             },
                         }));
                     }
@@ -4486,11 +4574,13 @@ fn seek_node(
             key,
             candidate,
             aggregate,
+            payload,
         } => Some(CandidatePoint {
             key: fixed_key(&key)?,
             leaf: CandidateLeaf {
                 candidate,
                 aggregate,
+                payload,
             },
         }),
         CandidateNode::Branch {
@@ -4727,6 +4817,7 @@ fn prepare_empty(
                 key: state.key.clone(),
                 candidate: leaf.candidate,
                 aggregate: leaf.aggregate.clone(),
+                payload: leaf.payload.clone(),
             },
             graph,
         )?),
@@ -4756,6 +4847,7 @@ fn prepare_at_leaf(
                     key: state.key.clone(),
                     candidate: leaf.candidate,
                     aggregate: leaf.aggregate.clone(),
+                    payload: leaf.payload.clone(),
                 },
                 graph,
             )?),
@@ -4802,6 +4894,7 @@ fn prepare_at_leaf(
                 key: state.key.clone(),
                 candidate: leaf.candidate,
                 aggregate: leaf.aggregate.clone(),
+                payload: leaf.payload.clone(),
             },
             graph,
         )?;

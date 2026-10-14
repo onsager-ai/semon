@@ -404,6 +404,7 @@ mod tests {
                                         leaf: CandidateLeaf {
                                             candidate: order.identity,
                                             aggregate: empty.clone(),
+                                            payload: None,
                                         },
                                     };
                                     let qualified = source.point(several, point).unwrap();
