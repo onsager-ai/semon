@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod description_stage;
 pub(crate) mod identity_stage;
 pub(crate) mod native_stage;
+pub(crate) mod range_stage;
 pub(crate) mod relation_stage;
 pub(crate) mod summary;
 pub(crate) mod turn_stage;
@@ -5368,8 +5369,7 @@ impl<'a> Builder<'a> {
         sent: &[usize],
         last: bool,
     ) -> Option<End> {
-        let mut facts = turn_stage::EndFacts::default();
-        let mut last_content_at = None;
+        let mut facts = range_stage::Facts::default();
         for position in members {
             let entry = &entries[*position];
             let outgoing = match entry.kind {
@@ -5383,15 +5383,24 @@ impl<'a> Builder<'a> {
                 }
                 _ => None,
             };
-            if facts.observe(
-                entry.kind,
-                entry.at.map(|at| event(self.files, at)),
-                outgoing,
-            ) {
-                last_content_at = entry.at;
-            }
+            facts
+                .observe(range_stage::Leaf {
+                    key: (
+                        0,
+                        0,
+                        u64::try_from(*position).expect("native entry position fits"),
+                        0,
+                        0,
+                    ),
+                    entry,
+                    found: entry.at.map(|at| event(self.files, at)),
+                    outgoing,
+                    boundary: false,
+                    count: 0,
+                })
+                .expect("native member count fits");
         }
-        facts.finish(
+        facts.end.finish(
             start.map(|handoff| {
                 let start = &self.handoffs[handoff].out;
                 (
@@ -5403,7 +5412,11 @@ impl<'a> Builder<'a> {
             last,
             self.sessions[index].out.waiting_for.as_deref(),
             self.sessions[index].out.state,
-            || last_content_at.is_some_and(|at| self.live_yield(index, at)),
+            || {
+                facts
+                    .last_content_at()
+                    .is_some_and(|at| self.live_yield(index, at))
+            },
         )
     }
 }
