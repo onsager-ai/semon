@@ -42,11 +42,11 @@ impl DescriptorRecord<'_, '_, '_> {
         let work = self.work.borrow();
         let left = (
             crate::SESSION_SOURCE_CHUNK_MAX.saturating_sub(work.native_bytes),
-            ROWS.saturating_sub(12 + work.metadata_rows),
+            ROWS.saturating_sub(16 + work.metadata_rows),
         );
         if (self.cancelled)()
             || left.1 < rows
-            || work.metadata_bytes + bytes + 4 * STATE_BYTES > BYTES
+            || work.metadata_bytes + bytes + 6 * STATE_BYTES > BYTES
         {
             return Err(Error::Deferred);
         }
@@ -378,8 +378,8 @@ impl Observation<'_, '_> {
         action: impl FnOnce(&native_events::Events<'_>) -> io::Result<T>,
     ) -> io::Result<T> {
         let before = self.work.borrow();
-        if before.metadata_rows + 3 + 12 > ROWS
-            || before.metadata_bytes + STATE_BYTES + 4 * STATE_BYTES > BYTES
+        if before.metadata_rows + 3 + 16 > ROWS
+            || before.metadata_bytes + STATE_BYTES + 6 * STATE_BYTES > BYTES
         {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,

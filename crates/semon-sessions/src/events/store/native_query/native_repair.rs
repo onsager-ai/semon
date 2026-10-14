@@ -17,6 +17,7 @@ mod native_activity;
 mod native_admission;
 mod native_classes;
 mod native_compare;
+mod native_controller;
 mod native_copilot;
 mod native_events;
 mod native_harness;
@@ -41,6 +42,7 @@ pub(crate) type MetadataStep = native_metadata::MetadataStep;
 pub(crate) type OriginalHeaderField = crate::events::native_harness::header::Field;
 pub(crate) type OriginalHeaderValue = crate::events::native_harness::header::Value<OriginalText>;
 pub(crate) type UsageRowStep = native_usage::UsageRowStep;
+pub(crate) type CopilotRecordStep = native_controller::CopilotRecordStep;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -53,6 +55,11 @@ pub(crate) const REPAIR_FORMAT: u32 = 3;
 const PREVIOUS_REPAIR_PARSER: u32 = 24;
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_original_harness (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_classes (
  original BLOB NOT NULL, class INTEGER NOT NULL, record_offset INTEGER NOT NULL,
  ordinal INTEGER NOT NULL, digest BLOB NOT NULL, decoded_bytes INTEGER NOT NULL,
@@ -1972,11 +1979,30 @@ impl NativeStore {
         completed: &dyn Fn(&Connection, [u8; 32], u64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<Outcome> {
+        self.finish_original_record_with_work(job, witness, repair, completed, cancelled)
+            .map(|step| step.outcome)
+    }
+
+    fn finish_original_record_with_work(
+        &mut self,
+        job: &Job,
+        witness: &SourceWitness,
+        repair: &Repair,
+        completed: &dyn Fn(&Connection, [u8; 32], u64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<RepairStep> {
+        let mut work = RepairWork::default();
         if cancelled() {
-            return Ok(Outcome::Deferred);
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
         }
         if !self.runtime_current(&job.spec)? {
-            return Ok(Outcome::Conflict);
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
         }
         let tx = self
             .connection
@@ -1991,24 +2017,40 @@ impl NativeStore {
             || !completed(&tx, repair.original, repair.cursor.record_at)
                 .map_err(io::Error::other)?
         {
-            return Ok(Outcome::Conflict);
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
         }
         let changed=tx.execute("UPDATE native_original_records SET status='folded' WHERE original=?1 AND record_offset=?2 AND end_offset=?3 AND status IN('lexed','gap')",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at)?,seq_u64(repair.cursor.source_at)?]).map_err(io::Error::other)?;
+        work.metadata_rows += 1;
+        work.metadata_bytes += "folded".len();
         if changed != 1 {
-            return Ok(Outcome::Conflict);
+            return Ok(RepairStep {
+                outcome: Outcome::Conflict,
+                work,
+            });
         }
         let cursor = next_record_cursor(repair);
         let state = bounded_json(&cursor, STATE_BYTES).map_err(io::Error::other)?;
+        work.metadata_rows += 1;
+        work.metadata_bytes += state.len();
         tx.execute(
             "UPDATE native_original_repairs SET cursor=?2,revision=revision+1 WHERE original=?1",
             params![repair.original.as_slice(), state],
         )
         .map_err(io::Error::other)?;
         if cancelled() {
-            return Ok(Outcome::Deferred);
+            return Ok(RepairStep {
+                outcome: Outcome::Deferred,
+                work,
+            });
         }
         tx.commit().map_err(io::Error::other)?;
-        Ok(Outcome::Written)
+        Ok(RepairStep {
+            outcome: Outcome::Written,
+            work,
+        })
     }
 
     /// One attempt requests at most one authorized 128KiB Records range and
@@ -3778,6 +3820,462 @@ mod tests {
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
         }
+    }
+
+    #[test]
+    fn original_copilot_controller_reopens_between_native_actions_and_seals_exact_records() {
+        use crate::events::native_event::NativeEvent;
+        use crate::events::native_harness::header::{Field, Value as HeaderValue};
+        fn resolve(fixture: &Fixture, bytes: &[u8], value: &mut Value) {
+            if value.get("original").is_some() && value.get("class").is_some() {
+                let text: OriginalText = serde_json::from_value(value.clone()).unwrap();
+                let (record, field): (u64, String) = fixture.store.connection.query_row(
+                    "SELECT c.record_offset,f.metadata FROM native_original_classes c JOIN native_original_fields f ON f.original=c.original AND f.record_offset=c.record_offset AND f.ordinal=c.ordinal WHERE c.original=?1 AND c.class=?2",
+                    params![text.original().as_slice(),text.identity()],|row|Ok((row.get(0)?,row.get(1)?)),
+                ).unwrap();
+                let field: OriginalField = serde_json::from_str(&field).unwrap();
+                let start = usize::try_from(record + field.span.start).unwrap();
+                let end = usize::try_from(record + field.span.end).unwrap();
+                let quoted = [b"\"".as_slice(), &bytes[start..end], b"\"".as_slice()].concat();
+                *value = Value::String(serde_json::from_slice(&quoted).unwrap());
+            } else if let Some(object) = value.as_object_mut() {
+                for value in object.values_mut() {
+                    resolve(fixture, bytes, value);
+                }
+            } else if let Some(array) = value.as_array_mut() {
+                for value in array {
+                    resolve(fixture, bytes, value);
+                }
+            }
+        }
+        for padding in [0usize, 128, 1024, 8192] {
+            let records = [
+                serde_json::json!({"id":"prestart","type":"user.message","timestamp":"2026-10-15T00:00:00Z","data":{"content":"ignored"}}),
+                serde_json::json!({"id":"start","type":"session.start","timestamp":"2026-10-15T00:00:01Z","data":{"context":{"cwd":"/native"},"selectedModel":"native-model","reasoningEffort":"high","copilotVersion":"1","sessionId":"native-session"},"padding":"x".repeat(padding)}),
+                serde_json::json!({"id":"prestart","type":"user.message","timestamp":"2026-10-15T00:00:02Z","data":{"content":"accepted"}}),
+                serde_json::json!({"id":"assistant","type":"assistant.message","timestamp":"2026-10-15T00:00:03Z","data":{"content":"reply","toolRequests":[{"toolCallId":"call","name":"bash"}]}}),
+                serde_json::json!({"id":"completion","type":"tool.execution_complete","timestamp":"2026-10-15T00:00:04Z","data":{"toolCallId":"call","success":true}}),
+                serde_json::json!({"id":"assistant","type":"user.message","timestamp":"2026-10-16T00:00:00Z","data":{"content":"duplicate"}}),
+                serde_json::json!({"type":"user.message","timestamp":"2026-10-17T00:00:00Z"}),
+            ];
+            let mut bytes = Vec::new();
+            let mut expected = FileIndex::default();
+            for record in &records {
+                crate::events::copilot(&mut expected, record, bytes.len() as u64);
+                serde_json::to_writer(&mut bytes, record).unwrap();
+                bytes.push(b'\n');
+            }
+            let mut fixture = Fixture::new_harness(&bytes, "copilot");
+            let reads = crate::events::FILE_READS.with(Cell::get);
+            let mut repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            let mut sealed = 0;
+            let mut attempts = 0;
+            while repair.cursor.phase != Phase::Complete {
+                attempts += 1;
+                assert!(
+                    attempts < 2048,
+                    "each durable native stage must eventually advance"
+                );
+                if repair.cursor.phase == Phase::FoldRecord {
+                    let fields = fixture
+                        .store
+                        .original_fields_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    repair = fixture
+                        .store
+                        .reload_original_repair(
+                            &fixture.job,
+                            &fixture.source,
+                            &fixture.sources.reader(),
+                        )
+                        .unwrap()
+                        .unwrap();
+                    if fields.outcome == Outcome::Written {
+                        let cancelled = fixture
+                            .store
+                            .original_copilot_record_step(
+                                &fixture.job,
+                                &fixture.source,
+                                &repair,
+                                &fixture.sources.reader(),
+                                &|| true,
+                            )
+                            .unwrap();
+                        assert_eq!(cancelled.outcome, Outcome::Deferred);
+                        assert_eq!(cancelled.work.native_bytes, 0);
+                        assert!(!cancelled.sealed);
+                        let step = fixture
+                            .store
+                            .original_copilot_record_step(
+                                &fixture.job,
+                                &fixture.source,
+                                &repair,
+                                &fixture.sources.reader(),
+                                &|| false,
+                            )
+                            .unwrap();
+                        assert_ne!(step.outcome, Outcome::Conflict);
+                        assert!(!step.needs_snapshot);
+                        assert!(step.work.metadata_rows <= ROWS);
+                        assert!(step.work.metadata_bytes <= BYTES);
+                        assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                        sealed += usize::from(step.sealed);
+                    }
+                } else {
+                    fixture
+                        .store
+                        .original_lex_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                }
+                fixture.store = NativeStore::open(&fixture.options).unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+            }
+            assert_eq!(sealed, records.len());
+            for (extra, expected) in [(false, &expected.events), (true, &expected.extras)] {
+                let mut after = None;
+                let mut actual = Vec::new();
+                loop {
+                    let page = fixture
+                        .store
+                        .original_events_page(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            extra,
+                            after,
+                            1,
+                        )
+                        .unwrap();
+                    assert!(page.work.decoded_rows <= 1);
+                    assert!(page.work.metadata_bytes < 4096);
+                    assert!(page.work.vm_steps < 128);
+                    after = page.after;
+                    for event in page.rows {
+                        let mut json = serde_json::to_value(event).unwrap();
+                        resolve(&fixture, &bytes, &mut json);
+                        actual.push(serde_json::from_value::<NativeEvent<String>>(json).unwrap());
+                    }
+                    if page.complete {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    actual,
+                    expected
+                        .iter()
+                        .cloned()
+                        .map(NativeEvent::from)
+                        .collect::<Vec<_>>()
+                );
+            }
+            let (bounds, _) = fixture
+                .store
+                .original_activity_facts(&fixture.job, &fixture.source, &repair)
+                .unwrap();
+            assert_eq!((bounds.first, bounds.last), (expected.first, expected.last));
+            let busy = fixture
+                .store
+                .original_busy_page(&fixture.job, &fixture.source, &repair, None, 64)
+                .unwrap();
+            assert_eq!(busy.rows, expected.busy);
+            for (field, expected) in [
+                (
+                    Field::Cwd,
+                    HeaderValue::Native(expected.cwd.clone().unwrap()),
+                ),
+                (
+                    Field::LastModel,
+                    HeaderValue::Native(expected.last_model.clone().unwrap()),
+                ),
+                (Field::Entrypoint, HeaderValue::CopilotCli),
+            ] {
+                let (value, work) = fixture
+                    .store
+                    .original_header_value(&fixture.job, &fixture.source, &repair, field)
+                    .unwrap();
+                assert_eq!(work.decoded_rows, 1);
+                let mut value = serde_json::to_value(value.unwrap()).unwrap();
+                resolve(&fixture, &bytes, &mut value);
+                assert_eq!(value, serde_json::to_value(expected).unwrap());
+            }
+            assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_copilot_controller_never_seals_an_unfinished_cumulative_snapshot() {
+        let bytes = b"{\"id\":\"start\",\"type\":\"session.start\",\"data\":{}}\n{\"id\":\"shutdown\",\"type\":\"session.shutdown\",\"data\":{\"modelMetrics\":{\"model\":{\"inputTokens\":3}}}}\n";
+        let mut fixture = Fixture::new_harness(bytes, "copilot");
+        let mut repair = fixture
+            .store
+            .begin_original_repair(
+                &fixture.job,
+                &fixture.source,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        let mut pending = false;
+        for _ in 0..512 {
+            if repair.cursor.phase == Phase::FoldRecord {
+                let fields = fixture
+                    .store
+                    .original_fields_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                repair = fixture
+                    .store
+                    .reload_original_repair(
+                        &fixture.job,
+                        &fixture.source,
+                        &fixture.sources.reader(),
+                    )
+                    .unwrap()
+                    .unwrap();
+                if fields.outcome == Outcome::Written {
+                    let step = fixture
+                        .store
+                        .original_copilot_record_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    if step.needs_snapshot {
+                        assert!(!step.sealed);
+                        pending = true;
+                        break;
+                    }
+                }
+            } else {
+                fixture
+                    .store
+                    .original_lex_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+            }
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+        }
+        assert!(pending);
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        let step = fixture
+            .store
+            .original_copilot_record_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert!(step.needs_snapshot);
+        assert_eq!(step.outcome, Outcome::Deferred);
+        assert_eq!(step.work.native_bytes, 1);
+        assert!(!step.sealed);
+        assert!(
+            fixture
+                .store
+                .original_event_facts(&fixture.job, &fixture.source, &repair)
+                .is_err()
+        );
+        assert_eq!(
+            record_status(&fixture.store.connection, &repair)
+                .unwrap()
+                .as_deref(),
+            Some("lexed")
+        );
+    }
+
+    #[test]
+    fn copilot_controller_resumes_native_admission_committed_before_control_checkpoint() {
+        let mut fixture = Fixture::new_harness(
+            b"{\"id\":\"native-id\",\"type\":\"session.start\",\"data\":{}}\n",
+            "copilot",
+        );
+        let repair = fixture.qualified_record();
+        let cache_path = crate::events::EventCache::path(&fixture.options.cache);
+        let observer = Connection::open(&cache_path).unwrap();
+        let cancelled = || {
+            let state: Option<String> = observer.query_row("SELECT cursor FROM native_original_copilot_admission WHERE original=?1 AND record_offset=?2",params![repair.original.as_slice(),seq_u64(repair.cursor.record_at).unwrap()],|row|row.get(0)).optional().unwrap();
+            state
+                .and_then(|state| {
+                    serde_json::from_str::<
+                        crate::events::native_harness::copilot_admission::Cursor<
+                            OriginalNode,
+                            OriginalText,
+                        >,
+                    >(&state)
+                    .unwrap()
+                    .result()
+                    .map(|(admission, _)| admission)
+                })
+                .is_some()
+        };
+        let mut interrupted = false;
+        for _ in 0..128 {
+            let step = fixture
+                .store
+                .original_copilot_record_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &cancelled,
+                )
+                .unwrap();
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            if step.outcome == Outcome::Deferred && cancelled() {
+                interrupted = true;
+                break;
+            }
+        }
+        assert!(interrupted);
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_original_harness", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        let step = fixture
+            .store
+            .original_copilot_record_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Written);
+        assert!(!step.sealed);
+        let stage: String = fixture
+            .store
+            .connection
+            .query_row("SELECT cursor FROM native_original_harness", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&stage)
+                .unwrap()
+                .get("Time")
+                .is_some(),
+            "resumed Accepted must not become Duplicate"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_copilot_seen",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn copilot_controller_publication_change_during_original_io_cannot_checkpoint() {
+        let bytes = b"{\"id\":\"native-id\",\"type\":\"session.start\",\"data\":{}}\n";
+        let mut fixture = Fixture::new_harness(bytes, "copilot");
+        let repair = fixture.qualified_record();
+        let cache_path = crate::events::EventCache::path(&fixture.options.cache);
+        let job = fixture.job.id;
+        let path = fixture.source.source.path.to_string_lossy().into_owned();
+        let provider = InterleavingReader::new(repair.source.clone(), bytes, None, move |call| {
+            if call == 0 {
+                let db = Connection::open(&cache_path).unwrap();
+                assert_eq!(
+                    db.execute(
+                        "UPDATE native_query_sources SET metadata='{}' WHERE job=?1 AND path=?2",
+                        params![job, path]
+                    )
+                    .unwrap(),
+                    1
+                );
+            }
+        });
+        let records = fixture.sources.reader_with(Some((
+            &provider,
+            crate::SessionSourceReadMode::ProviderOnly,
+        )));
+        let outcome = fixture.store.original_copilot_record_step(
+            &fixture.job,
+            &fixture.source,
+            &repair,
+            &records,
+            &|| false,
+        );
+        assert!(outcome.is_err() || outcome.is_ok_and(|step| step.outcome == Outcome::Conflict));
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row("SELECT count(*) FROM native_original_harness", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            record_status(&fixture.store.connection, &repair)
+                .unwrap()
+                .as_deref(),
+            Some("lexed")
+        );
     }
 
     #[test]
