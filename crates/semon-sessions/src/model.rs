@@ -5395,7 +5395,7 @@ impl<'a> Builder<'a> {
                             0,
                         ),
                         ordinal: 0,
-                        identity: String::new(),
+                        identity: [0; 32],
                     },
                     entry,
                     found: entry.at.map(|at| event(self.files, at)),
