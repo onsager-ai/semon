@@ -7,12 +7,13 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Order {
     pub(crate) key: EntryKey,
     pub(crate) ordinal: u64,
-    pub(crate) identity: String,
+    /// Private candidate content address, never the raw native session ID.
+    pub(crate) identity: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,7 +157,7 @@ mod tests {
                 order: Order {
                     key: (0, 0, position as u64, 0, 1),
                     ordinal: 0,
-                    identity: String::new(),
+                    identity: [0; 32],
                 },
                 entry: &entry,
                 found: Some(&event),
@@ -192,7 +193,7 @@ mod tests {
         assert_eq!(combined.last.as_ref().unwrap().offset, 1023);
         assert_eq!(combined.boundary.as_ref().unwrap().offset, 1020);
         assert_eq!(combined.last_content_at(), Some((0, 1023)));
-        assert!(serde_json::to_string(&combined).unwrap().len() < 1024);
+        assert!(serde_json::to_string(&combined).unwrap().len() < 4096);
     }
 
     #[test]
@@ -229,7 +230,7 @@ mod tests {
                     order: Order {
                         key: (i64::MIN, 0, 0, 0, 0),
                         ordinal,
-                        identity: id.into(),
+                        identity: [u8::try_from(ordinal + 1).unwrap(); 32],
                     },
                     entry: &entry,
                     found: None,
@@ -243,9 +244,9 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(facts.first.as_ref().unwrap().order.identity, "first");
+        assert_eq!(facts.first.as_ref().unwrap().order.identity, [1; 32]);
         assert_eq!(facts.last.as_ref().unwrap().order.ordinal, 1);
-        assert_eq!(facts.boundary.as_ref().unwrap().order.identity, "second");
+        assert_eq!(facts.boundary.as_ref().unwrap().order.identity, [2; 32]);
         assert_eq!(
             facts
                 .end
