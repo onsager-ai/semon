@@ -1,10 +1,6 @@
 //! Persistent geometry for native Order × model scalar rectangles.
 //! Geometry never interprets native identities, expiration or annotation rules.
 use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
 
 const ORDER_BYTES: usize = 69;
 const PREFIX: &str = "orthogonal/v1/";
@@ -1203,21 +1199,15 @@ pub(crate) struct Mutation<'a> {
 
 // The hook measures actual connection instructions, including SELECTs in a
 // caller's closure and all native owner fences, writes, CAS and COMMIT.
-fn vm_meter(connection: &Connection) -> Arc<AtomicU64> {
-    let counter = Arc::new(AtomicU64::new(0));
-    let hook = counter.clone();
-    connection.progress_handler(
-        1,
-        Some(move || {
-            hook.fetch_add(1, Ordering::Relaxed);
-            false
-        }),
-    );
-    counter
+fn vm_meter(connection: &Connection) -> native_query::vm_meter::Scope {
+    native_query::vm_meter::begin(connection)
 }
-fn finish_meter(connection: &Connection, meter: &AtomicU64, measure: &mut Measure) {
-    connection.progress_handler(0, None::<fn() -> bool>);
-    measure.connection_vm_steps = meter.load(Ordering::Relaxed);
+fn finish_meter(
+    connection: &Connection,
+    meter: native_query::vm_meter::Scope,
+    measure: &mut Measure,
+) {
+    measure.connection_vm_steps = meter.finish(connection);
 }
 
 impl NativeStore {
@@ -1317,7 +1307,7 @@ impl NativeStore {
             Ok((None, attempted.clone()))
         });
         let mut measure = Measure::default();
-        finish_meter(&self.connection, &meter, &mut measure);
+        finish_meter(&self.connection, meter, &mut measure);
         let (outcome, output) = result?;
         let (root, mut work) = output.unwrap_or((None, attempted));
         work.connection_vm_steps = measure.connection_vm_steps;
@@ -1381,7 +1371,7 @@ impl NativeStore {
             Ok((root, attempted.clone()))
         });
         let mut measure = Measure::default();
-        finish_meter(&self.connection, &meter, &mut measure);
+        finish_meter(&self.connection, meter, &mut measure);
         let (outcome, output) = result?;
         let (root, mut work) = output.unwrap_or((None, attempted));
         work.connection_vm_steps = measure.connection_vm_steps;
@@ -2041,7 +2031,7 @@ impl NativeStore {
             }
             Ok(Some(output))
         })();
-        finish_meter(&self.connection, &meter, &mut attempted);
+        finish_meter(&self.connection, meter, &mut attempted);
         result.map(|value| ReadAttempt {
             value,
             work: attempted,
@@ -2206,7 +2196,7 @@ impl NativeStore {
             Ok(attempted.clone())
         });
         let mut measure = Measure::default();
-        finish_meter(&self.connection, &meter, &mut measure);
+        finish_meter(&self.connection, meter, &mut measure);
         let (outcome, output) = result?;
         let mut work = output.unwrap_or(attempted);
         work.connection_vm_steps = measure.connection_vm_steps;
@@ -2734,7 +2724,7 @@ mod tests {
             let meter = vm_meter(&self.store.connection);
             let (_, calls, bytes) = crate::test_allocations::measure(|| self.reload());
             let mut work = Measure::default();
-            finish_meter(&self.store.connection, &meter, &mut work);
+            finish_meter(&self.store.connection, meter, &mut work);
             total.add(work, calls, bytes);
         }
         fn qualify(&mut self) {
@@ -2807,6 +2797,54 @@ mod tests {
             }
         }
         expected
+    }
+
+    #[test]
+    fn orthogonal_attempts_restore_outer_vm_after_success_cancel_and_error() {
+        let mut fixture = Fixture::new();
+        let root = Root::empty(9).unwrap();
+        let outer = native_query::vm_meter::begin(&fixture.store.connection);
+        let imported = fixture
+            .store
+            .orthogonal_import(&fixture.job, "nested", &root, &|_, _| Ok(true), &|| false)
+            .unwrap();
+        assert_eq!(imported.outcome, Outcome::Written);
+        assert!(imported.work.connection_vm_steps > 0);
+        let mut expected = imported.work.connection_vm_steps;
+        // StatementStatus does not install another observer and therefore
+        // cannot accidentally repair a clobbered enclosing callback.
+        let after = |db: &Connection| {
+            let mut query = db.prepare("SELECT 1").unwrap();
+            assert_eq!(query.query_row([], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            query.get_status(rusqlite::StatementStatus::VmStep) as u64
+        };
+        expected += after(&fixture.store.connection);
+        fixture.reload();
+        let cancelled = fixture
+            .store
+            .orthogonal_import(&fixture.job, "nested", &root, &|_, _| Ok(true), &|| true)
+            .unwrap();
+        assert_eq!(cancelled.outcome, Outcome::Deferred);
+        expected += cancelled.work.connection_vm_steps;
+        expected += after(&fixture.store.connection);
+        assert!(
+            fixture
+                .store
+                .orthogonal_import(
+                    &fixture.job,
+                    "nested",
+                    &root,
+                    &|_, _| Err(rusqlite::Error::InvalidQuery),
+                    &|| false,
+                )
+                .is_err()
+        );
+        expected += after(&fixture.store.connection);
+        let complete = outer.finish(&fixture.store.connection);
+        assert!(
+            complete >= expected,
+            "outer={complete}, disjoint child/tail work={expected}"
+        );
     }
 
     #[test]
