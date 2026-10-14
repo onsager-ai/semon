@@ -7,6 +7,10 @@
 //! public/standalone Trace schema, source, archive or custody row changes here.
 use super::{native_query, *};
 use native_query::{Job, NativeStore};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 mod candidate_tree;
 pub(crate) use candidate_tree::{
@@ -984,6 +988,41 @@ impl NativeStore {
     /// This transaction owns scalar witness checks, cursor/node/memo atomicity,
     /// revision CAS and cancellation. Original custody is never recaptured.
     fn rank_transaction<T>(
+        &mut self,
+        job: &Job,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        operation: impl FnOnce(&Connection, i64) -> io::Result<T>,
+    ) -> io::Result<(Outcome, Option<T>)> {
+        self.rank_transaction_body(job, closure, cancelled, operation)
+    }
+
+    /// Candidate-tree work reports the whole SQLite instruction delta for its
+    /// transaction, including native job/source witnesses, caller closure
+    /// queries, revision CAS and COMMIT. `Work::vm_steps` remains the narrower
+    /// per-statement counter for the graph/tree statements themselves.
+    fn rank_transaction_measured<T>(
+        &mut self,
+        job: &Job,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        operation: impl FnOnce(&Connection, i64) -> io::Result<T>,
+    ) -> io::Result<(Outcome, Option<T>, u64)> {
+        let steps = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&steps);
+        self.connection.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let result = self.rank_transaction_body(job, closure, cancelled, operation);
+        self.connection.progress_handler(0, None::<fn() -> bool>);
+        result.map(|(outcome, value)| (outcome, value, steps.load(Ordering::Relaxed)))
+    }
+
+    fn rank_transaction_body<T>(
         &mut self,
         job: &Job,
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
