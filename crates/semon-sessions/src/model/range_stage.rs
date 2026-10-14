@@ -2,7 +2,7 @@
 //! this ordered combine kernel; it never derives a second turn-end rule.
 use super::{
     Event, Ref,
-    native_stage::{Entry, EntryKey},
+    native_stage::{Entry, EntryKey, EntryKind},
     turn_stage::{EndFacts, HandoffEnd},
 };
 use serde::{Deserialize, Serialize};
@@ -67,11 +67,17 @@ struct ContentMark {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Facts {
+    /// Native group members include zero-slot Operation entries. Keep this
+    /// distinct from the caller's ordinary-slot weight in `count`.
+    pub(crate) entries: u64,
+    pub(crate) gaps: u64,
+    pub(crate) boundaries: u64,
     pub(crate) count: u64,
     pub(crate) end: EndFacts,
     pub(crate) first: Option<Mark>,
     pub(crate) last: Option<Mark>,
     pub(crate) boundary: Option<Mark>,
+    pub(crate) gap: Option<Mark>,
     /// A source-local prefix reaches every queued annotation strictly before
     /// this position, even when native timestamps move backwards.
     pub(crate) reached: Option<(u64, u32)>,
@@ -91,6 +97,9 @@ pub(crate) struct Leaf<'a> {
 impl Facts {
     pub(crate) fn observe(&mut self, leaf: Leaf<'_>) -> Result<(), &'static str> {
         let mut next = Self {
+            entries: 1,
+            gaps: u64::from(matches!(leaf.entry.kind, EntryKind::Gap)),
+            boundaries: u64::from(leaf.boundary),
             count: leaf.count,
             ..Self::default()
         };
@@ -102,6 +111,9 @@ impl Facts {
         next.first = Some(mark.clone());
         next.last = Some(mark.clone());
         next.reached = Some(leaf.entry.pos);
+        if matches!(leaf.entry.kind, EntryKind::Gap) {
+            next.gap = Some(mark.clone());
+        }
         if leaf.boundary {
             next.boundary = Some(mark);
         }
@@ -130,6 +142,18 @@ impl Facts {
     /// have been qualified. Ranges need not be contiguous in global order.
     /// `count` is the caller's native weight, not an inferred transcript size.
     pub(crate) fn merge(&mut self, other: Self) -> Result<(), &'static str> {
+        let entries = self
+            .entries
+            .checked_add(other.entries)
+            .ok_or("native entry count overflow")?;
+        let gaps = self
+            .gaps
+            .checked_add(other.gaps)
+            .ok_or("native gap count overflow")?;
+        let boundaries = self
+            .boundaries
+            .checked_add(other.boundaries)
+            .ok_or("native boundary count overflow")?;
         let count = self
             .count
             .checked_add(other.count)
@@ -165,6 +189,13 @@ impl Facts {
         }) {
             self.boundary = other.boundary;
         }
+        if other.gap.as_ref().is_some_and(|right| {
+            self.gap
+                .as_ref()
+                .is_none_or(|left| right.order > left.order)
+        }) {
+            self.gap = other.gap;
+        }
         if content_later {
             self.content = other.content;
         }
@@ -173,7 +204,53 @@ impl Facts {
         }
         self.reached = self.reached.max(other.reached);
         self.count = count;
+        self.entries = entries;
+        self.gaps = gaps;
+        self.boundaries = boundaries;
         Ok(())
+    }
+
+    /// Qualify one immutable source channel after physical source selection.
+    /// `time` is supplied only for the symbolic BeforeFirst channel. Observed
+    /// times remain in the local keys; Offset keys resolve to zero. No stored
+    /// prefix is rewritten when the first regular timestamp or file order
+    /// changes. Qualify before combining different source streams.
+    pub(crate) fn qualify(
+        &mut self,
+        source: usize,
+        file_order: usize,
+        several: bool,
+        time: Option<i64>,
+    ) {
+        let order = |order: &mut Order| {
+            order.key.0 = if several {
+                time.unwrap_or(order.key.0)
+            } else {
+                0
+            };
+            order.key.1 = if several { file_order } else { 0 };
+        };
+        for mark in [
+            &mut self.first,
+            &mut self.last,
+            &mut self.boundary,
+            &mut self.gap,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            order(&mut mark.order);
+            mark.file = source;
+        }
+        if let Some(content) = &mut self.content {
+            order(&mut content.order);
+            if let Some((file, _)) = &mut content.at {
+                *file = source;
+            }
+        }
+        if let Some(to_you) = &mut self.to_you {
+            order(to_you);
+        }
     }
 
     pub(crate) fn last_content_at(&self) -> Option<Ref> {
@@ -358,6 +435,123 @@ mod tests {
         assert_eq!(combined.boundary.as_ref().unwrap().offset, 1020);
         assert_eq!(combined.last_content_at(), Some((0, 1023)));
         assert!(serde_json::to_string(&combined).unwrap().len() < 4096);
+    }
+
+    #[test]
+    fn native_range_symbolic_qualification_matches_interleaved_native_observations() {
+        use crate::model::{
+            native_producer::{Candidate, EventInput},
+            native_stage::SourceTime,
+        };
+        for history in [0usize, 128, 1024, 8192] {
+            for first_time in [None, Some(-40), Some(400)] {
+                let mut qualified = Vec::new();
+                let mut channels = [Facts::default(), Facts::default(), Facts::default()];
+                for seq in 0..history + 3 {
+                    let source = seq % 3;
+                    let kind = match seq % 7 {
+                        0 => EntryKind::U,
+                        1 => EntryKind::Gap,
+                        2 => EntryKind::Operation(crate::model::ToolState::Ok),
+                        _ => EntryKind::A,
+                    };
+                    let event = Event {
+                        k: crate::events::Kind::A,
+                        o: seq as u64,
+                        b: (seq % 2) as u32,
+                        t: (source != 0).then_some((seq as i64 % 13) - 6),
+                        ..Event::default()
+                    };
+                    let time = event
+                        .t
+                        .map_or(SourceTime::BeforeFirst, SourceTime::Observed);
+                    let candidate = Candidate::regular(
+                        EventInput {
+                            seq,
+                            event: &event,
+                            kind,
+                            inherited: time,
+                            operation: None,
+                            identity: [source as u8; 32],
+                            ordinal: seq as u64,
+                        },
+                        |_| unreachable!(),
+                    );
+                    let (local, entry) = candidate.qualify(0, 0, true, Some(0));
+                    channels[source]
+                        .observe(Leaf {
+                            order: local,
+                            entry: &entry,
+                            found: Some(&event),
+                            outgoing: None,
+                            boundary: matches!(kind, EntryKind::U),
+                            count: u64::from(!matches!(kind, EntryKind::Operation(_))),
+                        })
+                        .unwrap();
+                    let (global, entry) =
+                        candidate.qualify(17 + source, 2 - source, true, first_time);
+                    qualified.push((global, entry, event));
+                }
+                let mut combined = Facts::default();
+                for (source, mut facts) in channels.into_iter().enumerate() {
+                    facts.qualify(
+                        17 + source,
+                        2 - source,
+                        true,
+                        (source == 0).then_some(first_time.unwrap_or(i64::MIN)),
+                    );
+                    combined.merge(facts).unwrap();
+                }
+                qualified.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut sequential = Facts::default();
+                for (order, entry, event) in &qualified {
+                    sequential
+                        .observe(Leaf {
+                            order: order.clone(),
+                            entry,
+                            found: Some(event),
+                            outgoing: None,
+                            boundary: matches!(entry.kind, EntryKind::U),
+                            count: u64::from(!matches!(entry.kind, EntryKind::Operation(_))),
+                        })
+                        .unwrap();
+                }
+                assert_eq!(
+                    serde_json::to_value(&combined).unwrap(),
+                    serde_json::to_value(&sequential).unwrap(),
+                    "history={history}, first={first_time:?}"
+                );
+                assert_eq!(combined.entries, (history + 3) as u64);
+                assert!(combined.gaps > 0);
+                assert!(combined.boundaries > 0);
+                assert!(combined.count < combined.entries);
+            }
+        }
+    }
+
+    #[test]
+    fn native_range_new_counter_overflows_keep_all_previous_facts() {
+        for field in ["entries", "gaps", "boundaries"] {
+            let mut left = Facts::default();
+            let mut right = Facts::default();
+            match field {
+                "entries" => {
+                    left.entries = u64::MAX;
+                    right.entries = 1;
+                }
+                "gaps" => {
+                    left.gaps = u64::MAX;
+                    right.gaps = 1;
+                }
+                _ => {
+                    left.boundaries = u64::MAX;
+                    right.boundaries = 1;
+                }
+            }
+            let before = serde_json::to_value(&left).unwrap();
+            assert!(left.merge(right).is_err());
+            assert_eq!(serde_json::to_value(&left).unwrap(), before);
+        }
     }
 
     #[test]
