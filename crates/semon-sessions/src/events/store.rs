@@ -22,6 +22,10 @@
 
 pub(crate) mod chunk_proofs;
 mod launch_calls;
+// The private producer API is consumed by the separately reviewed model
+// integration; unused entrypoints remain intentional in this foundation commit.
+#[allow(dead_code)]
+pub(crate) mod native_query;
 mod relocation;
 mod semantic_stage;
 
@@ -57,7 +61,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 28;
+const SCHEMA_VERSION: i64 = 29;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -163,6 +167,26 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS native_source_busy (
+    file_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_links (
+    file_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('session','continued','bridge')),
+    native_id TEXT NOT NULL,
+    PRIMARY KEY(file_id,kind,native_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_facts (
+    file_id INTEGER PRIMARY KEY,
+    generation TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    extras INTEGER NOT NULL,
+    signals INTEGER NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS files (
     file_id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -225,6 +249,7 @@ CREATE TABLE IF NOT EXISTS events (
     u TEXT,
     PRIMARY KEY (file_id, extra, seq)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_event_offset ON events(file_id,extra,o,seq);
 CREATE TABLE IF NOT EXISTS signals (
     file_id INTEGER NOT NULL,
     seq INTEGER NOT NULL,
@@ -328,6 +353,9 @@ DELETE FROM signals;
 DELETE FROM usage_identity;
 DELETE FROM usage;
 DELETE FROM codex_usage;
+DELETE FROM native_source_busy;
+DELETE FROM native_source_links;
+DELETE FROM native_source_facts;
 DELETE FROM files;
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
@@ -467,7 +495,10 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
         .map_err(io::Error::other)?;
     let stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_semantic_stage')", [], |row| row.get(0)).map_err(io::Error::other)?;
     let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining')) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')",[],|row|row.get(0)).map_err(io::Error::other)?;
-    Ok(pending || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?))
+    let query_stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='native_query_jobs')", [], |row| row.get(0)).map_err(io::Error::other)?;
+    Ok(pending
+        || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?)
+        || (query_stages && native_query::pending(&connection).map_err(io::Error::other)?))
 }
 
 /// Qualify a former Catalog source as a verified relocation of a current one.
@@ -4060,6 +4091,9 @@ impl SqliteStore {
                 "usage_identity",
                 "usage",
                 "codex_usage",
+                "native_source_busy",
+                "native_source_links",
+                "native_source_facts",
             ] {
                 transaction.execute(
                     &format!(
@@ -4339,6 +4373,8 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         transaction.execute_batch(crate::overview::SCHEMA)?;
         transaction.execute_batch(crate::causal_trace::SCHEMA)?;
         transaction.execute_batch(crate::history_projection::SCHEMA)?;
+        // Private owner epoch triggers require both Current and History tables.
+        transaction.execute_batch(native_query::SCHEMA)?;
         transaction.execute_batch(crate::catalog_search::SCHEMA)?;
         // Format 2 also reads the existing format-1 postings. Promote only its
         // metadata in this additive transaction, before the publication path
@@ -5425,6 +5461,9 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
         "usage_identity",
         "usage",
         "codex_usage",
+        "native_source_busy",
+        "native_source_links",
+        "native_source_facts",
     ] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?1"),
@@ -5488,18 +5527,38 @@ fn write_index_changes_measured(
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
     let started = measurements.start();
-    let full = super::DirtyRows {
+    // Complete publication visits full identity sets once; an append uses only
+    // the parser-owned delta and never constructs a discarded full link set.
+    let full = changes.is_none().then(|| super::DirtyRows {
         usage: index.usage_by_id.keys().cloned().collect(),
+        links: [
+            ("session", &index.links.session_ids),
+            ("continued", &index.links.continued_in),
+            ("bridge", &index.links.bridges),
+        ]
+        .into_iter()
+        .flat_map(|(kind, ids)| {
+            ids.iter().map(move |id| {
+                #[cfg(test)]
+                native_query::FULL_LINK_VISITS.with(|n| n.set(n.get() + 1));
+                (kind.to_owned(), id.clone())
+            })
+        })
+        .collect(),
         ..super::DirtyRows::default()
-    };
+    });
+    let changed_rows = changes
+        .or(full.as_ref())
+        .expect("complete or incremental native changes");
     measurements.record("dirty_rows", started, 1);
-    write_file(
+    write_file(transaction, path, ledger, changed_rows, index, measurements)?;
+    native_query::write_source_facts(
         transaction,
         path,
         ledger,
-        changes.unwrap_or(&full),
         index,
-        measurements,
+        changed_rows,
+        changes.is_none(),
     )?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
