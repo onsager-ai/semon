@@ -4094,84 +4094,20 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
     if let Some(branch) = field(record, "gitBranch") {
         summary.branch = Some(branch.to_owned());
     }
-    // Tokens de-duplicated by message id, as V1 counts them.
-    if let Some(message) = record.get("message")
-        && let (Some(id), Some(usage)) = (field(message, "id"), message.get("usage"))
-    {
-        let input = number(usage, "input_tokens");
-        let cache_write = number(usage, "cache_creation_input_tokens");
-        let cache_read = number(usage, "cache_read_input_tokens");
-        let output = number(usage, "output_tokens");
-        let split = usage
-            .get("cache_creation")
-            .and_then(Value::as_object)
-            .and_then(|cache_creation| {
-                let five = cache_creation
-                    .get("ephemeral_5m_input_tokens")
-                    .and_then(Value::as_u64)?;
-                let one = cache_creation
-                    .get("ephemeral_1h_input_tokens")
-                    .and_then(Value::as_u64)?;
-                (five.saturating_add(one) == cache_write).then_some((five, one))
-            });
-        let (cache_write_5m, cache_write_1h, split_unknown) = split
-            .map(|(five, one)| (five, one, false))
-            .unwrap_or((cache_write, 0, true));
-        let web_search_requests = usage
-            .get("server_tool_use")
-            .and_then(|tools| tools.get("web_search_requests"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let timestamp = time;
-        if let Some(dirty) = &mut summary.dirty_rows {
-            dirty.usage.insert(id.to_owned());
-        }
-        let mut record_ids = summary
-            .usage_by_id
-            .get(id)
-            .map(|usage| usage.record_ids.clone())
-            .unwrap_or_default();
-        if field(record, "type") == Some("assistant")
-            && let Some(uuid) = field(record, "uuid")
-        {
-            record_ids.insert(uuid.to_owned());
-        }
-        summary.usage_by_id.insert(
-            id.to_owned(),
-            MessageUsage {
-                record_ids,
-                model: field(message, "model").map(str::to_owned),
-                tokens: Tokens {
-                    input: input + cache_write + cache_read,
-                    cached_input: cache_read,
-                    output,
-                    reasoning_output: 0,
-                    total: input + cache_write + cache_read + output,
-                },
-                model_tokens: ModelTokens {
-                    input,
-                    output,
-                    cache_write,
-                    cache_read,
-                },
-                billing: BillingUsage {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write_5m,
-                    cache_write_1h,
-                    web_search_requests,
-                    speed: field(usage, "speed").map(str::to_owned),
-                    service_tier: field(usage, "service_tier").map(str::to_owned),
-                    prompt_size: input
-                        .saturating_add(cache_read)
-                        .saturating_add(cache_write_5m)
-                        .saturating_add(cache_write_1h),
-                    timestamp,
-                    split_unknown,
-                },
-            },
-        );
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut usage = native_harness::claude_usage::Cursor::default();
+    while usage.result().is_none() {
+        usage = native_producer::complete(native_harness::claude_usage::step(
+            &mut source,
+            &usage,
+            time,
+        ));
+    }
+    if let Some(Some(report)) = usage.result() {
+        native_producer::complete(native_harness::claude_usage::Store::claude_report(
+            summary,
+            report.clone(),
+        ));
     }
     if let Some(id) = field(record, "session_id")
         && Some(id) != field(record, "sessionId")
