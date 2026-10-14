@@ -31,6 +31,9 @@ const EMPTY_TREE: &str = "rank/v1/tree/empty";
 thread_local! {
     static TRACK_RUST_ALLOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static RUST_ALLOCATION_TOTALS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    static RUST_LIVE_BYTES: Cell<usize> = const { Cell::new(0) };
+    static RUST_PEAK_BYTES: Cell<usize> = const { Cell::new(0) };
+    static RUST_BASELINE_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -49,6 +52,7 @@ unsafe impl std::alloc::GlobalAlloc for TestCountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        release_test_allocation(layout.size());
         unsafe {
             <std::alloc::System as std::alloc::GlobalAlloc>::dealloc(
                 &std::alloc::System,
@@ -73,6 +77,7 @@ unsafe impl std::alloc::GlobalAlloc for TestCountingAllocator {
             )
         };
         if !next.is_null() {
+            release_test_allocation(layout.size());
             record_test_allocation(new_size);
         }
         next
@@ -85,15 +90,35 @@ static TEST_COUNTING_ALLOCATOR: TestCountingAllocator = TestCountingAllocator;
 
 #[cfg(test)]
 fn record_test_allocation(bytes: usize) {
+    let _ = RUST_LIVE_BYTES.try_with(|live| {
+        let current = live.get().saturating_add(bytes);
+        live.set(current);
+    });
     if TRACK_RUST_ALLOCATIONS
         .try_with(std::cell::Cell::get)
         .unwrap_or(false)
     {
+        let current = RUST_LIVE_BYTES.try_with(Cell::get).unwrap_or(0);
+        let _ = RUST_PEAK_BYTES.try_with(|peak| peak.set(peak.get().max(current)));
         let _ = RUST_ALLOCATION_TOTALS.try_with(|totals| {
             let (calls, total_bytes) = totals.get();
             totals.set((calls.saturating_add(1), total_bytes.saturating_add(bytes)));
         });
     }
+}
+
+#[cfg(test)]
+fn release_test_allocation(bytes: usize) {
+    let _ = RUST_LIVE_BYTES.try_with(|live| live.set(live.get().saturating_sub(bytes)));
+}
+
+// Operation-owned Rust heap high water on the synchronous test thread. This
+// excludes SQLite's C allocator and stack, just like the cumulative counter.
+#[cfg(test)]
+fn measured_peak_bytes() -> usize {
+    RUST_PEAK_BYTES
+        .with(Cell::get)
+        .saturating_sub(RUST_BASELINE_BYTES.with(Cell::get))
 }
 
 #[cfg(test)]
@@ -112,6 +137,9 @@ impl Drop for TestAllocationGuard {
 #[cfg(test)]
 fn measure_test_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
     RUST_ALLOCATION_TOTALS.with(|totals| totals.set((0, 0)));
+    let baseline = RUST_LIVE_BYTES.with(Cell::get);
+    RUST_BASELINE_BYTES.with(|value| value.set(baseline));
+    RUST_PEAK_BYTES.with(|value| value.set(baseline));
     TRACK_RUST_ALLOCATIONS.with(|tracking| tracking.set(true));
     let guard = TestAllocationGuard;
     let value = operation();
@@ -511,18 +539,33 @@ impl TreeDb<'_> {
         if !id.valid() {
             return Err(invalid("invalid candidate tree address"));
         }
+        // Candidate identities are "rank/v1/tree/" + 64 hex bytes (77).
+        // Graph identities add a one/two-digit level (79..=80). These guards
+        // mirror the existing address format; no new semantic cap is imposed.
+        // Keep nullable child absence separate from a rejected child address.
         let mut q = self
             .db
             .prepare_cached(
-                "SELECT CASE WHEN octet_length(n.metadata)<=65536 THEN n.metadata END,n.left_id,n.right_id,n.aggregate,
-                 CASE WHEN n.left_id IS NULL THEN n.right_id IS NULL ELSE n.right_id IS NOT NULL
+                "SELECT CASE WHEN octet_length(n.metadata)<=65536 THEN n.metadata END,
+                 CASE WHEN octet_length(n.left_id)=77 THEN n.left_id END,
+                 CASE WHEN octet_length(n.right_id)=77 THEN n.right_id END,
+                 CASE WHEN octet_length(n.aggregate) BETWEEN 79 AND 80 THEN n.aggregate END,
+                 (n.left_id IS NULL OR octet_length(n.left_id)=77)
+                   AND (n.right_id IS NULL OR octet_length(n.right_id)=77)
+                   AND CASE WHEN n.left_id IS NULL THEN n.right_id IS NULL ELSE n.right_id IS NOT NULL
                    AND EXISTS(SELECT 1 FROM native_rank_candidate_nodes a WHERE a.identity=n.left_id AND a.refs>0)
                    AND EXISTS(SELECT 1 FROM native_rank_candidate_nodes b WHERE b.identity=n.right_id AND b.refs>0)
                  END FROM native_rank_candidate_nodes n WHERE n.identity=?1",
             )
             .map_err(io::Error::other)?;
         q.reset_status(rusqlite::StatementStatus::VmStep);
-        let row: Option<(Option<String>, Option<String>, Option<String>, String, bool)> = q
+        let row: Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            bool,
+        )> = q
             .query_row([id.identity()], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
@@ -530,7 +573,7 @@ impl TreeDb<'_> {
             .map_err(io::Error::other)?;
         let vm = q.get_status(rusqlite::StatementStatus::VmStep);
         drop(q);
-        let Some((Some(text), left, right, aggregate, children_ok)) = row else {
+        let Some((Some(text), left, right, Some(aggregate), children_ok)) = row else {
             return Err(invalid("candidate tree node is absent or over budget"));
         };
         self.work.read(
@@ -855,10 +898,10 @@ pub(super) fn cleanup(
         return Ok((0, true));
     }
     let mut used = 0;
-    let mut q = db.prepare("SELECT cursor,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_applies WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
+    let mut q = db.prepare("SELECT CASE WHEN octet_length(cursor) BETWEEN 1 AND 256 THEN cursor END,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_applies WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
     let applies = q
-        .query_map(params![job, budget as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        .query_map(params![job, cleanup_limit(budget)?], |r| {
+            Ok((cleanup_text(r, 0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (cursor, raw_length) in applies {
@@ -885,10 +928,10 @@ pub(super) fn cleanup(
         return Ok((used, false));
     }
 
-    let mut q = db.prepare("SELECT cursor,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_cursors WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
+    let mut q = db.prepare("SELECT CASE WHEN octet_length(cursor) BETWEEN 1 AND 256 THEN cursor END,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_cursors WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
     let cursors = q
-        .query_map(params![job, budget as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        .query_map(params![job, cleanup_limit(budget)?], |r| {
+            Ok((cleanup_text(r, 0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (cursor, raw_length) in cursors {
@@ -916,12 +959,12 @@ pub(super) fn cleanup(
     }
 
     let root_limit = (budget - used) / 3;
-    let mut q = db.prepare("SELECT identity,empty,length(identity)+length(empty) FROM native_rank_candidate_roots WHERE job=?1 ORDER BY identity,empty LIMIT ?2")?;
+    let mut q = db.prepare("SELECT CASE WHEN identity='rank/v1/tree/empty' OR octet_length(identity)=77 THEN identity END,CASE WHEN octet_length(empty) BETWEEN 79 AND 80 THEN empty END,octet_length(identity)+octet_length(empty) FROM native_rank_candidate_roots WHERE job=?1 ORDER BY identity,empty LIMIT ?2")?;
     let roots = q
-        .query_map(params![job, root_limit as i64], |r| {
+        .query_map(params![job, cleanup_limit(root_limit)?], |r| {
             Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
+                cleanup_text(r, 0)?,
+                cleanup_text(r, 1)?,
                 r.get::<_, i64>(2)?,
             ))
         })?
@@ -959,10 +1002,10 @@ pub(super) fn cleanup(
     }
 
     let binding_limit = (budget - used) / 2;
-    let mut q = db.prepare("SELECT identity,length(identity) FROM native_rank_candidate_bindings WHERE job=?1 ORDER BY identity LIMIT ?2")?;
+    let mut q = db.prepare("SELECT CASE WHEN octet_length(identity)=77 THEN identity END,octet_length(identity) FROM native_rank_candidate_bindings WHERE job=?1 ORDER BY identity LIMIT ?2")?;
     let bindings = q
-        .query_map(params![job, binding_limit as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        .query_map(params![job, cleanup_limit(binding_limit)?], |r| {
+            Ok((cleanup_text(r, 0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (identity, raw_length) in bindings {
@@ -998,27 +1041,40 @@ pub(super) fn cleanup(
             Option<String>,
             String,
             i64,
+            bool,
         )> = db
             .query_row(
-                "SELECT identity,CASE WHEN octet_length(metadata)<=65536 THEN metadata END,left_id,right_id,aggregate,
-                 octet_length(metadata)+length(identity)+COALESCE(length(left_id),0)+COALESCE(length(right_id),0)+length(aggregate)
+                "SELECT CASE WHEN octet_length(identity)=77 THEN identity END,
+                 CASE WHEN octet_length(metadata)<=65536 THEN metadata END,
+                 CASE WHEN octet_length(left_id)=77 THEN left_id END,
+                 CASE WHEN octet_length(right_id)=77 THEN right_id END,
+                 CASE WHEN octet_length(aggregate) BETWEEN 79 AND 80 THEN aggregate END,
+                 octet_length(metadata)+octet_length(identity)+COALESCE(octet_length(left_id),0)+COALESCE(octet_length(right_id),0)+octet_length(aggregate),
+                 (left_id IS NULL OR octet_length(left_id)=77) AND (right_id IS NULL OR octet_length(right_id)=77)
                  FROM native_rank_candidate_nodes WHERE refs=0 ORDER BY identity LIMIT 1",
                 [],
                 |r| {
                     Ok((
-                        r.get(0)?,
+                        cleanup_text(r, 0)?,
                         r.get(1)?,
                         r.get(2)?,
                         r.get(3)?,
-                        r.get(4)?,
+                        cleanup_text(r, 4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((identity, metadata, left, right, aggregate, raw_length)) = record else {
+        let Some((identity, metadata, left, right, aggregate, raw_length, widths_ok)) = record
+        else {
             break;
         };
+        if !widths_ok {
+            return Err(cleanup_error(
+                "candidate tree cleanup child exceeds address width",
+            ));
+        }
         let length = usize::try_from(raw_length)
             .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, raw_length))?;
         if length > *bytes {
@@ -1100,6 +1156,18 @@ fn decrement_graph_ref(db: &Connection, identity: &str) -> rusqlite::Result<()> 
         return Err(cleanup_error("candidate tree graph aggregate is absent"));
     }
     Ok(())
+}
+
+// Every variable-width cleanup column is SQL-guarded before Rust materializes
+// it. A NULL guard result is corrupt derived metadata, never child absence.
+fn cleanup_text(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<String> {
+    row.get::<_, Option<String>>(column)?
+        .ok_or_else(|| cleanup_error("candidate tree cleanup address exceeds its width"))
+}
+
+fn cleanup_limit(limit: usize) -> rusqlite::Result<i64> {
+    i64::try_from(limit)
+        .map_err(|_| cleanup_error("candidate tree cleanup row budget exceeds SQLite integer"))
 }
 
 fn cleanup_error(message: &'static str) -> rusqlite::Error {
@@ -2345,6 +2413,135 @@ mod tests {
         );
     }
 
+    #[test]
+    fn candidate_tree_guards_every_materialized_node_column() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let aggregate = NodeId {
+            level: 64,
+            digest: "0".repeat(64),
+        };
+        let node = CandidateNode::Leaf {
+            key: vec![0; KEY_BYTES],
+            candidate: [0; 32],
+            aggregate: aggregate.clone(),
+        };
+        let metadata = encoded(&node, NODE_BYTES).unwrap();
+        let id = candidate_id(&metadata);
+        assert_eq!(id.identity().len(), 77);
+        assert_eq!(aggregate.identity().len(), 80);
+        let huge = "x".repeat(1024 * 1024);
+        for column in ["metadata", "left_id", "right_id", "aggregate"] {
+            db.execute("DELETE FROM native_rank_candidate_nodes", [])
+                .unwrap();
+            db.execute(
+                "INSERT INTO native_rank_candidate_nodes VALUES(?1,?2,NULL,NULL,?3,0)",
+                params![id.identity(), metadata, aggregate.identity()],
+            )
+            .unwrap();
+            let mut tree = TreeDb {
+                db: &db,
+                job: 1,
+                work: CandidateWork::default(),
+            };
+            assert!(
+                tree.read_node(&id).is_ok(),
+                "NULL children are legitimate leaf absence"
+            );
+            if matches!(column, "left_id" | "right_id") {
+                db.execute(
+                    "UPDATE native_rank_candidate_nodes SET left_id=?1,right_id=?1",
+                    [id.identity()],
+                )
+                .unwrap();
+            }
+            db.execute(
+                &format!("UPDATE native_rank_candidate_nodes SET {column}=?1"),
+                [&huge],
+            )
+            .unwrap();
+            let (result, _, bytes) = measure_test_allocations(|| tree.read_node(&id));
+            assert!(result.is_err(), "{column} was admitted");
+            assert!(bytes < 128 * 1024, "{column} allocated {bytes} Rust bytes");
+            assert!(measured_peak_bytes() < 128 * 1024);
+        }
+    }
+
+    #[test]
+    fn candidate_tree_cleanup_guards_all_addresses_before_decoding() {
+        let huge = "x".repeat(1024 * 1024);
+        let tree_id = CandidateNodeId {
+            digest: "0".repeat(64),
+        }
+        .identity();
+        let graph_id = NodeId {
+            level: 64,
+            digest: "0".repeat(64),
+        }
+        .identity();
+        for (table, column) in [
+            ("applies", "cursor"),
+            ("cursors", "cursor"),
+            ("roots", "identity"),
+            ("roots", "empty"),
+            ("bindings", "identity"),
+            ("nodes", "identity"),
+            ("nodes", "metadata"),
+            ("nodes", "left_id"),
+            ("nodes", "right_id"),
+            ("nodes", "aggregate"),
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(SCHEMA).unwrap();
+            match table {
+                "applies" | "cursors" => {
+                    db.execute(
+                        &format!(
+                            "INSERT INTO native_rank_candidate_{table} VALUES(1,'cursor','{{}}')"
+                        ),
+                        [],
+                    )
+                    .unwrap();
+                }
+                "roots" => {
+                    db.execute(
+                        "INSERT INTO native_rank_candidate_roots VALUES(1,?1,?2)",
+                        params![tree_id, graph_id],
+                    )
+                    .unwrap();
+                }
+                "bindings" => {
+                    db.execute(
+                        "INSERT INTO native_rank_candidate_bindings VALUES(1,?1)",
+                        [&tree_id],
+                    )
+                    .unwrap();
+                }
+                "nodes" => {
+                    db.execute(
+                        "INSERT INTO native_rank_candidate_nodes VALUES(?1,'{}',?1,?1,?2,0)",
+                        params![tree_id, graph_id],
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            db.execute(
+                &format!("UPDATE native_rank_candidate_{table} SET {column}=?1"),
+                [&huge],
+            )
+            .unwrap();
+            let (result, _, allocated) =
+                measure_test_allocations(|| cleanup(&db, 1, 32, &mut usize::MAX));
+            assert!(result.is_err(), "{table}.{column} was admitted");
+            assert!(
+                allocated < 128 * 1024,
+                "{table}.{column} allocated {allocated} Rust bytes"
+            );
+            assert!(measured_peak_bytes() < 128 * 1024);
+        }
+    }
+
     #[derive(Clone)]
     struct BulkItem {
         key: [u8; KEY_BYTES],
@@ -2449,6 +2646,16 @@ mod tests {
 
     #[test]
     fn candidate_tree_one_point_queries_stay_indexed_at_history_prefixes() {
+        one_point_history_prefixes(false);
+    }
+
+    #[test]
+    fn candidate_tree_full_graph_queries_stay_indexed_at_history_prefixes() {
+        one_point_history_prefixes(true);
+    }
+
+    fn one_point_history_prefixes(full_graph_guard: bool) {
+        let included_sources = if full_graph_guard { 0 } else { u64::MAX };
         let mut fixture = Fixture::new();
         let sizes = [0usize, 128, 1024, 8192];
         let mut items: Vec<_> = (0..8192usize)
@@ -2474,7 +2681,18 @@ mod tests {
             job: fixture.job.id,
             work: super::super::Work::default(),
         };
-        let one = graph.intern(Node::Terminal { facts: one_text }).unwrap();
+        let mut one = graph.intern(Node::Terminal { facts: one_text }).unwrap();
+        if full_graph_guard {
+            for source in (0..64).rev() {
+                one = graph
+                    .intern(Node::Decision {
+                        source,
+                        absent: one,
+                        present: fixture.empty.clone(),
+                    })
+                    .unwrap();
+            }
+        }
         drop(graph);
         for item in &mut items {
             item.aggregate = one.clone();
@@ -2536,7 +2754,7 @@ mod tests {
                         &fixture.job,
                         root,
                         *size as u64,
-                        u64::MAX,
+                        included_sources,
                         &facts_count,
                         &valid_closure,
                         &|| false,
@@ -2557,7 +2775,7 @@ mod tests {
                             &fixture.job,
                             root,
                             0,
-                            u64::MAX,
+                            included_sources,
                             &facts_count,
                             &valid_closure,
                             &|| false,
@@ -2575,7 +2793,7 @@ mod tests {
                             &fixture.job,
                             root,
                             &CandidateBounds::default(),
-                            u64::MAX,
+                            included_sources,
                             &combine_facts,
                             &valid_closure,
                             &|| false,
@@ -2598,7 +2816,7 @@ mod tests {
                             root,
                             &[0; KEY_BYTES],
                             CandidateDirection::Forward,
-                            u64::MAX,
+                            included_sources,
                             &facts_count,
                             &valid_closure,
                             &|| false,
@@ -2619,7 +2837,7 @@ mod tests {
                             &fixture.job,
                             root,
                             (size / 2) as u64,
-                            u64::MAX,
+                            included_sources,
                             &facts_count,
                             &valid_closure,
                             &|| false,
@@ -2650,7 +2868,7 @@ mod tests {
                             &fixture.job,
                             root,
                             &bounds,
-                            u64::MAX,
+                            included_sources,
                             &combine_facts,
                             &valid_closure,
                             &|| false,
@@ -2678,7 +2896,7 @@ mod tests {
                             root,
                             &point.key,
                             direction,
-                            u64::MAX,
+                            included_sources,
                             &facts_count,
                             &valid_closure,
                             &|| false,
@@ -2696,7 +2914,7 @@ mod tests {
                 seek_reads += seek.work.sql_reads;
             }
             println!(
-                "candidate_tree prefix={size} select_reads={} select_vm={} sqlite_vm={} select_bytes={} range_reads={} seek_reads={} depth={} node_bytes={} rust_allocs(select/range/seek)={}/{}/{} rust_bytes={}/{}/{}",
+                "candidate_tree full_graph={full_graph_guard} prefix={size} select_reads={} select_vm={} sqlite_vm={} select_bytes={} range_reads={} seek_reads={} depth={} node_bytes={} rust_allocs(select/range/seek)={}/{}/{} rust_bytes={}/{}/{}",
                 selected.work.sql_reads,
                 selected.work.vm_steps,
                 selected.work.sqlite_vm_steps,
@@ -2967,6 +3185,147 @@ mod tests {
             .unwrap();
         assert_eq!(included.outcome, CandidateReadOutcome::Qualified);
         assert!(included.value.is_some());
+        assert_eq!(included.value.as_ref().unwrap().key, [0; KEY_BYTES]);
+        // Each selected path has at most 552 branches. Each branch evaluates
+        // one left aggregate through at most 64 decisions + one terminal.
+        // Include root evaluation, point rows, binding and empty validation.
+        let maximum_reads = (MAX_DEPTH + 1) * (usize::from(super::super::VARIABLES) + 3) + 8;
+        let check_read = |label: &str,
+                          work: &CandidateWork,
+                          allocations: usize,
+                          allocated: usize| {
+            assert!(
+                work.sql_reads <= maximum_reads,
+                "{label} repeated aggregate evaluation: {work:?}"
+            );
+            assert_eq!(work.sql_writes, 0);
+            assert!(work.vm_steps > 0 && work.sqlite_vm_steps > 0);
+            // All tested statements are indexed point lookups. The complete
+            // hook also includes the fixed fixture's before/after witness SQL.
+            assert!(work.sqlite_vm_steps <= work.vm_steps as u64 + 16_384);
+            assert!(work.metadata_bytes <= maximum_reads * 4096);
+            assert!(work.max_depth <= MAX_DEPTH);
+            assert!(work.max_live_node_bytes <= NODE_BYTES);
+            assert!(allocations > 0 && allocated <= maximum_reads * 16 * 1024);
+            assert!(measured_peak_bytes() <= 2 * STEP_BYTES);
+            println!(
+                "candidate_tree deep_full_guard {label} reads={} explicit_vm={} all_sqlite_vm={} decoded_bytes={} rust_allocations={allocations} rust_cumulative_bytes={allocated} rust_heap_high_water={}",
+                work.sql_reads,
+                work.vm_steps,
+                work.sqlite_vm_steps,
+                work.metadata_bytes,
+                measured_peak_bytes()
+            );
+        };
+        let spec = fixture.spec.clone();
+        fixture.job = fixture.reopen(&spec);
+        let (selected, allocations, allocated) = measure_test_allocations(|| {
+            fixture
+                .store
+                .candidate_tree_select(
+                    &fixture.job,
+                    &complete,
+                    0,
+                    0,
+                    &facts_count,
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap()
+        });
+        assert_eq!(selected.outcome, CandidateReadOutcome::Qualified);
+        assert_eq!(selected.value.unwrap().key, [0; KEY_BYTES]);
+        check_read("cold_select", &selected.work, allocations, allocated);
+        let (range, allocations, allocated) = measure_test_allocations(|| {
+            fixture
+                .store
+                .candidate_tree_range(
+                    &fixture.job,
+                    &complete,
+                    &CandidateBounds {
+                        lower: Some([0; KEY_BYTES]),
+                        upper: Some([0; KEY_BYTES]),
+                    },
+                    0,
+                    &combine_facts,
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap()
+        });
+        assert_eq!(range.outcome, CandidateReadOutcome::Qualified);
+        let expected = serde_json::to_value(&replacement_entry.facts).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(range.value.as_deref().unwrap()).unwrap(),
+            expected
+        );
+        check_read("point_range", &range.work, allocations, allocated);
+        for direction in [CandidateDirection::Forward, CandidateDirection::Backward] {
+            let (seek, allocations, allocated) = measure_test_allocations(|| {
+                fixture
+                    .store
+                    .candidate_tree_seek(
+                        &fixture.job,
+                        &complete,
+                        &[0; KEY_BYTES],
+                        direction,
+                        0,
+                        &facts_count,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap()
+            });
+            assert_eq!(seek.outcome, CandidateReadOutcome::Qualified);
+            assert_eq!(seek.value.unwrap().key, [0; KEY_BYTES]);
+            check_read("point_seek", &seek.work, allocations, allocated);
+        }
+        let checks = Cell::new(0);
+        let (cancelled_read, allocations, allocated) = measure_test_allocations(|| {
+            fixture
+                .store
+                .candidate_tree_select(
+                    &fixture.job,
+                    &complete,
+                    0,
+                    0,
+                    &facts_count,
+                    &valid_closure,
+                    &|| {
+                        checks.set(checks.get() + 1);
+                        checks.get() >= 8
+                    },
+                )
+                .unwrap()
+        });
+        assert_eq!(cancelled_read.outcome, CandidateReadOutcome::Deferred);
+        assert!(cancelled_read.value.is_none());
+        check_read(
+            "cancelled_select",
+            &cancelled_read.work,
+            allocations,
+            allocated,
+        );
+        let fence_calls = Cell::new(0);
+        let fenced = fixture
+            .store
+            .candidate_tree_select(
+                &fixture.job,
+                &complete,
+                0,
+                0,
+                &facts_count,
+                &|db, job| {
+                    fence_calls.set(fence_calls.get() + 1);
+                    Ok(valid_closure(db, job)? && fence_calls.get() == 1)
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(fenced.outcome, CandidateReadOutcome::Conflict);
+        assert!(fenced.value.is_none());
+        assert!(fenced.work.sql_reads > 0 && fenced.work.sqlite_vm_steps > 0);
+
         let all_omitted = fixture
             .store
             .candidate_tree_select(
@@ -3252,6 +3611,7 @@ impl NativeStore {
                 return Ok(None);
             };
             let mut rank = rank;
+            let mut remaining_total = None;
             let mut previous_split = None;
             let mut active = Vec::with_capacity(MAX_DEPTH);
             for depth in 0..=MAX_DEPTH {
@@ -3265,7 +3625,10 @@ impl NativeStore {
                 active.push(identity);
                 tree.work.max_depth = tree.work.max_depth.max(depth);
                 let node = tree.read_node(&current)?;
-                let total = count(&graph.evaluate(node.aggregate(), included_sources)?)?;
+                let total = match remaining_total {
+                    Some(total) => total,
+                    None => count(&graph.evaluate(node.aggregate(), included_sources)?)?,
+                };
                 if total == 0 || rank >= total {
                     return Ok(None);
                 }
@@ -3301,9 +3664,11 @@ impl NativeStore {
                             return Err(invalid("candidate tree aggregate count is inconsistent"));
                         }
                         if rank < left_count {
+                            remaining_total = Some(left_count);
                             current = left;
                         } else {
                             rank -= left_count;
+                            remaining_total = Some(total - left_count);
                             current = right;
                         }
                         previous_split = Some(split);
