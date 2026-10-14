@@ -10,7 +10,14 @@ use crate::model::range_stage::CandidateRef;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{cell::Cell, io};
+use std::{
+    cell::{Cell, RefCell},
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 pub(crate) const KEY_BYTES: usize = 69;
 const KEY_BITS: usize = KEY_BYTES * 8;
@@ -19,6 +26,99 @@ const NODE_BYTES: usize = 64 * 1024;
 const CURSOR_BYTES: usize = 64 * 1024;
 const PATH_FRAME_BYTES: usize = 68;
 const EMPTY_TREE: &str = "rank/v1/tree/empty";
+
+#[cfg(test)]
+thread_local! {
+    static TRACK_RUST_ALLOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RUST_ALLOCATION_TOTALS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+struct TestCountingAllocator;
+
+#[cfg(test)]
+unsafe impl std::alloc::GlobalAlloc for TestCountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let pointer = unsafe {
+            <std::alloc::System as std::alloc::GlobalAlloc>::alloc(&std::alloc::System, layout)
+        };
+        if !pointer.is_null() {
+            record_test_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe {
+            <std::alloc::System as std::alloc::GlobalAlloc>::dealloc(
+                &std::alloc::System,
+                pointer,
+                layout,
+            )
+        };
+    }
+
+    unsafe fn realloc(
+        &self,
+        pointer: *mut u8,
+        layout: std::alloc::Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        let next = unsafe {
+            <std::alloc::System as std::alloc::GlobalAlloc>::realloc(
+                &std::alloc::System,
+                pointer,
+                layout,
+                new_size,
+            )
+        };
+        if !next.is_null() {
+            record_test_allocation(new_size);
+        }
+        next
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_COUNTING_ALLOCATOR: TestCountingAllocator = TestCountingAllocator;
+
+#[cfg(test)]
+fn record_test_allocation(bytes: usize) {
+    if TRACK_RUST_ALLOCATIONS
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(false)
+    {
+        let _ = RUST_ALLOCATION_TOTALS.try_with(|totals| {
+            let (calls, total_bytes) = totals.get();
+            totals.set((calls.saturating_add(1), total_bytes.saturating_add(bytes)));
+        });
+    }
+}
+
+#[cfg(test)]
+struct TestAllocationGuard;
+
+#[cfg(test)]
+impl Drop for TestAllocationGuard {
+    fn drop(&mut self) {
+        let _ = TRACK_RUST_ALLOCATIONS.try_with(|tracking| tracking.set(false));
+    }
+}
+
+/// Count actual Rust allocations made synchronously by one tested operation.
+/// SQLite's C allocator and external provider/proof I/O are intentionally outside
+/// this measurement; SQLite instruction work is measured separately.
+#[cfg(test)]
+fn measure_test_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
+    RUST_ALLOCATION_TOTALS.with(|totals| totals.set((0, 0)));
+    TRACK_RUST_ALLOCATIONS.with(|tracking| tracking.set(true));
+    let guard = TestAllocationGuard;
+    let value = operation();
+    drop(guard);
+    let (calls, bytes) = RUST_ALLOCATION_TOTALS.with(std::cell::Cell::get);
+    (value, calls, bytes)
+}
 
 /// Registered by the private native producer schema owner in its versioned
 /// migration. Keeping it separate prevents an accidental public Trace change.
@@ -38,6 +138,10 @@ CREATE TABLE IF NOT EXISTS native_rank_candidate_roots (
  PRIMARY KEY(job,identity,empty)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_rank_candidate_cursors (
+ job INTEGER NOT NULL, cursor TEXT NOT NULL, metadata TEXT NOT NULL,
+ PRIMARY KEY(job,cursor)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_rank_candidate_applies (
  job INTEGER NOT NULL, cursor TEXT NOT NULL, metadata TEXT NOT NULL,
  PRIMARY KEY(job,cursor)
 ) STRICT, WITHOUT ROWID;
@@ -116,14 +220,22 @@ pub(crate) struct CandidateStep {
 /// existing graph Apply work that maintains native conditional aggregates.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CandidateWork {
+    /// Explicit tree and graph statements, excluding native job/closure fences.
     pub(crate) sql_reads: usize,
     pub(crate) sql_writes: usize,
+    /// Encoded/decoded bytes for the explicit tree and graph rows above.
     pub(crate) metadata_bytes: usize,
+    /// StatementStatus totals for explicit tree and graph statements.
     pub(crate) vm_steps: i64,
+    /// Actual SQLite progress-hook delta for the complete API operation,
+    /// including job/source/runtime witnesses, closure SQL and revision CAS.
+    /// External provider/proof I/O is outside this SQLite-only storage layer.
+    pub(crate) sqlite_vm_steps: u64,
     pub(crate) apply_visits: usize,
     pub(crate) nodes_written: usize,
     pub(crate) max_depth: usize,
     pub(crate) max_cursor_bytes: usize,
+    pub(crate) max_apply_bytes: usize,
     pub(crate) max_live_node_bytes: usize,
 }
 
@@ -270,7 +382,7 @@ impl PathFrame {
             .map_err(|_| invalid("candidate tree cursor split is invalid"))?;
         let split = u16::from_str_radix(split_text, 16)
             .map_err(|_| invalid("candidate tree cursor split is invalid"))?;
-        let right = match frame.as_bytes()[67] {
+        let right = match frame[67] {
             b'0' => false,
             b'1' => true,
             _ => return Err(invalid("candidate tree cursor direction is invalid")),
@@ -308,7 +420,7 @@ struct UpdateState {
     base: Option<CandidateNodeId>,
     repair: usize,
     pending: Option<PendingBranch>,
-    apply: Option<Apply>,
+    apply_active: bool,
     prepared: bool,
 }
 
@@ -330,7 +442,6 @@ impl UpdateState {
                     && pending.right.valid()
                     && pending.left != pending.right
             })
-            && self.apply.as_ref().is_none_or(|apply| apply.valid())
             && self.replacement.as_ref().is_none_or(|leaf| {
                 leaf.aggregate.valid() && leaf.candidate.as_slice() == &self.key[37..]
             })
@@ -521,6 +632,72 @@ impl TreeDb<'_> {
         Ok(())
     }
 
+    fn read_apply(&mut self, cursor: &str) -> io::Result<Option<Apply>> {
+        let mut q = self
+            .db
+            .prepare_cached("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM native_rank_candidate_applies WHERE job=?1 AND cursor=?2")
+            .map_err(io::Error::other)?;
+        q.reset_status(rusqlite::StatementStatus::VmStep);
+        let row: Option<Option<String>> = q
+            .query_row(params![self.job, cursor], |r| r.get(0))
+            .optional()
+            .map_err(io::Error::other)?;
+        let vm = q.get_status(rusqlite::StatementStatus::VmStep);
+        drop(q);
+        let text = match row {
+            None => {
+                self.work.read(cursor.len(), vm);
+                return Ok(None);
+            }
+            Some(None) => {
+                return Err(invalid("candidate tree Apply row exceeds scalar budget"));
+            }
+            Some(Some(text)) => text,
+        };
+        self.work.read(text.len() + cursor.len(), vm);
+        self.work.max_apply_bytes = self.work.max_apply_bytes.max(text.len());
+        let apply: Apply = serde_json::from_str(&text).map_err(io::Error::other)?;
+        if !apply.valid() {
+            return Err(invalid("candidate tree Apply state is invalid"));
+        }
+        Ok(Some(apply))
+    }
+
+    fn put_apply(&mut self, cursor: &str, apply: &Apply) -> io::Result<()> {
+        if !apply.valid() {
+            return Err(invalid("candidate tree Apply state is invalid"));
+        }
+        let text = encoded(apply, CURSOR_BYTES)?;
+        let mut q = self
+            .db
+            .prepare_cached("INSERT INTO native_rank_candidate_applies VALUES(?1,?2,?3) ON CONFLICT(job,cursor) DO UPDATE SET metadata=excluded.metadata")
+            .map_err(io::Error::other)?;
+        q.reset_status(rusqlite::StatementStatus::VmStep);
+        q.execute(params![self.job, cursor, text])
+            .map_err(io::Error::other)?;
+        let vm = q.get_status(rusqlite::StatementStatus::VmStep);
+        self.work.write(text.len() + cursor.len(), vm);
+        self.work.max_apply_bytes = self.work.max_apply_bytes.max(text.len());
+        Ok(())
+    }
+
+    fn delete_apply(&mut self, cursor: &str) -> io::Result<()> {
+        let mut q = self
+            .db
+            .prepare_cached("DELETE FROM native_rank_candidate_applies WHERE job=?1 AND cursor=?2")
+            .map_err(io::Error::other)?;
+        q.reset_status(rusqlite::StatementStatus::VmStep);
+        let changed = q
+            .execute(params![self.job, cursor])
+            .map_err(io::Error::other)?;
+        let vm = q.get_status(rusqlite::StatementStatus::VmStep);
+        if changed != 1 {
+            return Err(invalid("candidate tree Apply row disappeared"));
+        }
+        self.work.write(cursor.len(), vm);
+        Ok(())
+    }
+
     fn bind_root(&mut self, root: &CandidateRoot, graph: &mut Graph<'_>) -> io::Result<()> {
         if !root_valid(root) {
             return Err(invalid("candidate tree root is invalid"));
@@ -678,13 +855,45 @@ pub(super) fn cleanup(
         return Ok((0, true));
     }
     let mut used = 0;
+    let mut q = db.prepare("SELECT cursor,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_applies WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
+    let applies = q
+        .query_map(params![job, budget as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (cursor, raw_length) in applies {
+        let length = usize::try_from(raw_length)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, raw_length))?;
+        if used >= budget || length > *bytes {
+            break;
+        }
+        if db.execute(
+            "DELETE FROM native_rank_candidate_applies WHERE job=?1 AND cursor=?2",
+            params![job, cursor],
+        )? != 1
+        {
+            return Err(cleanup_error("candidate tree Apply row disappeared"));
+        }
+        *bytes -= length;
+        used += 1;
+    }
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_applies WHERE job=?1)",
+        [job],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok((used, false));
+    }
+
     let mut q = db.prepare("SELECT cursor,octet_length(metadata)+octet_length(cursor) FROM native_rank_candidate_cursors WHERE job=?1 ORDER BY cursor LIMIT ?2")?;
     let cursors = q
         .query_map(params![job, budget as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (cursor, length) in cursors {
+    for (cursor, raw_length) in cursors {
+        let length = usize::try_from(raw_length)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, raw_length))?;
         if used >= budget || length > *bytes {
             break;
         }
@@ -713,11 +922,13 @@ pub(super) fn cleanup(
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, usize>(2)?,
+                r.get::<_, i64>(2)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (identity, empty, length) in roots {
+    for (identity, empty, raw_length) in roots {
+        let length = usize::try_from(raw_length)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, raw_length))?;
         let node = identity != EMPTY_TREE;
         let operations = 1 + usize::from(node) + 1;
         if used + operations > budget || length > *bytes {
@@ -751,10 +962,12 @@ pub(super) fn cleanup(
     let mut q = db.prepare("SELECT identity,length(identity) FROM native_rank_candidate_bindings WHERE job=?1 ORDER BY identity LIMIT ?2")?;
     let bindings = q
         .query_map(params![job, binding_limit as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (identity, length) in bindings {
+    for (identity, raw_length) in bindings {
+        let length = usize::try_from(raw_length)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, raw_length))?;
         if used + 2 > budget || length > *bytes {
             break;
         }
@@ -784,7 +997,7 @@ pub(super) fn cleanup(
             Option<String>,
             Option<String>,
             String,
-            usize,
+            i64,
         )> = db
             .query_row(
                 "SELECT identity,CASE WHEN octet_length(metadata)<=65536 THEN metadata END,left_id,right_id,aggregate,
@@ -803,9 +1016,11 @@ pub(super) fn cleanup(
                 },
             )
             .optional()?;
-        let Some((identity, metadata, left, right, aggregate, length)) = record else {
+        let Some((identity, metadata, left, right, aggregate, raw_length)) = record else {
             break;
         };
+        let length = usize::try_from(raw_length)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, raw_length))?;
         if length > *bytes {
             break;
         }
@@ -847,8 +1062,8 @@ pub(super) fn cleanup(
         *bytes -= length;
     }
     let remains = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_cursors) OR EXISTS(SELECT 1 FROM native_rank_candidate_roots) OR EXISTS(SELECT 1 FROM native_rank_candidate_bindings) OR EXISTS(SELECT 1 FROM native_rank_candidate_nodes WHERE refs=0)",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM native_rank_candidate_applies WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_cursors WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_roots WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_bindings WHERE job=?1) OR EXISTS(SELECT 1 FROM native_rank_candidate_nodes WHERE refs=0)",
+        [job],
         |r| r.get::<_, bool>(0),
     )?;
     if remains {
@@ -912,10 +1127,6 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1009,14 +1220,14 @@ mod tests {
                 connection: writer.connection,
                 options: options.clone(),
             };
-            // This test owns initialization explicitly; production registration
-            // remains the private schema owner's versioned migration.
+            // Exercise the private owner initialization, then register this
+            // pending private module through its separately exported schema.
+            // No public Trace initializer or schema migration is involved.
+            native_query::initialize(&store.connection).unwrap();
             store
                 .connection
-                .execute_batch(super::super::SCHEMA)
+                .execute_batch(super::super::CANDIDATE_TREE_SCHEMA)
                 .unwrap();
-            assert_eq!(native_query::SCHEMA_VERSION, 7);
-            store.connection.execute_batch(SCHEMA).unwrap();
             let spec = native_query::JobSpec {
                 view_key: "chosen:candidate-tree".into(),
                 version: 1,
@@ -1116,6 +1327,59 @@ mod tests {
             }
         }
 
+        fn graph_leaf_with_paged_guard(
+            &mut self,
+            entry: &TestEntry,
+            variant: usize,
+            decisions: &[(u8, bool)],
+        ) -> CandidateLeaf {
+            let facts = facts_for(
+                entry.seq,
+                entry.facts.first.as_ref().unwrap().order.key.0,
+                variant,
+            );
+            let facts = serde_json::to_string(&facts).unwrap();
+            let empty = serde_json::to_string(&Facts::default()).unwrap();
+            self.cursor += 1;
+            let cursor = format!("wide-guard-{}", self.cursor);
+            assert_eq!(
+                self.store
+                    .rank_begin_guard(
+                        &self.job,
+                        super::super::GuardInput {
+                            cursor: &cursor,
+                            facts: &facts,
+                            empty: &empty,
+                            decisions,
+                        },
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap(),
+                Outcome::Written
+            );
+            self.refresh();
+            let mut result = None;
+            for _ in 0..256 {
+                let step = self
+                    .store
+                    .rank_advance_guard(&self.job, &cursor, &valid_closure, &|| false)
+                    .unwrap();
+                assert_eq!(step.outcome, Outcome::Written);
+                assert!(step.work.sql_reads + step.work.sql_writes <= STEP_ROWS);
+                assert!(step.work.metadata_bytes <= STEP_BYTES);
+                self.refresh();
+                if let Some(root) = step.complete {
+                    result = Some(root);
+                    break;
+                }
+            }
+            CandidateLeaf {
+                candidate: entry.candidate,
+                aggregate: result.expect("64-source graph guard exceeded its step bound"),
+            }
+        }
+
         fn update(
             &mut self,
             root: &CandidateRoot,
@@ -1126,36 +1390,40 @@ mod tests {
             self.cursor += 1;
             let cursor = format!("candidate-tree-{}", self.cursor);
             let combine = combine_facts;
-            let start = self
-                .store
-                .candidate_tree_begin_update(
-                    &self.job,
-                    &cursor,
-                    root,
-                    key,
-                    replacement,
-                    version,
-                    &valid_closure,
-                    &|| false,
-                )
-                .unwrap();
+            let (start, allocations, allocated_bytes) = measure_test_allocations(|| {
+                self.store
+                    .candidate_tree_begin_update(
+                        &self.job,
+                        &cursor,
+                        root,
+                        key,
+                        replacement,
+                        version,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap()
+            });
+            check_allocations(allocations, allocated_bytes);
             assert_eq!(start.outcome, Outcome::Written);
             assert!(start.complete.is_none());
             check_step(&start.work);
             let mut work = start.work;
             self.refresh();
             for _ in 0..2000 {
-                let step = self
-                    .store
-                    .candidate_tree_advance_update(
-                        &self.job,
-                        &cursor,
-                        version,
-                        &combine,
-                        &valid_closure,
-                        &|| false,
-                    )
-                    .unwrap();
+                let (step, allocations, allocated_bytes) = measure_test_allocations(|| {
+                    self.store
+                        .candidate_tree_advance_update(
+                            &self.job,
+                            &cursor,
+                            version,
+                            &combine,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+                check_allocations(allocations, allocated_bytes);
                 assert_eq!(step.outcome, Outcome::Written);
                 check_step(&step.work);
                 add_work(&mut work, &step.work);
@@ -1192,8 +1460,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn candidate_tree_schema_is_registered_separately_by_the_private_owner() {
+        let fixture = Fixture::new();
+        assert!(
+            native_query::schema_version(&fixture.store.connection)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(super::super::CANDIDATE_TREE_SCHEMA, SCHEMA);
+        for table in [
+            "native_rank_candidate_nodes",
+            "native_rank_candidate_bindings",
+            "native_rank_candidate_roots",
+            "native_rank_candidate_cursors",
+            "native_rank_candidate_applies",
+        ] {
+            let main: bool = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let temporary: bool = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(main, "private owner did not register {table}");
+            assert!(!temporary, "candidate table {table} entered TEMP");
+        }
+    }
+
     fn valid_closure(_: &Connection, _: i64) -> rusqlite::Result<bool> {
         Ok(true)
+    }
+
+    fn private_cleanup_row_count(db: &Connection) -> i64 {
+        db.query_row(
+            "SELECT
+               (SELECT count(*) FROM native_rank_candidate_applies) +
+               (SELECT count(*) FROM native_rank_candidate_cursors) +
+               (SELECT count(*) FROM native_rank_candidate_roots) +
+               (SELECT count(*) FROM native_rank_candidate_bindings) +
+               (SELECT count(*) FROM native_rank_candidate_nodes) +
+               (SELECT count(*) FROM native_rank_memos) +
+               (SELECT count(*) FROM native_rank_bindings) +
+               (SELECT count(*) FROM native_rank_nodes) +
+               (SELECT count(*) FROM native_query_rows) +
+               (SELECT count(*) FROM native_query_sources) +
+               (SELECT count(*) FROM native_query_owners) +
+               (SELECT count(*) FROM native_query_jobs)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
     }
 
     fn order(seq: usize, time: i64, identity: CandidateRef) -> Order {
@@ -1280,7 +1608,19 @@ mod tests {
         assert!(work.sql_reads + work.sql_writes <= STEP_ROWS);
         assert!(work.metadata_bytes <= STEP_BYTES);
         assert!(work.max_cursor_bytes <= CURSOR_BYTES);
+        assert!(work.max_apply_bytes <= CURSOR_BYTES);
         assert!(work.max_depth <= MAX_DEPTH + 1);
+        assert!(work.sqlite_vm_steps > 0);
+        assert!(work.sqlite_vm_steps <= 500_000);
+        assert!(work.max_live_node_bytes <= NODE_BYTES);
+    }
+
+    fn check_allocations(calls: usize, bytes: usize) {
+        assert!(calls > 0, "the operation recorded no Rust allocations");
+        assert!(
+            bytes <= 2 * STEP_BYTES,
+            "per-operation Rust allocations exceeded 2 MiB"
+        );
     }
 
     fn add_work(total: &mut CandidateWork, next: &CandidateWork) {
@@ -1288,10 +1628,12 @@ mod tests {
         total.sql_writes += next.sql_writes;
         total.metadata_bytes += next.metadata_bytes;
         total.vm_steps += next.vm_steps;
+        total.sqlite_vm_steps += next.sqlite_vm_steps;
         total.apply_visits += next.apply_visits;
         total.nodes_written += next.nodes_written;
         total.max_depth = total.max_depth.max(next.max_depth);
         total.max_cursor_bytes = total.max_cursor_bytes.max(next.max_cursor_bytes);
+        total.max_apply_bytes = total.max_apply_bytes.max(next.max_apply_bytes);
         total.max_live_node_bytes = total.max_live_node_bytes.max(next.max_live_node_bytes);
     }
 
@@ -1487,8 +1829,27 @@ mod tests {
             .unwrap();
         assert_eq!(empty_result.outcome, CandidateReadOutcome::Qualified);
         assert!(empty_result.value.is_none());
+        let baseline = fixture
+            .store
+            .candidate_tree_select(
+                &fixture.job,
+                &root,
+                0,
+                u64::MAX,
+                &facts_count,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(baseline.outcome, CandidateReadOutcome::Qualified);
         let closure_calls = Cell::new(0);
-        let changing_closure = |_: &Connection, _: i64| {
+        let changing_closure = |db: &Connection, job: i64| {
+            let source_count: i64 = db.query_row(
+                "SELECT count(*) FROM native_query_sources WHERE job=?1",
+                [job],
+                |row| row.get(0),
+            )?;
+            assert!(source_count > 0);
             closure_calls.set(closure_calls.get() + 1);
             Ok(closure_calls.get() == 1)
         };
@@ -1506,6 +1867,7 @@ mod tests {
             .unwrap();
         assert_eq!(changed.outcome, CandidateReadOutcome::Conflict);
         assert_eq!(closure_calls.get(), 2);
+        assert!(changed.work.sqlite_vm_steps > baseline.work.sqlite_vm_steps);
     }
 
     #[test]
@@ -1611,19 +1973,22 @@ mod tests {
         let third_leaf = fixture.graph_leaf(&third, 0);
         let mut next_job = fixture.store.reload(&next_spec.view_key).unwrap().unwrap();
         let cursor = "imported-root-update";
-        let start = fixture
-            .store
-            .candidate_tree_begin_update(
-                &next_job,
-                cursor,
-                &root,
-                third.key,
-                Some(third_leaf),
-                "facts-v1",
-                &valid_closure,
-                &|| false,
-            )
-            .unwrap();
+        let (start, allocations, allocated_bytes) = measure_test_allocations(|| {
+            fixture
+                .store
+                .candidate_tree_begin_update(
+                    &next_job,
+                    cursor,
+                    &root,
+                    third.key,
+                    Some(third_leaf),
+                    "facts-v1",
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap()
+        });
+        check_allocations(allocations, allocated_bytes);
         assert_eq!(start.outcome, Outcome::Written);
         assert_eq!(
             fixture
@@ -1642,18 +2007,33 @@ mod tests {
             fixture.store.restart(&fixture.job).unwrap(),
             Outcome::Written
         );
-        loop {
+        let mut cleaned = false;
+        for _ in 0..4096 {
             let old = fixture
                 .store
                 .reload(&original_spec.view_key)
                 .unwrap()
                 .unwrap();
+            let before_rows = private_cleanup_row_count(&fixture.store.connection);
             match fixture.store.cleanup(&old).unwrap() {
-                Outcome::Written => break,
-                Outcome::Deferred => continue,
+                Outcome::Written => {
+                    cleaned = true;
+                    break;
+                }
+                Outcome::Deferred => {
+                    let after_rows = private_cleanup_row_count(&fixture.store.connection);
+                    assert!(
+                        after_rows < before_rows,
+                        "old-job cleanup deferred without deleting private rows"
+                    );
+                }
                 outcome => panic!("unexpected cleanup outcome {outcome:?}"),
             }
         }
+        assert!(
+            cleaned,
+            "old-job cleanup exceeded its bounded progress loop"
+        );
         let retained: i64 = fixture
             .store
             .connection
@@ -1665,24 +2045,32 @@ mod tests {
             .unwrap();
         assert!(retained > 0);
         next_job = fixture.store.reload(&next_spec.view_key).unwrap().unwrap();
-        let imported_root = loop {
-            let step = fixture
-                .store
-                .candidate_tree_advance_update(
-                    &next_job,
-                    cursor,
-                    "facts-v1",
-                    &combine,
-                    &valid_closure,
-                    &|| false,
-                )
-                .unwrap();
+        let mut imported_root = None;
+        for _ in 0..2000 {
+            let (step, allocations, allocated_bytes) = measure_test_allocations(|| {
+                fixture
+                    .store
+                    .candidate_tree_advance_update(
+                        &next_job,
+                        cursor,
+                        "facts-v1",
+                        &combine,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap()
+            });
+            check_allocations(allocations, allocated_bytes);
             assert_eq!(step.outcome, Outcome::Written);
+            check_step(&step.work);
+            assert!(step.work.sqlite_vm_steps > 0);
             next_job = fixture.store.reload(&next_spec.view_key).unwrap().unwrap();
             if let Some(root) = step.complete {
-                break root;
+                imported_root = Some(root);
+                break;
             }
-        };
+        }
+        let imported_root = imported_root.expect("imported-root update exceeded its step bound");
         fixture
             .store
             .connection
@@ -1738,6 +2126,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deferred.0, Outcome::Deferred);
+        assert!(deferred.1.sql_reads + deferred.1.sql_writes > 0);
+        assert!(deferred.1.sqlite_vm_steps > 0);
         assert_eq!(
             fixture
                 .store
@@ -1768,6 +2158,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deferred.outcome, Outcome::Deferred);
+        assert!(deferred.work.sql_reads + deferred.work.sql_writes > 0);
+        assert!(deferred.work.sqlite_vm_steps > 0);
         assert_eq!(
             fixture
                 .store
@@ -1816,6 +2208,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deferred.outcome, Outcome::Deferred);
+        assert!(deferred.work.sql_reads + deferred.work.sql_writes > 0);
+        assert!(deferred.work.sqlite_vm_steps > 0);
         assert_eq!(
             fixture
                 .store
@@ -2091,59 +2485,155 @@ mod tests {
             .collect::<Vec<_>>();
         tx.commit().unwrap();
         for root in &roots {
-            let (outcome, work) = fixture
-                .store
-                .candidate_tree_bind_root(&fixture.job, root, &valid_closure, &|| false)
-                .unwrap();
+            let ((outcome, work), allocations, allocated_bytes) = measure_test_allocations(|| {
+                fixture
+                    .store
+                    .candidate_tree_bind_root(&fixture.job, root, &valid_closure, &|| false)
+                    .unwrap()
+            });
+            check_allocations(allocations, allocated_bytes);
             assert_eq!(outcome, Outcome::Written);
-            assert!(work.unwrap().sql_writes > 0);
+            assert!(work.sql_writes > 0 && work.sqlite_vm_steps > 0);
             fixture.refresh();
         }
+
+        let mut append_rows = Vec::new();
+        let mut mutated_roots = Vec::new();
+        for (root, size) in roots.iter().zip(sizes) {
+            let seq = 50_000 + size;
+            let appended = test_entry(seq, seq as i64, 0);
+            let leaf = fixture.graph_leaf_with_guard(&appended, 0, &[]);
+            let (appended_root, append_work) =
+                fixture.update(root, appended.key, Some(leaf), "facts-v1");
+            if size > 0 {
+                assert!(append_work.apply_visits > 0);
+            }
+            assert!(append_work.sqlite_vm_steps > 0);
+            append_rows.push(append_work.sql_reads + append_work.sql_writes);
+
+            let replacement = test_entry(seq, seq as i64, 1);
+            let leaf = fixture.graph_leaf_with_guard(&replacement, 1, &[]);
+            let (replaced_root, replace_work) =
+                fixture.update(&appended_root, replacement.key, Some(leaf), "facts-v1");
+            if size > 0 {
+                assert!(replace_work.apply_visits > 0);
+            }
+
+            let (deleted_root, delete_work) =
+                fixture.update(&replaced_root, replacement.key, None, "facts-v1");
+            assert!(delete_work.sql_reads + delete_work.sql_writes > 0);
+            assert!(delete_work.sqlite_vm_steps > 0);
+            mutated_roots.push((deleted_root, size));
+        }
+        assert!(append_rows[3] < append_rows[0] * 8 + 64);
         fixture.ready();
 
-        let measured_vm = Arc::new(AtomicUsize::new(0));
-        let observed_vm = Arc::clone(&measured_vm);
-        fixture.store.connection.progress_handler(
-            1,
-            Some(move || {
-                observed_vm.fetch_add(1, Ordering::Relaxed);
-                false
-            }),
-        );
-        for (root, size) in roots.iter().zip(sizes) {
-            if size == 0 {
-                let selected = fixture
+        for (root, size) in &mutated_roots {
+            let (result, allocations, allocated_bytes) = measure_test_allocations(|| {
+                fixture
                     .store
                     .candidate_tree_select(
                         &fixture.job,
                         root,
-                        0,
+                        *size as u64,
                         u64::MAX,
                         &facts_count,
                         &valid_closure,
                         &|| false,
                     )
-                    .unwrap();
+                    .unwrap()
+            });
+            check_allocations(allocations, allocated_bytes);
+            assert_eq!(result.outcome, CandidateReadOutcome::Qualified);
+            assert!(result.value.is_none(), "deleted append remained selectable");
+        }
+
+        for (root, size) in roots.iter().zip(sizes) {
+            if size == 0 {
+                let (selected, allocations, allocated_bytes) = measure_test_allocations(|| {
+                    fixture
+                        .store
+                        .candidate_tree_select(
+                            &fixture.job,
+                            root,
+                            0,
+                            u64::MAX,
+                            &facts_count,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+                check_allocations(allocations, allocated_bytes);
                 assert_eq!(selected.outcome, CandidateReadOutcome::Qualified);
                 assert!(selected.value.is_none());
+                assert!(selected.work.sqlite_vm_steps > 0);
+                let (range, allocations, allocated_bytes) = measure_test_allocations(|| {
+                    fixture
+                        .store
+                        .candidate_tree_range(
+                            &fixture.job,
+                            root,
+                            &CandidateBounds::default(),
+                            u64::MAX,
+                            &combine_facts,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+                check_allocations(allocations, allocated_bytes);
+                assert_eq!(range.outcome, CandidateReadOutcome::Qualified);
+                assert_eq!(
+                    serde_json::from_str::<Facts>(range.value.as_deref().unwrap())
+                        .unwrap()
+                        .count,
+                    0
+                );
+                let (seek, allocations, allocated_bytes) = measure_test_allocations(|| {
+                    fixture
+                        .store
+                        .candidate_tree_seek(
+                            &fixture.job,
+                            root,
+                            &[0; KEY_BYTES],
+                            CandidateDirection::Forward,
+                            u64::MAX,
+                            &facts_count,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+                check_allocations(allocations, allocated_bytes);
+                assert_eq!(seek.outcome, CandidateReadOutcome::Qualified);
+                assert!(seek.value.is_none());
                 continue;
             }
             let point = &items[size / 2];
-            let selected = fixture
-                .store
-                .candidate_tree_select(
-                    &fixture.job,
-                    root,
-                    (size / 2) as u64,
-                    u64::MAX,
-                    &facts_count,
-                    &valid_closure,
-                    &|| false,
-                )
-                .unwrap();
+            let (selected, select_allocations, select_allocated_bytes) =
+                measure_test_allocations(|| {
+                    fixture
+                        .store
+                        .candidate_tree_select(
+                            &fixture.job,
+                            root,
+                            (size / 2) as u64,
+                            u64::MAX,
+                            &facts_count,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+            check_allocations(select_allocations, select_allocated_bytes);
             assert_eq!(selected.outcome, CandidateReadOutcome::Qualified);
             assert_eq!(selected.value.as_ref().unwrap().key, point.key);
-            assert!(selected.work.sql_reads > 0 && selected.work.vm_steps > 0);
+            assert!(
+                selected.work.sql_reads > 0
+                    && selected.work.vm_steps > 0
+                    && selected.work.sqlite_vm_steps > 0
+            );
             assert!(selected.work.sql_reads + selected.work.sql_writes < 8 * KEY_BITS);
             assert!(selected.work.max_depth <= MAX_DEPTH);
             assert!(selected.work.max_live_node_bytes < NODE_BYTES);
@@ -2152,62 +2642,77 @@ mod tests {
                 lower: Some(point.key),
                 upper: Some(point.key),
             };
-            let range = fixture
-                .store
-                .candidate_tree_range(
-                    &fixture.job,
-                    root,
-                    &bounds,
-                    u64::MAX,
-                    &combine_facts,
-                    &valid_closure,
-                    &|| false,
-                )
-                .unwrap();
+            let (range, range_allocations, range_allocated_bytes) =
+                measure_test_allocations(|| {
+                    fixture
+                        .store
+                        .candidate_tree_range(
+                            &fixture.job,
+                            root,
+                            &bounds,
+                            u64::MAX,
+                            &combine_facts,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+            check_allocations(range_allocations, range_allocated_bytes);
             let range_facts: Facts = serde_json::from_str(range.value.as_deref().unwrap()).unwrap();
             assert_eq!(range.outcome, CandidateReadOutcome::Qualified);
             assert_eq!(range_facts.count, 1);
             assert!(range.work.sql_reads + range.work.sql_writes < 16 * KEY_BITS);
             assert!(range.work.metadata_bytes < STEP_BYTES);
+            assert!(range.work.sqlite_vm_steps > 0);
             assert!(range.work.max_live_node_bytes < NODE_BYTES);
 
             let mut seek_reads = 0;
+            let mut seek_allocations = 0;
+            let mut seek_allocated_bytes = 0;
             for direction in [CandidateDirection::Forward, CandidateDirection::Backward] {
-                let seek = fixture
-                    .store
-                    .candidate_tree_seek(
-                        &fixture.job,
-                        root,
-                        &point.key,
-                        direction,
-                        u64::MAX,
-                        &facts_count,
-                        &valid_closure,
-                        &|| false,
-                    )
-                    .unwrap();
+                let (seek, allocations, allocated_bytes) = measure_test_allocations(|| {
+                    fixture
+                        .store
+                        .candidate_tree_seek(
+                            &fixture.job,
+                            root,
+                            &point.key,
+                            direction,
+                            u64::MAX,
+                            &facts_count,
+                            &valid_closure,
+                            &|| false,
+                        )
+                        .unwrap()
+                });
+                check_allocations(allocations, allocated_bytes);
                 assert_eq!(seek.outcome, CandidateReadOutcome::Qualified);
                 assert_eq!(seek.value.unwrap().key, point.key);
                 assert!(seek.work.sql_reads + seek.work.sql_writes < 8 * KEY_BITS);
                 assert!(seek.work.vm_steps > 0);
+                assert!(seek.work.sqlite_vm_steps > 0);
+                seek_allocations = seek_allocations.max(allocations);
+                seek_allocated_bytes = seek_allocated_bytes.max(allocated_bytes);
                 seek_reads += seek.work.sql_reads;
             }
             println!(
-                "candidate_tree prefix={size} select_reads={} select_vm={} select_bytes={} range_reads={} seek_reads={} depth={} node_bytes={}",
+                "candidate_tree prefix={size} select_reads={} select_vm={} sqlite_vm={} select_bytes={} range_reads={} seek_reads={} depth={} node_bytes={} rust_allocs(select/range/seek)={}/{}/{} rust_bytes={}/{}/{}",
                 selected.work.sql_reads,
                 selected.work.vm_steps,
+                selected.work.sqlite_vm_steps,
                 selected.work.metadata_bytes,
                 range.work.sql_reads,
                 seek_reads,
                 range.work.max_depth,
                 range.work.max_live_node_bytes,
+                select_allocations,
+                range_allocations,
+                seek_allocations,
+                select_allocated_bytes,
+                range_allocated_bytes,
+                seek_allocated_bytes,
             );
         }
-        fixture
-            .store
-            .connection
-            .progress_handler(0, None::<fn() -> bool>);
-        assert!(measured_vm.load(Ordering::Relaxed) > 0);
     }
 
     #[test]
@@ -2243,23 +2748,11 @@ mod tests {
     }
 
     #[test]
-    fn candidate_tree_deepest_key_path_stays_inside_scalar_cursor_budget() {
+    fn candidate_tree_deep_path_and_full_graph_guard_checkpoint_independently() {
         let mut fixture = Fixture::new();
-        let mut graph = Graph {
-            db: &fixture.store.connection,
-            job: fixture.job.id,
-            work: super::super::Work::default(),
-        };
-        let one = graph
-            .intern(Node::Terminal {
-                facts: serde_json::to_string(&Facts {
-                    count: 1,
-                    ..Facts::default()
-                })
-                .unwrap(),
-            })
-            .unwrap();
-        drop(graph);
+        let decisions: Vec<_> = (0..64).map(|source| (source, false)).collect();
+        let old_entry = test_entry(0, 0, 0);
+        let old_leaf = fixture.graph_leaf_with_paged_guard(&old_entry, 0, &decisions);
         let mut keys = Vec::with_capacity(KEY_BITS + 1);
         keys.push([0; KEY_BYTES]);
         for bit in (0..KEY_BITS).rev() {
@@ -2272,63 +2765,119 @@ mod tests {
             .map(|key| BulkItem {
                 candidate: key[37..].try_into().unwrap(),
                 key,
-                aggregate: one.clone(),
+                aggregate: old_leaf.aggregate.clone(),
             })
             .collect();
         let tx = fixture.store.connection.unchecked_transaction().unwrap();
         let root = bulk_root(&tx, fixture.job.id, &items, &fixture.empty).unwrap();
         tx.commit().unwrap();
-        let (outcome, _) = fixture
-            .store
-            .candidate_tree_bind_root(&fixture.job, &root, &valid_closure, &|| false)
-            .unwrap();
+        let ((outcome, bind_work), allocations, allocated_bytes) = measure_test_allocations(|| {
+            fixture
+                .store
+                .candidate_tree_bind_root(&fixture.job, &root, &valid_closure, &|| false)
+                .unwrap()
+        });
+        check_allocations(allocations, allocated_bytes);
         assert_eq!(outcome, Outcome::Written);
+        assert!(bind_work.sqlite_vm_steps > 0);
         fixture.refresh();
 
-        let replacement_facts = serde_json::to_string(&Facts {
-            count: 2,
-            ..Facts::default()
-        })
-        .unwrap();
-        let empty_facts = serde_json::to_string(&Facts::default()).unwrap();
-        let (outcome, aggregate) = fixture
-            .store
-            .rank_guard(
-                &fixture.job,
-                &replacement_facts,
-                &empty_facts,
-                &[],
-                &valid_closure,
-                &|| false,
-            )
-            .unwrap();
-        assert_eq!(outcome, Outcome::Written);
-        let aggregate = aggregate.unwrap().0;
-        fixture.refresh();
+        let replacement_entry = test_entry(0, 0, 1);
+        let replacement = fixture.graph_leaf_with_paged_guard(&replacement_entry, 1, &decisions);
         let key = [0; KEY_BYTES];
-        let start = fixture
-            .store
-            .candidate_tree_begin_update(
-                &fixture.job,
-                "deepest-key-update",
-                &root,
-                key,
-                Some(CandidateLeaf {
-                    candidate: [0; 32],
-                    aggregate,
-                }),
-                "deep-facts-v1",
-                &valid_closure,
-                &|| false,
-            )
-            .unwrap();
+        let (start, allocations, allocated_bytes) = measure_test_allocations(|| {
+            fixture
+                .store
+                .candidate_tree_begin_update(
+                    &fixture.job,
+                    "deepest-key-update",
+                    &root,
+                    key,
+                    Some(CandidateLeaf {
+                        candidate: [0; 32],
+                        aggregate: replacement.aggregate,
+                    }),
+                    "deep-facts-v1",
+                    &valid_closure,
+                    &|| false,
+                )
+                .unwrap()
+        });
+        check_allocations(allocations, allocated_bytes);
         assert_eq!(start.outcome, Outcome::Written);
         check_step(&start.work);
         let mut max_cursor = start.work.max_cursor_bytes;
+        let mut max_apply = start.work.max_apply_bytes;
         fixture.refresh();
-        let mut complete = None;
+        let mut checkpoint = None;
+        let mut max_path_frames = 0;
         for _ in 0..2000 {
-            let step = fixture
+            let (step, allocations, allocated_bytes) = measure_test_allocations(|| {
+                fixture
+                    .store
+                    .candidate_tree_advance_update(
+                        &fixture.job,
+                        "deepest-key-update",
+                        "deep-facts-v1",
+                        &combine_facts,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap()
+            });
+            check_allocations(allocations, allocated_bytes);
+            assert_eq!(step.outcome, Outcome::Written);
+            check_step(&step.work);
+            max_cursor = max_cursor.max(step.work.max_cursor_bytes);
+            max_apply = max_apply.max(step.work.max_apply_bytes);
+            fixture.refresh();
+            let cursor_text: String = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT metadata FROM native_rank_candidate_cursors WHERE job=?1 AND cursor='deepest-key-update'",
+                    [fixture.job.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let state: UpdateState = serde_json::from_str(&cursor_text).unwrap();
+            max_path_frames = max_path_frames.max(state.path.len() / PATH_FRAME_BYTES);
+            if state.path.len() / PATH_FRAME_BYTES == MAX_DEPTH && state.apply_active {
+                let apply_text: String = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT metadata FROM native_rank_candidate_applies WHERE job=?1 AND cursor='deepest-key-update'",
+                        [fixture.job.id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let apply: Apply = serde_json::from_str(&apply_text).unwrap();
+                assert!(
+                    apply.frames.len() > 60,
+                    "full64-source Apply was not checkpointed"
+                );
+                checkpoint = Some((cursor_text, apply_text));
+                break;
+            }
+            assert!(
+                step.complete.is_none(),
+                "deep path completed before checkpoint"
+            );
+        }
+        let (cursor_before_cancel, apply_before_cancel) =
+            checkpoint.expect("deep path and full graph guard did not overlap");
+
+        let spec = fixture.spec.clone();
+        fixture.job = fixture.reopen(&spec);
+        let revision = fixture.job.revision;
+        let calls = Cell::new(0);
+        let cancel_after_graph_work = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 4
+        };
+        let (deferred, allocations, allocated_bytes) = measure_test_allocations(|| {
+            fixture
                 .store
                 .candidate_tree_advance_update(
                     &fixture.job,
@@ -2336,21 +2885,102 @@ mod tests {
                     "deep-facts-v1",
                     &combine_facts,
                     &valid_closure,
-                    &|| false,
+                    &cancel_after_graph_work,
                 )
-                .unwrap();
+                .unwrap()
+        });
+        check_allocations(allocations, allocated_bytes);
+        assert_eq!(deferred.outcome, Outcome::Deferred);
+        assert!(deferred.work.sql_reads + deferred.work.sql_writes > 0);
+        assert!(deferred.work.sqlite_vm_steps > 0);
+        assert!(calls.get() >= 4);
+        fixture.refresh();
+        assert_eq!(
+            fixture.job.revision, revision,
+            "cancelled checkpoint advanced revision"
+        );
+        let cursor_after_cancel: String = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT metadata FROM native_rank_candidate_cursors WHERE job=?1 AND cursor='deepest-key-update'",
+                [fixture.job.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let apply_after_cancel: String = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT metadata FROM native_rank_candidate_applies WHERE job=?1 AND cursor='deepest-key-update'",
+                [fixture.job.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor_after_cancel, cursor_before_cancel);
+        assert_eq!(apply_after_cancel, apply_before_cancel);
+
+        let mut complete = None;
+        for _ in 0..2000 {
+            let (step, allocations, allocated_bytes) = measure_test_allocations(|| {
+                fixture
+                    .store
+                    .candidate_tree_advance_update(
+                        &fixture.job,
+                        "deepest-key-update",
+                        "deep-facts-v1",
+                        &combine_facts,
+                        &valid_closure,
+                        &|| false,
+                    )
+                    .unwrap()
+            });
+            check_allocations(allocations, allocated_bytes);
             assert_eq!(step.outcome, Outcome::Written);
             check_step(&step.work);
             max_cursor = max_cursor.max(step.work.max_cursor_bytes);
+            max_apply = max_apply.max(step.work.max_apply_bytes);
             fixture.refresh();
             if step.complete.is_some() {
                 complete = step.complete;
                 break;
             }
         }
-        assert!(complete.is_some());
+        let complete = complete.expect("deep update exceeded its bounded progress loop");
+        assert_eq!(max_path_frames, MAX_DEPTH);
         assert!(max_cursor > 32 * 1024);
         assert!(max_cursor <= CURSOR_BYTES);
+        assert!(max_apply > 10 * 1024 && max_apply <= CURSOR_BYTES);
+
+        fixture.ready();
+        let included = fixture
+            .store
+            .candidate_tree_select(
+                &fixture.job,
+                &complete,
+                0,
+                0,
+                &facts_count,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(included.outcome, CandidateReadOutcome::Qualified);
+        assert!(included.value.is_some());
+        let all_omitted = fixture
+            .store
+            .candidate_tree_select(
+                &fixture.job,
+                &complete,
+                0,
+                u64::MAX,
+                &facts_count,
+                &valid_closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(all_omitted.outcome, CandidateReadOutcome::Qualified);
+        assert!(all_omitted.value.is_none());
     }
 }
 
@@ -2402,37 +3032,42 @@ impl NativeStore {
             base: None,
             repair: 0,
             pending: None,
-            apply: None,
+            apply_active: false,
             prepared: false,
         };
         let text = encoded(&state, CURSOR_BYTES)?;
-        let (outcome, result) = self.rank_transaction(job, closure, cancelled, |db, id| {
-            let mut tree = TreeDb {
-                db,
-                job: id,
-                work: CandidateWork::default(),
-            };
-            let mut graph = Graph {
-                db,
-                job: id,
-                work: super::Work::default(),
-            };
-            tree.bind_root(root, &mut graph)?;
-            if let Some(leaf) = &state.replacement {
-                graph.node(&leaf.aggregate)?;
-                graph.bind(&leaf.aggregate)?;
-            }
-            if tree.cursor_exists(cursor)? {
-                return Err(invalid("candidate tree cursor already exists"));
-            }
-            tree.put_cursor(cursor, &text)?;
-            tree.work.add_graph(&graph.work);
-            if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
-                return Err(invalid("candidate tree begin step exceeds work budget"));
-            }
-            Ok((None, tree.work))
-        })?;
-        let (complete, work) = result.unwrap_or_default();
+        let captured_work = RefCell::new(CandidateWork::default());
+        let (outcome, result, sqlite_vm_steps) =
+            self.rank_transaction_measured(job, closure, cancelled, |db, id| {
+                let mut tree = TreeDb {
+                    db,
+                    job: id,
+                    work: CandidateWork::default(),
+                };
+                let mut graph = Graph {
+                    db,
+                    job: id,
+                    work: super::Work::default(),
+                };
+                tree.bind_root(root, &mut graph)?;
+                if let Some(leaf) = &state.replacement {
+                    graph.node(&leaf.aggregate)?;
+                    graph.bind(&leaf.aggregate)?;
+                }
+                if tree.cursor_exists(cursor)? {
+                    return Err(invalid("candidate tree cursor already exists"));
+                }
+                tree.put_cursor(cursor, &text)?;
+                tree.work.add_graph(&graph.work);
+                if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
+                    return Err(invalid("candidate tree begin step exceeds work budget"));
+                }
+                let work = tree.work.clone();
+                *captured_work.borrow_mut() = work.clone();
+                Ok((None, work))
+            })?;
+        let (complete, mut work) = result.unwrap_or((None, captured_work.into_inner()));
+        work.sqlite_vm_steps = sqlite_vm_steps;
         Ok(CandidateStep {
             outcome,
             complete,
@@ -2459,8 +3094,9 @@ impl NativeStore {
             }
             cancellation_seen.get()
         };
-        let (outcome, result) =
-            self.rank_transaction(job, closure, &latched_cancelled, |db, id| {
+        let captured_work = RefCell::new(CandidateWork::default());
+        let (outcome, result, sqlite_vm_steps) =
+            self.rank_transaction_measured(job, closure, &latched_cancelled, |db, id| {
                 let mut tree = TreeDb {
                     db,
                     job: id,
@@ -2480,14 +3116,29 @@ impl NativeStore {
                 {
                     return Err(invalid("candidate tree update cursor is stale or invalid"));
                 }
+                let had_apply = state.apply_active;
+                let mut apply = tree.read_apply(cursor)?;
+                if had_apply != apply.is_some() {
+                    return Err(invalid("candidate tree Apply cursor ownership changed"));
+                }
                 let complete = advance_state(
                     &mut tree,
                     &mut graph,
                     &mut state,
+                    &mut apply,
                     combine,
                     &latched_cancelled,
                 )?;
+                state.apply_active = apply.is_some();
+                if let Some(apply) = &apply {
+                    tree.put_apply(cursor, apply)?;
+                } else if had_apply {
+                    tree.delete_apply(cursor)?;
+                }
                 let root = if complete {
+                    if state.apply_active {
+                        return Err(invalid("candidate tree completed with pending graph Apply"));
+                    }
                     let root = CandidateRoot {
                         tree: state.base.clone(),
                         empty: state.root.empty.clone(),
@@ -2503,9 +3154,12 @@ impl NativeStore {
                 if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
                     return Err(invalid("candidate tree advance exceeds work budget"));
                 }
-                Ok((root, tree.work))
+                let work = tree.work.clone();
+                *captured_work.borrow_mut() = work.clone();
+                Ok((root, work))
             })?;
-        let (complete, work) = result.unwrap_or_default();
+        let (complete, mut work) = result.unwrap_or((None, captured_work.into_inner()));
+        work.sqlite_vm_steps = sqlite_vm_steps;
         Ok(CandidateStep {
             outcome,
             complete,
@@ -2521,26 +3175,32 @@ impl NativeStore {
         root: &CandidateRoot,
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
-    ) -> io::Result<(Outcome, Option<CandidateWork>)> {
-        let (outcome, result) = self.rank_transaction(job, closure, cancelled, |db, id| {
-            let mut tree = TreeDb {
-                db,
-                job: id,
-                work: CandidateWork::default(),
-            };
-            let mut graph = Graph {
-                db,
-                job: id,
-                work: super::Work::default(),
-            };
-            tree.bind_root(root, &mut graph)?;
-            tree.work.add_graph(&graph.work);
-            if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
-                return Err(invalid("candidate tree root import exceeds work budget"));
-            }
-            Ok(tree.work)
-        })?;
-        Ok((outcome, result))
+    ) -> io::Result<(Outcome, CandidateWork)> {
+        let captured_work = RefCell::new(CandidateWork::default());
+        let (outcome, result, sqlite_vm_steps) =
+            self.rank_transaction_measured(job, closure, cancelled, |db, id| {
+                let mut tree = TreeDb {
+                    db,
+                    job: id,
+                    work: CandidateWork::default(),
+                };
+                let mut graph = Graph {
+                    db,
+                    job: id,
+                    work: super::Work::default(),
+                };
+                tree.bind_root(root, &mut graph)?;
+                tree.work.add_graph(&graph.work);
+                if tree.work.rows() > STEP_ROWS || tree.work.metadata_bytes > STEP_BYTES {
+                    return Err(invalid("candidate tree root import exceeds work budget"));
+                }
+                let work = tree.work.clone();
+                *captured_work.borrow_mut() = work.clone();
+                Ok(work)
+            })?;
+        let mut work = result.unwrap_or_else(|| captured_work.into_inner());
+        work.sqlite_vm_steps = sqlite_vm_steps;
+        Ok((outcome, work))
     }
 
     /// Read indexed metadata under the complete job/source/owner closure. This
@@ -2573,7 +3233,7 @@ impl NativeStore {
                     cancelled,
                 )?;
             }
-            Ok(facts)
+            Ok(Some(facts))
         })
     }
 
@@ -2694,7 +3354,40 @@ impl NativeStore {
         root: &CandidateRoot,
         closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
         cancelled: &dyn Fn() -> bool,
-        operation: impl FnOnce(&mut TreeDb<'_>, &mut Graph<'_>, &dyn Fn() -> bool) -> io::Result<T>,
+        operation: impl FnOnce(
+            &mut TreeDb<'_>,
+            &mut Graph<'_>,
+            &dyn Fn() -> bool,
+        ) -> io::Result<Option<T>>,
+    ) -> io::Result<CandidateRead<T>> {
+        let steps = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&steps);
+        self.connection.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let result = self.candidate_tree_read_body(job, root, closure, cancelled, operation);
+        self.connection.progress_handler(0, None::<fn() -> bool>);
+        result.map(|mut read| {
+            read.work.sqlite_vm_steps = steps.load(Ordering::Relaxed);
+            read
+        })
+    }
+
+    fn candidate_tree_read_body<T>(
+        &self,
+        job: &Job,
+        root: &CandidateRoot,
+        closure: &dyn Fn(&Connection, i64) -> rusqlite::Result<bool>,
+        cancelled: &dyn Fn() -> bool,
+        operation: impl FnOnce(
+            &mut TreeDb<'_>,
+            &mut Graph<'_>,
+            &dyn Fn() -> bool,
+        ) -> io::Result<Option<T>>,
     ) -> io::Result<CandidateRead<T>> {
         let cancellation_seen = Cell::new(false);
         let latched_cancelled = || {
@@ -2773,7 +3466,7 @@ impl NativeStore {
         tx.commit().map_err(io::Error::other)?;
         Ok(CandidateRead {
             outcome: CandidateReadOutcome::Qualified,
-            value: Some(value),
+            value,
             work,
         })
     }
@@ -2986,10 +3679,11 @@ fn advance_state(
     tree: &mut TreeDb<'_>,
     graph: &mut Graph<'_>,
     state: &mut UpdateState,
+    apply_state: &mut Option<Apply>,
     combine: &dyn Fn(&str, &str) -> io::Result<String>,
     cancelled: &dyn Fn() -> bool,
 ) -> io::Result<bool> {
-    if !state.valid() {
+    if !state.valid() || state.apply_active != apply_state.is_some() {
         return Err(invalid("candidate tree update state is invalid"));
     }
     loop {
@@ -3050,7 +3744,7 @@ fn advance_state(
 
         if let Some(pending) = state.pending.clone() {
             let state_bytes = encoded(state, CURSOR_BYTES)?.len();
-            if let Some(apply) = state.apply.as_mut() {
+            if let Some(apply) = apply_state.as_mut() {
                 if apply.frames.is_empty() {
                     let aggregate = apply
                         .returned
@@ -3083,7 +3777,7 @@ fn advance_state(
                             .ok_or_else(|| invalid("candidate tree repair cursor underflow"))?;
                     }
                     state.pending = None;
-                    state.apply = None;
+                    *apply_state = None;
                     continue;
                 }
                 let row_limit = STEP_ROWS.saturating_sub(tree.work.rows() + 20);
@@ -3114,7 +3808,8 @@ fn advance_state(
             if !apply.valid() {
                 return Err(invalid("candidate tree Apply inputs are invalid"));
             }
-            state.apply = Some(apply);
+            *apply_state = Some(apply);
+            state.apply_active = true;
             continue;
         }
 
