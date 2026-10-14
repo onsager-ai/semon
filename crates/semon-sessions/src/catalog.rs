@@ -5890,6 +5890,7 @@ mod tests {
     #[test]
     fn journal_append_and_warm_restart_ignore_unrelated_history() {
         use std::io::Write;
+        let mut baseline = None;
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
             let path = fixture.source("selected");
@@ -5925,6 +5926,7 @@ mod tests {
             let reads = crate::events::FILE_READS.with(std::cell::Cell::get);
             let parsed = crate::events::PARSED.with(std::cell::Cell::get);
             let hashed = crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
+            let full_prefix = crate::events::HASHED_BYTES.with(std::cell::Cell::get);
             let started = std::time::Instant::now();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
             let mut work = crate::viewer::lock(&evidence.work);
@@ -5945,6 +5947,20 @@ mod tests {
             let read_bytes =
                 crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get) - read_bytes;
             let parse_bytes = crate::events::PARSED_BYTES.with(std::cell::Cell::get) - parse_bytes;
+            assert_eq!(
+                crate::events::HASHED_BYTES.with(std::cell::Cell::get),
+                full_prefix,
+                "qualified append rehashed a historical prefix"
+            );
+            let work_bytes = (hash_bytes, read_bytes, parse_bytes);
+            if let Some(baseline) = baseline {
+                assert_eq!(
+                    work_bytes, baseline,
+                    "append work grew with unrelated history"
+                );
+            } else {
+                baseline = Some(work_bytes);
+            }
             assert_eq!((discovery, semantic, published), (0, 1, 1));
             assert_eq!(work.events.as_ref().unwrap().resident_index_payloads(), 0);
             assert_eq!(loads, 1, "loaded unrelated Event Index history");
@@ -5954,6 +5970,7 @@ mod tests {
             drop(work);
             evidence.retire();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let restarted = std::time::Instant::now();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
             let mut work = crate::viewer::lock(&evidence.work);
             assert!(
@@ -5968,9 +5985,12 @@ mod tests {
             );
             assert_eq!(work.events.as_ref().unwrap().paths().count(), 0);
             assert_eq!(fixture.body("sid=selected").0, 200);
+            let restart = restarted.elapsed();
+            assert!(restart < Duration::from_secs(2));
             eprintln!(
-                "journal-append unrelated={unrelated} loads={loads} records={records} hashed_bytes={hash_bytes} read_bytes={read_bytes} parsed_bytes={parse_bytes} discovery_entries={discovery} semantic_sources={semantic} published_rows={published} resident_index_payloads=0 elapsed_us={} restart_loads=0",
-                elapsed.as_micros()
+                "journal-append unrelated={unrelated} loads={loads} records={records} hashed_bytes={hash_bytes} full_prefix_hash_bytes=0 read_bytes={read_bytes} parsed_bytes={parse_bytes} discovery_entries={discovery} semantic_sources={semantic} published_rows={published} resident_index_payloads=0 elapsed_us={} restart_loads=0 restart_usable_us={}",
+                elapsed.as_micros(),
+                restart.as_micros()
             );
         }
     }

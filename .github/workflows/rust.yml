@@ -88,7 +88,13 @@ jobs:
         # Keep producer phase timings in a failed test's captured output. This
         # distinguishes bounded foreground discovery from background publication
         # on the actual runner without changing deadlines or successful output.
-        run: SEMON_BUILD_TIMING=1 cargo test --locked
+        run: |
+          # Foreground and incremental budgets use normal execution. Keep the
+          # existing instrumented full suite as separate regression evidence.
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture
+          SEMON_BUILD_TIMING=1 cargo test --locked
 
       - name: Source clock/account strict Clippy
         run: cargo clippy -p semon-sessions --all-targets --features test-clock,test-ui-account-server --locked -- --no-deps -D warnings
