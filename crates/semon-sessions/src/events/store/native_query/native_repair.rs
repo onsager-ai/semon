@@ -15,11 +15,12 @@ use crate::json_string::native_record::{
 
 mod native_classes;
 mod native_events;
+mod native_retirement;
 pub(crate) use native_classes::IdentityStep;
 pub(crate) use native_classes::Representative as OriginalTextRepresentative;
 pub(crate) use native_events::Text as OriginalText;
 
-pub(crate) const REPAIR_FORMAT: u32 = 2;
+pub(crate) const REPAIR_FORMAT: u32 = 3;
 // The pre-format namespace was published with parser 24. Its key must stay
 // frozen even when the complete native producer later advances CACHE_VERSION.
 const PREVIOUS_REPAIR_PARSER: u32 = 24;
@@ -61,6 +62,10 @@ CREATE INDEX IF NOT EXISTS native_original_plain_tool_ids
  ON native_original_tool_ids(original,identity,plain,sequence);
 CREATE TABLE IF NOT EXISTS native_original_cleanup (
  original BLOB PRIMARY KEY, obsolete BLOB NOT NULL, table_index INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_retirements (
+ original BLOB NOT NULL, obsolete BLOB NOT NULL, table_index INTEGER NOT NULL,
+ PRIMARY KEY(original,obsolete)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_repairs (
  original BLOB PRIMARY KEY, parser INTEGER NOT NULL, source TEXT NOT NULL,
@@ -172,6 +177,9 @@ pub(crate) struct RepairWork {
     /// Actual statement VM work of obsolete-format key selection and deletion.
     /// Other producer phases retain their own instrumentation obligations.
     pub(crate) cleanup_vm_steps: i32,
+    /// Peak owned primary-key payload during retirement, excluding SQLite's
+    /// page cache and fixed transaction/statement storage.
+    pub(crate) cleanup_key_bytes: usize,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct RepairStep {
@@ -257,12 +265,26 @@ fn namespace(source: &crate::SessionSourceRef) -> io::Result<[u8; 32]> {
     digest.update(b"native-original-derived\0");
     digest.update(REPAIR_FORMAT.to_be_bytes());
     digest.update(super::super::super::CACHE_VERSION.to_be_bytes());
+    let policy = crate::json_string::native_number::PRODUCER_POLICY.as_bytes();
+    digest.update((policy.len() as u32).to_be_bytes());
+    digest.update(policy);
     digest.update(serde_json::to_vec(source).map_err(io::Error::other)?);
     Ok(digest.finalize().into())
 }
 fn previous_namespace(source: &crate::SessionSourceRef) -> io::Result<[u8; 32]> {
     let mut digest = Sha256::new();
     digest.update(b"native-original-derived-v1\0");
+    digest.update(PREVIOUS_REPAIR_PARSER.to_be_bytes());
+    digest.update(serde_json::to_vec(source).map_err(io::Error::other)?);
+    Ok(digest.finalize().into())
+}
+
+fn format_two_namespace(source: &crate::SessionSourceRef) -> io::Result<[u8; 32]> {
+    // Format 2 predated the numeric feature-policy binding. Freeze its parser
+    // and key instead of attempting to deserialize its obsolete continuations.
+    let mut digest = Sha256::new();
+    digest.update(b"native-original-derived\0");
+    digest.update(2_u32.to_be_bytes());
     digest.update(PREVIOUS_REPAIR_PARSER.to_be_bytes());
     digest.update(serde_json::to_vec(source).map_err(io::Error::other)?);
     Ok(digest.finalize().into())
@@ -446,10 +468,8 @@ impl NativeStore {
         })
     }
 
-    /// Retire only this same Original's obsolete derived-format rows. Unknown
-    /// old cursor JSON is never decoded and never becomes reader authority.
-    /// At most 30 small primary keys are read/deleted plus one cursor update;
-    /// original logs, archives, ledgers, custody and Trace rows are untouched.
+    /// Called by the bounded lexical worker before qualifying new-format facts.
+    /// The fixed native schema owner retires only proven obsolete namespaces.
     pub(crate) fn original_cleanup_step(
         &mut self,
         job: &Job,
@@ -458,151 +478,7 @@ impl NativeStore {
         records: &crate::query_source::Records<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<RepairStep> {
-        // Every entry has an Original-prefix primary key and contains only
-        // derived producer metadata. Fixed table identifiers cannot originate
-        // from source text or a stored previous-format cursor.
-        const TABLES: &[(&str, &str)] = &[
-            ("native_original_tokens", "record_offset,ordinal"),
-            ("native_original_fields", "record_offset,ordinal"),
-            ("native_original_nodes", "record_offset,address"),
-            ("native_original_numbers", "record_offset,address"),
-            (
-                "native_original_members",
-                "record_offset,parent_offset,name",
-            ),
-            ("native_original_records", "record_offset"),
-            ("native_original_repairs", "original"),
-        ];
-        let mut work = RepairWork::default();
-        if cancelled() {
-            return Ok(RepairStep {
-                outcome: Outcome::Deferred,
-                work,
-            });
-        }
-        if reference(records, witness)? != repair.source || !self.runtime_current(&job.spec)? {
-            return Ok(RepairStep {
-                outcome: Outcome::Conflict,
-                work,
-            });
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(io::Error::other)?;
-        if !job_current(&tx, job).map_err(io::Error::other)?
-            || !check_source(&tx, witness).map_err(io::Error::other)?
-            || !repair_current(&tx, repair).map_err(io::Error::other)?
-            || !admitted_original(&tx, job, witness).map_err(io::Error::other)?
-        {
-            return Ok(RepairStep {
-                outcome: Outcome::Conflict,
-                work,
-            });
-        }
-        let marker: Option<(Vec<u8>, i64)> = tx
-            .query_row(
-                "SELECT obsolete,table_index FROM native_original_cleanup WHERE original=?1",
-                params![repair.original.as_slice()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(io::Error::other)?;
-        let Some((obsolete, table)) = marker else {
-            return Ok(RepairStep {
-                outcome: Outcome::Written,
-                work,
-            });
-        };
-        work.metadata_rows = 1;
-        work.metadata_bytes = 40;
-        if obsolete.as_slice() != previous_namespace(&repair.source)?.as_slice()
-            || obsolete.as_slice() == repair.original.as_slice()
-            || table < 0
-        {
-            return Err(io::Error::other(
-                "obsolete Original repair identity disagrees",
-            ));
-        }
-        let index = usize::try_from(table).map_err(io::Error::other)?;
-        if index >= TABLES.len() {
-            return Ok(RepairStep {
-                outcome: Outcome::Written,
-                work,
-            });
-        }
-        let (table_name, columns) = TABLES[index];
-        let sql = format!(
-            "SELECT {columns} FROM {table_name} WHERE original=?1 ORDER BY {columns} LIMIT 30"
-        );
-        let mut query = tx.prepare(&sql).map_err(io::Error::other)?;
-        let count = columns.split(',').count();
-        let mut values = query
-            .query(params![obsolete.as_slice()])
-            .map_err(io::Error::other)?;
-        let mut keys = Vec::new();
-        while let Some(row) = values.next().map_err(io::Error::other)? {
-            let mut key = Vec::new();
-            for column in 0..count {
-                let value = row.get_ref(column).map_err(io::Error::other)?;
-                let bytes = match value {
-                    rusqlite::types::ValueRef::Integer(_) => 8,
-                    rusqlite::types::ValueRef::Text(value)
-                    | rusqlite::types::ValueRef::Blob(value) => value.len(),
-                    _ => return Err(io::Error::other("obsolete Original key has invalid type")),
-                };
-                if bytes > 128 || work.metadata_bytes + bytes > BYTES {
-                    return Err(io::Error::other(
-                        "obsolete Original key exceeds derived budget",
-                    ));
-                }
-                work.metadata_bytes += bytes;
-                key.push(rusqlite::types::Value::try_from(value).map_err(io::Error::other)?);
-            }
-            keys.push(key);
-            work.metadata_rows += 1;
-        }
-        drop(values);
-        work.cleanup_vm_steps += query.get_status(rusqlite::StatementStatus::VmStep);
-        drop(query);
-        let predicates = columns
-            .split(',')
-            .enumerate()
-            .map(|(index, column)| format!("{column}=?{}", index + 2))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let delete_sql = format!("DELETE FROM {table_name} WHERE original=?1 AND {predicates}");
-        let mut remove = tx.prepare(&delete_sql).map_err(io::Error::other)?;
-        for key in &keys {
-            let mut args = Vec::with_capacity(key.len() + 1);
-            args.push(rusqlite::types::Value::Blob(obsolete.clone()));
-            args.extend(key.iter().cloned());
-            remove
-                .execute(rusqlite::params_from_iter(args))
-                .map_err(io::Error::other)?;
-            work.metadata_rows += 1;
-        }
-        work.cleanup_vm_steps += remove.get_status(rusqlite::StatementStatus::VmStep);
-        drop(remove);
-        let next = if keys.len() < 30 { index + 1 } else { index };
-        tx.execute(
-            "UPDATE native_original_cleanup SET table_index=?2 WHERE original=?1",
-            params![repair.original.as_slice(), next as i64],
-        )
-        .map_err(io::Error::other)?;
-        work.metadata_rows += 1;
-        work.metadata_bytes += 8;
-        if cancelled() {
-            return Ok(RepairStep {
-                outcome: Outcome::Deferred,
-                work,
-            });
-        }
-        tx.commit().map_err(io::Error::other)?;
-        Ok(RepairStep {
-            outcome: Outcome::Deferred,
-            work,
-        })
+        native_retirement::advance(self, job, witness, repair, records, cancelled)
     }
 
     fn original_number_step(
@@ -1724,8 +1600,7 @@ impl NativeStore {
             return Ok(None);
         }
         let text = json(&source).map_err(io::Error::other)?;
-        let obsolete = previous_namespace(&source)?;
-        tx.execute("INSERT OR IGNORE INTO native_original_cleanup SELECT ?1,?2,0 WHERE EXISTS(SELECT 1 FROM native_original_repairs WHERE original=?2)",params![original.as_slice(),obsolete.as_slice()]).map_err(io::Error::other)?;
+        native_retirement::enqueue(&tx, original, &source).map_err(io::Error::other)?;
         let cursor = bounded_json(&Cursor::new(), STATE_BYTES).map_err(io::Error::other)?;
         tx.execute(
             "INSERT OR IGNORE INTO native_original_repairs VALUES(?1,?2,?3,0,?4)",
@@ -1975,7 +1850,8 @@ impl NativeStore {
                 work,
             });
         }
-        let obsolete_pending:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM native_original_cleanup WHERE original=?1 AND table_index<7)",params![repair.original.as_slice()],|row|row.get(0)).map_err(io::Error::other)?;
+        let obsolete_pending = native_retirement::pending(&self.connection, repair.original)
+            .map_err(io::Error::other)?;
         if obsolete_pending {
             return self.original_cleanup_step(job, witness, repair, records, cancelled);
         }
@@ -3836,6 +3712,530 @@ mod tests {
                 .unwrap();
             assert_eq!(repair.cursor.phase, Phase::FoldRecord);
         }
+    }
+
+    fn seed_obsolete_policy(fixture: &mut Fixture, old: [u8; 32], events: i64) {
+        let source = reference(&fixture.sources.reader(), &fixture.source).unwrap();
+        let tx = fixture.store.connection.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO native_original_repairs VALUES(?1,24,?2,7,'{unknown old cursor')",
+            params![old.as_slice(), json(&source).unwrap()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_original_event_state VALUES(?1,?2)",
+            params![old.as_slice(), events],
+        )
+        .unwrap();
+        for sequence in 0..events {
+            tx.execute(
+                "INSERT INTO native_original_events VALUES(?1,?2,1,1,0,0,'{unknown old event')",
+                params![old.as_slice(), sequence],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO native_original_pending VALUES(?1,1,0,0)",
+            params![old.as_slice()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_original_tool_ids VALUES(?1,1,0,1)",
+            params![old.as_slice()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_original_classes VALUES(?1,1,0,0,zeroblob(32),4)",
+            params![old.as_slice()],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO native_original_identities VALUES(?1,0,0,0,'{\"complete\":true,\"class\":1}')",params![old.as_slice()]).unwrap();
+        tx.execute(
+            "INSERT INTO native_original_tokens VALUES(?1,0,0,'{unknown token')",
+            params![old.as_slice()],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO native_original_fields VALUES(?1,0,0,0,1,NULL,0,'{unknown field','{unknown fingerprint',NULL,NULL)",params![old.as_slice()]).unwrap();
+        tx.execute(
+            "INSERT INTO native_original_nodes VALUES(?1,0,0,NULL,NULL,NULL,'{unknown node',1)",
+            params![old.as_slice()],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO native_original_numbers VALUES(?1,0,0,0,1,'{unknown number cursor','{\"Finite\":1.0}')",params![old.as_slice()]).unwrap();
+        tx.execute(
+            "INSERT INTO native_original_members VALUES(?1,0,0,'n',0,'{unknown member cursor')",
+            params![old.as_slice()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_original_records VALUES(?1,0,?2,'folded')",
+            params![old.as_slice(), source.offset as i64],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_original_cleanup VALUES(?1,?2,3)",
+            params![
+                old.as_slice(),
+                previous_namespace(&source).unwrap().as_slice()
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn numeric_policy_restart_retires_both_formats_and_requalifies_exact_native_facts() {
+        let bytes = b"{\"n\":1.000000000000000111022302462515654042363166809082031251,\"a\":\"same\",\"b\":\"same\"}\n";
+        let expected: Value = serde_json::from_slice(bytes).unwrap();
+        assert_ne!(expected["n"].as_f64().unwrap().to_bits(), 1.0_f64.to_bits());
+        let mut fixture = Fixture::new(bytes);
+        let source = reference(&fixture.sources.reader(), &fixture.source).unwrap();
+        let obsolete = [
+            previous_namespace(&source).unwrap(),
+            format_two_namespace(&source).unwrap(),
+        ];
+        let current = namespace(&source).unwrap();
+        assert_ne!(current, obsolete[0]);
+        assert_ne!(current, obsolete[1]);
+        for old in obsolete {
+            seed_obsolete_policy(&mut fixture, old, 31);
+        }
+        let unknown = [0x66_u8; 32];
+        fixture.store.connection.execute("INSERT INTO native_original_repairs VALUES(?1,24,'unknown external source',0,'unknown external cursor')",params![unknown.as_slice()]).unwrap();
+        let reads = super::super::super::super::FILE_READS.with(Cell::get);
+        let repair = fixture
+            .store
+            .begin_original_repair(
+                &fixture.job,
+                &fixture.source,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(repair.original, current);
+        assert_eq!(repair.cursor.source_at, 0);
+        let calls = Cell::new(0);
+        let cancelled = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 3
+        };
+        let cancelled_step = fixture
+            .store
+            .original_lex_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                &fixture.sources.reader(),
+                &cancelled,
+            )
+            .unwrap();
+        assert_eq!(cancelled_step.outcome, Outcome::Deferred);
+        for old in obsolete {
+            let count: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_events WHERE original=?1",
+                    params![old.as_slice()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 31);
+        }
+        let mut attempts = 0;
+        while native_retirement::pending(&fixture.store.connection, current).unwrap() {
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            let resumed = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &fixture.sources.reader())
+                .unwrap()
+                .unwrap();
+            assert_eq!(resumed.cursor.source_at, 0);
+            let step = fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &resumed,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            assert!(step.work.metadata_rows <= ROWS);
+            assert!(step.work.metadata_bytes <= BYTES);
+            assert!(step.work.cleanup_vm_steps < 4096);
+            assert!(step.work.cleanup_key_bytes <= STATE_BYTES);
+            assert_eq!((step.work.range_requests, step.work.native_bytes), (0, 0));
+            attempts += 1;
+            assert!(attempts < 64);
+        }
+        for old in obsolete {
+            for table in [
+                "native_original_repairs",
+                "native_original_event_state",
+                "native_original_events",
+                "native_original_pending",
+                "native_original_tool_ids",
+                "native_original_classes",
+                "native_original_identities",
+                "native_original_tokens",
+                "native_original_fields",
+                "native_original_nodes",
+                "native_original_numbers",
+                "native_original_members",
+                "native_original_records",
+                "native_original_cleanup",
+            ] {
+                let count: i64 = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE original=?1"),
+                        params![old.as_slice()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0, "unretired {table}");
+            }
+        }
+        let qualified = fixture.qualified_record();
+        let n = fixture.member(&qualified, "n");
+        let number = fixture
+            .store
+            .original_number(&fixture.job, &fixture.source, &qualified, n.address)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            number.number().as_f64().unwrap().to_bits(),
+            expected["n"].as_f64().unwrap().to_bits()
+        );
+        let a = fixture.member(&qualified, "a");
+        let b = fixture.member(&qualified, "b");
+        let first = fixture.identity(&qualified, a.ordinal);
+        let second = fixture.identity(&qualified, b.ordinal);
+        assert_eq!(first, second);
+        assert_eq!(first.identity(), 1);
+        let before = json(&qualified.cursor).unwrap();
+        let again = fixture
+            .store
+            .begin_original_repair(
+                &fixture.job,
+                &fixture.source,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(json(&again.cursor).unwrap(), before);
+        assert!(!native_retirement::pending(&fixture.store.connection, current).unwrap());
+        assert_eq!(fs::read(&fixture.source.source.path).unwrap(), bytes);
+        assert!(job_current(&fixture.store.connection, &fixture.job).unwrap());
+        assert!(check_source(&fixture.store.connection, &fixture.source).unwrap());
+        let unknown_count:i64=fixture.store.connection.query_row("SELECT count(*) FROM native_original_repairs WHERE original=?1 AND cursor='unknown external cursor'",params![unknown.as_slice()],|row|row.get(0)).unwrap();
+        assert_eq!(unknown_count, 1);
+        assert_eq!(
+            super::super::super::super::FILE_READS.with(Cell::get),
+            reads
+        );
+    }
+
+    #[test]
+    fn policy_retirement_step_holds_keys_and_work_fixed_as_obsolete_history_grows() {
+        let mut baseline = None;
+        for history in [0, 128, 1024, 8192] {
+            let mut fixture = Fixture::new(b"{}\n");
+            let source = reference(&fixture.sources.reader(), &fixture.source).unwrap();
+            let old = format_two_namespace(&source).unwrap();
+            seed_obsolete_policy(&mut fixture, old, history + 30);
+            if history == 0 {
+                // Interrupted previous cleanup removed the repair root first.
+                // Its remaining consumers still require called retirement.
+                fixture
+                    .store
+                    .connection
+                    .execute(
+                        "DELETE FROM native_original_repairs WHERE original=?1",
+                        params![old.as_slice()],
+                    )
+                    .unwrap();
+            }
+            let reads = super::super::super::super::FILE_READS.with(Cell::get);
+            let repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            let step = fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            assert_eq!(step.work.metadata_rows, 63);
+            assert!(step.work.metadata_bytes <= BYTES);
+            assert!(step.work.cleanup_vm_steps < 4096);
+            assert!(step.work.cleanup_key_bytes <= STATE_BYTES);
+            assert_eq!((step.work.range_requests, step.work.native_bytes), (0, 0));
+            let fixed = (
+                step.work.metadata_rows,
+                step.work.metadata_bytes,
+                step.work.cleanup_key_bytes,
+            );
+            assert_eq!(*baseline.get_or_insert(fixed), fixed);
+            assert_eq!(repair.cursor.source_at, 0);
+            let remaining: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_events WHERE original=?1",
+                    params![old.as_slice()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, history);
+            assert_eq!(
+                super::super::super::super::FILE_READS.with(Cell::get),
+                reads
+            );
+        }
+    }
+
+    #[test]
+    fn policy_retirement_rechecks_source_owner_runtime_and_provider_after_evidence_io() {
+        for change in ["source", "owner", "runtime", "provider"] {
+            let bytes = b"{}\n";
+            let mut fixture = Fixture::new(bytes);
+            let source = reference(&fixture.sources.reader(), &fixture.source).unwrap();
+            let old = format_two_namespace(&source).unwrap();
+            seed_obsolete_policy(&mut fixture, old, 31);
+            let repair = fixture
+                .store
+                .begin_original_repair(
+                    &fixture.job,
+                    &fixture.source,
+                    &fixture.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            let cache = super::super::super::super::EventCache::path(&fixture.options.cache);
+            let path = fixture.source.source.path.to_string_lossy().into_owned();
+            let runtime = fixture.options.claude_json.clone();
+            let provider = InterleavingReader::new(
+                source,
+                bytes,
+                (change == "provider").then_some(0),
+                move |call| {
+                    if call != 1 {
+                        return;
+                    }
+                    if change == "runtime" {
+                        fs::write(&runtime, b"{\"changed\":true}").unwrap();
+                    } else if change != "provider" {
+                        let db = Connection::open(&cache).unwrap();
+                        if change == "source" {
+                            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0) ON CONFLICT(source_path) DO UPDATE SET revision=revision+1",[&path]).unwrap();
+                        } else {
+                            db.execute("UPDATE session_catalog SET metadata=metadata WHERE session_key='chosen'",[]).unwrap();
+                        }
+                    }
+                },
+            );
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            records.read_range(&repair.source, None, 0, 1).unwrap();
+            assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let result = fixture.store.original_lex_step(
+                &fixture.job,
+                &fixture.source,
+                &repair,
+                &records,
+                &|| false,
+            );
+            if change == "provider" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().outcome, Outcome::Conflict);
+            }
+            assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(
+                provider
+                    .bytes_read
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                bytes.len() * 2
+            );
+            let remaining: i64 = fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM native_original_events WHERE original=?1",
+                    params![old.as_slice()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 31);
+        }
+    }
+
+    #[test]
+    fn policy_restart_keeps_retained_provider_evidence_and_refuses_unadmitted_authority() {
+        let bytes = b"{\"n\":1.25}\n";
+        let mut fixture = Fixture::new(bytes);
+        let source = reference(&fixture.sources.reader(), &fixture.source).unwrap();
+        let old = format_two_namespace(&source).unwrap();
+        seed_obsolete_policy(&mut fixture, old, 31);
+        let mut repair = fixture
+            .store
+            .begin_original_repair(
+                &fixture.job,
+                &fixture.source,
+                &fixture.sources.reader(),
+                &|| false,
+            )
+            .unwrap()
+            .unwrap();
+        let denied =
+            crate::query_source::Sources::capture(&fixture.options, std::iter::empty()).unwrap();
+        assert!(
+            fixture
+                .store
+                .original_lex_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    &denied.reader(),
+                    &|| false
+                )
+                .is_err()
+        );
+        let remaining: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM native_original_events WHERE original=?1",
+                params![old.as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 31);
+        // Only this test-owned live path disappears. The independently retained
+        // immutable provider bytes and the original identity/custody stay bound.
+        fs::remove_file(&fixture.source.source.path).unwrap();
+        let provider = InterleavingReader::new(source.clone(), bytes, None, |_| {});
+        let reads = super::super::super::super::FILE_READS.with(Cell::get);
+        while native_retirement::pending(&fixture.store.connection, repair.original).unwrap() {
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            let step = fixture
+                .store
+                .original_lex_step(&fixture.job, &fixture.source, &repair, &records, &|| false)
+                .unwrap();
+            assert_eq!(step.outcome, Outcome::Deferred);
+            assert_eq!((step.work.native_bytes, step.work.range_requests), (0, 0));
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &records)
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        while repair.cursor.phase != Phase::FoldRecord {
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            let step = fixture
+                .store
+                .original_lex_step(&fixture.job, &fixture.source, &repair, &records, &|| false)
+                .unwrap();
+            assert!(step.work.metadata_rows <= ROWS);
+            assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &records)
+                .unwrap()
+                .unwrap();
+        }
+        loop {
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            let step = fixture
+                .store
+                .original_fields_step(&fixture.job, &fixture.source, &repair, &records, &|| false)
+                .unwrap();
+            assert!(step.work.metadata_rows <= ROWS);
+            assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+            fixture.store = NativeStore::open(&fixture.options).unwrap();
+            repair = fixture
+                .store
+                .reload_original_repair(&fixture.job, &fixture.source, &records)
+                .unwrap()
+                .unwrap();
+            if step.outcome == Outcome::Written {
+                break;
+            }
+        }
+        let root = fixture
+            .store
+            .original_root(&fixture.job, &fixture.source, &repair)
+            .unwrap()
+            .unwrap();
+        let number_node = loop {
+            let records = fixture.sources.reader_with(Some((
+                &provider,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )));
+            let step = fixture
+                .store
+                .original_member_step(
+                    &fixture.job,
+                    &fixture.source,
+                    &repair,
+                    root.address,
+                    "n",
+                    &records,
+                    &|| false,
+                )
+                .unwrap();
+            if step.complete {
+                break step.node.unwrap();
+            }
+        };
+        let number = fixture
+            .store
+            .original_number(&fixture.job, &fixture.source, &repair, number_node.address)
+            .unwrap()
+            .unwrap();
+        assert_eq!(number.number().as_f64(), Some(1.25));
+        assert_eq!(repair.source, source);
+        assert_eq!(provider.bytes.as_ref(), bytes);
+        assert!(provider.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(check_source(&fixture.store.connection, &fixture.source).unwrap());
+        assert!(job_current(&fixture.store.connection, &fixture.job).unwrap());
+        assert_eq!(
+            super::super::super::super::FILE_READS.with(Cell::get),
+            reads
+        );
     }
 
     #[test]
