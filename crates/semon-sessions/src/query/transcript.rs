@@ -489,14 +489,18 @@ fn read_inner(
     let records = sources.reader_with(rendering);
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     if session {
-        let Some(busy) = saved["rows"][key].get("busy") else {
+        let session_key =
+            crate::query_projection::prefix("session", &crate::query_projection::identity(&row));
+        let encoded:Option<String>=db.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1",[session_key],|r|r.get(0)).optional().map_err(unavailable)?.flatten();
+        let Some(encoded) = encoded else {
             return Ok(None);
         };
+        let session_metadata: Value = serde_json::from_str(&encoded).map_err(unavailable)?;
         let mut summary = saved["rows"][key]["summary"].clone();
-        if !summary.is_object() {
+        if !summary.is_object() || !session_metadata["busy"].is_array() {
             return Ok(None);
         }
-        summary["busy"] = busy.clone();
+        summary["busy"] = session_metadata["busy"].clone();
         if !options.all && !options.scan_window {
             let cutoff =
                 now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX));
@@ -518,7 +522,7 @@ fn read_inner(
         .map_err(unavailable)?;
         let mut turns = Vec::new();
         let mut after = -1i64;
-        let mut metadata_bytes = 0usize;
+        let mut metadata_bytes = encoded.len() + summary.to_string().len();
         loop {
             let snapshot = db.transaction().map_err(unavailable)?;
             unchanged(

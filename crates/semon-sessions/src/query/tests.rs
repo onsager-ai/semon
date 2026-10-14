@@ -3782,7 +3782,7 @@ fn handoff_endpoint_indexes_upgrade_without_losing_native_evidence() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        26
+        27
     );
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('session_trace_from','session_trace_to')", [], |row|row.get::<_,i64>(0)).unwrap(), 2);
     assert!(
@@ -5434,6 +5434,84 @@ fn focused_tail_summary_and_stopped_search_do_not_prepare_growing_selected_histo
                 "provider byte bound: {bytes}"
             );
         }
+    }
+}
+
+#[test]
+fn focused_tail_does_not_load_growing_session_busy_metadata() {
+    for prefix in [0, 16, 128] {
+        let home = Home::new("focused-busy-metadata");
+        let mut records = vec![human("lead", ts(0, 0), "fixed prompt")];
+        for n in 0..prefix {
+            let minute = (n + 1) * 10;
+            records.push(human("lead", ts(minute / 60, minute % 60), "next prompt"));
+            records.push(assistant(
+                "lead",
+                ts(minute / 60, minute % 60),
+                vec![text("reply")],
+            ));
+        }
+        records.push(assistant("lead", ts(23, 59), vec![text("fixed tail")]));
+        home.top("lead", &records);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        drop(cache);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='lead'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let catalog: Value = serde_json::from_str(&metadata).unwrap();
+        assert!(
+            metadata.len() < 8192,
+            "Catalog metadata grew with selected history: {}",
+            metadata.len()
+        );
+        assert!(catalog["query"]["rows"]["lead"].get("busy").is_none());
+        let busy: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key LIKE 'native_query_session:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let busy: Value = serde_json::from_str(&busy).unwrap();
+        assert!(busy["busy"].as_array().unwrap().len() >= prefix as usize);
+        let args = json!({"id":"lead","limit":1});
+        let expected = Query::from_sources(admitted(home.options.clone()))
+            .call_at("read_transcript", &args, NOW)
+            .unwrap();
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let answer = query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(answer, expected);
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            indexes
+        );
+        assert!(query.native.is_none());
+        assert!(transcript::SLOTS.with(std::cell::Cell::get) <= 3);
     }
 }
 

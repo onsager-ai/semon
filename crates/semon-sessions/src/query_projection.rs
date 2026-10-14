@@ -1,7 +1,7 @@
 //! Private, generation-bound Query recipes in the Event Index metadata region.
 //! Public Trace rows and digests retain their existing contract. No bodies live here.
 use crate::{
-    model::{Handoff, Turn, summary::CatalogRow},
+    model::{Handoff, Session, Turn, summary::CatalogRow},
     overview::Summary,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
+    session: Value,
     turns: Vec<Value>,
     edges: Vec<Value>,
 }
@@ -29,8 +30,9 @@ pub(crate) fn header(db: &Connection, key: &str) -> rusqlite::Result<Option<Stri
     db.query_row("SELECT CASE WHEN octet_length(value)<=65536 THEN value ELSE NULL END FROM meta WHERE key=?1", [prefix("header",key)], |r|r.get(0)).optional().map(Option::flatten)
 }
 impl Projection {
-    pub(crate) fn capture(turns: &[&Turn], edges: &[&Handoff]) -> Self {
+    pub(crate) fn capture(session: &Session, turns: &[&Turn], edges: &[&Handoff]) -> Self {
         Self {
+            session: json!({"busy":session.busy}),
             turns: turns.iter().enumerate().map(|(order,turn)| {
                 let mut query=json!(turn);
                 query.as_object_mut().expect("turn object").remove("text");
@@ -53,6 +55,7 @@ impl Projection {
         summary: &Summary,
         trace: &str,
     ) -> rusqlite::Result<()> {
+        let session = serde_json::to_string(&self.session).map_err(data)?;
         let turns: Vec<_> = self
             .turns
             .iter()
@@ -78,12 +81,13 @@ impl Projection {
         );
         let mut hash = Sha256::new();
         hash.update(serde_json::to_vec(&(1, &source, trace)).map_err(data)?);
-        for text in turns.iter().chain(&edges) {
+        for text in std::iter::once(&session).chain(turns.iter()).chain(&edges) {
             hash.update((text.len() as u64).to_le_bytes());
             hash.update(text.as_bytes());
         }
         let generation = format!("{:x}", hash.finalize());
-        let complete = turns.iter().chain(&edges).all(|text| text.len() <= 65536);
+        let complete =
+            session.len() <= 1048576 && turns.iter().chain(&edges).all(|text| text.len() <= 65536);
         let header=json!({"version":1,"generation":generation,"source_generation":source,"trace":trace,"query_generation":query_generation,"complete":complete,"turns":turns.len(),"edges":edges.len()}).to_string();
         if super::query_projection::header(tx, &identity)?.as_deref() == Some(&header) {
             return Ok(());
@@ -94,6 +98,7 @@ impl Projection {
         }
         let mut put = tx.prepare_cached("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)")?;
         if complete {
+            put.execute(params![prefix("session", &identity), session])?;
             for (order, text) in turns.iter().enumerate() {
                 put.execute(params![
                     format!("{}{:020}", prefix("turn", &identity), order),
