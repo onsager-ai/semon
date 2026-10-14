@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS native_query_jobs (
  revision INTEGER NOT NULL, cursor TEXT NOT NULL, state TEXT NOT NULL,
  sources INTEGER NOT NULL DEFAULT 0, owners INTEGER NOT NULL DEFAULT 0
 ) STRICT;
+CREATE INDEX IF NOT EXISTS native_query_pending ON native_query_jobs(job) WHERE phase<>'ready';
 CREATE TABLE IF NOT EXISTS native_query_ready (
  view_key TEXT PRIMARY KEY, job INTEGER NOT NULL, metadata TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
@@ -446,6 +447,199 @@ impl NativeStore {
         read_job(&self.connection, view_key).map_err(io::Error::other)
     }
 
+    /// Private unfinished work, including cleanup, in a bounded indexed page.
+    /// Stale-runtime jobs are returned so the scheduler can restart them; this
+    /// accessor grants no right to consume their staged outputs.
+    pub(crate) fn pending_jobs(&self, after: Option<i64>) -> io::Result<Page<Job, i64>> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        if !current(&tx).map_err(io::Error::other)? {
+            return Err(io::Error::other("native store version changed"));
+        }
+        let length = "192+octet_length(view_key)+COALESCE(octet_length(catalog_generation),0)+octet_length(runtime)+octet_length(phase)+octet_length(cursor)+octet_length(state)";
+        let columns = guard_columns(
+            "job,version,catalog_generation,runtime,phase,revision,cursor,state,view_key",
+            length,
+        );
+        let mut query = tx.prepare(&format!("SELECT {columns},{length} FROM native_query_jobs WHERE phase<>'ready' AND job>?1 ORDER BY job LIMIT 64")).map_err(io::Error::other)?;
+        let mut rows = query
+            .query([after.unwrap_or(-1)])
+            .map_err(io::Error::other)?;
+        let mut output = Vec::new();
+        let mut end = after;
+        let mut work = Work::default();
+        while let Some(row) = rows.next().map_err(io::Error::other)? {
+            let bytes = usize::try_from(row.get::<_, i64>(9).map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
+            if bytes > BYTES {
+                return Err(io::Error::other("native job exceeds metadata budget"));
+            }
+            if work.metadata_bytes + bytes > BYTES {
+                break;
+            }
+            let state: String = row.get(7).map_err(io::Error::other)?;
+            let job = Job {
+                id: row.get(0).map_err(io::Error::other)?,
+                spec: JobSpec {
+                    view_key: row.get(8).map_err(io::Error::other)?,
+                    version: row.get(1).map_err(io::Error::other)?,
+                    catalog_generation: row.get(2).map_err(io::Error::other)?,
+                    runtime: row.get(3).map_err(io::Error::other)?,
+                },
+                phase: row.get(4).map_err(io::Error::other)?,
+                revision: row.get(5).map_err(io::Error::other)?,
+                cursor: row.get(6).map_err(io::Error::other)?,
+                state: serde_json::from_str(&state).map_err(io::Error::other)?,
+            };
+            end = Some(job.id);
+            output.push(job);
+            work.decoded_rows += 1;
+            work.metadata_bytes += bytes;
+        }
+        drop(rows);
+        work.vm_steps = query.get_status(rusqlite::StatementStatus::VmStep);
+        drop(query);
+        let remains: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_query_jobs WHERE phase<>'ready' AND job>?1)",
+                [end.unwrap_or(-1)],
+                |r| r.get(0),
+            )
+            .map_err(io::Error::other)?;
+        Ok(Page {
+            rows: output,
+            after: end,
+            complete: !remains,
+            work,
+        })
+    }
+    /// Return the originally admitted Catalog/custody/ledger witness. Source
+    /// pages are ordered by path; native source ordinals belong to producer
+    /// SourceFact rows and are never reconstructed from this lexical order.
+    pub(crate) fn admitted_sources_page(
+        &self,
+        job: &Job,
+        after: Option<&str>,
+    ) -> io::Result<Page<SourceWitness, String>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("native producer runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        if !job_current(&tx, job).map_err(io::Error::other)? {
+            return Err(io::Error::other("native stage witness changed"));
+        }
+        let length = "64+octet_length(path)+octet_length(metadata)+COALESCE(octet_length(archive),0)+COALESCE(octet_length(mutation),0)";
+        let columns = guard_columns(
+            "0,dev,ino,size,mtime_ns,resume_at,prefix,tail,ctime_ns,metadata,present,claim,archive,mutation",
+            length,
+        );
+        let comparison = if after.is_some() { ">" } else { ">=" };
+        let mut query=tx.prepare(&format!("SELECT {columns},{length} FROM native_query_sources WHERE job=?1 AND path{comparison}?2 ORDER BY path LIMIT 64")).map_err(io::Error::other)?;
+        let mut rows = query
+            .query(params![job.id, after.unwrap_or("")])
+            .map_err(io::Error::other)?;
+        let mut output = Vec::new();
+        let mut end = after.map(str::to_owned);
+        let mut work = Work::default();
+        while let Some(row) = rows.next().map_err(io::Error::other)? {
+            let bytes = usize::try_from(row.get::<_, i64>(14).map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
+            if bytes > BYTES {
+                return Err(io::Error::other(
+                    "native source witness exceeds metadata budget",
+                ));
+            }
+            if work.metadata_bytes + bytes > BYTES {
+                break;
+            }
+            let text: String = row.get(9).map_err(io::Error::other)?;
+            let source: CatalogSource = serde_json::from_str(&text).map_err(io::Error::other)?;
+            let ledger = if row.get::<_, bool>(10).map_err(io::Error::other)? {
+                Some(read_ledger(row).map_err(io::Error::other)?.1)
+            } else {
+                None
+            };
+            end = Some(
+                source
+                    .path
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("native source path is not portable"))?
+                    .to_owned(),
+            );
+            output.push(SourceWitness {
+                source,
+                ledger,
+                claim: row.get(11).map_err(io::Error::other)?,
+                archive: row.get(12).map_err(io::Error::other)?,
+                mutation: row.get(13).map_err(io::Error::other)?,
+            });
+            work.decoded_rows += 1;
+            work.metadata_bytes += bytes;
+        }
+        drop(rows);
+        work.vm_steps = query.get_status(rusqlite::StatementStatus::VmStep);
+        drop(query);
+        let comparison = if end.is_some() { ">" } else { ">=" };
+        let remains:bool=tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM native_query_sources WHERE job=?1 AND path{comparison}?2)"),params![job.id,end.as_deref().unwrap_or("")],|r|r.get(0)).map_err(io::Error::other)?;
+        Ok(Page {
+            rows: output,
+            after: end,
+            complete: !remains,
+            work,
+        })
+    }
+    pub(crate) fn admitted_owner(
+        &self,
+        job: &Job,
+        identity: &str,
+    ) -> io::Result<Option<OwnerWitness>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("native producer runtime changed"));
+        }
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        if !job_current(&tx, job).map_err(io::Error::other)? {
+            return Err(io::Error::other("native stage witness changed"));
+        }
+        let length = "octet_length(identity)+octet_length(session_key)+COALESCE(octet_length(catalog),0)+COALESCE(octet_length(history),0)+COALESCE(octet_length(private_header),0)+COALESCE(octet_length(trace_header),0)+COALESCE(octet_length(slot_header),0)+COALESCE(octet_length(history_header),0)";
+        let columns = guard_columns(
+            "identity,session_key,catalog,history,private_header,trace_header,slot_header,history_header",
+            length,
+        );
+        let mut query = tx
+            .prepare(&format!(
+                "SELECT {columns},{length} FROM native_query_owners WHERE job=?1 AND identity=?2"
+            ))
+            .map_err(io::Error::other)?;
+        let mut rows = query
+            .query(params![job.id, identity])
+            .map_err(io::Error::other)?;
+        let Some(row) = rows.next().map_err(io::Error::other)? else {
+            return Ok(None);
+        };
+        if row.get::<_, i64>(8).map_err(io::Error::other)? > BYTES as i64 {
+            return Err(io::Error::other(
+                "native owner witness exceeds metadata budget",
+            ));
+        }
+        Ok(Some(OwnerWitness {
+            identity: row.get(0).map_err(io::Error::other)?,
+            key: row.get(1).map_err(io::Error::other)?,
+            catalog: row.get(2).map_err(io::Error::other)?,
+            history: row.get(3).map_err(io::Error::other)?,
+            private_header: row.get(4).map_err(io::Error::other)?,
+            trace_header: row.get(5).map_err(io::Error::other)?,
+            slot_header: row.get(6).map_err(io::Error::other)?,
+            history_header: row.get(7).map_err(io::Error::other)?,
+        }))
+    }
     /// All staged output and the native reducer cursor commit together. No
     /// implicit row deletion, unbounded materialization or final body load.
     pub(crate) fn checkpoint(
@@ -1081,6 +1275,9 @@ impl NativeStore {
         kind: RowKind,
         after: Option<&RowKey>,
     ) -> io::Result<Page<StageRow, RowKey>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("native producer runtime changed"));
+        }
         let tx = self
             .connection
             .unchecked_transaction()
@@ -1161,6 +1358,9 @@ impl NativeStore {
         kind: RowKind,
         identity: &str,
     ) -> io::Result<Option<StageRow>> {
+        if !self.runtime_current(&job.spec)? {
+            return Err(io::Error::other("native producer runtime changed"));
+        }
         let tx = self
             .connection
             .unchecked_transaction()
@@ -2401,6 +2601,50 @@ mod tests {
                 .primitives_ready
         );
         assert!(fixture.store.busy_page(&fixture.source(), None).is_err());
+    }
+    #[test]
+    fn native_query_pending_work_and_original_admitted_witness_resume_without_index_loads() {
+        let mut fixture = Fixture::new(1024);
+        let witness = fixture.source();
+        let job = fixture.admitted();
+        let owner = fixture
+            .store
+            .admitted_owner(&job, &crate::query_projection::identity(&fixture.row))
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.key, fixture.row.key);
+        let reads = super::super::super::FILE_READS.with(Cell::get);
+        let page = fixture.store.pending_jobs(None).unwrap();
+        assert!(page.complete);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].id, job.id);
+        assert!(page.work.metadata_bytes < 4096);
+        let page = fixture.store.admitted_sources_page(&job, None).unwrap();
+        assert!(page.complete);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].ledger, witness.ledger);
+        assert_eq!(page.rows[0].source, witness.source);
+        assert_eq!(super::super::super::FILE_READS.with(Cell::get), reads);
+        fixture
+            .store
+            .connection
+            .execute(
+                "UPDATE meta SET value='new-coarse-marker' WHERE key='catalog_generation'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .admitted_sources_page(&job, None)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        fixture.store.connection.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0) ON CONFLICT(source_path) DO UPDATE SET revision=revision+1",[fixture.row.sources[0].path.to_str().unwrap()]).unwrap();
+        assert!(fixture.store.admitted_sources_page(&job, None).is_err());
+        assert_eq!(fixture.store.pending_jobs(None).unwrap().rows.len(), 1);
     }
     #[test]
     fn native_query_additive_migration_preserves_main_and_temp_and_public_standalone_schemas() {
