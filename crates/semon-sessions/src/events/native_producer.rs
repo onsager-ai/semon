@@ -6,7 +6,9 @@
 //! requires a complete source index. Point reads return one metadata event;
 //! turn closure visits at most 64 pending calls per resumable step.
 
-use super::{Event, FileIndex, Kind, POLLS_MAX, Reply, STDIN, UNKNOWN, YIELDS_MAX};
+use super::{
+    Event, FileIndex, Kind, POLLS_MAX, Reply, STDIN, Signal, SignalKind, UNKNOWN, YIELDS_MAX,
+};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
@@ -36,6 +38,123 @@ pub(crate) trait ToolStore {
     /// Exactly one open code-mode pending call, otherwise None. Indexed
     /// implementations need at most two matching rows to establish ambiguity.
     fn unique_open_code_mode(&self) -> Result<Option<usize>, Self::Error>;
+}
+
+pub(crate) trait SignalStore: ToolStore {
+    fn last_signal(&self, kind: Option<SignalKind>)
+    -> Result<Option<(usize, Signal)>, Self::Error>;
+    fn append_signal(&mut self, signal: Signal) -> Result<(), Self::Error>;
+    fn replace_signal(&mut self, sequence: usize, signal: Signal) -> Result<(), Self::Error>;
+}
+
+pub(crate) fn note<S: SignalStore>(
+    store: &mut S,
+    k: SignalKind,
+    o: u64,
+    t: Option<i64>,
+    n: String,
+    v: Option<u64>,
+) -> Result<(), S::Error> {
+    let at = u32::try_from(store.event_count()?).unwrap_or(u32::MAX);
+    store.append_signal(Signal {
+        k,
+        o,
+        t,
+        at,
+        n: Some(n),
+        v,
+    })
+}
+
+pub(crate) fn setting<S: SignalStore>(
+    store: &mut S,
+    k: SignalKind,
+    o: u64,
+    t: Option<i64>,
+    value: Option<&str>,
+) -> Result<(), S::Error> {
+    let Some(value) = value.and_then(super::bounded) else {
+        return Ok(());
+    };
+    if store
+        .last_signal(Some(k))?
+        .and_then(|(_, signal)| signal.n)
+        .as_deref()
+        != Some(value.as_str())
+    {
+        note(store, k, o, t, value, None)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn signal<S: SignalStore>(
+    store: &mut S,
+    k: SignalKind,
+    o: u64,
+    t: Option<i64>,
+    n: Option<&str>,
+    v: Option<u64>,
+) -> Result<(), S::Error> {
+    let n = n
+        .filter(|tag| {
+            tag.len() <= 32
+                && tag
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b' '))
+        })
+        .map(str::to_owned);
+    let at = u32::try_from(store.event_count()?).unwrap_or(u32::MAX);
+    if k == SignalKind::Compact
+        && let Some((sequence, mut last)) = store.last_signal(None)?
+        && last.k == SignalKind::Compact
+        && last.at == at
+    {
+        if last.n.is_none() {
+            last.n = n;
+        }
+        if last.v.is_none() {
+            last.v = v;
+        }
+        if last.t.is_none() {
+            last.t = t;
+        }
+        store.replace_signal(sequence, last)?;
+        return Ok(());
+    }
+    store.append_signal(Signal { k, o, t, at, n, v })
+}
+
+pub(crate) fn push<S: ToolStore>(store: &mut S, event: Event) -> Result<(), S::Error> {
+    if event.k == Kind::Gap
+        && let Some(last) = store.event_count()?.checked_sub(1)
+        && store.event(last)?.is_some_and(|last| last.k == Kind::Gap)
+    {
+        return Ok(());
+    }
+    store.append_event(event)?;
+    Ok(())
+}
+
+impl SignalStore for FileIndex {
+    fn last_signal(&self, kind: Option<SignalKind>) -> Result<Option<(usize, Signal)>, Infallible> {
+        Ok(self
+            .signals
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, signal)| kind.map_or_else(|| !signal.k.annotates(), |kind| signal.k == kind))
+            .map(|(sequence, signal)| (sequence, signal.clone())))
+    }
+    fn append_signal(&mut self, signal: Signal) -> Result<(), Infallible> {
+        self.signals.push(signal);
+        Ok(())
+    }
+    fn replace_signal(&mut self, sequence: usize, signal: Signal) -> Result<(), Infallible> {
+        if let Some(existing) = self.signal_mut(sequence) {
+            *existing = signal;
+        }
+        Ok(())
+    }
 }
 
 /// Native yields already have a fixed 64-session bound, with session IDs at
@@ -394,6 +513,91 @@ mod tests {
             assert_eq!(reply.e, padding == 511);
             assert_eq!(reply.f & UNKNOWN == 0, padding == 511);
         }
+    }
+
+    #[test]
+    fn compaction_and_settings_preserve_signal_placement_and_first_evidence() {
+        let mut source = FileIndex::default();
+        complete(signal(
+            &mut source,
+            SignalKind::Compact,
+            10,
+            None,
+            None,
+            None,
+        ));
+        complete(setting(
+            &mut source,
+            SignalKind::Effort,
+            11,
+            Some(11),
+            Some("high"),
+        ));
+        complete(signal(
+            &mut source,
+            SignalKind::Compact,
+            12,
+            Some(12),
+            Some("auto"),
+            Some(9),
+        ));
+        assert_eq!(source.signals.len(), 2);
+        assert_eq!(source.signals[0].o, 10);
+        assert_eq!(source.signals[0].t, Some(12));
+        assert_eq!(source.signals[0].n.as_deref(), Some("auto"));
+        assert_eq!(source.signals[0].v, Some(9));
+        complete(setting(
+            &mut source,
+            SignalKind::Effort,
+            13,
+            Some(13),
+            Some("high"),
+        ));
+        assert_eq!(source.signals.len(), 2);
+        complete(signal(
+            &mut source,
+            SignalKind::Interrupt,
+            14,
+            Some(14),
+            Some("user"),
+            None,
+        ));
+        complete(signal(
+            &mut source,
+            SignalKind::Compact,
+            15,
+            Some(15),
+            None,
+            None,
+        ));
+        assert_eq!(source.signals.len(), 4);
+        complete(push(
+            &mut source,
+            Event {
+                k: Kind::Gap,
+                o: 16,
+                ..Event::default()
+            },
+        ));
+        complete(push(
+            &mut source,
+            Event {
+                k: Kind::Gap,
+                o: 17,
+                ..Event::default()
+            },
+        ));
+        assert_eq!(source.events.len(), 1);
+        complete(signal(
+            &mut source,
+            SignalKind::Compact,
+            18,
+            Some(18),
+            None,
+            None,
+        ));
+        assert_eq!(source.signals.len(), 5);
+        assert_eq!(source.signals[4].at, 1);
     }
 
     #[test]

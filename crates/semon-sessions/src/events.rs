@@ -455,32 +455,13 @@ fn bounded(text: &str) -> Option<String> {
 
 /// Pushes a signal whose tag is already bounded, without the compaction dedupe.
 fn note(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, n: String, v: Option<u64>) {
-    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
-    summary.signals.push(Signal {
-        k,
-        o,
-        t,
-        at,
-        n: Some(n),
-        v,
-    });
+    native_producer::complete(native_producer::note(summary, k, o, t, n, v));
 }
 
 /// Records a run setting when `value` is the first seen or differs from the
 /// last one recorded for `k`. A missing value changes nothing.
 fn setting(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, value: Option<&str>) {
-    let Some(value) = value.and_then(bounded) else {
-        return;
-    };
-    let last = summary
-        .signals
-        .iter()
-        .rev()
-        .find(|signal| signal.k == k)
-        .and_then(|signal| signal.n.as_deref());
-    if last != Some(value.as_str()) {
-        note(summary, k, o, t, value, None);
-    }
+    native_producer::complete(native_producer::setting(summary, k, o, t, value));
 }
 
 /// A policy as Codex writes it: a name, or an object naming its type or mode
@@ -3228,15 +3209,7 @@ pub(crate) fn busy_merge(mut intervals: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 }
 
 fn push(summary: &mut FileIndex, event: Event) {
-    if event.k == Kind::Gap
-        && summary
-            .events
-            .last()
-            .is_some_and(|last| last.k == Kind::Gap)
-    {
-        return;
-    }
-    summary.events.push(event);
+    native_producer::complete(native_producer::push(summary, event));
 }
 
 /// Compaction dedupe has two limits: an interrupt between lines of one
@@ -3250,39 +3223,7 @@ fn signal(
     n: Option<&str>,
     v: Option<u64>,
 ) {
-    let n = n
-        .filter(|tag| {
-            tag.len() <= 32
-                && tag
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b' '))
-        })
-        .map(str::to_owned);
-    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
-    if k == SignalKind::Compact
-        && let Some(index) = summary
-            .signals
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, signal)| !signal.k.annotates())
-            .map(|(index, _)| index)
-        && let Some(last) = summary.signal_mut(index)
-        && last.k == SignalKind::Compact
-        && last.at == at
-    {
-        if last.n.is_none() {
-            last.n = n;
-        }
-        if last.v.is_none() {
-            last.v = v;
-        }
-        if last.t.is_none() {
-            last.t = t;
-        }
-        return;
-    }
-    summary.signals.push(Signal { k, o, t, at, n, v });
+    native_producer::complete(native_producer::signal(summary, k, o, t, n, v));
 }
 
 /// Adds a transcript-only marker. The viewer groups consecutive thinking
