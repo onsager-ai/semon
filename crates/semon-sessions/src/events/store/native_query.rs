@@ -9,6 +9,7 @@ use crate::model::{
 pub(super) mod candidate_delta;
 mod native_repair;
 pub(crate) mod physical_profile;
+pub(crate) mod source_roots;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
 pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
 
@@ -7300,6 +7301,133 @@ mod tests {
         assert!(
             vm.windows(2).all(|pair| pair[0] == pair[1]),
             "private initializer SQLite VM work {vm:?}"
+        );
+    }
+
+    #[test]
+    fn source_roots_prepublication_stage_is_typed_durable_and_epoch_fenced() {
+        let mut fixture = Fixture::new(0);
+        let epoch = source_roots::Epoch {
+            epoch: 17,
+            base_generation: Some("catalog-one".into()),
+            source_revision: 23,
+            runtime: fixture.spec().runtime,
+        };
+        fixture.store.connection.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) VALUES(1,?1,'publication',?2,?3,?4)",params![epoch.epoch,epoch.base_generation,epoch.runtime,epoch.source_revision]).unwrap();
+        let source = fixture.source();
+        let mut stage = fixture
+            .store
+            .begin_source_roots(&epoch, &[source.clone()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .connection
+                .query_row(
+                    "SELECT owners FROM native_query_jobs WHERE job=?1",
+                    [stage.job.id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            fixture
+                .store
+                .checkpoint(
+                    &stage.job,
+                    "entries",
+                    "bad-reader-checkpoint",
+                    &serde_json::json!({}),
+                    &[],
+                    &|| false
+                )
+                .is_err()
+        );
+        let (outcome, sql) = fixture
+            .store
+            .checkpoint_source_roots(
+                &stage,
+                "entries",
+                "source-event-0",
+                &serde_json::json!({"epoch":epoch,"next":1}),
+                &[],
+                &|_, _| Ok(true),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(outcome, Outcome::Written);
+        assert!(sql > 0);
+        let before = stage.job.revision;
+        fixture.store = NativeStore::open(&fixture.options).unwrap();
+        stage = fixture
+            .store
+            .begin_source_roots(&epoch, &[source.clone()])
+            .unwrap()
+            .unwrap();
+        assert!(stage.job.revision > before);
+        assert_eq!(stage.job.state["next"], 1);
+        assert_eq!(stage.job.cursor, "source-event-0");
+        for cancelled in [false, true] {
+            fixture
+                .store
+                .connection
+                .execute("UPDATE catalog_semantic_stage SET revision=revision+1", [])
+                .unwrap();
+            let before = stage.job.revision;
+            let (outcome, sql) = fixture
+                .store
+                .checkpoint_source_roots(
+                    &stage,
+                    "finish",
+                    "unqualified",
+                    &serde_json::json!({}),
+                    &[],
+                    &|_, _| Ok(true),
+                    &|| cancelled,
+                )
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if cancelled {
+                    Outcome::Deferred
+                } else {
+                    Outcome::Conflict
+                }
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .reload(&stage.job.spec.view_key)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                before
+            );
+            if !cancelled {
+                assert!(sql > 0);
+            }
+            fixture
+                .store
+                .connection
+                .execute(
+                    "UPDATE catalog_semantic_stage SET revision=?1",
+                    [epoch.source_revision],
+                )
+                .unwrap();
+        }
+        fixture
+            .store
+            .connection
+            .execute("UPDATE catalog_semantic_stage SET phase='relations'", [])
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .begin_source_roots(&epoch, &[source])
+                .unwrap()
+                .is_none()
         );
     }
 }
