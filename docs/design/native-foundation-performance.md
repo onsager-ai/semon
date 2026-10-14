@@ -11,7 +11,6 @@ budgets, not claims of demonstrated production capability.
 | Focused query for a known, explicitly selected session | 2 s without global indexing | P0 |
 | Qualified Push/append | Work independent of unrelated history width | P0 |
 | Complete cold indexing with 2,048 unrelated sessions | 30 s in required CI | P1 |
-| Same complete indexing | 10 s optimization objective; nonblocking | P2 |
 
 ## Interactive readiness
 
