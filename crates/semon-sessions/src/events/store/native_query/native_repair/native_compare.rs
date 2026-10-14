@@ -290,6 +290,14 @@ impl NativeStore {
         if cancelled() {
             return Ok(meter.result(Outcome::Deferred, work, None));
         }
+        // Admission binds one CatalogSource per absolute (job, path). Two
+        // root-relative references to that path cannot authorize two Original
+        // namespaces under that single admitted witness.
+        if left.repair.original != right.repair.original
+            && left.witness.source.path == right.witness.source.path
+        {
+            return Ok(meter.result(Outcome::Conflict, work, None));
+        }
         for source in [left, right] {
             meter.fences += 1;
             if reference(source.records, source.witness)? != source.repair.source
@@ -595,6 +603,9 @@ mod tests {
     }
     impl Fixture {
         fn new(encoded: &[String]) -> Self {
+            Self::with_overlapping_roots(encoded, false)
+        }
+        fn with_overlapping_roots(encoded: &[String], overlap: bool) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "semon-original-compare-{}-{}",
                 std::process::id(),
@@ -603,7 +614,7 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-            let options = crate::Options {
+            let mut options = crate::Options {
                 claude_home: root.join("claude"),
                 claude_json: root.join("claude.json"),
                 codex_home: root.join("codex"),
@@ -611,6 +622,9 @@ mod tests {
                 cache: root.join("cache"),
                 ..crate::Options::default()
             };
+            if overlap {
+                options.codex_home = options.claude_home.join("projects");
+            }
             let (mut writer, _) = SqliteStore::attempt_scoped(
                 &super::super::super::super::super::EventCache::path(&options.cache),
                 None,
@@ -719,117 +733,111 @@ mod tests {
                 texts: Vec::new(),
             };
             for i in 0..encoded.len() {
-                let mut repair = fixture
-                    .store
-                    .begin_original_repair(
-                        &fixture.job,
-                        &fixture.witnesses[i],
-                        &fixture.sources.reader(),
-                        &|| false,
-                    )
-                    .unwrap()
-                    .unwrap();
-                let mut attempts = 0;
-                while repair.cursor.phase != Phase::FoldRecord {
-                    let step = fixture
-                        .store
-                        .original_lex_step(
-                            &fixture.job,
-                            &fixture.witnesses[i],
-                            &repair,
-                            &fixture.sources.reader(),
-                            &|| false,
-                        )
-                        .unwrap();
-                    assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
-                    assert!(step.work.metadata_rows <= ROWS);
-                    repair = fixture
-                        .store
-                        .reload_original_repair(
-                            &fixture.job,
-                            &fixture.witnesses[i],
-                            &fixture.sources.reader(),
-                        )
-                        .unwrap()
-                        .unwrap();
-                    attempts += 1;
-                    assert!(attempts < 1024);
-                }
-                loop {
-                    let step = fixture
-                        .store
-                        .original_fields_step(
-                            &fixture.job,
-                            &fixture.witnesses[i],
-                            &repair,
-                            &fixture.sources.reader(),
-                            &|| false,
-                        )
-                        .unwrap();
-                    repair = fixture
-                        .store
-                        .reload_original_repair(
-                            &fixture.job,
-                            &fixture.witnesses[i],
-                            &fixture.sources.reader(),
-                        )
-                        .unwrap()
-                        .unwrap();
-                    attempts += 1;
-                    assert!(attempts < 2048);
-                    if step.outcome == Outcome::Written {
-                        break;
-                    }
-                }
-                let text = if let Ok(Some(root)) =
-                    fixture
-                        .store
-                        .original_root(&fixture.job, &fixture.witnesses[i], &repair)
-                {
-                    let node = loop {
-                        let step = fixture
-                            .store
-                            .original_member_step(
-                                &fixture.job,
-                                &fixture.witnesses[i],
-                                &repair,
-                                root.address,
-                                "s",
-                                &fixture.sources.reader(),
-                                &|| false,
-                            )
-                            .unwrap();
-                        if step.complete {
-                            break step.node.unwrap();
-                        }
-                        attempts += 1;
-                        assert!(attempts < 4096);
-                    };
-                    loop {
-                        let step = fixture
-                            .store
-                            .original_identity_step(
-                                &fixture.job,
-                                &fixture.witnesses[i],
-                                &repair,
-                                node.ordinal,
-                                &fixture.sources.reader(),
-                                &|| false,
-                            )
-                            .unwrap();
-                        if let Some(text) = step.text {
-                            break Some(text);
-                        }
-                        attempts += 1;
-                        assert!(attempts < 8192);
-                    }
-                } else {
-                    None
-                };
-                fixture.repairs.push(repair);
-                fixture.texts.push(text);
+                fixture.prepare_original(i);
             }
             fixture
+        }
+        fn prepare_original(&mut self, i: usize) {
+            let mut repair = self
+                .store
+                .begin_original_repair(
+                    &self.job,
+                    &self.witnesses[i],
+                    &self.sources.reader(),
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap();
+            let mut attempts = 0;
+            while repair.cursor.phase != Phase::FoldRecord {
+                let step = self
+                    .store
+                    .original_lex_step(
+                        &self.job,
+                        &self.witnesses[i],
+                        &repair,
+                        &self.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                assert!(step.work.metadata_rows <= ROWS);
+                repair = self
+                    .store
+                    .reload_original_repair(&self.job, &self.witnesses[i], &self.sources.reader())
+                    .unwrap()
+                    .unwrap();
+                attempts += 1;
+                assert!(attempts < 1024);
+            }
+            loop {
+                let step = self
+                    .store
+                    .original_fields_step(
+                        &self.job,
+                        &self.witnesses[i],
+                        &repair,
+                        &self.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                repair = self
+                    .store
+                    .reload_original_repair(&self.job, &self.witnesses[i], &self.sources.reader())
+                    .unwrap()
+                    .unwrap();
+                attempts += 1;
+                assert!(attempts < 2048);
+                if step.outcome == Outcome::Written {
+                    break;
+                }
+            }
+            let text = if let Ok(Some(root)) =
+                self.store
+                    .original_root(&self.job, &self.witnesses[i], &repair)
+            {
+                let node = loop {
+                    let step = self
+                        .store
+                        .original_member_step(
+                            &self.job,
+                            &self.witnesses[i],
+                            &repair,
+                            root.address,
+                            "s",
+                            &self.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    if step.complete {
+                        break step.node.unwrap();
+                    }
+                    attempts += 1;
+                    assert!(attempts < 4096);
+                };
+                loop {
+                    let step = self
+                        .store
+                        .original_identity_step(
+                            &self.job,
+                            &self.witnesses[i],
+                            &repair,
+                            node.ordinal,
+                            &self.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    if let Some(text) = step.text {
+                        break Some(text);
+                    }
+                    attempts += 1;
+                    assert!(attempts < 8192);
+                }
+            } else {
+                None
+            };
+            self.repairs.push(repair);
+            self.texts.push(text);
         }
         fn closure(db: &Connection, job: i64) -> rusqlite::Result<bool> {
             db.query_row("SELECT NOT EXISTS(SELECT 1 FROM comparison_required_owners r LEFT JOIN native_query_owners w ON w.job=?1 AND w.session_key=r.key WHERE w.session_key IS NULL)",[job],|row|row.get(0))
@@ -986,6 +994,133 @@ mod tests {
                 cached: false,
             })
         }
+    }
+
+    #[test]
+    fn original_pair_rejects_two_root_relative_originals_for_one_admitted_path_before_io() {
+        let mut fixture = Fixture::with_overlapping_roots(&[quoted("same"), quoted("same")], true);
+        assert_eq!(
+            fixture.options.codex_home,
+            fixture.options.claude_home.join("projects")
+        );
+        assert!(
+            fixture.witnesses[0]
+                .source
+                .path
+                .starts_with(&fixture.options.claude_home)
+        );
+        assert!(
+            fixture.witnesses[0]
+                .source
+                .path
+                .starts_with(&fixture.options.codex_home)
+        );
+        // Both legitimate cases retain the ordinary native equality result.
+        assert_eq!(fixture.complete(0, 0), Comparison::Equal);
+        assert_eq!(fixture.complete(0, 1), Comparison::Equal);
+        assert_ne!(
+            fixture.witnesses[0].source.path,
+            fixture.witnesses[1].source.path
+        );
+        let left_sources = Arc::clone(&fixture.sources);
+        let source = fixture.witnesses[0].source.clone();
+        let captured = crate::source_chunks::capture(
+            &mut crate::sealed::LogFile::open(&source.path).unwrap(),
+            source.offset,
+            0,
+        )
+        .unwrap();
+        // A separately captured request resolves the same native file through
+        // the other configured overlapping root. No reference/namespace is
+        // fabricated: capture and the regular producer qualify both forms.
+        let mut alternate = fixture.options.clone();
+        alternate.claude_home = fixture.root.join("unselected-claude-root");
+        fixture.sources = Arc::new(
+            crate::query_source::Sources::capture(
+                &alternate,
+                std::iter::once((source, Some(Arc::new(captured.chunks)))),
+            )
+            .unwrap(),
+        );
+        fixture.prepare_original(0);
+        let left_records = left_sources.reader();
+        let right_records = fixture.sources.reader();
+        let left_ref = reference(&left_records, &fixture.witnesses[0]).unwrap();
+        let right_ref = reference(&right_records, &fixture.witnesses[0]).unwrap();
+        assert_eq!(left_ref.root, "claude");
+        assert_eq!(right_ref.root, "codex");
+        assert_eq!(left_ref.path, "projects/p/owner-0.jsonl");
+        assert_eq!(right_ref.path, "p/owner-0.jsonl");
+        assert_ne!(fixture.repairs[0].original, fixture.repairs[2].original);
+        for index in [0, 2] {
+            assert!(repair_current(&fixture.store.connection, &fixture.repairs[index]).unwrap());
+            assert!(
+                admitted_original(
+                    &fixture.store.connection,
+                    &fixture.job,
+                    &fixture.witnesses[0]
+                )
+                .unwrap()
+            );
+        }
+        let left_provider = Provider::new(left_ref, &fixture.bytes[0], None, |_| {});
+        let right_provider = Provider::new(right_ref, &fixture.bytes[0], None, |_| {});
+        let left_records = left_sources.reader_with(Some((
+            &left_provider,
+            crate::SessionSourceReadMode::ProviderOnly,
+        )));
+        let right_records = fixture.sources.reader_with(Some((
+            &right_provider,
+            crate::SessionSourceReadMode::ProviderOnly,
+        )));
+        let before: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM native_original_comparisons",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let step = fixture
+            .store
+            .original_compare_step(
+                &fixture.job,
+                ComparisonSource {
+                    witness: &fixture.witnesses[0],
+                    repair: &fixture.repairs[0],
+                    text: fixture.texts[0].as_ref().unwrap(),
+                    records: &left_records,
+                },
+                ComparisonSource {
+                    witness: &fixture.witnesses[0],
+                    repair: &fixture.repairs[2],
+                    text: fixture.texts[2].as_ref().unwrap(),
+                    records: &right_records,
+                },
+                &Fixture::closure,
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(step.outcome, Outcome::Conflict);
+        assert!(step.comparison.is_none());
+        assert_eq!(step.work.native_bytes, 0);
+        assert_eq!(step.work.range_requests, 0);
+        assert_eq!(step.records_finish_calls, 0);
+        assert_eq!(left_provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(right_provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(left_provider.read_bytes.load(Ordering::SeqCst), 0);
+        assert_eq!(right_provider.read_bytes.load(Ordering::SeqCst), 0);
+        let after: i64 = fixture
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM native_original_comparisons",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, before, "refusal installed pair metadata");
     }
 
     #[test]
