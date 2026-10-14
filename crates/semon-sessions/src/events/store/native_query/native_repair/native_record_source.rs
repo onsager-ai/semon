@@ -265,6 +265,22 @@ impl RecordSource for DescriptorRecord<'_, '_, '_> {
         self.work.borrow_mut().metadata_bytes += size;
         Ok(number.and_then(|number| number.number().as_i64()))
     }
+    fn unsigned(&mut self, node: &OriginalNode) -> Result<Option<u64>, Error> {
+        self.node_current(node)?;
+        if !matches!(node.value, OriginalValue::Number(_)) {
+            return Ok(None);
+        }
+        self.remaining(1, STATE_BYTES)?;
+        let (number, size) = self.store.borrow().original_number_with_size(
+            self.job,
+            self.witness,
+            self.repair,
+            node.address,
+        )?;
+        self.work.borrow_mut().metadata_rows += 1;
+        self.work.borrow_mut().metadata_bytes += size;
+        Ok(number.and_then(|number| number.number().as_u64()))
+    }
     fn array_next(
         &mut self,
         node: &OriginalNode,

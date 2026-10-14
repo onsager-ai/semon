@@ -8,6 +8,7 @@ pub(crate) mod activity;
 pub(crate) mod copilot;
 pub(crate) mod copilot_admission;
 pub(crate) mod copilot_metadata;
+pub(crate) mod copilot_usage;
 pub(crate) mod header;
 pub(crate) mod record;
 pub(crate) mod record_time;
