@@ -14,6 +14,48 @@ pub(crate) struct Address {
     pub(crate) seq: usize,
 }
 
+/// Stable native emission order inside an equal placement key. Storage assigns
+/// the tree's u64 tie labels against this descriptor; it must never use the
+/// candidate digest or a packed/truncated event sequence as semantic order.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EmissionOrder {
+    class: u8,
+    seq: u64,
+    member: u64,
+}
+
+impl EmissionOrder {
+    pub(crate) fn regular(seq: usize, member: usize) -> Self {
+        Self {
+            class: 1,
+            seq: seq as u64,
+            member: member as u64,
+        }
+    }
+    pub(crate) fn after(seq: usize) -> Self {
+        Self {
+            class: 1,
+            seq: seq as u64,
+            member: u64::MAX,
+        }
+    }
+    pub(crate) fn operation(seq: usize) -> Self {
+        Self {
+            class: 2,
+            seq: seq as u64,
+            member: 0,
+        }
+    }
+    pub(crate) fn head() -> Self {
+        Self {
+            class: 0,
+            seq: 0,
+            member: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Candidate {
@@ -24,6 +66,8 @@ pub(crate) struct Candidate {
     pub(crate) phase: u8,
     pub(crate) entry: Entry,
     pub(crate) has_operations: bool,
+    #[serde(default)]
+    pub(crate) head: bool,
 }
 
 pub(crate) struct EventInput<'a> {
@@ -67,6 +111,7 @@ impl Candidate {
                 at: Some((0, input.seq)),
             },
             has_operations: input.operation.is_some(),
+            head: false,
         }
     }
     pub(crate) fn operation(
@@ -91,6 +136,54 @@ impl Candidate {
                 at: None,
             },
             has_operations: false,
+            head: false,
+        }
+    }
+    pub(crate) fn after(
+        seq: usize,
+        event: &Event,
+        handoff: usize,
+        inherited: SourceTime,
+        identity: CandidateRef,
+        ordinal: u64,
+    ) -> Self {
+        Self {
+            address: Address { extra: false, seq },
+            identity,
+            ordinal,
+            time: inherited,
+            phase: 2,
+            entry: Entry {
+                kind: EntryKind::H(handoff),
+                file: 0,
+                offset: event.o,
+                pos: (event.o, event.b),
+                t: event.t,
+                at: None,
+            },
+            has_operations: false,
+            head: false,
+        }
+    }
+    /// A native head points at the first eligible event's source offset (or
+    /// first source offset0), but its ordering key is always the forced head.
+    pub(crate) fn head(seq: usize, offset: u64, handoff: usize, identity: CandidateRef) -> Self {
+        Self {
+            address: Address { extra: false, seq },
+            identity,
+            ordinal: 0,
+            time: SourceTime::Observed(i64::MIN),
+            phase: 0,
+            entry: Entry {
+                kind: EntryKind::H(handoff),
+                file: 0,
+                offset,
+                pos: (offset, 0),
+                t: None,
+                at: None,
+            },
+            has_operations: false,
+            head: true,
         }
     }
     /// A file's global source reference ordinal and its session merge ordinal
@@ -106,13 +199,17 @@ impl Candidate {
         entry.file = source;
         entry.at = entry.at.map(|(_, seq)| (source, seq));
         let order = Order {
-            key: native_stage::key(
-                several,
-                self.time.resolve(first_regular_time),
-                file_order,
-                entry.pos,
-                self.phase,
-            ),
+            key: if self.head {
+                (i64::MIN, 0, 0, 0, 0)
+            } else {
+                native_stage::key(
+                    several,
+                    self.time.resolve(first_regular_time),
+                    file_order,
+                    entry.pos,
+                    self.phase,
+                )
+            },
             ordinal: self.ordinal,
             identity: self.identity,
         };
@@ -132,6 +229,59 @@ mod tests {
         events::{Kind, Reply},
         model::ToolState,
     };
+
+    #[test]
+    fn native_head_after_and_equal_key_emission_keep_the_complete_builder_order() {
+        let event = Event {
+            o: u64::MAX,
+            b: u32::MAX,
+            t: Some(-40),
+            ..Default::default()
+        };
+        for several in [false, true] {
+            let (order, entry) =
+                Candidate::head(91, event.o, 7, [3; 32]).qualify(9, 4, several, Some(400));
+            assert_eq!(order.key, (i64::MIN, 0, 0, 0, 0));
+            assert_eq!(
+                (entry.file, entry.offset, entry.pos, entry.t, entry.at),
+                (9, u64::MAX, (u64::MAX, 0), None, None)
+            );
+            let after = Candidate::after(91, &event, 7, SourceTime::BeforeFirst, [4; 32], 19);
+            let (order, entry) = after.qualify(9, 4, several, Some(400));
+            assert_eq!(
+                order.key,
+                (if several { 400 } else { 0 }, 4, u64::MAX, u32::MAX, 2)
+            );
+            assert_eq!(
+                (entry.file, entry.offset, entry.t, entry.at),
+                (9, u64::MAX, Some(-40), None)
+            );
+        }
+        // This is the actual insertion sequence when placement keys coincide:
+        // head, event members and after for each native regular ref, then extras.
+        let expected = vec![
+            EmissionOrder::head(),
+            EmissionOrder::regular(0, 0),
+            EmissionOrder::regular(0, 1),
+            EmissionOrder::after(0),
+            EmissionOrder::regular(1, 0),
+            EmissionOrder::after(1),
+            EmissionOrder::regular(usize::MAX - 1, usize::MAX - 1),
+            EmissionOrder::operation(0),
+            EmissionOrder::operation(1),
+        ];
+        let mut shuffled = expected.clone();
+        shuffled.reverse();
+        shuffled.sort();
+        assert_eq!(shuffled, expected);
+        for emission in expected {
+            assert_eq!(
+                serde_json::from_str::<EmissionOrder>(&serde_json::to_string(&emission).unwrap())
+                    .unwrap(),
+                emission
+            );
+        }
+    }
 
     #[test]
     fn native_candidate_keeps_symbolic_prefix_and_qualifies_reference_and_merge_order() {

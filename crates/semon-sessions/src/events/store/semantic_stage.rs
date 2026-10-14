@@ -668,6 +668,7 @@ fn event_page(c: &Connection) -> rusqlite::Result<bool> {
                     block: event.b,
                     kind: event.k,
                     occurrence,
+                    seq: Some(seq),
                 },
                 event,
             };

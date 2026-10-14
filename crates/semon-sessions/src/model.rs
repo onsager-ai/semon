@@ -5161,17 +5161,9 @@ impl<'a> Builder<'a> {
                 .first()
                 .map(|at| (at.0, event(self.files, *at).o))
                 .unwrap_or((self.sessions[index].files[0], 0));
-            keyed.push((
-                (i64::MIN, 0, 0, 0, 0),
-                Entry {
-                    kind: EntryKind::H(*handoff),
-                    file,
-                    offset,
-                    pos: (offset, 0),
-                    t: None,
-                    at: None,
-                },
-            ));
+            let (order, entry) = native_producer::Candidate::head(0, offset, *handoff, [0; 32])
+                .qualify(file, 0, several, None);
+            keyed.push((order.key, entry));
         }
         for at in refs {
             let found = event(self.files, at);
