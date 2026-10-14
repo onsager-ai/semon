@@ -9,11 +9,15 @@ const STATE_BYTES: usize = 64 * 1024;
 fn source_fact_generation(ledger: &Ledger) -> rusqlite::Result<String> {
     Ok(format!("interval-v2:{}", json(ledger)?))
 }
+fn source_order_generation(ledger: &Ledger) -> rusqlite::Result<String> {
+    Ok(format!("order-v1:{}", json(ledger)?))
+}
 #[cfg(test)]
 thread_local! {
     pub(super) static FULL_LINK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BUSY_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DELTA_LINK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ORDER_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(super) const SCHEMA: &str = "
@@ -101,6 +105,15 @@ pub(crate) struct SourceHeader {
     /// whole header or fabricate facts for an older publication.
     pub(crate) primitives_ready: bool,
     pub(crate) counts: Option<(usize, usize, usize)>,
+    /// `None` requires bounded primitive repair. `Some` with an absent time
+    /// qualifies a wholly untimed source; it does not invent i64::MIN evidence.
+    pub(crate) time_seed: Option<TimeSeed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TimeSeed {
+    pub(crate) first_seq: Option<usize>,
+    pub(crate) first_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1631,7 +1644,7 @@ impl NativeStore {
             "entrypoint,title,agent_name,last_model,failed,first_ms,last_ms,cwd,branch",
             length,
         );
-        let mut q = tx.prepare(&format!("SELECT {columns},{length},(SELECT generation FROM native_source_facts WHERE file_id=files.file_id),(SELECT events FROM native_source_facts WHERE file_id=files.file_id),(SELECT extras FROM native_source_facts WHERE file_id=files.file_id),(SELECT signals FROM native_source_facts WHERE file_id=files.file_id) FROM files WHERE path=?1")).map_err(io::Error::other)?;
+        let mut q = tx.prepare(&format!("SELECT {columns},{length},(SELECT generation FROM native_source_facts WHERE file_id=files.file_id),(SELECT events FROM native_source_facts WHERE file_id=files.file_id),(SELECT extras FROM native_source_facts WHERE file_id=files.file_id),(SELECT signals FROM native_source_facts WHERE file_id=files.file_id),(SELECT generation FROM native_source_order_facts WHERE file_id=files.file_id),(SELECT first_seq FROM native_source_order_facts WHERE file_id=files.file_id),(SELECT first_ms FROM native_source_order_facts WHERE file_id=files.file_id) FROM files WHERE path=?1")).map_err(io::Error::other)?;
         let mut rows = q
             .query([witness.source.path.to_string_lossy().as_ref()])
             .map_err(io::Error::other)?;
@@ -1655,6 +1668,20 @@ impl NativeStore {
         } else {
             None
         };
+        let order_generation: Option<String> = row.get(14).map_err(io::Error::other)?;
+        let time_seed = if order_generation.as_deref()
+            == Some(&source_order_generation(ledger).map_err(io::Error::other)?)
+        {
+            Some(TimeSeed {
+                first_seq: row
+                    .get::<_, Option<i64>>(15)
+                    .map_err(io::Error::other)?
+                    .map(seq_of),
+                first_ms: row.get(16).map_err(io::Error::other)?,
+            })
+        } else {
+            None
+        };
         Ok(Some(SourceHeader {
             witness: witness.clone(),
             entrypoint: row.get(0).map_err(io::Error::other)?,
@@ -1668,7 +1695,51 @@ impl NativeStore {
             branch: row.get(8).map_err(io::Error::other)?,
             primitives_ready,
             counts,
+            time_seed,
         }))
+    }
+
+    /// Exact native record identity, including UUID precedence, is normalized
+    /// by the existing writer. No per-candidate source-event scan occurs here.
+    pub(crate) fn source_has_copy_identity(
+        &self,
+        witness: &SourceWitness,
+        identity: &str,
+    ) -> io::Result<(bool, Work)> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(io::Error::other)?;
+        let file = self.selected_file(witness)?;
+        let generation: Option<String> = tx
+            .query_row(
+                "SELECT generation FROM native_source_order_facts WHERE file_id=?1",
+                [file],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        let expected = witness
+            .ledger
+            .as_ref()
+            .map(source_order_generation)
+            .transpose()
+            .map_err(io::Error::other)?;
+        if generation.is_none() || generation != expected {
+            return Err(io::Error::other(
+                "native copy primitives require bounded repair",
+            ));
+        }
+        let mut q = tx.prepare("SELECT EXISTS(SELECT 1 FROM native_source_copy_events WHERE file_id=?1 AND identity=?2)").map_err(io::Error::other)?;
+        let present = q
+            .query_row(params![file, identity], |r| r.get(0))
+            .map_err(io::Error::other)?;
+        let work = Work {
+            decoded_rows: 0,
+            metadata_bytes: 0,
+            vm_steps: q.get_status(rusqlite::StatementStatus::VmStep),
+        };
+        Ok((present, work))
     }
 
     pub(crate) fn events_page(
@@ -1830,6 +1901,7 @@ pub(super) fn write_source_facts(
     index: &FileIndex,
     changes: &super::super::DirtyRows,
     complete: bool,
+    expected: Option<&Ledger>,
 ) -> rusqlite::Result<()> {
     let file: i64 = tx.query_row("SELECT file_id FROM files WHERE path=?1", [path], |r| {
         r.get(0)
@@ -1887,6 +1959,88 @@ pub(super) fn write_source_facts(
                 seq_int(index.signals.len())
             ],
         )?;
+    }
+    write_order_facts(tx, file, ledger, index, changes, complete, expected)?;
+    Ok(())
+}
+
+/// Full initial publication normalizes retained native facts once. Normal
+/// append visits only parser-owned touched rows and the appended suffix.
+/// Old missing primitives stay unqualified until bounded original repair.
+fn write_order_facts(
+    tx: &Transaction<'_>,
+    file: i64,
+    ledger: &Ledger,
+    index: &FileIndex,
+    changes: &super::super::DirtyRows,
+    complete: bool,
+    expected: Option<&Ledger>,
+) -> rusqlite::Result<()> {
+    let old: Option<String> = tx
+        .query_row(
+            "SELECT generation FROM native_source_order_facts WHERE file_id=?1",
+            [file],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let qualified =
+        complete || old.is_some() && old == expected.map(source_order_generation).transpose()?;
+    if complete {
+        tx.execute(
+            "DELETE FROM native_source_event_times WHERE file_id=?1",
+            [file],
+        )?;
+        tx.execute(
+            "DELETE FROM native_source_copy_events WHERE file_id=?1",
+            [file],
+        )?;
+    }
+    changed(
+        changes.before_events,
+        &changes.events,
+        &index.events,
+        |seq, event| {
+            #[cfg(test)]
+            ORDER_FACT_VISITS.with(|n| n.set(n.get() + 1));
+            if let Some(time) = event.t {
+                tx.execute("INSERT INTO native_source_event_times VALUES(?1,?2,?3) ON CONFLICT(file_id,seq) DO UPDATE SET t=excluded.t",params![file,seq_int(seq),time])?;
+            } else {
+                tx.execute(
+                    "DELETE FROM native_source_event_times WHERE file_id=?1 AND seq=?2",
+                    params![file, seq_int(seq)],
+                )?;
+            }
+            if let Some(identity) = crate::model::native_copy_identity(event) {
+                tx.execute("INSERT INTO native_source_copy_events VALUES(?1,?2,?3) ON CONFLICT(file_id,seq) DO UPDATE SET identity=excluded.identity",params![file,seq_int(seq),identity])?;
+            } else {
+                tx.execute(
+                    "DELETE FROM native_source_copy_events WHERE file_id=?1 AND seq=?2",
+                    params![file, seq_int(seq)],
+                )?;
+            }
+            Ok(())
+        },
+        |cut| {
+            tx.execute(
+                "DELETE FROM native_source_event_times WHERE file_id=?1 AND seq>=?2",
+                params![file, seq_int(cut)],
+            )?;
+            tx.execute(
+                "DELETE FROM native_source_copy_events WHERE file_id=?1 AND seq>=?2",
+                params![file, seq_int(cut)],
+            )?;
+            Ok(())
+        },
+    )?;
+    if qualified {
+        let first: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT seq,t FROM native_source_event_times WHERE file_id=?1 ORDER BY seq LIMIT 1",
+                [file],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        tx.execute("INSERT INTO native_source_order_facts VALUES(?1,?2,?3,?4) ON CONFLICT(file_id) DO UPDATE SET generation=excluded.generation,first_seq=excluded.first_seq,first_ms=excluded.first_ms",params![file,source_order_generation(ledger)?,first.map(|p|p.0),first.map(|p|p.1)])?;
     }
     Ok(())
 }
@@ -2345,7 +2499,7 @@ mod tests {
         index.links.session_ids.insert("origin".into());
         let changes = super::super::super::DirtyRows::between(&fixture.index, &index);
         let tx = fixture.store.connection.unchecked_transaction().unwrap();
-        write_source_facts(&tx, path, &ledger, &index, &changes, false).unwrap();
+        write_source_facts(&tx, path, &ledger, &index, &changes, false, Some(&ledger)).unwrap();
         tx.commit().unwrap();
         assert_eq!(
             fixture
@@ -2361,7 +2515,7 @@ mod tests {
             .execute("DELETE FROM native_source_facts", [])
             .unwrap();
         let tx = fixture.store.connection.unchecked_transaction().unwrap();
-        write_source_facts(&tx, path, &ledger, &index, &changes, false).unwrap();
+        write_source_facts(&tx, path, &ledger, &index, &changes, false, Some(&ledger)).unwrap();
         tx.commit().unwrap();
         assert!(
             !fixture
@@ -2399,6 +2553,166 @@ mod tests {
             assert_eq!(FULL_LINK_VISITS.with(Cell::get), 0);
             assert_eq!(DELTA_LINK_VISITS.with(Cell::get), 1);
         }
+    }
+    #[test]
+    fn native_query_symbolic_first_time_and_copy_primitives_have_fixed_append_work() {
+        for earlier in [0, 128, 1024, 8192] {
+            let fixture = Fixture::new(0);
+            let witness = fixture.source();
+            let ledger = witness.ledger.as_ref().unwrap();
+            let path = witness.source.path.to_str().unwrap();
+            let mut index = fixture.index.clone();
+            index.events = (0..=earlier)
+                .map(|seq| Event {
+                    k: Kind::A,
+                    o: seq as u64,
+                    u: Some(format!("uuid-{seq}")),
+                    ..Event::default()
+                })
+                .collect();
+            let tx = fixture.store.connection.unchecked_transaction().unwrap();
+            write_index_changes(&tx, path, ledger, &index, None, None).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .source_header(&fixture.source())
+                    .unwrap()
+                    .unwrap()
+                    .time_seed,
+                Some(TimeSeed {
+                    first_seq: None,
+                    first_ms: None
+                })
+            );
+            let mut work = Vec::new();
+            for (time, identity) in [(200, "first-timed"), (10, "later-earlier-time")] {
+                let mut changes = super::super::super::DirtyRows::begin(&index);
+                index.events.push(Event {
+                    k: Kind::Tool,
+                    o: index.events.len() as u64,
+                    t: Some(time),
+                    id: Some(identity.into()),
+                    ..Event::default()
+                });
+                // DirtyRows::begin owns the previous tail. No old candidate is
+                // touched when the first native timestamp resolves its seed.
+                changes.events.insert(index.events.len() - 1);
+                ORDER_FACT_VISITS.with(|n| n.set(0));
+                let tx = fixture.store.connection.unchecked_transaction().unwrap();
+                write_index_changes(&tx, path, ledger, &index, Some(&changes), Some(ledger))
+                    .unwrap();
+                tx.commit().unwrap();
+                assert_eq!(ORDER_FACT_VISITS.with(Cell::get), 1);
+                let source = fixture.source();
+                let seed = fixture
+                    .store
+                    .source_header(&source)
+                    .unwrap()
+                    .unwrap()
+                    .time_seed
+                    .unwrap();
+                assert_eq!(seed.first_seq, Some(earlier + 1));
+                assert_eq!(seed.first_ms, index.events.iter().find_map(|e| e.t));
+                assert_eq!(seed.first_ms, Some(200));
+                let (present, measured) = fixture
+                    .store
+                    .source_has_copy_identity(&source, identity)
+                    .unwrap();
+                assert!(present);
+                assert_eq!(measured.decoded_rows, 0);
+                work.push(measured.vm_steps);
+            }
+            assert_eq!(work[0], work[1]);
+            assert!(
+                fixture
+                    .store
+                    .source_has_copy_identity(&fixture.source(), "uuid-0")
+                    .unwrap()
+                    .0
+            );
+        }
+    }
+
+    #[test]
+    fn native_query_copy_identity_uses_native_uuid_precedence_and_old_footer_stays_pending() {
+        let fixture = Fixture::new(0);
+        let witness = fixture.source();
+        let ledger = witness.ledger.as_ref().unwrap();
+        let path = witness.source.path.to_str().unwrap();
+        let mut index = fixture.index.clone();
+        index.events = vec![
+            Event {
+                k: Kind::A,
+                id: Some("plain-assistant-id".into()),
+                ..Event::default()
+            },
+            Event {
+                k: Kind::Tool,
+                id: Some("shadowed-tool-id".into()),
+                u: Some("native-uuid".into()),
+                ..Event::default()
+            },
+            Event {
+                k: Kind::Xsm,
+                id: Some("native-message-id".into()),
+                ..Event::default()
+            },
+        ];
+        let tx = fixture.store.connection.unchecked_transaction().unwrap();
+        write_index_changes(&tx, path, ledger, &index, None, None).unwrap();
+        tx.commit().unwrap();
+        for identity in [
+            "plain-assistant-id",
+            "shadowed-tool-id",
+            "native-uuid",
+            "native-message-id",
+        ] {
+            let oracle = index
+                .events
+                .iter()
+                .filter_map(crate::model::native_copy_identity)
+                .any(|candidate| candidate == identity);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_has_copy_identity(&fixture.source(), identity)
+                    .unwrap()
+                    .0,
+                oracle
+            );
+        }
+        fixture
+            .store
+            .connection
+            .execute("DELETE FROM native_source_order_facts", [])
+            .unwrap();
+        let changes = super::super::super::DirtyRows::begin(&index);
+        index.events.push(Event {
+            k: Kind::A,
+            t: Some(700),
+            ..Event::default()
+        });
+        ORDER_FACT_VISITS.with(|n| n.set(0));
+        let tx = fixture.store.connection.unchecked_transaction().unwrap();
+        write_index_changes(&tx, path, ledger, &index, Some(&changes), Some(ledger)).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(ORDER_FACT_VISITS.with(Cell::get), 1);
+        assert!(
+            fixture
+                .store
+                .source_header(&fixture.source())
+                .unwrap()
+                .unwrap()
+                .time_seed
+                .is_none()
+        );
+        assert!(
+            fixture
+                .store
+                .source_has_copy_identity(&fixture.source(), "native-uuid")
+                .is_err()
+        );
     }
     #[test]
     fn native_query_all_admitted_owners_and_new_closure_are_fenced() {
@@ -2539,7 +2853,8 @@ mod tests {
                 assert!(changes.busy.len() <= 3);
                 BUSY_FACT_VISITS.with(|n| n.set(0));
                 let tx = fixture.store.connection.unchecked_transaction().unwrap();
-                write_source_facts(&tx, path, &ledger, &index, &changes, false).unwrap();
+                write_source_facts(&tx, path, &ledger, &index, &changes, false, Some(&ledger))
+                    .unwrap();
                 tx.commit().unwrap();
                 assert!(BUSY_FACT_VISITS.with(Cell::get) <= 3);
                 let mut actual = Vec::new();
@@ -2592,7 +2907,7 @@ mod tests {
         super::super::super::activity(&mut index, Some(-1000));
         let changes = index.dirty_rows.take().unwrap();
         let tx = fixture.store.connection.unchecked_transaction().unwrap();
-        write_source_facts(&tx, path, &ledger, &index, &changes, false).unwrap();
+        write_source_facts(&tx, path, &ledger, &index, &changes, false, Some(&ledger)).unwrap();
         tx.commit().unwrap();
         assert!(
             !fixture

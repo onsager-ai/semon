@@ -61,7 +61,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 31;
+const SCHEMA_VERSION: i64 = 32;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -192,6 +192,20 @@ CREATE TABLE IF NOT EXISTS native_source_facts (
     events INTEGER NOT NULL,
     extras INTEGER NOT NULL,
     signals INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS native_source_event_times (
+    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, t INTEGER NOT NULL,
+    PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_source_copy_events (
+    file_id INTEGER NOT NULL, seq INTEGER NOT NULL, identity TEXT NOT NULL,
+    PRIMARY KEY(file_id,seq)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_source_copy_identity ON native_source_copy_events(file_id,identity,seq);
+CREATE TABLE IF NOT EXISTS native_source_order_facts (
+    file_id INTEGER PRIMARY KEY, generation TEXT NOT NULL,
+    first_seq INTEGER, first_ms INTEGER,
+    CHECK((first_seq IS NULL)=(first_ms IS NULL))
 ) STRICT;
 CREATE TABLE IF NOT EXISTS files (
     file_id INTEGER PRIMARY KEY,
@@ -363,6 +377,9 @@ DELETE FROM native_source_busy;
 DELETE FROM native_source_busy_intervals;
 DELETE FROM native_source_links;
 DELETE FROM native_source_facts;
+DELETE FROM native_source_event_times;
+DELETE FROM native_source_copy_events;
+DELETE FROM native_source_order_facts;
 DELETE FROM files;
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
@@ -4102,6 +4119,9 @@ impl SqliteStore {
                 "native_source_busy_intervals",
                 "native_source_links",
                 "native_source_facts",
+                "native_source_event_times",
+                "native_source_copy_events",
+                "native_source_order_facts",
             ] {
                 transaction.execute(
                     &format!(
@@ -5473,6 +5493,9 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
         "native_source_busy_intervals",
         "native_source_links",
         "native_source_facts",
+        "native_source_event_times",
+        "native_source_copy_events",
+        "native_source_order_facts",
     ] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?1"),
@@ -5573,6 +5596,7 @@ fn write_index_changes_measured(
         index,
         changed_rows,
         changes.is_none(),
+        expected,
     )?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
