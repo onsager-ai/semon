@@ -36,6 +36,9 @@ impl NativeStore {
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<AdmissionStep> {
         let mut work = RepairWork::default();
+        if repair.source.root != "copilot" {
+            return Ok(result(Outcome::Conflict, work, None));
+        }
         if cancelled() {
             return Ok(result(Outcome::Deferred, work, None));
         }

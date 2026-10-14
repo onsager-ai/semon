@@ -66,6 +66,9 @@ impl<N, T> Cursor<N, T> {
     pub(crate) fn complete(&self) -> bool {
         matches!(self.phase, Phase::Done)
     }
+    pub(crate) fn valid(&self) -> bool {
+        !matches!(self.phase,Phase::DispatchKind{index,..} if index>4)
+    }
 }
 
 #[derive(Clone, Debug)]

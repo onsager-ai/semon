@@ -33,6 +33,9 @@ impl NativeStore {
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<BodyStep> {
         let mut work = RepairWork::default();
+        if repair.source.root != "copilot" {
+            return Ok(result(Outcome::Conflict, work, false));
+        }
         if cancelled() {
             return Ok(result(Outcome::Deferred, work, false));
         }
@@ -67,7 +70,7 @@ impl NativeStore {
         } else {
             (None, copilot::Cursor::new(base.clone()))
         };
-        if cursor.base != *base {
+        if !cursor.valid() || cursor.base != *base {
             return Err(io::Error::other(
                 "native Copilot base changed during repair",
             ));

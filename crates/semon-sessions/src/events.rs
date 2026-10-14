@@ -4879,15 +4879,6 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
     let identity = identity.expect("admitted native identity").as_str();
     let data = &record["data"];
     let time = record_time(record);
-    if let Some(timestamp) = field(record, "timestamp")
-        && time.is_some()
-    {
-        let index = summary.copilot.as_mut().expect("initialized");
-        if index.first.is_none() {
-            index.first = Some(timestamp.into());
-        }
-        index.last = Some(timestamp.into());
-    }
     activity(summary, time);
     let event = Event {
         o: offset,
@@ -4895,98 +4886,45 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
         u: Some(identity.to_owned()),
         ..Default::default()
     };
-    match field(record, "type").unwrap_or("") {
-        "session.start" => {
-            summary.cwd = data
-                .get("context")
-                .and_then(|c| field(c, "cwd"))
-                .map(str::to_owned);
-            summary.entrypoint = Some("copilot-cli".into());
-            summary.last_model = field(data, "selectedModel").map(str::to_owned);
-            setting(
-                summary,
-                SignalKind::Model,
-                offset,
-                time,
-                field(data, "selectedModel"),
-            );
-            setting(
-                summary,
-                SignalKind::Effort,
-                offset,
-                time,
-                field(data, "reasoningEffort"),
-            );
-            summary.copilot.as_mut().expect("initialized").lifecycle = Some("session.start".into());
-        }
-        "session.resume" => {
-            summary.copilot.as_mut().expect("initialized").lifecycle = Some("session.resume".into())
-        }
-        "session.model_change" => {
-            let model = field(data, "newModel").or_else(|| field(data, "model"));
-            setting(summary, SignalKind::Model, offset, time, model);
-            if let Some(model) = model {
-                summary.last_model = Some(model.to_owned());
-            }
-        }
-        "assistant.message" => {
-            if let Some(model) = field(data, "model") {
-                summary.last_model = Some(model.into());
-                setting(summary, SignalKind::Model, offset, time, Some(model));
-            }
-        }
-        "tool.execution_start" => {
-            // A start is metadata for the assistant's exact request; no fabricated
-            // call from an orphan start or name/timing attribution.
-        }
-        "abort" => {
-            // No toolCallId: retain cancellation; pending calls remain unknown.
-            setting(
-                summary,
-                SignalKind::Interrupt,
-                offset,
-                time,
-                field(data, "reason"),
-            );
-        }
-        "session.compaction_complete" => {
-            note(
-                summary,
-                SignalKind::Compact,
-                offset,
-                time,
-                "manual".into(),
-                None,
-            );
-        }
-        "session.shutdown" => {
-            let index = summary.copilot.as_mut().expect("initialized");
-            index.lifecycle = Some("session.shutdown".into());
-            // Each shutdown replaces the preceding cumulative snapshot, including
-            // child usage. Never add agentMetrics or compaction metrics to it.
-            index.usage = crate::copilot::snapshot(data);
-            index.usage_source = Some(crate::copilot::Observation {
-                event_id: identity.into(),
-                offset,
-                timestamp: time,
-            });
-            index.usage_events = index
-                .usage
-                .as_ref()
-                .map(|usage| {
-                    usage
-                        .by_model
-                        .iter()
-                        .map(|(model, tokens)| CodexUsageEvent {
-                            model: model.clone(),
-                            tokens: tokens.clone(),
-                            timestamp: time,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-        }
-        _ => {}
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut metadata = native_harness::copilot_metadata::Cursor::new(offset, time);
+    while metadata.result().is_none() {
+        let prepared = native_producer::complete(native_harness::copilot_metadata::prepare(
+            &mut source,
+            summary,
+            &metadata,
+        ));
+        native_producer::complete(native_harness::copilot_metadata::apply(
+            summary,
+            &mut metadata,
+            prepared,
+        ));
+    }
+    if metadata.result() == Some(true) {
+        let index = summary.copilot.as_mut().expect("initialized");
+        // Each shutdown replaces the preceding cumulative snapshot, including
+        // child usage. Never add agentMetrics or compaction metrics to it.
+        index.usage = crate::copilot::snapshot(data);
+        index.usage_source = Some(crate::copilot::Observation {
+            event_id: identity.into(),
+            offset,
+            timestamp: time,
+        });
+        index.usage_events = index
+            .usage
+            .as_ref()
+            .map(|usage| {
+                usage
+                    .by_model
+                    .iter()
+                    .map(|(model, tokens)| CodexUsageEvent {
+                        model: model.clone(),
+                        tokens: tokens.clone(),
+                        timestamp: time,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     }
     let mut record = native_harness::record::ValueRecord { record };
     let mut cursor = native_harness::copilot::Cursor::new(event.into());

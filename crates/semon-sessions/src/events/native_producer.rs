@@ -84,6 +84,20 @@ pub(crate) fn setting<S: SignalStore>(
     let Some(value) = value.and_then(super::bounded) else {
         return Ok(());
     };
+    setting_tag(store, k, o, t, Some(value))
+}
+/// value comes from the same native bounded-tag producer. It may contain the
+/// established #hash suffix, so it must not be classified a second time.
+pub(crate) fn setting_tag<S: SignalStore>(
+    store: &mut S,
+    k: SignalKind,
+    o: u64,
+    t: Option<i64>,
+    value: Option<String>,
+) -> Result<(), S::Error> {
+    let Some(value) = value else {
+        return Ok(());
+    };
     if store
         .last_signal(Some(k))?
         .and_then(|(_, signal)| signal.n)
