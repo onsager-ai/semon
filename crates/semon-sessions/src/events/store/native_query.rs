@@ -10,6 +10,7 @@ pub(super) mod candidate_delta;
 mod native_repair;
 pub(crate) mod physical_profile;
 pub(crate) mod point_publication;
+pub(crate) mod source_candidate;
 pub(crate) mod source_roots;
 pub(crate) type CandidateChange = candidate_delta::CandidateChange;
 pub(crate) type CandidateInterest = candidate_delta::CandidateInterest;
@@ -228,6 +229,15 @@ pub(crate) struct EventAddress {
     pub(crate) seq: usize,
 }
 
+pub(crate) enum EventPoint {
+    Event(Event),
+    Missing,
+    /// Scalar size evidence only: no oversized native metadata was decoded.
+    OriginalRequired {
+        bytes: usize,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SourceHeader {
     pub(crate) witness: SourceWitness,
@@ -388,6 +398,12 @@ pub(crate) struct Work {
     pub(crate) decoded_rows: usize,
     pub(crate) metadata_bytes: usize,
     pub(crate) vm_steps: i32,
+}
+/// Actual metadata decoded by one owned relationship/closure qualification.
+/// Controllers count every invocation, including refusal and cancellation.
+pub(crate) struct ClosureRead {
+    pub(crate) current: bool,
+    pub(crate) work: Work,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Page<T, K> {
@@ -2552,16 +2568,45 @@ impl NativeStore {
         extra: bool,
         seq: usize,
     ) -> io::Result<Option<Event>> {
+        self.event_at_measured(witness, extra, seq)
+            .map(|(event, _)| event)
+    }
+    pub(crate) fn event_at_measured(
+        &self,
+        witness: &SourceWitness,
+        extra: bool,
+        seq: usize,
+    ) -> io::Result<(Option<Event>, Work)> {
+        let (point, work) = self.event_point(witness, extra, seq, BYTES)?;
+        match point {
+            EventPoint::Event(event) => Ok((Some(event), work)),
+            EventPoint::Missing => Ok((None, work)),
+            EventPoint::OriginalRequired { .. } => Err(io::Error::other(
+                "native point event exceeds metadata budget",
+            )),
+        }
+    }
+    pub(crate) fn event_point(
+        &self,
+        witness: &SourceWitness,
+        extra: bool,
+        seq: usize,
+        maximum: usize,
+    ) -> io::Result<(EventPoint, Work)> {
+        if maximum == 0 || maximum > BYTES {
+            return Err(io::Error::other("invalid native event point budget"));
+        }
         let tx = self
             .connection
             .unchecked_transaction()
             .map_err(io::Error::other)?;
         let Some(file) = current_file_if_present(&tx, witness).map_err(io::Error::other)? else {
-            return Ok(None);
+            return Ok((EventPoint::Missing, Work::default()));
         };
         let seq = sequence_sql(seq).map_err(io::Error::other)?;
         let length = "192+COALESCE(octet_length(k),0)+COALESCE(octet_length(id),0)+COALESCE(octet_length(n),0)+COALESCE(octet_length(y),0)+COALESCE(octet_length(reply_m),0)+COALESCE(octet_length(peer_sock),0)+COALESCE(octet_length(peer_start),0)+COALESCE(octet_length(u),0)";
-        let columns = guard_columns(EVENT_COLUMNS, length);
+        let columns =
+            guard_columns(EVENT_COLUMNS, length).replace("<=1048576", &format!("<={maximum}"));
         let mut q = tx
             .prepare(&format!(
                 "SELECT {columns},{length} FROM events WHERE file_id=?1 AND extra=?2 AND seq=?3"
@@ -2571,14 +2616,38 @@ impl NativeStore {
             .query(params![file, extra, seq])
             .map_err(io::Error::other)?;
         let Some(row) = rows.next().map_err(io::Error::other)? else {
-            return Ok(None);
+            drop(rows);
+            return Ok((
+                EventPoint::Missing,
+                Work {
+                    vm_steps: q.get_status(rusqlite::StatementStatus::VmStep),
+                    ..Default::default()
+                },
+            ));
         };
-        if row.get::<_, i64>(27).map_err(io::Error::other)? > BYTES as i64 {
-            return Err(io::Error::other(
-                "native point event exceeds metadata budget",
+        let bytes = usize::try_from(row.get::<_, i64>(27).map_err(io::Error::other)?)
+            .map_err(io::Error::other)?;
+        if bytes > maximum {
+            drop(rows);
+            return Ok((
+                EventPoint::OriginalRequired { bytes },
+                Work {
+                    decoded_rows: 1,
+                    metadata_bytes: 8,
+                    vm_steps: q.get_status(rusqlite::StatementStatus::VmStep),
+                },
             ));
         }
-        Ok(Some(read_event(row).map_err(io::Error::other)?.2))
+        let event = read_event(row).map_err(io::Error::other)?.2;
+        drop(rows);
+        Ok((
+            EventPoint::Event(event),
+            Work {
+                decoded_rows: 1,
+                metadata_bytes: bytes,
+                vm_steps: q.get_status(rusqlite::StatementStatus::VmStep),
+            },
+        ))
     }
 }
 
@@ -7501,5 +7570,182 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+    #[test]
+    fn native_source_candidate_points_keep_code_mode_placement_and_fixed_history_work() {
+        use crate::model::{ToolState, native_stage::EntryKind};
+        use source_candidate::{Evidence, Member, Prepared, Request};
+        let mut vms = Vec::new();
+        for history in [0, 128, 1024, 8192] {
+            let fixture = Fixture::new(history);
+            let mut index = fixture.index.clone();
+            let call = (history as u64 + 1) * 8;
+            let operation = call + 8;
+            let reply = call + 16;
+            index.events[history] = Event {
+                k: Kind::Tool,
+                o: call,
+                b: 2,
+                t: Some(-40),
+                n: Some("exec_command".into()),
+                r: Some(Reply {
+                    o: reply,
+                    b: 4,
+                    e: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            index.extras.push(Event {
+                k: Kind::Operation,
+                o: operation,
+                b: 3,
+                parent: Some(history),
+                ..Default::default()
+            });
+            fixture.write_full_index(&index);
+            let witness = fixture.source();
+            let before = super::super::super::FILE_READS.with(Cell::get);
+            let read = fixture
+                .store
+                .source_candidate(
+                    Evidence::Current(&witness),
+                    Request {
+                        address: EventAddress {
+                            extra: false,
+                            seq: history,
+                        },
+                        member: Member::Native {
+                            background_end: false,
+                        },
+                        identity: [7; 32],
+                        ordinal: 19,
+                        subagent_handback: None,
+                    },
+                )
+                .unwrap();
+            assert!(read.work.decoded_rows <= 12);
+            assert!(read.work.metadata_bytes < 4096);
+            vms.push(read.work.vm_steps);
+            let Prepared::Candidate { candidate, found } = read.prepared else {
+                panic!("expected native call candidate")
+            };
+            assert!(found.n.is_none() && found.id.is_none());
+            assert!(candidate.has_operations);
+            let (order, entry) = candidate.qualify(5, 2, true, None);
+            assert_eq!(order.key, (-40, 2, reply, 4, 1));
+            assert_eq!(order.ordinal, 19);
+            assert_eq!(entry.kind, EntryKind::Tool(ToolState::Err));
+            assert_eq!(entry.at, Some((5, history)));
+            assert_eq!(super::super::super::FILE_READS.with(Cell::get), before);
+            let read = fixture
+                .store
+                .source_candidate(
+                    Evidence::Current(&witness),
+                    Request {
+                        address: EventAddress {
+                            extra: true,
+                            seq: 1,
+                        },
+                        member: Member::Operation,
+                        identity: [8; 32],
+                        ordinal: 21,
+                        subagent_handback: None,
+                    },
+                )
+                .unwrap();
+            let Prepared::Candidate { candidate, .. } = read.prepared else {
+                panic!("expected operation")
+            };
+            assert_eq!(
+                candidate.qualify(5, 2, true, None).0.key,
+                (-40, 2, operation, 3, 1)
+            );
+            index.events[history].n = Some("SubagentHandback".into());
+            fixture.write_full_index(&index);
+            let witness = fixture.source();
+            let read = fixture
+                .store
+                .source_candidate(
+                    Evidence::Current(&witness),
+                    Request {
+                        address: EventAddress {
+                            extra: false,
+                            seq: history,
+                        },
+                        member: Member::Native {
+                            background_end: false,
+                        },
+                        identity: [7; 32],
+                        ordinal: 19,
+                        subagent_handback: Some(false),
+                    },
+                )
+                .unwrap();
+            assert!(matches!(read.prepared, Prepared::Omitted));
+            let read = fixture
+                .store
+                .source_candidate(
+                    Evidence::Current(&witness),
+                    Request {
+                        address: EventAddress {
+                            extra: false,
+                            seq: history,
+                        },
+                        member: Member::Placed { handoff: 4 },
+                        identity: [7; 32],
+                        ordinal: 19,
+                        subagent_handback: None,
+                    },
+                )
+                .unwrap();
+            let Prepared::Candidate { candidate, .. } = read.prepared else {
+                panic!("native placement replaces excluded event kind")
+            };
+            assert_eq!(candidate.entry.kind, EntryKind::H(4));
+            assert_eq!(
+                candidate.qualify(5, 2, true, None).0.key,
+                (-40, 2, call, 2, 1)
+            );
+        }
+        assert!(
+            vms.windows(2).all(|pair| pair[0] == pair[1]),
+            "candidate primitive VM work {vms:?}"
+        );
+    }
+
+    #[test]
+    fn native_source_candidate_queues_original_for_large_current_metadata_without_decoding_it() {
+        use source_candidate::{Evidence, Member, Prepared, Request};
+        let fixture = Fixture::new(0);
+        let mut index = fixture.index.clone();
+        index.events[0].k = Kind::Tool;
+        index.events[0].n = Some("x".repeat(2 * BYTES));
+        fixture.write_full_index(&index);
+        let witness = fixture.source();
+        let read = fixture
+            .store
+            .source_candidate(
+                Evidence::Current(&witness),
+                Request {
+                    address: EventAddress {
+                        extra: false,
+                        seq: 0,
+                    },
+                    member: Member::Native {
+                        background_end: false,
+                    },
+                    identity: [7; 32],
+                    ordinal: 0,
+                    subagent_handback: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(read.prepared,Prepared::OriginalRequired { metadata_bytes } if metadata_bytes > BYTES)
+        );
+        assert_eq!(read.work.decoded_rows, 1);
+        assert_eq!(read.work.metadata_bytes, 8);
+        assert!(read.work.vm_steps > 0);
     }
 }

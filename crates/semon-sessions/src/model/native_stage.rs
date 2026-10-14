@@ -165,6 +165,22 @@ pub(crate) fn event_kind(
     background_end: bool,
     has_operations: bool,
 ) -> Option<EntryKind> {
+    event_kind_qualified(
+        found,
+        background_end,
+        has_operations,
+        found.n.as_deref() == Some("SubagentHandback"),
+    )
+}
+
+/// Descriptor-backed sources supply the exact native name predicate. Their
+/// scalar Event intentionally has no owned name and must not infer absence.
+pub(crate) fn event_kind_qualified(
+    found: &Event,
+    background_end: bool,
+    has_operations: bool,
+    subagent_handback: bool,
+) -> Option<EntryKind> {
     match found.k {
         Kind::U => Some(EntryKind::U),
         Kind::A => Some(EntryKind::A),
@@ -175,9 +191,7 @@ pub(crate) fn event_kind(
         {
             None
         }
-        Kind::Tool if found.n.as_deref() != Some("SubagentHandback") => {
-            Some(EntryKind::Tool(tool_state(found)))
-        }
+        Kind::Tool if !subagent_handback => Some(EntryKind::Tool(tool_state(found))),
         _ => None,
     }
 }
@@ -733,5 +747,34 @@ mod tests {
         let mut data = signal_kind(&signal, None);
         cursor.apply(&mut data);
         assert_eq!(data.previous.as_deref(), Some("b"));
+    }
+    #[test]
+    fn native_descriptor_name_predicate_is_exact_without_an_owned_name() {
+        for name in [
+            None,
+            Some("SubagentHandback"),
+            Some("SubagentHandbackx"),
+            Some("exec_command"),
+        ] {
+            let event = Event {
+                k: Kind::Tool,
+                n: name.map(str::to_owned),
+                ..Default::default()
+            };
+            let scalar =
+                crate::events::native_event::NativeEvent::<String>::from(event.clone()).scalar();
+            assert!(scalar.n.is_none());
+            for operations in [false, true] {
+                assert_eq!(
+                    event_kind(&event, false, operations),
+                    event_kind_qualified(
+                        &scalar,
+                        false,
+                        operations,
+                        name == Some("SubagentHandback")
+                    )
+                );
+            }
+        }
     }
 }
