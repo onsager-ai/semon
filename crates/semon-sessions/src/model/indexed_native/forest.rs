@@ -19,6 +19,9 @@ use std::io;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Channel {
+    /// The native incoming head always orders at MIN/file0/position0 in
+    /// either merge mode. Its source address still belongs to its own file.
+    Head,
     Offset,
     BeforeFirst,
     Observed,
@@ -39,18 +42,27 @@ pub(crate) struct Source<'a> {
 impl Source<'_> {
     fn prefix(&self, several: bool) -> Option<[u8; 16]> {
         let time = match self.channel {
+            Channel::Head => i64::MIN,
             Channel::Offset => 0,
             Channel::BeforeFirst => self.first_regular_time.unwrap_or(i64::MIN),
             Channel::Observed => return None,
         };
         let mut prefix = [0; 16];
         prefix[..8].copy_from_slice(&((time as u64) ^ (1 << 63)).to_be_bytes());
-        prefix[8..]
-            .copy_from_slice(&(if several { self.file_order as u64 } else { 0 }).to_be_bytes());
+        prefix[8..].copy_from_slice(
+            &(if several && !matches!(self.channel, Channel::Head) {
+                self.file_order as u64
+            } else {
+                0
+            })
+            .to_be_bytes(),
+        );
         Some(prefix)
     }
     fn check(&self, several: bool) -> io::Result<()> {
-        if several == matches!(self.channel, Channel::Offset) {
+        if !matches!(self.channel, Channel::Head)
+            && several == matches!(self.channel, Channel::Offset)
+        {
             return Err(io::Error::other(
                 "native source channel does not match merge mode",
             ));
@@ -65,9 +77,12 @@ impl Source<'_> {
                 std::cmp::Ordering::Equal => {}
             }
             let mut local = *global;
-            // Static Offset/BeforeFirst channels always store local time0.
+            // Head retains its forced MIN/file0 key. Static Offset and
+            // BeforeFirst channels instead store symbolic local time0.
             local[..16].fill(0);
-            local[0] = 128;
+            if !matches!(self.channel, Channel::Head) {
+                local[0] = 128;
+            }
             return Some(Some(local));
         }
         let file = (self.file_order as u64).to_be_bytes();
@@ -121,6 +136,10 @@ impl Source<'_> {
         Ok(Some(CandidateBounds { lower, upper }))
     }
     fn qualify(&self, several: bool, facts: &mut Facts) {
+        if matches!(self.channel, Channel::Head) {
+            facts.qualify(self.source, 0, true, Some(i64::MIN));
+            return;
+        }
         facts.qualify(
             self.source,
             self.file_order,
@@ -134,6 +153,7 @@ impl Source<'_> {
     fn point(&self, several: bool, point: CandidatePoint) -> io::Result<Point> {
         let bytes = &point.key;
         if bytes[8..16] != [0; 8]
+            || matches!(self.channel, Channel::Head) && bytes[..29] != [0; 29]
             || matches!(self.channel, Channel::Offset | Channel::BeforeFirst)
                 && bytes[..8] != (1u64 << 63).to_be_bytes()
         {
@@ -142,6 +162,7 @@ impl Source<'_> {
             ));
         }
         let time = match self.channel {
+            Channel::Head => i64::MIN,
             Channel::Offset => 0,
             Channel::BeforeFirst => self.first_regular_time.unwrap_or(i64::MIN),
             Channel::Observed => {
@@ -152,7 +173,11 @@ impl Source<'_> {
         let order = Order {
             key: (
                 time,
-                if several { self.file_order } else { 0 },
+                if several && !matches!(self.channel, Channel::Head) {
+                    self.file_order
+                } else {
+                    0
+                },
                 u64::from_be_bytes(bytes[16..24].try_into().expect("fixed native key")),
                 u32::from_be_bytes(bytes[24..28].try_into().expect("fixed native key")),
                 bytes[28],
@@ -237,6 +262,7 @@ fn add(total: &mut CandidateWork, part: &CandidateWork) {
     total.sqlite_vm_steps += part.sqlite_vm_steps;
     total.apply_visits += part.apply_visits;
     total.nodes_written += part.nodes_written;
+    total.structural_reads += part.structural_reads;
     total.max_depth = total.max_depth.max(part.max_depth);
     total.max_cursor_bytes = total.max_cursor_bytes.max(part.max_cursor_bytes);
     total.max_apply_bytes = total.max_apply_bytes.max(part.max_apply_bytes);
@@ -365,6 +391,60 @@ mod tests {
     use crate::events::store::native_rank::{CandidateLeaf, NodeId};
 
     #[test]
+    fn native_head_channel_matches_candidate_forced_order_and_keeps_source_address() {
+        use crate::model::{native_producer::Candidate, range_stage::Leaf};
+        let empty: NodeId =
+            serde_json::from_value(serde_json::json!({"level":64,"digest":"0".repeat(64)}))
+                .unwrap();
+        let root = CandidateRoot::empty(empty);
+        let candidate = Candidate::head(7, 321, 4, [7; 32]);
+        for several in [false, true] {
+            let source = Source {
+                root: &root,
+                channel: Channel::Head,
+                source: 17,
+                file_order: 99,
+                first_regular_time: Some(900),
+                included: 0,
+            };
+            let (expected, entry) = candidate.qualify(17, 99, several, Some(900));
+            let (local_order, local_entry) = candidate.qualify(0, 0, false, None);
+            let mut facts = Facts::default();
+            Candidate::observe(
+                &mut facts,
+                Leaf {
+                    order: local_order.clone(),
+                    entry: &local_entry,
+                    found: None,
+                    outgoing: None,
+                    boundary: true,
+                    count: 1,
+                },
+            )
+            .unwrap();
+            source.qualify(several, &mut facts);
+            assert_eq!(facts.first.as_ref().unwrap().order, expected);
+            assert_eq!(facts.first.as_ref().unwrap().file, entry.file);
+            assert_eq!(facts.first.as_ref().unwrap().offset, 321);
+            let point = source
+                .point(
+                    several,
+                    CandidatePoint {
+                        key: local_order.encoded(),
+                        leaf: CandidateLeaf {
+                            candidate: candidate.identity,
+                            aggregate: root.empty_graph(),
+                            payload: None,
+                        },
+                    },
+                )
+                .unwrap();
+            assert_eq!(point.order, expected);
+            assert_eq!(point.source, 17);
+        }
+    }
+
+    #[test]
     fn native_forest_projects_inclusive_bounds_without_rewriting_symbolic_keys() {
         // This pure projection oracle intentionally has no admitted authority
         // or SQLite read. Real roots/closures are exercised by storage tests.
@@ -373,8 +453,15 @@ mod tests {
                 .unwrap();
         let root = CandidateRoot::empty(empty.clone());
         for several in [false, true] {
-            for channel in [Channel::Offset, Channel::BeforeFirst, Channel::Observed] {
-                if several == matches!(channel, Channel::Offset) {
+            for channel in [
+                Channel::Head,
+                Channel::Offset,
+                Channel::BeforeFirst,
+                Channel::Observed,
+            ] {
+                if !matches!(channel, Channel::Head)
+                    && several == matches!(channel, Channel::Offset)
+                {
                     continue;
                 }
                 for file_order in [0, 1, 2, usize::MAX] {
@@ -389,11 +476,19 @@ mod tests {
                         };
                         let mut points = Vec::new();
                         for time in [i64::MIN, -1, 0, 1, i64::MAX] {
-                            if !matches!(channel, Channel::Observed) && time != 0 {
+                            if matches!(channel, Channel::Head) && time != i64::MIN
+                                || !matches!(channel, Channel::Observed | Channel::Head)
+                                    && time != 0
+                            {
                                 continue;
                             }
                             for offset in [0, 1, u64::MAX] {
                                 for phase in [0, 1, 2] {
+                                    if matches!(channel, Channel::Head)
+                                        && (offset != 0 || phase != 0)
+                                    {
+                                        continue;
+                                    }
                                     let order = Order {
                                         key: (time, 0, offset, 0, phase),
                                         ordinal: 1,
