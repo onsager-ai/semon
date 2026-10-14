@@ -3221,13 +3221,12 @@ pub(crate) fn gap(summary: &mut FileIndex, offset: u64) {
 }
 
 pub(crate) fn record_time(record: &Value) -> Option<i64> {
-    field(record, "timestamp")
-        .or_else(|| {
-            record
-                .get("payload")
-                .and_then(|payload| field(payload, "timestamp"))
-        })
-        .and_then(parse_ms)
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut cursor = native_harness::record_time::Cursor::default();
+    while cursor.result().is_none() {
+        cursor = native_producer::complete(native_harness::record_time::step(&mut source, &cursor));
+    }
+    cursor.result().expect("completed native record time")
 }
 
 fn absolute_reset_ms(value: &Value) -> Option<i64> {

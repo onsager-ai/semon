@@ -21,6 +21,7 @@ mod native_copilot;
 mod native_events;
 mod native_harness;
 mod native_record_source;
+mod native_record_time;
 mod native_retirement;
 mod native_source;
 mod native_tag;
@@ -33,6 +34,7 @@ pub(crate) type TextComparisonStep = native_compare::TextComparisonStep;
 pub(crate) type BodyStep = native_copilot::BodyStep;
 pub(crate) type AdmissionStep = native_admission::AdmissionStep;
 pub(crate) type OriginalActivityFacts = native_activity::OriginalActivityFacts;
+pub(crate) type RecordTimeStep = native_record_time::RecordTimeStep;
 pub(crate) use native_events::Text as OriginalText;
 pub(crate) use native_harness::LiteralStep;
 pub(crate) use native_source::OriginalEventFacts;
@@ -108,6 +110,11 @@ CREATE TABLE IF NOT EXISTS native_original_copilot_body (
  PRIMARY KEY(original,record_offset)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_original_copilot_admission (
+ original BLOB NOT NULL, record_offset INTEGER NOT NULL,
+ revision INTEGER NOT NULL, cursor TEXT NOT NULL,
+ PRIMARY KEY(original,record_offset)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_original_record_time (
  original BLOB NOT NULL, record_offset INTEGER NOT NULL,
  revision INTEGER NOT NULL, cursor TEXT NOT NULL,
  PRIMARY KEY(original,record_offset)
@@ -3737,6 +3744,69 @@ mod tests {
                     .is_none()
             );
             assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+        }
+    }
+
+    #[test]
+    fn original_record_time_preserves_native_precedence_and_qualified_unknown() {
+        for size in [0usize, 128, 1024, 8192, 200_000] {
+            let valid = format!("2026-10-15T01:02:03{}Z", "x".repeat(size));
+            for record in [
+                serde_json::json!({"timestamp":"invalid","payload":{"timestamp":valid}}),
+                serde_json::json!({"timestamp":false,"payload":{"timestamp":valid}}),
+                serde_json::json!({"timestamp":valid}),
+                serde_json::json!({"payload":null}),
+            ] {
+                let expected = crate::field(&record, "timestamp")
+                    .or_else(|| {
+                        record
+                            .get("payload")
+                            .and_then(|p| crate::field(p, "timestamp"))
+                    })
+                    .and_then(crate::events::parse_ms);
+                assert_eq!(crate::events::record_time(&record), expected);
+                let bytes = format!("{record}\n");
+                let mut fixture = Fixture::new(bytes.as_bytes());
+                let repair = fixture.qualified_record();
+                let reads = crate::events::FILE_READS.with(Cell::get);
+                let mut attempts = 0;
+                loop {
+                    attempts += 1;
+                    assert!(attempts < 128);
+                    let step = fixture
+                        .store
+                        .original_record_time_step(
+                            &fixture.job,
+                            &fixture.source,
+                            &repair,
+                            &fixture.sources.reader(),
+                            &|| false,
+                        )
+                        .unwrap();
+                    assert!(step.work.metadata_rows <= ROWS);
+                    assert!(step.work.metadata_bytes <= BYTES);
+                    assert!(step.work.native_bytes <= crate::SESSION_SOURCE_CHUNK_MAX);
+                    fixture.store = NativeStore::open(&fixture.options).unwrap();
+                    if step.complete {
+                        assert_eq!(step.millis, expected);
+                        break;
+                    }
+                }
+                let cached = fixture
+                    .store
+                    .original_record_time_step(
+                        &fixture.job,
+                        &fixture.source,
+                        &repair,
+                        &fixture.sources.reader(),
+                        &|| false,
+                    )
+                    .unwrap();
+                assert!(cached.complete);
+                assert_eq!(cached.millis, expected);
+                assert_eq!(cached.work.native_bytes, 1);
+                assert_eq!(crate::events::FILE_READS.with(Cell::get), reads);
+            }
         }
     }
 
