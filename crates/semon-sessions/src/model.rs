@@ -563,7 +563,7 @@ pub(crate) fn is_ask(id: &str) -> bool {
 /// What the in-memory text cache may hold, in bytes.
 const TEXT_BUDGET: usize = 32 * 1024 * 1024;
 /// Every text read back is capped to this before it is kept.
-const TEXT_MAX: usize = 64 * 1024;
+pub(crate) const TEXT_MAX: usize = 64 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TextKey {
@@ -6072,7 +6072,7 @@ pub(crate) fn overview_text(recipe: &Value, record: &Value, question: Option<&Va
                 .join("\n"),
             MSG_MAX
         )),
-        Some("answer") => {
+        Some("answer" | "answers") => {
             let questions = question
                 .map(|record| {
                     questions(
@@ -6087,6 +6087,9 @@ pub(crate) fn overview_text(recipe: &Value, record: &Value, question: Option<&Va
             } else {
                 text_answers(&questions, field(&raw, "text").unwrap_or(""))
             };
+            if recipe["kind"] == "answers" {
+                return serde_json::json!(answers);
+            }
             serde_json::json!(
                 answers
                     .iter()

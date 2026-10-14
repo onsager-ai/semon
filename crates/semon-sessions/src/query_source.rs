@@ -188,6 +188,9 @@ struct PreparedBlock {
 }
 
 impl Records<'_> {
+    pub(crate) fn source_ref(&self, path: &Path) -> Option<&SessionSourceRef> {
+        self.sources.proofs.get(path)?.source.as_ref()
+    }
     /// Read only the indexed decisive record. Unlike transcript offsets, a
     /// marker may be valid JSON at EOF before its terminating newline arrives.
     pub(crate) fn marker(
