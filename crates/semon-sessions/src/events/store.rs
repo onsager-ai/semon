@@ -57,7 +57,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -7341,6 +7341,56 @@ mod tests {
             drop(legacy);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn schema_twenty_six_adds_custody_parts_without_rebinding_existing_rows() {
+        let root = scratch("custody-parts-migration");
+        let (options, _, _) = catalog_native_fixture(&root, 2, true);
+        let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
+        let proof = crate::session_source_proof(&options, "codex", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&options, "codex", relative)
+            .unwrap()
+            .unwrap();
+        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+        let path = crate::events::EventCache::path(&options.cache);
+        let (store, _) = opened(&path);
+        // Recreate the preceding schema's absence of this additive table.
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM session_history_slot_parts", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute_batch("DROP TABLE session_history_slot_parts; PRAGMA user_version=26;")
+            .unwrap();
+        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+        drop(store);
+        let (store, _) = opened(&path);
+        assert_eq!(
+            versions(&store.connection).unwrap(),
+            (27, Some(CACHE_VERSION))
+        );
+        let mut after = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+        assert_eq!(
+            after.remove("main.session_history_slot_parts"),
+            Some(Vec::new())
+        );
+        after.get_mut("main.sqlite_schema").unwrap().retain(|row| {
+            row[2] != rusqlite::types::Value::Text("session_history_slot_parts".into())
+        });
+        assert_eq!(
+            after, before,
+            "migration must preserve every existing MAIN/TEMP row and schema object"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
