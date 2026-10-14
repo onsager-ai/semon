@@ -1609,12 +1609,16 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            let page = core.respond("GET", "/api/sessions", "machine=second", None);
-            assert!(
-                matches!(page.status, 200 | 503),
-                "unexpected native publication response: {}",
-                page.status
-            );
+            // Unscoped control ownership requires qualified absence in every
+            // configured source, including the unchanged first machine.
+            for machine in ["first", "second"] {
+                let page = core.respond("GET", "/api/sessions", &format!("machine={machine}"), None);
+                assert!(
+                    matches!(page.status, 200 | 503),
+                    "unexpected native publication response: {}",
+                    page.status
+                );
+            }
             if core.session_machine_key("replacement").unwrap().as_deref() == Some("second") {
                 break;
             }
