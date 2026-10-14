@@ -45,7 +45,12 @@ impl AnnotationReach {
         self.position = self.position.max(Some(position));
     }
     pub(crate) fn before(&self, position: (u64, u32)) -> bool {
-        self.position.is_some_and(|reached| position < reached)
+        self.consumed(position, false)
+    }
+    /// Under the native parser's unique operation-offset qualification, direct
+    /// operation consumption and offset-prefix consumption form this union.
+    pub(crate) fn consumed(&self, position: (u64, u32), operation_reached: bool) -> bool {
+        operation_reached || self.position.is_some_and(|reached| position < reached)
     }
 }
 
@@ -375,6 +380,83 @@ pub(crate) fn signal_kind(signal: &events::Signal, tool: Option<String>) -> Sign
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_operation_annotation_prefix_matches_queue_union_with_backwards_entries() {
+        let annotations = [
+            ((1, 0), false),
+            ((4, 0), true),
+            ((6, 0), false),
+            ((7, 0), true),
+            ((9, 0), true),
+            ((10, 0), false),
+        ];
+        let mut queue = std::collections::VecDeque::from(annotations);
+        let mut reach = AnnotationReach::default();
+        let mut consumed = std::collections::BTreeSet::new();
+        let mut operations = std::collections::BTreeSet::new();
+        for (position, operation) in [
+            ((7, 0), true),
+            ((8, 0), false),
+            ((4, 0), true),
+            ((9, 0), true),
+            ((2, 0), false),
+            ((11, 0), false),
+        ] {
+            while queue.front().is_some_and(|row| row.0 < position) {
+                consumed.insert(queue.pop_front().unwrap().0);
+            }
+            if operation {
+                operations.insert(position);
+                if let Some(at) = queue.iter().position(|row| row.1 && row.0.0 == position.0) {
+                    consumed.insert(queue.remove(at).unwrap().0);
+                }
+            }
+            reach.push(position);
+            for (marker, is_operation) in annotations {
+                assert_eq!(
+                    reach.consumed(marker, is_operation && operations.contains(&marker)),
+                    consumed.contains(&marker)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_parser_operation_offsets_are_unique_even_when_item_ids_repeat() {
+        let mut index = crate::events::FileIndex::default();
+        crate::events::codex(
+            &mut index,
+            &serde_json::json!({"type":"response_item",
+            "payload":{"type":"custom_tool_call","call_id":"exec","name":"exec",
+                "input":"await tools.exec_command({cmd:'ls'})"}}),
+            0,
+        );
+        for offset in 1..=32 {
+            crate::events::codex(
+                &mut index,
+                &serde_json::json!({"type":"event_msg",
+                "payload":{"type":"item_completed","item":{"type":"CommandExecution",
+                    "id":"same-item","exit_code":0}}}),
+                offset,
+            );
+        }
+        let operations: Vec<_> = index
+            .extras
+            .iter()
+            .filter(|event| event.k == Kind::Operation)
+            .collect();
+        assert_eq!(operations.len(), 32);
+        assert!(operations.iter().all(|event| event.b == 0));
+        assert_eq!(
+            operations
+                .iter()
+                .map(|event| event.o)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            operations.len()
+        );
+    }
 
     #[test]
     fn native_annotation_reach_matches_offset_queue_with_backwards_entries_and_operations() {
