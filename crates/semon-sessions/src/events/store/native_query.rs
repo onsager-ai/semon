@@ -14,7 +14,7 @@ const STATE_BYTES: usize = 64 * 1024;
 // Rebuildable private Query metadata is versioned independently from the
 // public native Event Index schema28 and the native parser/custody contract.
 // Install both Original repair metadata and the cross-channel child index.
-pub(super) const SCHEMA_VERSION: i64 = 9;
+pub(super) const SCHEMA_VERSION: i64 = 10;
 const SCHEMA_KEY: &str = "native_query_schema";
 
 pub(super) fn schema_version(db: &Connection) -> rusqlite::Result<Option<i64>> {
@@ -5228,6 +5228,16 @@ mod tests {
         private_original_schema_reopen(7);
     }
 
+    #[test]
+    fn native_query_private_eight_reopen_preserves_original_rows_and_installs_event_tables() {
+        private_original_schema_reopen(8);
+    }
+
+    #[test]
+    fn native_query_private_nine_reopen_preserves_child_facts_and_installs_event_tables() {
+        private_original_schema_reopen(9);
+    }
+
     fn private_original_schema_reopen(previous_version: i64) {
         let mut fixture = Fixture::new(0);
         let source = fixture.source();
@@ -5261,7 +5271,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        if previous_version == 7 {
+        if previous_version >= 7 {
             // Preserve every preceding Original table's partial staging rows.
             // Reopening installs schema, without decoding or qualifying them.
             fixture
@@ -5275,6 +5285,45 @@ mod tests {
                  INSERT INTO native_original_fields VALUES(X'07',0,1,1,2,0,1,'{}','{}',NULL,NULL);",
                 )
                 .unwrap();
+        }
+        if previous_version >= 8 {
+            fixture
+                .store
+                .connection
+                .execute_batch(
+                    "INSERT INTO native_original_numbers VALUES(X'07',0,3,3,4,'{}',NULL);
+                 INSERT INTO native_original_members VALUES(X'07',0,0,'field',1,'{}');
+                 INSERT INTO native_original_cleanup VALUES(X'07',X'08',0);",
+                )
+                .unwrap();
+        }
+        let mut added = vec![
+            "native_original_event_state",
+            "native_original_events",
+            "native_original_pending",
+            "native_original_tool_ids",
+        ];
+        if previous_version < 8 {
+            added.extend([
+                "native_original_numbers",
+                "native_original_members",
+                "native_original_cleanup",
+            ]);
+        }
+        if previous_version == 5 {
+            added.extend([
+                "native_original_repairs",
+                "native_original_tokens",
+                "native_original_records",
+                "native_original_nodes",
+                "native_original_fields",
+            ]);
+        }
+        if previous_version < 9 {
+            added.extend([
+                "native_source_child_operations",
+                "native_source_child_operation_facts",
+            ]);
         }
         let job = fixture.admitted();
         let source_header = format!(
@@ -5309,23 +5358,18 @@ mod tests {
         // Exercise both actual reopen entry points against the prior private
         // version, whose native public schema and parser were already current.
         for via_native_store in [true, false] {
-            fixture
-                .store
-                .connection
-                .execute_batch(
-                    "DROP TABLE native_original_numbers; DROP TABLE native_original_members;
-                 DROP TABLE native_original_cleanup;",
-                )
-                .unwrap();
-            if previous_version == 5 {
+            for table in &added {
                 fixture
                     .store
                     .connection
-                    .execute_batch(
-                        "DROP TABLE native_original_fields; DROP TABLE native_original_nodes;
-                 DROP TABLE native_original_records; DROP TABLE native_original_tokens;
-                 DROP TABLE native_original_repairs;",
-                    )
+                    .execute_batch(&format!("DROP TABLE {table};"))
+                    .unwrap();
+            }
+            if previous_version < 9 {
+                fixture
+                    .store
+                    .connection
+                    .execute_batch("DROP TRIGGER native_source_child_operation_cleanup;")
                     .unwrap();
             }
             fixture
@@ -5396,6 +5440,17 @@ mod tests {
                 ("native_original_field_candidate", "index"),
                 ("native_original_field_pending", "index"),
                 ("native_original_number_pending", "index"),
+                ("native_original_event_state", "table"),
+                ("native_original_events", "table"),
+                ("native_original_pending", "table"),
+                ("native_original_tool_ids", "table"),
+                ("native_original_event_identity", "index"),
+                ("native_original_pending_open", "index"),
+                ("native_original_plain_tool_ids", "index"),
+                ("native_source_child_operations", "table"),
+                ("native_source_child_operation_facts", "table"),
+                ("native_source_child_operation_parent", "index"),
+                ("native_source_child_operation_cleanup", "trigger"),
             ] {
                 assert!(
                     fixture
@@ -5410,24 +5465,6 @@ mod tests {
                     "missing Original {kind} {name}"
                 );
             }
-            let added = if previous_version == 5 {
-                vec![
-                    "native_original_repairs",
-                    "native_original_tokens",
-                    "native_original_records",
-                    "native_original_nodes",
-                    "native_original_fields",
-                    "native_original_numbers",
-                    "native_original_members",
-                    "native_original_cleanup",
-                ]
-            } else {
-                vec![
-                    "native_original_numbers",
-                    "native_original_members",
-                    "native_original_cleanup",
-                ]
-            };
             let mut reopened =
                 crate::native_timing::cleanup_tests::snapshot(&fixture.store.connection);
             for table in &added {
@@ -5440,6 +5477,11 @@ mod tests {
                     !added
                         .iter()
                         .any(|table| row[2] == rusqlite::types::Value::Text((*table).into()))
+                        && !(previous_version < 9
+                            && row[1]
+                                == rusqlite::types::Value::Text(
+                                    "native_source_child_operation_cleanup".into(),
+                                ))
                 });
             for row in reopened.get_mut("main.meta").unwrap() {
                 if row[0] == rusqlite::types::Value::Text(SCHEMA_KEY.into()) {
@@ -5450,6 +5492,25 @@ mod tests {
                 reopened, snapshot,
                 "private migration changed existing MAIN/TEMP rows or schema"
             );
+            if previous_version < 9 {
+                assert!(
+                    fixture
+                        .store
+                        .last_operation(&fixture.source(), 0)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("bounded repair")
+                );
+            } else {
+                assert_eq!(
+                    fixture
+                        .store
+                        .last_operation(&fixture.source(), 0)
+                        .unwrap()
+                        .0,
+                    None
+                );
+            }
             assert!(fixture.store.recheck(&job).unwrap());
             let reloaded = fixture.store.reload(&job.spec.view_key).unwrap().unwrap();
             assert_eq!(
