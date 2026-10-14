@@ -75,10 +75,11 @@ try {
       true,
     );
     await page
-      .locator('a[href^="/s/codex/"][href*="' + encodeURIComponent(sessionId) + '"]')
-      .filter({ visible: true })
-      .first()
+      .getByRole('dialog', { name: 'Session Composer', exact: true })
+      .getByRole('button', { name: 'Close', exact: true })
       .click();
+    await page.getByRole('button', { name: 'Back to sessions', exact: true }).click();
+    await page.locator('[data-session-row="list"][data-id="' + sessionId + '"]').click();
     await page.locator('section[aria-label="Transcript"]').waitFor();
     await page.getByRole('button', { name: /^(Open Composer|Composer;)/ }).click();
     await panel
