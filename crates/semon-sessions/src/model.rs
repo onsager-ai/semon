@@ -24,6 +24,7 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod copy_stage;
 pub(crate) mod description_stage;
 pub(crate) mod identity_stage;
 pub(crate) mod indexed_native;
@@ -1040,10 +1041,8 @@ pub(crate) fn plain_name(name: &str) -> String {
 
 /// Shared copy-resume identity; bridge peers deliberately do not deduplicate.
 pub(crate) fn native_copy_identity(event: &Event) -> Option<String> {
-    event.u.clone().or_else(|| match event.k {
-        Kind::Tool | Kind::Xsm => event.id.clone(),
-        _ => None,
-    })
+    crate::events::native_event::copy_identity(event.k, event.u.as_ref(), event.id.as_ref())
+        .cloned()
 }
 
 /// This machine's hostname, as `/proc` (or `/etc/hostname`) gives it.
@@ -1303,8 +1302,17 @@ pub(crate) fn catalog_source_in_window(
     source: &summary::CatalogSource,
     cutoff: Option<i64>,
 ) -> bool {
-    cutoff
-        .is_none_or(|cutoff| source.modified_ns / 1_000_000 >= u128::try_from(cutoff).unwrap_or(0))
+    source_modified_in_window(Some(source.modified_ns), cutoff)
+}
+
+/// A missing native source clock does not omit the source from a scan.
+/// This is a source modification clock, independent of event/activity seeds.
+pub(crate) fn source_modified_in_window(modified_ns: Option<u128>, cutoff: Option<i64>) -> bool {
+    cutoff.is_none_or(|cutoff| {
+        modified_ns.is_none_or(|modified_ns| {
+            modified_ns / 1_000_000 >= u128::try_from(cutoff).unwrap_or(0)
+        })
+    })
 }
 
 /// A file's modification time (epoch ms).
@@ -1346,7 +1354,12 @@ fn scan(
     let mut seen = BTreeSet::new();
     let mut skipped = BTreeSet::new();
     let outside = |path: &Path| {
-        cutoff.is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
+        cutoff.is_some_and(|cutoff| {
+            !source_modified_in_window(
+                modified_ms(path).map(|modified| u128::try_from(modified).unwrap_or(0) * 1_000_000),
+                Some(cutoff),
+            )
+        })
     };
     let mut paths = Vec::new();
     if let Some(selected) = selected {

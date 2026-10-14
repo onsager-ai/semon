@@ -109,7 +109,24 @@ impl<T> NativeReply<T> {
         }
     }
 }
+/// Exact native copy identity. UUID takes precedence even when empty; only
+/// Tool and Xsm fall back to their native id, in the same raw namespace.
+pub(crate) fn copy_identity<'a, T>(
+    kind: Kind,
+    uuid: Option<&'a T>,
+    id: Option<&'a T>,
+) -> Option<&'a T> {
+    uuid.or_else(|| {
+        matches!(kind, Kind::Tool | Kind::Xsm)
+            .then_some(id)
+            .flatten()
+    })
+}
+
 impl<T> NativeEvent<T> {
+    pub(crate) fn copy_identity(&self) -> Option<&T> {
+        copy_identity(self.k, self.u.as_ref(), self.id.as_ref())
+    }
     pub(crate) fn text_refs(&self) -> [Option<&T>; 7] {
         [
             self.id.as_ref(),
