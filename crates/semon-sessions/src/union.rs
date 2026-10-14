@@ -1304,17 +1304,16 @@ impl ViewerCore {
                     selected = Some(identity);
                 }
             }
-            if let Some(identity) = &selected {
-                if identity.native_id.is_none()
+            if let Some(identity) = &selected
+                && (identity.native_id.is_none()
                     || view
                         .evidence
                         .local_query_target(&identity.catalog_key, model::now_ms())
                         .ok()
                         .flatten()
-                        .is_none()
-                {
-                    return Err(crate::CatalogIdentityError::Unavailable);
-                }
+                        .is_none())
+            {
+                return Err(crate::CatalogIdentityError::Unavailable);
             }
             Ok(selected)
         };
