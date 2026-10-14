@@ -1,24 +1,38 @@
-//! Bounded continuation of the complete native serde_json number producer.
-//! Keep its default u64-significand/exponent components, then give a compact
-//! equivalent spelling back to serde_json::Number for the final conversion.
-//! Do not implement a second float converter or retain numeric source text.
+//! Bounded continuation of the resolved native serde_json number producer.
 //!
-//! Native provenance: serde_json 1.0.151, default non-float_roundtrip numeric
-//! paths parse_integer/parse_decimal/parse_exponent/parse_long_integer in
-//! https://github.com/serde-rs/json/blob/v1.0.151/src/de.rs . The independent
-//! oracle below must change with any dependency numeric policy/feature change.
+//! serde_json 1.0.151 has `float_roundtrip` enabled by semon-control's
+//! serde_json_canonicalizer dependency. Its lexical f64 producer retains 768
+//! significant decimal digits and one sticky digit (lexical/bhcomp.rs and
+//! lexical/num.rs, MAX_DIGITS = 769). Retain that bounded evidence, then delegate
+//! conversion of an equivalent compact spelling to the same serde_json owner.
+//!
+//! Every f64 rounding midpoint is m * 2^q, m < 2^54 and q >= -1075. When q < 0,
+//! its terminating decimal numerator m * 5^(-q) has at most 768 digits because
+//! log10(2^54 * 5^1075) < 768. Thus a discarded nonzero digit after digit 768
+//! can distinguish an exact midpoint from a value above it, but cannot cross
+//! another midpoint. A single sticky 1 has the same rounding consequence. This
+//! includes zero/min-subnormal and max-finite/overflow boundaries. No float
+//! conversion or rounding is implemented here.
+//!
+//! Primary owner: https://github.com/serde-rs/json/tree/v1.0.151/src/lexical .
+//! de.rs:623-636, 674-713, 740-833, 876-899; lexical/bhcomp.rs:21-75,
+//! 192-222; lexical/num.rs:366-370 and lexical/exponent.rs:25-49.
+//! Changing that owner's version/features requires new derived metadata policy
+//! and independent complete-parser qualification; old receipts cannot be reused.
 
 use super::{JSON_STRING_CHUNK_DECODED_MAX, invalid, native_record::Number};
 use serde::{Deserialize, Serialize};
 use std::io;
+
+pub(crate) const PRODUCER_POLICY: &str = "serde-json-1.0.151-float-roundtrip-prefix768-v1";
+const SIGNIFICANT_DIGITS: usize = 768;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "NumberParts")]
 pub(crate) enum NativeNumber {
     Unsigned(u64),
     Signed(i64),
-    // Persist bits, because JSON serialization followed by the native default
-    // float parser need not preserve every already-converted f64 bit pattern.
+    // Persist already-qualified finite bits, independently of JSON spellings.
     Float(u64),
 }
 #[derive(Deserialize)]
@@ -65,19 +79,49 @@ pub(crate) enum Qualification {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Cursor {
+    // Compact field names preserve the existing 1 KiB fixture checkpoint
+    // assertion even after retaining the necessary rounding evidence. Version 1
+    // explicitly refuses previous u64-only checkpoints.
+    #[serde(rename = "v")]
+    policy: u8,
+    #[serde(rename = "0")]
     start: u64,
+    #[serde(rename = "1")]
     end: u64,
+    #[serde(rename = "2")]
     pub(crate) at: u64,
+    #[serde(rename = "3")]
     state: Option<Number>,
+    #[serde(rename = "4")]
     positive: bool,
+    // Bounded significant source evidence, never the full numeric token.
+    #[serde(rename = "5")]
+    prefix: String,
+    #[serde(rename = "6")]
+    sticky: bool,
+    #[serde(rename = "7")]
+    integer_digits: u64,
+    #[serde(rename = "8")]
+    integer_nonzero: bool,
+    #[serde(rename = "9")]
+    fraction_leading_zeros: u64,
+    #[serde(rename = "10")]
     significand: u64,
+    #[serde(rename = "11")]
     scale: i32,
+    #[serde(rename = "12")]
     long_integer: bool,
+    #[serde(rename = "13")]
     decimal_overflow: bool,
+    #[serde(rename = "14")]
     float: bool,
+    #[serde(rename = "15")]
     exponent_positive: bool,
+    #[serde(rename = "16")]
     exponent: i32,
+    #[serde(rename = "17")]
     exponent_overflow: bool,
+    #[serde(rename = "18")]
     pub(crate) result: Option<Qualification>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -91,11 +135,17 @@ impl Cursor {
             return Err(invalid());
         }
         Ok(Self {
+            policy: 1,
             start,
             end,
             at: start,
             state: None,
             positive: true,
+            prefix: String::with_capacity(SIGNIFICANT_DIGITS),
+            sticky: false,
+            integer_digits: 0,
+            integer_nonzero: false,
+            fraction_leading_zeros: 0,
             significand: 0,
             scale: 0,
             long_integer: false,
@@ -108,6 +158,12 @@ impl Cursor {
         })
     }
     pub(crate) fn step(&mut self, bytes: &[u8], budget: usize) -> io::Result<Step> {
+        if self.policy != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("numeric continuation requires {PRODUCER_POLICY}"),
+            ));
+        }
         if self.at < self.start
             || self.at > self.end
             || self.result.is_some()
@@ -118,6 +174,12 @@ impl Cursor {
                 io::ErrorKind::InvalidInput,
                 "invalid native number continuation or byte budget",
             ));
+        }
+        if self.prefix.len() > SIGNIFICANT_DIGITS
+            || self.prefix.bytes().any(|byte| !byte.is_ascii_digit())
+            || self.prefix.starts_with('0')
+        {
+            return Err(invalid());
         }
         let maximum = bytes
             .len()
@@ -159,6 +221,28 @@ impl Cursor {
         match byte {
             b'0'..=b'9' => {
                 let digit = u64::from(byte - b'0');
+                if matches!(
+                    old,
+                    None | Some(Number::Sign | Number::Integer | Number::Dot | Number::Fraction)
+                ) {
+                    if matches!(old, None | Some(Number::Sign | Number::Integer)) {
+                        self.integer_digits =
+                            self.integer_digits.checked_add(1).ok_or_else(invalid)?;
+                        self.integer_nonzero |= digit != 0;
+                    } else if self.prefix.is_empty() && digit == 0 {
+                        self.fraction_leading_zeros = self
+                            .fraction_leading_zeros
+                            .checked_add(1)
+                            .ok_or_else(invalid)?;
+                    }
+                    if !self.prefix.is_empty() || digit != 0 {
+                        if self.prefix.len() < SIGNIFICANT_DIGITS {
+                            self.prefix.push(char::from(byte));
+                        } else {
+                            self.sticky |= digit != 0;
+                        }
+                    }
+                }
                 match old {
                     None | Some(Number::Sign) => self.significand = digit,
                     Some(Number::Integer) => {
@@ -221,11 +305,38 @@ impl Cursor {
         let sign = if self.positive { "" } else { "-" };
         let compact = if self.float {
             if self.exponent_overflow {
-                if self.exponent_positive && self.significand != 0 {
+                if self.exponent_positive && !self.prefix.is_empty() {
                     self.result = Some(Qualification::Invalid);
                     return;
                 }
                 format!("{sign}0e0")
+            } else if self.long_integer || self.decimal_overflow {
+                // Mirror lexical::scientific_exponent's saturation order, not
+                // a mathematical cancellation across comically large counts.
+                let exponent = if self.exponent_positive {
+                    self.exponent
+                } else {
+                    -self.exponent
+                };
+                let scientific = if self.integer_nonzero {
+                    exponent
+                        .saturating_add(i32::try_from(self.integer_digits - 1).unwrap_or(i32::MAX))
+                } else {
+                    exponent
+                        .saturating_sub(
+                            i32::try_from(self.fraction_leading_zeros).unwrap_or(i32::MAX),
+                        )
+                        .saturating_sub(1)
+                };
+                let mut digits = self.prefix.clone();
+                if self.sticky {
+                    digits.push('1');
+                }
+                // A decimal marker preserves the native F64 variant, including
+                // long all-integer spellings and their negative counterpart.
+                let (first, rest) = digits.split_at(1);
+                let rest = if rest.is_empty() { "0" } else { rest };
+                format!("{sign}{first}.{rest}e{scientific}")
             } else {
                 let scale = if self.exponent_positive {
                     self.scale.saturating_add(self.exponent)
@@ -255,6 +366,9 @@ mod tests {
             assert!(step.consumed <= page);
             let saved = serde_json::to_vec(&cursor).unwrap();
             assert!(saved.len() < 1024);
+            assert!(std::mem::size_of::<Cursor>() + cursor.prefix.capacity() < 2048);
+            assert!(cursor.prefix.len() <= SIGNIFICANT_DIGITS);
+            assert_eq!(step.complete, cursor.result.is_some());
             cursor = serde_json::from_slice(&saved).unwrap();
         }
         cursor.result.unwrap()
@@ -334,7 +448,128 @@ mod tests {
                 let step = cursor.step(&text.as_bytes()[at..], 64).unwrap();
                 assert!(step.consumed <= 64);
                 assert!(serde_json::to_vec(&cursor).unwrap().len() < 1024);
+                assert!(std::mem::size_of::<Cursor>() + cursor.prefix.capacity() < 2048);
             }
+        }
+    }
+    // Exact dyadic spelling constructed using decimal integer arithmetic, not
+    // either number parser. Midpoint tests still compare against the complete
+    // resolved native serde producer, independently of this continuation.
+    fn midpoint(mut mantissa: u64, exponent: i32) -> String {
+        let mut digits = Vec::new();
+        while mantissa != 0 {
+            digits.push((mantissa % 10) as u8);
+            mantissa /= 10;
+        }
+        for _ in 0..exponent.unsigned_abs() {
+            let mut carry = 0;
+            for digit in &mut digits {
+                let value = *digit * if exponent < 0 { 5 } else { 2 } + carry;
+                *digit = value % 10;
+                carry = value / 10;
+            }
+            if carry != 0 {
+                digits.push(carry);
+            }
+        }
+        let integer: String = digits
+            .iter()
+            .rev()
+            .map(|digit| char::from(b'0' + digit))
+            .collect();
+        if exponent >= 0 {
+            return format!("{integer}.0");
+        }
+        let places = exponent.unsigned_abs() as usize;
+        if integer.len() <= places {
+            format!("0.{}{integer}", "0".repeat(places - integer.len()))
+        } else {
+            let split = integer.len() - places;
+            format!("{}.{}", &integer[..split], &integer[split..])
+        }
+    }
+    #[test]
+    fn bounded_roundtrip_preserves_midpoints_and_arbitrarily_late_sticky_digits() {
+        // Tie at 1, zero/min-subnormal, max-subnormal/min-normal, a
+        // normal/subnormal midpoint, and the finite/infinite boundary.
+        for (mantissa, exponent) in [
+            ((1u64 << 53) + 1, -53),
+            (1, -1075),
+            ((1u64 << 53) - 1, -1075),
+            ((1u64 << 53) + 1, -1075),
+            ((1u64 << 54) - 1, 970),
+        ] {
+            let tie = midpoint(mantissa, exponent);
+            assert_native(&tie);
+            assert_native(&format!("-{tie}"));
+            for zeros in [0, 768, 8192] {
+                let above = format!("{tie}{}1", "0".repeat(zeros));
+                assert_native(&above);
+                assert_native(&format!("-{above}"));
+            }
+        }
+        let tie = midpoint((1u64 << 53) + 1, -53);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Number>(&tie)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            1f64.to_bits()
+        );
+        let above = format!("{tie}{}1", "0".repeat(8192));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Number>(&above)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            1f64.to_bits() + 1
+        );
+    }
+    #[test]
+    fn long_mantissas_compensated_exponents_and_zero_keep_native_results() {
+        for size in [0, 128, 1024, 8192, 100_000] {
+            for text in [
+                format!("123{}e-{size}", "0".repeat(size)),
+                format!("0.{}123e{size}", "0".repeat(size)),
+                format!("0.{}e2147483648", "0".repeat(size + 1)),
+                format!("-0.{}e2147483648", "0".repeat(size + 1)),
+                format!("1.{}e-{}", "7".repeat(size + 1), "9".repeat(128)),
+            ] {
+                let native = serde_json::from_str::<serde_json::Number>(&text);
+                for page in [4096, JSON_STRING_CHUNK_DECODED_MAX] {
+                    match (native.as_ref(), qualify(&text, page)) {
+                        (Ok(expected), Qualification::Finite(actual)) => {
+                            assert_eq!(actual, NativeNumber::from_native(expected.clone()))
+                        }
+                        (Err(_), Qualification::Invalid) => {}
+                        _ => panic!("native long number result differs at size {size}"),
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn restart_rejects_a_different_numeric_producer_policy_and_nonfinite_receipts() {
+        let mut cursor = Cursor::new(0, 2).unwrap();
+        assert!(!cursor.step(b"1", 1).unwrap().complete);
+        cursor.policy = 0;
+        let mut resumed: Cursor =
+            serde_json::from_slice(&serde_json::to_vec(&cursor).unwrap()).unwrap();
+        assert!(resumed.step(b"2", 1).is_err());
+        let old = br#"{"start":0,"end":2,"at":1,"state":"Integer","positive":true,"significand":1,"scale":0,"long_integer":false,"decimal_overflow":false,"float":false,"exponent_positive":true,"exponent":0,"exponent_overflow":false,"result":null}"#;
+        assert!(serde_json::from_slice::<Cursor>(old).is_err());
+        let mut current = Cursor::new(0, 2).unwrap();
+        assert!(
+            current
+                .step(b"12", JSON_STRING_CHUNK_DECODED_MAX + 1)
+                .is_err()
+        );
+        assert_eq!(current.at, 0);
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let receipt = serde_json::to_vec(&NativeNumber::Float(value.to_bits())).unwrap();
+            assert!(serde_json::from_slice::<NativeNumber>(&receipt).is_err());
         }
     }
 }
