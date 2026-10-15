@@ -1700,10 +1700,32 @@ fn indexed(home: &Home, file: &str) -> bool {
         .any(|path| path.ends_with(file))
 }
 
+fn assert_paused_find_before_window_preparation(query: &mut Query, home: &Home) {
+    let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+    for args in [
+        json!({"text": "recent", "since": "10d"}),
+        json!({"text": "old", "since": "31d"}),
+        json!({"text": "", "since": 17}),
+        Value::Null,
+    ] {
+        let error = query.call("find", &args).unwrap_err();
+        assert_eq!(error.code, "capability_unavailable", "{args}");
+        assert_eq!(error.window_start, None);
+    }
+    assert!(query.native.is_none());
+    assert_eq!(
+        crate::events::FILE_READS.with(std::cell::Cell::get),
+        indexes
+    );
+    assert!(!home.options.cache.exists());
+    assert!(!crate::events::EventCache::path(&home.options.cache).exists());
+}
+
 #[test]
 fn the_window_bounds_what_is_read_and_says_where_it_starts() {
     let home = aged();
     let mut query = windowed(&home, false);
+    assert_paused_find_before_window_preparation(&mut query, &home);
     let listed = query.call("list_sessions", &json!({})).unwrap();
     assert_eq!(ids_of(&listed), ["recent"]);
     assert_eq!(
@@ -1715,11 +1737,11 @@ fn the_window_bounds_what_is_read_and_says_where_it_starts() {
         !indexed(&home, "old.jsonl"),
         "a file outside the window is not read"
     );
-    // Every tool names the window.
+    // Every active tool names the window.
     for (tool, args) in [
         ("get_session", json!({"id": "recent"})),
         ("read_transcript", json!({"id": "recent"})),
-        ("find", json!({"text": "recent", "since": "10d"})),
+        ("list_sessions", json!({"since": "10d"})),
         ("stalls", json!({"idle_minutes": 1, "since": "30d"})),
     ] {
         let answer = query.call(tool, &args).unwrap();
@@ -1751,11 +1773,12 @@ fn the_window_bounds_what_is_read_and_says_where_it_starts() {
 fn a_since_before_the_window_is_refused_not_cut_short() {
     let home = aged();
     let mut query = windowed(&home, false);
+    assert_paused_find_before_window_preparation(&mut query, &home);
     let before = iso(now_ms() - 40 * DAY_MS);
     for (tool, args) in [
         ("list_sessions", json!({"since": "40d"})),
         ("list_sessions", json!({"since": before})),
-        ("find", json!({"text": "old", "since": "31d"})),
+        ("list_sessions", json!({"since": "31d"})),
         ("stalls", json!({"idle_minutes": 5, "since": "6w"})),
     ] {
         let error = query.call(tool, &args).unwrap_err();
