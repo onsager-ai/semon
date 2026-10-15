@@ -266,6 +266,13 @@ for (const width of [390, 1280])
                   navigation: {
                     leading: [
                       {
+                        key: 'workspace-settings',
+                        label: 'Workspace Settings',
+                        icon: 'settings',
+                        href: '/workspace/settings?return_to=%2Fsessions',
+                        current: false,
+                      },
+                      {
                         key: 'new-session',
                         label: 'New Session',
                         icon: 'plus',
@@ -311,9 +318,14 @@ for (const width of [390, 1280])
                   'native host Machines path was lost',
                 );
                 assert(
-                  document.querySelector('#nav [data-go="new-session"]')?.getAttribute('href') ===
-                    '/sessions/new?return_to=%2Fsessions',
+                  document
+                    .querySelector('#nav [data-go="workspace-settings"]')
+                    ?.getAttribute('href') === '/workspace/settings?return_to=%2Fsessions',
                   'shared chrome overwrote the native host return destination',
+                );
+                assert(
+                  !document.querySelector('#nav [data-go="new-session"]'),
+                  'paused creation was advertised by the native shell',
                 );
                 assert(
                   document.querySelector('#lanes .srow') && requests === before + 1,
@@ -377,9 +389,15 @@ for (const width of [390, 1280])
                     originalTimers.setTimeout.call(window, resolve, 50),
                   );
                 assert(document.querySelector('#page .turns'), 'session did not commit');
-                document.querySelector('[aria-label="Open Composer"]').click();
+                assert(
+                  !document.querySelector('[aria-label="Open Composer"]'),
+                  'paused Composer was advertised',
+                );
+                document
+                  .querySelector('[aria-label="Session menu: details, cost and actions"]')
+                  .click();
                 await settle();
-                assert(document.querySelector('dialog'), 'session panel did not open');
+                assert(document.querySelector('dialog'), 'session menu panel did not open');
                 panelBody = document.querySelector('dialog .panel-b');
               }
               if (mode === 'host') {

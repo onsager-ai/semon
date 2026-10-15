@@ -280,6 +280,7 @@ jobs:
       # receiver and `semon push --watch` keep running for the step below, as they would on a real pair of machines.
       # The model built from that copy must equal the machine's own, byte for byte (tests/ui/pushed-parity.mjs).
       - name: Pushed data, received and compared with the machine's own model
+        id: pushed-parity
         if: ${{ !cancelled() && matrix.suite == 'transport' }}
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
@@ -313,7 +314,7 @@ jobs:
       # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
       # local fixture above.
       - name: Pushed data in the viewer
-        if: ${{ !cancelled() && matrix.suite == 'transport' }}
+        if: ${{ !cancelled() && matrix.suite == 'transport' && steps.pushed-parity.outcome == 'success' }}
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
           SEMON_PIXEL_SCREENS: home,sessions,analytics,session-harbor,session-deps
@@ -335,6 +336,7 @@ jobs:
           [ -n "$url" ] || { cat "$RUNNER_TEMP/pushed-viewer.log"; exit 1; }
           export SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}"
           cd tests/ui
+          node pushed-parity.mjs --native-pages
           failed=0
           node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN" || failed=1
           node pixels.mjs || failed=1
