@@ -2595,7 +2595,7 @@ mod tests {
             "src/lib/api.ts",
             "src/app/catalogViewer.tsx",
             "src/app/overviewPages.tsx",
-            "src/app/controlObservation.ts",
+            "src/app/runtimeObservation.ts",
             "src/state/catalog-selection.ts",
         ] {
             assert!(
@@ -2603,6 +2603,10 @@ mod tests {
                 "{module} must be scanned"
             );
         }
+        assert!(
+            !js.contains("  // src/app/controlObservation.ts\n"),
+            "paused control observation must not enter the collection bundle"
+        );
         let injected = js.replacen(
             "  // src/lib/account.ts\n",
             "  // src/lib/account.ts\n  probe.innerHTML = hostile;\n",
