@@ -32,6 +32,12 @@ fn native_query_corpus(options: &Options, now: i64) -> serde_json::Value {
         options.clone(),
     )]));
     let mut query = semon_sessions::Query::from_sources(sources);
+    let paused_find = query
+        .call_at("find", &json!({"text":"session"}), now)
+        .unwrap_err();
+    assert_eq!(paused_find.code, "capability_unavailable");
+    let malformed_find = query.call_at("find", &json!(null), now).unwrap_err();
+    assert_eq!(malformed_find.to_json(), paused_find.to_json());
     let listing = query
         .call_at("list_sessions", &json!({"limit":1000}), now)
         .unwrap();
@@ -107,7 +113,7 @@ fn native_query_corpus(options: &Options, now: i64) -> serde_json::Value {
         .collect();
     json!({"listing":listing,"sessions":sessions,"transcripts":transcripts,"catalog":metrics,
         "stalls":query.call_at("stalls", &json!({"idle_minutes":1}), now).unwrap(),
-        "find":query.call_at("find", &json!({"text":"session"}), now).unwrap()})
+        "paused_find":paused_find.to_json()})
 }
 
 fn native_reply_content(reply: &semon_sessions::ViewerReply) -> serde_json::Value {
