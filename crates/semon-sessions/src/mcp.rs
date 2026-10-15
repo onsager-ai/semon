@@ -26,7 +26,7 @@ const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "Semon reads the local Claude Code and Codex session logs, read-only. \
     list_sessions and stalls give facts about sessions (state, last log line, process, parent and children); \
-    get_session adds its turns and handoffs; read_transcript and find read what the sessions said. \
+    get_session adds its turns and handoffs; read_transcript reads what a selected session said. \
     Times are epoch milliseconds. A field Semon can't know exactly is null. \
     The tools read a window of recent logs (30 days unless the server was started with --since or --all); \
     every answer names its window_start, and a since before it is the error outside_window.";
@@ -137,7 +137,7 @@ fn call(query: &mut Query, params: &Value) -> Result<Value, (i64, String)> {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Err((INVALID_PARAMS, "tools/call needs a tool name".into()));
     };
-    if !query_tools().iter().any(|tool| tool.name == name) {
+    if name != "find" && !query_tools().iter().any(|tool| tool.name == name) {
         return Err((INVALID_PARAMS, format!("Unknown tool: {name}")));
     }
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
@@ -180,6 +180,23 @@ mod tests {
 
     fn ask(query: &mut Query, line: &str) -> Option<Value> {
         handle(query, line.as_bytes())
+    }
+
+    #[test]
+    fn paused_find_is_unadvertised_and_refuses_before_native_reads() {
+        let (mut query, root) = empty_query("paused-find");
+        assert!(!INSTRUCTIONS.contains("find"));
+        assert!(!tools().iter().any(|tool| tool["name"] == "find"));
+        for arguments in [json!({"text":"private"}), json!({}), json!(17), Value::Null] {
+            let result = call(&mut query, &json!({"name":"find","arguments":arguments})).unwrap();
+            assert_eq!(result["isError"], true);
+            let value: Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(value["error"]["code"], "capability_unavailable");
+        }
+        assert!(!root.join("index.json").exists());
+        assert!(!crate::events::EventCache::path(&root.join("index.json")).exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -303,13 +320,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [
-                "list_sessions",
-                "get_session",
-                "read_transcript",
-                "find",
-                "stalls"
-            ]
+            ["list_sessions", "get_session", "read_transcript", "stalls"]
         );
         assert_eq!(replies[2]["error"]["code"], PARSE_ERROR);
         let _ = fs::remove_dir_all(root);

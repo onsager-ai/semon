@@ -4,18 +4,19 @@
 
 Semon collects, synchronizes, browses and queries harness-native agent sessions.
 Native source logs, the incremental Session Event Index, and Session Catalog form
-the foundation for Viewer, CLI, MCP, runtime integration and future Session
-Intelligence.
+the foundation for Viewer, CLI, MCP, future Session Intelligence.
 
 The core CLI lives in `semon-cli`; session discovery/parsing and focused reads live
 in `semon-sessions`, generic mirror synchronization in `semon-push`, SSH onboarding
-in `semon-ssh`, and runtime/control integration in `semon-runtime`/`semon-control`.
+in `semon-ssh`. Retained optional runtime/control engines live in `semon-runtime`/`semon-control`.
 
 Encrypted Relay and Canonical Trace Store are retired pre-release experiments.
 The product does not ship their protocols, capture services or migration tools.
 Native source logs, the Session Event Index, generic Push, SSH and runtime
-coordination remain supported. This code change does not remove user data,
+observation remain supported. This code change does not remove user data,
 keys or installed services. See the [session foundation contract](docs/design/session-foundation-retirement.md).
+
+The collection configuration temporarily pauses two-way harness control, managed runtime delivery and broad full-text retrieval. Collection, synchronization, monitoring, metadata navigation and readable native history remain active without model or compute credentials. Direct `find` and control calls return `capability_unavailable` before native discovery, controller/provider initialization or delivery. Passive questions, approvals, outcomes, lineage and handoffs remain visible. Native archive/unarchive, enrollment/revocation, collection configuration, authorization, export and explicit data administration remain in scope. Existing credentials, history, operation receipts and uncertain outcomes are preserved; this pause stops no installed harness and replays no unknown write. See the [temporary collection scope](docs/design/session-foundation-retirement.md#temporary-collection-scope).
 
 ## Seeing your agent sessions
 
@@ -125,7 +126,6 @@ They read a window of recent logs: only the log files modified in the last 30 da
 | `list_sessions` | `state`, `repo`, `since`, `parent`, `harness`, `limit` | session summaries, most recently active first |
 | `get_session` | `id` | the summary, busy intervals, turns (each incoming message and how the turn ended) and every handoff to or from it |
 | `read_transcript` | `id`, one of `before` / `after` / `turn`, `limit` | a page of the transcript, exactly as the viewer's `/api/tx` serves it |
-| `find` | `text`, `since`, `limit`, `max_bytes` | entries containing the text (ASCII case-insensitive), newest first, with their session, position and a snippet; bounded by a result limit and a byte budget |
 | `stalls` | `idle_minutes`, `since` | sessions quiet for that long that are working, wait on a question, or whose process died while its pid file said busy, each with a `stall_reason` |
 
 A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub`), `name`, `model`, `repo`, `branch`, `machine`, `parent`, `children`, `state`, `start`, `last_activity`, `pid`, `alive`, `exit`, `open_question`, `tokens` (`input` uncached, `cached`, `output`), `run` and `turns_truncated`. Times are epoch milliseconds. `state` is one of `working`, `waiting-question`, `idle`, `ended`, `error` and `unknown`; `stall_reason` is one of `waiting-question`, `no-output` and `process-gone`, and every `stalls` answer states its rule. A field Semon can't know exactly is `null`: `pid` and `alive` come only from a Claude pid file checked against its process's start time, or from a held Codex writer lock. `run` holds a live session process's run ids, read from `/proc/<pid>/environ` by exact name: `OSTROM_RUN_ID` and `OSTROM_WORK_ORDER_ID` ([Ostrom's run environment contract](https://github.com/onsager-ai/ostrom/blob/main/docs/loops.md)), and nothing else. Every other entry of the environment is dropped as it is parsed, never kept or logged. `run` is `{}` when the process has neither variable, and `null` when there is no live process (a subagent has none of its own) or its environment can't be read whole: unreadable, over 256 KB, or a run id that isn't UTF-8. The facts `semon push` sends carry each live process's run ids, so a mirror answers `run` without reading `/proc`. `exit` is `null`: no log records a run's exit status (a Codex `task_complete` error is a turn's outcome, shown as the state `error`), and none is inferred. Turns and handoffs use the same native identities across Query, Transcript and Viewer reads. `since` is a duration back from now (`90m`, `2h`, `7d`) or an RFC 3339 time. A failure has a closed `code` (`unknown_session`, `unknown_turn`, `invalid_arguments`, `outside_window`, …): `semon query` exits nonzero, and `semon mcp` returns a tool result with `isError`.
@@ -134,7 +134,6 @@ A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub
 semon query list_sessions --state working --json
 semon query get_session SESSION_ID
 semon query read_transcript SESSION_ID --before 200 --limit 50
-semon query find "cargo test" --newer-than 2d
 semon query stalls --idle-minutes 30
 semon query list_sessions --since 90d --newer-than 60d   # a wider window
 semon query get_session SESSION_ID --all                 # every log file

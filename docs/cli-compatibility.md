@@ -1,5 +1,7 @@
 # CLI evidence compatibility
 
+The collection product temporarily pauses `semon control` and broad `find` with explicit unavailability before initialization. The control and runtime native contracts below describe retained optional engines and historical evidence; they do not enable collection delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
 Tracking: #235, #236–242. Baseline audited at main
 `24e1932ef78238fdb13b5c1d11b61636695baf34` on 2026-10-03.
 Copilot CLI persisted-state implementation follows #285 and the supported-version

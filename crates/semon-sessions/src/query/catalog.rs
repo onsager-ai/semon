@@ -509,9 +509,34 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         now: i64,
     ) -> Result<Value, QueryError> {
+        validate_query_call(tool, args)?;
+        self.execute_catalog_at(tool, args, provider, mode, now)
+    }
+
+    // Retained optional search qualification never opens a product override.
+    #[cfg(test)]
+    pub(super) fn call_optional_catalog_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        provider: Option<&CatalogReaderFactory>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        validate_tool_call(&retained_query_tools(), tool, args)?;
+        self.execute_catalog_at(tool, args, provider, mode, now)
+    }
+
+    fn execute_catalog_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        provider: Option<&CatalogReaderFactory>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
         #[cfg(test)]
         WORK.with(|work| work.set(Work::default()));
-        validate_query_call(tool, args)?;
         if !matches!(tool, "list_sessions" | "stalls" | "find") {
             return Err(QueryError::invalid(
                 "Catalog calls require a listing, stall or search tool",

@@ -29,7 +29,8 @@ jobs:
           CARGO_INCREMENTAL: 0
           CARGO_PROFILE_DEV_DEBUG: 0
         run: |
-          cargo build -p semon-control --bin semon-ssh-controller -p semon-ssh --example controller-install --locked
+          cargo build -p semon-control --bin semon-ssh-controller --example ssh-controller-qualification -p semon-ssh --example controller-install --locked
+          cargo test -p semon-control --bin semon-ssh-controller collection_controller_refuses --locked
           cargo build -p semon-cli --bin semon --locked
           python3 tests/ssh/test_controller_supervisor.py
       - name: Install pinned offline probe dependencies
@@ -43,7 +44,7 @@ jobs:
           printf '%s  %s\n' 4fcc47ab57f52ff75363951a8761146cd10c8288bd86fed45487dbb204a16b71 "$RUNNER_TEMP/native-package.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/native-package.tar.gz" -C "$RUNNER_TEMP/native-package"
           rm "$RUNNER_TEMP/native-package.tar.gz"
-      - name: Real native SSH dispatch and captured-history readback
+      - name: Retained optional controller security and captured-history readback
         run: |
           # Ubuntu's host AppArmor user-namespace restriction also restricts
           # capabilities in Docker's nested namespace, including its loopback.
@@ -55,4 +56,4 @@ jobs:
             trap 'sudo sysctl -q -w "$namespace_key=$namespace_previous"' EXIT
             sudo sysctl -q -w "$namespace_key=0"
           fi
-          SEMON_CODEX_PACKAGE="$RUNNER_TEMP/native-package" SEMON_SSH_BINARY="$PWD/target/debug/semon" scripts/ssh-native-fixture.sh "$RUNNER_TEMP/native-probe/bin/python" tests/spikes/ssh-native-controller.py --installer "$PWD/target/debug/examples/controller-install" --controller "$PWD/target/debug/semon-ssh-controller" --codex "$RUNNER_TEMP/native-package/bin/codex" --output "$RUNNER_TEMP/native-controller-report.json"
+          SEMON_CODEX_PACKAGE="$RUNNER_TEMP/native-package" SEMON_SSH_BINARY="$PWD/target/debug/semon" scripts/ssh-native-fixture.sh "$RUNNER_TEMP/native-probe/bin/python" tests/spikes/ssh-native-controller.py --installer "$PWD/target/debug/examples/controller-install" --controller "$PWD/target/debug/examples/ssh-controller-qualification" --codex "$RUNNER_TEMP/native-package/bin/codex" --output "$RUNNER_TEMP/native-controller-report.json"

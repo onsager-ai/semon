@@ -50,12 +50,11 @@ export default async function deepLinkLive(browser) {
           'the native turn lands below the Topbar',
         );
         const url = page.url();
-        await page.getByRole('button', { name: 'Open Composer', exact: true }).click();
-        const composer = page.getByRole('dialog', { name: 'Session Composer', exact: true });
-        await composer.waitFor();
-        await page.goBack();
-        await composer.waitFor({ state: 'detached' });
-        assert.equal(page.url(), url, 'Composer Back preserves the permalink');
+        assert.equal(
+          await page.getByRole('button', { name: 'Open Composer', exact: true }).count(),
+          0,
+        );
+        assert.equal(page.url(), url, 'Collection controls preserve the permalink');
         assert.equal(await page.locator('#page [aria-label="Conversation controls"]').count(), 0);
         const unavailable = new URL(page.url());
         unavailable.hash = 'turn=unrecorded-native-turn';
@@ -70,6 +69,6 @@ export default async function deepLinkLive(browser) {
         await closePage(page);
       }
     }
-  console.log('Native source-qualified permalinks, anchors and Composer history passed');
+  console.log('Native source-qualified permalinks, anchors and collection control refusal passed');
   return true;
 }

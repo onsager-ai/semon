@@ -150,6 +150,10 @@ formatting and causal calculations remain where the canonical reader needs them.
 Qualified persisted reads can register update interest without cold preparation;
 missing evidence and invalidation still queue the same bounded native producer.
 
+## Temporary collection configuration
+
+The canonical collection reader supplies no control owner, live control stream, launch snapshot or Composer action. New Session navigation is removed. Independent runtime observation and passive recorded asks/outcomes retain their existing owners. Shared optional control components and their direct fixtures retain drafts, unknown outcomes and lifecycle semantics; no optional fixture grants active collection authority. Broad full-text retrieval is paused; metadata navigation and selected-text navigation remain active. The retained control behavior described elsewhere in this contract applies only to those optional consumers. See the [temporary collection scope](session-foundation-retirement.md#temporary-collection-scope).
+
 ## Refactoring contract
 
 This document is the canonical viewer refactoring contract. AGENTS.md and the

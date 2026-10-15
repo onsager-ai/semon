@@ -373,11 +373,13 @@ pub fn serve_listener(options: ServeOptions, listener: std::net::TcpListener) ->
     serve_server(options, server)
 }
 
-/// Serves the existing local viewer with one opt-in native control connection.
+/// Retained control entry point; unavailable in the collection configuration.
+/// Refuses before binding a listener or starting native observation.
 pub fn serve_with_control(
     options: ServeOptions,
     control: Arc<semon_control::codex::Codex>,
 ) -> io::Result<()> {
+    semon_control::require_collection_control()?;
     let address = listen_addr(&options.listen)?;
     let server = Server::http(address).map_err(io::Error::other)?;
     serve_server_control(options, server, Some(control))
@@ -581,8 +583,7 @@ impl Viewer {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
         if request.method() == &Method::Post && path == "/api/control" {
-            let authorized =
-                self.control.is_some() && control_authorized(&request, &self.token, self.port);
+            let authorized = control_authorized(&request, &self.token, self.port);
             let reply = if authorized {
                 self.control_write(&mut request)
             } else {
@@ -659,6 +660,12 @@ impl Viewer {
                 );
                 self.core.respond("GET", path, &joined, None)
             }
+        } else if path == "/api/session-control" && semon_control::COLLECTION_CONTROL_PAUSED {
+            control_reply(
+                200,
+                serde_json::json!({"control":null,"control_available":false,
+                "reason":"Two-way control is paused in the collection configuration"}),
+            )
         } else if path == "/api/session-control" {
             let identity = self
                 .core
@@ -686,7 +693,11 @@ impl Viewer {
             self.core
                 .respond("GET", path, query, if_none_match.as_deref())
         };
-        if path == "/api/viewer/home" && reply.status == 200 && self.control.is_some() {
+        if path == "/api/viewer/home"
+            && reply.status == 200
+            && self.control.is_some()
+            && !semon_control::COLLECTION_CONTROL_PAUSED
+        {
             let mut body: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
             if body.is_object() {
                 body["launch_control"] = self
@@ -705,6 +716,13 @@ impl Viewer {
         respond(request, reply, set_cookie.then_some(&self.token));
     }
     fn control_write(&self, request: &mut Request) -> ViewerReply {
+        if semon_control::COLLECTION_CONTROL_PAUSED {
+            return control_reply(
+                503,
+                serde_json::json!({"error":{"code":"capability_unavailable",
+                "message":"Two-way control is paused in the collection configuration"}}),
+            );
+        }
         if request_header(request, "Content-Type") != Some("application/json")
             || request.body_length().is_none_or(|n| n > 65536)
         {
@@ -1641,6 +1659,43 @@ mod tests {
         stream.read_to_end(&mut response).unwrap();
         worker.join().unwrap();
         String::from_utf8_lossy(&response).into_owned()
+    }
+
+    #[test]
+    fn collection_control_refuses_authenticated_stale_and_malformed_writes_without_reads() {
+        let fixture = Fixture::new();
+        fixture.claude(
+            "private",
+            &[json!({"type":"user","sessionId":"private","message":{"content":"Do not read"}})],
+        );
+        for body in [
+            r#"{"op":"send","thread":"stale","text":"never deliver"}"#,
+            "malformed",
+        ] {
+            let response = http(
+                &fixture,
+                &format!(
+                    "POST /api/control HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nOrigin: http://127.0.0.1:PORT\r\nCookie: semon_session=0123456789abcdef0123456789abcdef\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+            assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+            assert!(response.contains("capability_unavailable"), "{response}");
+        }
+        let forbidden = http(
+            &fixture,
+            "POST /api/control HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(forbidden.starts_with("HTTP/1.1 403"));
+        let status = http(
+            &fixture,
+            "GET /api/session-control?sid=stale&t=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n",
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert!(status.contains("\"control\":null"));
+        assert!(status.contains("\"control_available\":false"));
+        assert!(!fixture.options.cache.exists());
+        assert!(!crate::events::EventCache::path(&fixture.options.cache).exists());
     }
 
     #[test]

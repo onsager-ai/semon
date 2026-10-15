@@ -1,5 +1,7 @@
 # Two-way control: one local Codex session
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](session-foundation-retirement.md#temporary-collection-scope).
+
 Updated October 4, 2026. [#293](https://github.com/onsager-ai/semon/issues/293)
 is Codex-first. This replaces the earlier Claude-first delivery order and
 ancestry-based owner check. The landed `semon-control` foundations remain the

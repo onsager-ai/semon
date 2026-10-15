@@ -170,6 +170,12 @@ fn renew(
     Ok(Value::Null)
 }
 fn main() -> io::Result<()> {
+    semon_control::require_collection_control()?;
+    run_retained_controller()
+}
+
+// Private to this binary and its explicit offline qualification adapter.
+pub(crate) fn run_retained_controller() -> io::Result<()> {
     let mut input = request(io::stdin().lock())?;
     if input["version"] != 1 || input["method"] != "openai_api_key" {
         return Err(refusal());
@@ -368,4 +374,14 @@ fn main() -> io::Result<()> {
     )?;
     fs::remove_file(ipc)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pause_tests {
+    #[test]
+    fn collection_controller_refuses_before_reading_bootstrap_or_writing() {
+        let error = super::main().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("capability_unavailable"));
+    }
 }

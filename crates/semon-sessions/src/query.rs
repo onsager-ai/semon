@@ -117,7 +117,7 @@ const CONTEXT: usize = 80;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryError {
     /// `unknown_tool`, `invalid_arguments`, `unknown_session`,
-    /// `unknown_turn`, `outside_window`, `id_conflict` or `io`.
+    /// `unknown_turn`, `outside_window`, `id_conflict`, `capability_unavailable` or `io`.
     pub code: &'static str,
     pub message: String,
     /// With `outside_window`: where the window starts (epoch ms).
@@ -187,8 +187,17 @@ fn id_property(what: &str) -> Value {
     json!({"type": "string", "minLength": 1, "description": what})
 }
 
-/// Every tool, with its input schema.
+/// Active collection tools, with their input schemas.
 pub fn query_tools() -> Vec<QueryTool> {
+    retained_query_tools()
+        .into_iter()
+        .filter(|tool| tool.name != "find")
+        .collect()
+}
+
+// Preserve the optional matcher contract and independent semantic fixtures.
+// Public dispatch must pass validate_query_call before preparing any evidence.
+fn retained_query_tools() -> Vec<QueryTool> {
     vec![
         QueryTool {
             name: "list_sessions",
@@ -731,11 +740,20 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
     out
 }
 
-/// Validate the shared five-tool contract before admitting source/archive work.
+/// Validate the active collection contract before admitting source/archive work.
 /// This performs no I/O and grants no source authority. Window membership and
 /// generation checks still belong to the actual Query call.
 pub fn validate_query_call(tool: &str, args: &Value) -> Result<(), QueryError> {
-    let tools = query_tools();
+    if tool == "find" {
+        return Err(QueryError::new(
+            "capability_unavailable",
+            "Full-text find is paused in the collection configuration",
+        ));
+    }
+    validate_tool_call(&query_tools(), tool, args)
+}
+
+fn validate_tool_call(tools: &[QueryTool], tool: &str, args: &Value) -> Result<(), QueryError> {
     let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
         let names: Vec<&str> = tools.iter().map(|spec| spec.name).collect();
         return Err(QueryError::new(
@@ -880,6 +898,24 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate_query_call(tool, args)?;
+        self.execute_at(tool, args, now)
+    }
+
+    // Only unit fixtures can enter the retained optional search engine.
+    #[cfg(test)]
+    fn call_optional_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let empty = json!({});
+        let args = if args.is_null() { &empty } else { args };
+        validate_tool_call(&retained_query_tools(), tool, args)?;
+        self.execute_at(tool, args, now)
+    }
+
+    fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
         if !self.embedded
             && self.sources.machines.len() == 1
             && !self.sources.is_retired()

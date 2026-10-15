@@ -1,5 +1,7 @@
 # SSH execution receipt broker
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
 Part of #303; builds on merged #304 and Hub #98. Inspected base: main
 30588f6 (managed E2B #306 included). The generic Session/OperationId/CAS contracts
 remain in semon-runtime; hosted custody, current owner/workspace authorization,

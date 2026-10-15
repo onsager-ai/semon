@@ -1,5 +1,7 @@
 # Native Codex controller on SSH
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
 This explicit opt-in controller builds on the private receipt broker. It does not
 run during host discovery, connection tests or mirrored-history setup. The
 embedding must persist a fresh native launch claim and separately authorize

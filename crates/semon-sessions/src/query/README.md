@@ -1,5 +1,7 @@
 # Query contract reference
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](../../../../docs/design/session-foundation-retirement.md#temporary-collection-scope).
+
 Embedding callers admit a `SessionSources` owner and use
 `Query::from_sources(sources)`. The host still owns authorization, admission and
 source custody; the native constructor preserves its configured output window.

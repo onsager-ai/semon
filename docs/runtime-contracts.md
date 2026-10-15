@@ -1,5 +1,7 @@
 # Durable runtime records (#250)
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
 `semon-runtime` is independent of capture, Push, relay, the CLI and provider
 SDKs. It defines distinct logical session, workspace, harness thread, provider
 runtime, operation, checkpoint and credential-reference identifiers. Credentials

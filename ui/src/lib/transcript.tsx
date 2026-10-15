@@ -197,9 +197,8 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
   }
   render() {
     const snapshot = this.props.owner.snapshot;
-    let view =
-      snapshot.control ??
-      unavailableControl(snapshot.id, 'Native session controls are unavailable.');
+    if (!snapshot.control) return null;
+    let view = snapshot.control;
     const runtime = snapshot.runtime?.observation;
     if (runtime?.freshness === 'current' && ['ended', 'failed'].includes(runtime.state)) {
       const blocked = unavailableControl(
@@ -231,6 +230,11 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
 /** The transcript owner retains the existing input root across panel dismissal. */
 function paintComposer(owner: SessionOwner) {
   if (owner.disposed) return;
+  if (!owner.snapshot.control) {
+    owner.composerPanel?.destroy();
+    render(null, owner.composerTrigger);
+    return;
+  }
   const pending =
     owner.snapshot.control?.snapshot.requests.filter(
       (request) => request.state.state === 'open' || request.state.state === 'claimed',
