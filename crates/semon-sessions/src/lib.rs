@@ -24,7 +24,7 @@ pub use overview::{
 };
 pub use overview_repair::{
     overview_repair_candidates, overview_repair_sources, repair_session_overview,
-    session_overview_observe, session_query_sources,
+    repair_session_overview_with_control, session_overview_observe, session_query_sources,
 };
 mod catalog;
 mod catalog_changes;
@@ -101,8 +101,10 @@ mod native_evidence;
 mod native_timing;
 pub use native_evidence::SessionSources;
 mod query_source;
+mod selected_read;
 mod source_chunks;
 mod source_reader;
+pub use selected_read::SelectedReadControl;
 mod tx;
 pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSourceReader};
 mod union;

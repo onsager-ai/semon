@@ -773,6 +773,19 @@ fn validate_tool_call(tools: &[QueryTool], tool: &str, args: &Value) -> Result<(
 pub type CatalogReaderFactory =
     dyn Fn(&str, &str) -> io::Result<Box<dyn crate::SessionSourceReader>>;
 
+fn selected_error(error: &io::Error) -> QueryError {
+    let terminal = crate::selected_read::check().err();
+    let error = terminal.as_ref().unwrap_or(error);
+    if matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        QueryError::new("unavailable", error.to_string())
+    } else {
+        QueryError::io(error)
+    }
+}
+
 /// The agent read surface over one machine's homes or several: the tools
 /// `semon query` and `semon mcp` answer. Local calls share the native source
 /// index and snapshots between calls, rebuilding only what changed. Hosted
@@ -1033,6 +1046,33 @@ impl Query {
         )
     }
 
+    /// Selected read with the host's whole-request deadline/cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_selected_with_control(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        control: &crate::SelectedReadControl,
+    ) -> Result<Value, QueryError> {
+        let _scope = crate::selected_read::Scope::enter(control);
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
+        let result = self.call_selected_at(
+            source_key,
+            catalog_key,
+            tool,
+            args,
+            provider,
+            mode,
+            now_ms(),
+        );
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
+        result
+    }
+
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn call_selected_at(
@@ -1078,6 +1118,8 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         now: i64,
     ) -> Result<Value, QueryError> {
+        let _scope = crate::selected_read::Scope::ensure();
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
         let evidence = self
             .sources
             .machines
@@ -1204,8 +1246,9 @@ impl Query {
                 Ok(answer)
             },
         )
-        .map_err(|error| QueryError::io(&error))?;
+        .map_err(|error| selected_error(&error))?;
         let mut answer: Value = result?;
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
         answer["window_start"] = json!(self.start);
         Ok(answer)
     }
