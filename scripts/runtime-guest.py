@@ -87,8 +87,14 @@ def launch():
                 write('receipt.json', {'status': 'delivery_unknown'})
 
 
-if __name__ == '__main__':
-    if sys.argv[1:] == ['inspect']:
+def main(arguments):
+    if arguments == ['inspect']:
         print(json.dumps(inspect()))
-    elif sys.argv[1:] == ['launch']:
-        launch()
+        return 0
+    print(json.dumps({'error': 'capability_unavailable',
+                      'message': 'Guest execution is paused in the collection configuration'}))
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

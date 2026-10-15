@@ -150,15 +150,24 @@ def managed(request, sandbox):
 
 
 def main():
-    os.environ['E2B_CONNECTION_RETRIES'] = '0'
-    logging.disable(logging.CRITICAL)
-    result = {"error": "provider_outcome_unknown"}
+    # Existing snapshot/receipt reconciliation is observational; delivery is paused.
+    result = {"error": "capability_unavailable",
+              "message": "Managed runtime delivery is paused in the collection configuration"}
     try:
         raw = sys.stdin.buffer.read(131073)
-        if len(raw) > 131072 or importlib.metadata.version("e2b") != "2.52.0":
+        request = json.loads(raw) if len(raw) <= 131072 else None
+        if (not isinstance(request, dict) or request.get('method') != 'rpc'
+                or not isinstance(request.get('payload'), dict)
+                or request['payload'].get('op') != 'snapshot'):
+            sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+            return
+        result = {"error": "provider_outcome_unknown"}
+        os.environ['E2B_CONNECTION_RETRIES'] = '0'
+        logging.disable(logging.CRITICAL)
+        if importlib.metadata.version("e2b") != "2.52.0":
             raise ValueError()
         from e2b import Sandbox
-        result = managed(json.loads(raw), Sandbox)
+        result = managed(request, Sandbox)
     except Exception:
         pass  # Vendor errors/command output may contain credentials or input.
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")

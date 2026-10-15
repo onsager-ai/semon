@@ -136,15 +136,22 @@ def execute(request, sandbox_class):
 
 
 def main():
-    os.environ['E2B_CONNECTION_RETRIES'] = '0'
-    logging.disable(logging.CRITICAL)
-    result = UNKNOWN
+    # Only retained receipt inspection survives the collection delivery pause.
+    result = {'error': 'capability_unavailable',
+              'message': 'Managed runtime delivery is paused in the collection configuration'}
     try:
         data = sys.stdin.buffer.read(262145)
-        if len(data) > 262144 or importlib.metadata.version('e2b') != '2.52.0':
+        request = json.loads(data) if len(data) <= 262144 else None
+        if not isinstance(request, dict) or request.get('method') not in ('inspect', 'inspect_bootstrap'):
+            print(json.dumps(result, separators=(',', ':')))
+            return
+        result = UNKNOWN
+        os.environ['E2B_CONNECTION_RETRIES'] = '0'
+        logging.disable(logging.CRITICAL)
+        if importlib.metadata.version('e2b') != '2.52.0':
             raise ValueError()
         from e2b import Sandbox
-        result = execute(json.loads(data), Sandbox)
+        result = execute(request, Sandbox)
     except Exception:
         pass
     print(json.dumps(result, separators=(',', ':')))

@@ -84,17 +84,13 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- --no-deps -D warnings
 
-      - name: cargo test
-        # Keep producer phase timings in a failed test's captured output. This
-        # distinguishes bounded foreground discovery from background publication
-        # on the actual runner without changing deadlines or successful output.
+      - name: Collection pause boundaries before broad regressions
         run: |
-          # Foreground and incremental budgets use normal execution. Keep the
-          # existing instrumented full suite as separate regression evidence.
-          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
-          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture
-          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture
-          SEMON_BUILD_TIMING=1 cargo test --locked
+          python3 -m unittest discover -s tests/spikes -p test_collection_pause.py -v
+          cargo test -p semon-sessions --lib --locked paused_find_ -- --nocapture
+          cargo test -p semon-sessions --lib --locked collection_control_refuses_ -- --nocapture
+          cargo test -p semon-cli --bin semon --locked paused_delivery_refuses_ -- --nocapture
+          cargo test -p semon-control --bins --locked collection_ -- --nocapture
 
       - name: Recovery core journey and selected fallback diagnostics
         env:
@@ -107,6 +103,18 @@ jobs:
           cargo test -p semon-sessions --locked focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_aliases -- --test-threads=1 --nocapture
           cargo test -p semon-sessions --locked native_tool_outputs_use_bounded_string_fields_and_preserve_call_context -- --test-threads=1 --nocapture
           cargo test -p semon-sessions --locked native_relocation_history_witness_survives_failed_publication_and_an_append -- --test-threads=1 --nocapture
+
+      - name: cargo test
+        # Keep producer phase timings in a failed test's captured output. This
+        # distinguishes bounded foreground discovery from background publication
+        # on the actual runner without changing deadlines or successful output.
+        run: |
+          # Foreground and incremental budgets use normal execution. Keep the
+          # existing instrumented full suite as separate regression evidence.
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture
+          SEMON_BUILD_TIMING=1 cargo test --locked
 
       - name: Source clock/account strict Clippy
         run: cargo clippy -p semon-sessions --all-targets --features test-clock,test-ui-account-server --locked -- --no-deps -D warnings
