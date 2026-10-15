@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -18,6 +19,16 @@ def load(name):
 
 
 class CollectionPause(unittest.TestCase):
+    def test_ssh_qualification_refuses_before_fixture_tools_or_credentials(self):
+        for name in ["ssh-fixture.sh", "ssh-native-fixture.sh"]:
+            with self.subTest(script=name):
+                result = subprocess.run(["/bin/sh", str(SCRIPTS / name), "unexpected"],
+                                        env={"PATH": ""}, input=b"malformed private input",
+                                        capture_output=True, timeout=2)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, b"capability_unavailable: SSH qualification is paused in the collection configuration\n")
+
     def test_workers_refuse_stale_and_malformed_delivery_before_sdk_admission(self):
         for name, engine in [("e2b-runtime", "execute"), ("e2b-managed", "managed")]:
             module = load(name)

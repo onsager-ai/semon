@@ -1,5 +1,9 @@
 # SSH transport and mirror bootstrap
 
+Current collection scope: all SSH capabilities are paused, including onboarding/testing, remote installation/bootstrap/update, tunnels and SSH-mediated collection/execution. Public Rust transport APIs and the fixture installer return `capability_unavailable` before credentials, temporary files, sockets or SSH processes. Execution capabilities are all false; pure identity and saved-receipt handling remain available. Existing accepted history, credentials, known-host custody, installations and sessions are preserved. Local native collection and non-SSH Push/receive remain active. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
+The implementation and protocol contracts below describe retained private engines and historical qualification, not active product setup. Real-SSH fixture scripts refuse immediately, and OpenSSH/native-controller CI jobs are explicitly deferred. Offline security, receipt identity, supervisor lifetime and non-SSH checkpoint custody tests remain active. Deferred jobs are not passes; reactivation requires a future scope decision and isolated fixture adaptation, without a product bypass.
+
 `semon-ssh` is a reusable Linux/OpenSSH transport for existing servers. It has
 no Hub URL, tenancy, provider policy or agent-control capabilities. It supports
 unencrypted OpenSSH/PEM private keys accepted by OpenSSH, with Ed25519 host-key
@@ -42,7 +46,7 @@ Model authentication remains independent. The separately authorized
 [execution receipt broker](ssh-execution.md) provides private-driver dispatch and
 inspection; native launch and hosted execution adoption remain qualification gates.
 
-Qualification:
+Retained qualification commands (real-SSH command currently refuses):
 
 ```sh
 cargo test -p semon-ssh --locked

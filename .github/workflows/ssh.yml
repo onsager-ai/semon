@@ -1,4 +1,4 @@
-name: SSH qualification
+name: SSH inactive boundaries and retained security
 on:
   pull_request:
     paths:
@@ -8,11 +8,32 @@ on:
       - 'tests/spikes/ssh-native-controller.py'
       - 'scripts/ssh-fixture.sh'
       - 'tests/ssh/**'
+      - 'tests/spikes/test_collection_pause.py'
       - '.github/workflows/ssh.yml'
 permissions:
   contents: read
 jobs:
+  inactive-and-offline-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refuse stale SSH before credentials or transport admission
+        run: |
+          python3 -m unittest discover -s tests/spikes -p test_collection_pause.py -v
+          cargo test -p semon-ssh --lib --locked collection_ssh_ -- --nocapture
+          cargo test -p semon-ssh --example controller-install --locked collection_controller_install_refuses -- --nocapture
+      - name: Retained offline security, receipt identity and non-SSH checkpoint custody
+        run: |
+          cargo test -p semon-ssh --locked
+          cargo test -p semon-control --bin semon-ssh-controller --locked collection_controller_refuses
+          python3 tests/ssh/test_controller_supervisor.py
+
+  # Source #380 / Hub #267: real-SSH feature qualification is explicitly deferred
+  # after the inactive boundary checks above. Kept verbatim as historical oracles;
+  # skipped jobs are not passes and require a future scope decision to reactivate.
   openssh:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -20,6 +41,7 @@ jobs:
       - run: scripts/ssh-fixture.sh cargo test -p semon-ssh --locked --features real-ssh-tests
 
   native-controller:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

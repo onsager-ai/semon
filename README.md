@@ -7,7 +7,7 @@ Native source logs, the incremental Session Event Index, and Session Catalog for
 the foundation for Viewer, CLI, MCP, future Session Intelligence.
 
 The core CLI lives in `semon-cli`; session discovery/parsing and focused reads live
-in `semon-sessions`, generic mirror synchronization in `semon-push`, SSH onboarding
+in `semon-sessions`, generic mirror synchronization in `semon-push`, retained SSH transport
 in `semon-ssh`. Retained optional runtime/control engines live in `semon-runtime`/`semon-control`.
 
 Encrypted Relay and Canonical Trace Store are retired pre-release experiments.
@@ -16,7 +16,7 @@ Native source logs, the Session Event Index, generic Push, SSH and runtime
 observation remain supported. This code change does not remove user data,
 keys or installed services. See the [session foundation contract](docs/design/session-foundation-retirement.md).
 
-The collection configuration temporarily pauses two-way harness control, managed runtime delivery and broad full-text retrieval. Collection, synchronization, monitoring, metadata navigation and readable native history remain active without model or compute credentials. Direct `find` and control calls return `capability_unavailable` before native discovery, controller/provider initialization or delivery. Passive questions, approvals, outcomes, lineage and handoffs remain visible. Native archive/unarchive, enrollment/revocation, collection configuration, authorization, export and explicit data administration remain in scope. Existing credentials, history, operation receipts and uncertain outcomes are preserved; this pause stops no installed harness and replays no unknown write. See the [temporary collection scope](docs/design/session-foundation-retirement.md#temporary-collection-scope).
+The collection configuration temporarily pauses two-way harness control, managed runtime delivery, broad full-text retrieval and all SSH capabilities. Collection, synchronization, monitoring, metadata navigation and readable native history remain active without model, compute or SSH credentials or SSH connectivity. Direct `find`, control and SSH calls return `capability_unavailable` before native discovery, controller/provider initialization or delivery. Passive questions, approvals, outcomes, lineage and handoffs remain visible. Native archive/unarchive, enrollment/revocation, collection configuration, authorization, export and explicit data administration remain in scope. Existing credentials, history, operation receipts and uncertain outcomes are preserved; this pause stops no installed harness and replays no unknown write. See the [temporary collection scope](docs/design/session-foundation-retirement.md#temporary-collection-scope).
 
 ## Seeing your agent sessions
 
@@ -58,22 +58,21 @@ semon receive token list --dir ~/semon-mirror
 semon receive --dir ~/semon-mirror            # listens on 127.0.0.1:8735
 ```
 
-Put the token on that machine in a 0600 file, and point `semon push` at the receiver. The simplest route keeps the receiver on loopback and forwards a port over SSH, since plain `http` to a loopback address is allowed:
+Put the token on that machine in a 0600 file, and point `semon push` at the receiver. For a receiver on this machine, plain `http` to loopback is allowed. Across machines, use an operator-provisioned TLS receiver with a publicly trusted certificate; SSH tunnels and SSH-mediated collection are paused:
 
 ```sh
-ssh -N -L 8735:127.0.0.1:8735 receiving-host &
 semon push --to http://127.0.0.1:8735 --token-file ~/.config/semon/laptop.token --watch
 ```
 
 `semon receive token revoke laptop --dir ~/semon-mirror` removes a token. A running receiver re-reads `DIR/tokens` when the file changes, so the next request with that token gets 401 without a restart. If the file stops parsing, or its mode is loosened, no token is accepted until it is fixed.
 
-The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given and `DIR/tokens` holds at least one token; plain HTTP off loopback is always refused. These are the generic `semon receive` rules, implemented in `semon-push`. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; otherwise use the SSH route above.
+The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given and `DIR/tokens` holds at least one token; plain HTTP off loopback is always refused. These are the generic `semon receive` rules, implemented in `semon-push`. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; configure a trusted certificate before using a remote receiver.
 
 Its limits:
 
 - A request body is at most 6 MiB (one append's 4 MiB of file bytes, as base64, plus the JSON around it). A larger declared body gets 413 before any of it is read. A body needs a `Content-Length`: without one, or chunked, it gets 411.
 - The token is checked (401) before the body is read.
-- At most 32 connections at once. A connection that hasn't yet passed the token check also counts against its address (an IPv6 one by its /64), which may have 4 such; once a request on it is authenticated it counts only toward the 32, so machines behind one address (an SSH tunnel, a NAT) each keep their `--watch` connection. One more over either limit is closed as soon as it is accepted.
+- At most 32 connections at once. A connection that hasn't yet passed the token check also counts against its address (an IPv6 one by its /64), which may have 4 such; once a request on it is authenticated it counts only toward the 32, so machines behind one address (for example, behind a NAT) each keep their `--watch` connection. One more over either limit is closed as soon as it is accepted.
 - Every read and write, the TLS handshake's included, runs against a deadline, so trickling bytes doesn't stretch it. The first request's head must be in within 10 s of the connection being accepted, a later one's within 10 s of its first byte, and a body within 120 s. A kept-alive connection closes after 30 s idle, and no single read or write waits more than 30 s.
 - Each machine's copy holds at most 20 GiB (`--max-bytes SIZE`, as in `500G`), counted by a walk of `DIR/machines/` at start and then by each write. A push that would pass it gets 507, and `semon push` reports the failure and stops that pass. To recover, raise `--max-bytes` and restart the receiver. Deleting copies under `DIR` doesn't lower the count until a restart, and the machine sends deleted copies again anyway.
 - Paths are checked with `semon_sessions::is_input_path`. The receiver creates its directories itself and refuses a request whose path meets a symbolic link.
@@ -95,25 +94,7 @@ Every session keeps its machine, each machine answers for its own transcripts, a
 
 DIR is only read. Nothing is written there, and no symbolic link is followed out of a machine's directory: a machine directory, a home (`claude/`, `codex/` or their `projects/` and `sessions/`), a `facts.json` or a log file that is a link is ignored. What the viewer keeps for each received machine (its metadata cache and the facts it serves) goes beside `--cache`, under `received/`.
 
-`--machines` changes nothing about who can reach the viewer: it listens only on `127.0.0.1`, and wants the token URL (then its cookie) and an exact local Host header. To see it from another computer, forward the port over SSH. The Host check includes the port, so use the same port number on both ends:
-
-1. On the machine that holds DIR, serve on a fixed port:
-
-   ```sh
-   semon sessions --serve --machines ~/semon-machines --listen 127.0.0.1:8765
-   ```
-
-   It prints `http://127.0.0.1:8765/?t=TOKEN`.
-
-2. On the computer you view from, open the tunnel and leave it running:
-
-   ```sh
-   ssh -N -L 8765:127.0.0.1:8765 you@that-machine
-   ```
-
-3. Open the printed URL, unchanged, in a browser on the computer you view from.
-
-If port 8765 is taken on either side, pick another and use it in both `--listen` and `-L`. A different local port (`-L 8080:127.0.0.1:8765`, then `http://127.0.0.1:8080/…`) is refused by the Host check with 403.
+`--machines` changes nothing about who can reach the viewer: it listens only on `127.0.0.1`, and requires the token URL (then its cookie) and an exact local Host header. Open the printed URL on that machine. SSH tunneling is paused in the collection configuration; it is not an active remote-viewing setup route.
 
 ## For agents: `semon query` and `semon mcp`
 
@@ -192,5 +173,4 @@ repository's Apache-2.0 license.
 
 Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.
 
-Reusable SSH checks and mirror bootstrap for embedding applications are documented
-in [SSH bootstrap](docs/ssh-bootstrap.md). SSH enrollment grants no agent execution.
+SSH onboarding, testing, installation/bootstrap/update, tunneling and SSH-mediated collection/execution are paused. Public transport calls refuse before credentials or network admission. [SSH bootstrap](docs/ssh-bootstrap.md) records the retained private transport and deferred qualification; existing credentials, installations and history are preserved.
