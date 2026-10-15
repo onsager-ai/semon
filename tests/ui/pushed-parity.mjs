@@ -109,16 +109,36 @@ if (process.argv.includes('--native-pages')) {
           // Their complete body already participates in exact transcript parity;
           // there is no field chunk to request from the expansion endpoint.
           if (entry.field.chunks === 0) {
+            // The producer deliberately omits empty Thinking text. Require that
+            // exact shape on both observations; other fields must contain ''.
+            const omittedThinking = entry.k === 'think' && entry.field.name === 'text';
+            const emptyBody = (value) =>
+              omittedThinking
+                ? value.k === 'think' && !Object.hasOwn(value, 'text')
+                : value[entry.field.name] === '';
+            const sameDescriptor = JSON.stringify(saved.field) === JSON.stringify(entry.field);
             if (
               !['text', 'out'].includes(entry.field.name) ||
               entry.field.complete !== true ||
               entry.clipped !== false ||
-              entry[entry.field.name] !== '' ||
-              JSON.stringify(saved.field) !== JSON.stringify(entry.field) ||
+              !emptyBody(entry) ||
+              !sameDescriptor ||
               saved.clipped !== false ||
-              saved[entry.field.name] !== ''
+              !emptyBody(saved)
             )
-              throw Error('pushed-parity zero-chunk native field is not complete empty content');
+              throw Error(
+                'pushed-parity zero-chunk native field is not complete empty content: ' +
+                  JSON.stringify({
+                    slot: entry.slot,
+                    omittedThinking,
+                    sameDescriptor,
+                    entryComplete: entry.field.complete === true,
+                    entryUnclipped: entry.clipped === false,
+                    savedUnclipped: saved.clipped === false,
+                    entryEmpty: emptyBody(entry),
+                    savedEmpty: emptyBody(saved),
+                  }),
+              );
             expansions[key] = { field: entry.field.name, text: '' };
             continue;
           }
