@@ -59,6 +59,7 @@ pub(super) fn read(
     let prefix = prefix(path);
     let header: Option<Option<String>> = connection
         .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
+            crate::selected_read::row(row, 512)?;
             row.get(0)
         })
         .optional()?;
@@ -87,6 +88,7 @@ pub(super) fn read(
     let mut hashes = Vec::new();
     let mut page = 0;
     while let Some(row) = rows.next()? {
+        crate::selected_read::row(row, PAGE * 32)?;
         let key: String = row.get(0)?;
         if key == format!("{prefix}header") {
             continue;

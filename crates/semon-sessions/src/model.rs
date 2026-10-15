@@ -2039,7 +2039,16 @@ impl<'a> Builder<'a> {
 
     /// A session's events in order.
     fn events_of(&self, session: usize) -> Vec<Ref> {
-        self.sessions[session].refs.clone()
+        if !crate::selected_read::active() {
+            return self.sessions[session].refs.clone();
+        }
+        self.sessions[session]
+            .refs
+            .iter()
+            .enumerate()
+            .take_while(|(index, _)| crate::selected_read::continue_at(*index))
+            .map(|(_, reference)| *reference)
+            .collect()
     }
 
     /// Orders every session's events once. A lineage's files usually follow
@@ -2054,7 +2063,11 @@ impl<'a> Builder<'a> {
                 let events = &self.files[*file].summary.events;
                 // Events before a file's first timestamp take that timestamp.
                 let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
-                for (at, event) in events.iter().enumerate() {
+                for (at, event) in events
+                    .iter()
+                    .enumerate()
+                    .take_while(|(at, _)| crate::selected_read::continue_at(*at))
+                {
                     time = event.t.unwrap_or(time);
                     if copied.contains(&(*file, at)) {
                         continue;
@@ -2812,7 +2825,13 @@ impl<'a> Builder<'a> {
 
     fn index_tools(&mut self) {
         for (position, file) in self.files.iter().enumerate() {
-            for (at, event) in file.summary.events.iter().enumerate() {
+            for (at, event) in file
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .take_while(|(at, _)| crate::selected_read::continue_at(*at))
+            {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
@@ -2855,7 +2874,11 @@ impl<'a> Builder<'a> {
     fn background_commands(&mut self) {
         for index in 0..self.sessions.len() {
             let mut calls = HashMap::<String, Ref>::new();
-            for at in self.events_of(index) {
+            for at in self
+                .events_of(index)
+                .into_iter()
+                .take_while(|at| crate::selected_read::continue_at(at.1))
+            {
                 let found = event(self.files, at);
                 if self.files[at.0].harness() != "claude" {
                     continue;
@@ -2888,7 +2911,13 @@ impl<'a> Builder<'a> {
         let mut receipts = HashMap::<String, Vec<Ref>>::new();
         let mut aliases = HashMap::<String, Vec<Ref>>::new();
         for (position, file) in self.files.iter().enumerate() {
-            for (at, event) in file.summary.events.iter().enumerate() {
+            for (at, event) in file
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .take_while(|(at, _)| crate::selected_read::continue_at(*at))
+            {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
@@ -3364,7 +3393,13 @@ impl<'a> Builder<'a> {
             if file.harness() != "claude" {
                 continue;
             }
-            for (at, event) in file.summary.events.iter().enumerate() {
+            for (at, event) in file
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .take_while(|(at, _)| crate::selected_read::continue_at(*at))
+            {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
@@ -3382,7 +3417,13 @@ impl<'a> Builder<'a> {
             if file.harness() != "claude" {
                 continue;
             }
-            for (at, event) in file.summary.events.iter().enumerate() {
+            for (at, event) in file
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .take_while(|(at, _)| crate::selected_read::continue_at(*at))
+            {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
@@ -3742,7 +3783,13 @@ impl<'a> Builder<'a> {
             if file.harness() != "codex" {
                 continue;
             }
-            for (at, event) in file.summary.events.iter().enumerate() {
+            for (at, event) in file
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .take_while(|(at, _)| crate::selected_read::continue_at(*at))
+            {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
@@ -3950,7 +3997,11 @@ impl<'a> Builder<'a> {
             if self.sessions[index].kind != SessKind::Lineage {
                 continue;
             }
-            for at in self.events_of(index) {
+            for at in self
+                .events_of(index)
+                .into_iter()
+                .take_while(|at| crate::selected_read::continue_at(at.1))
+            {
                 if event(self.files, at).k != Kind::Ask {
                     continue;
                 }
@@ -4344,7 +4395,11 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let mut waits = Vec::new();
-            for at in self.events_of(index) {
+            for at in self
+                .events_of(index)
+                .into_iter()
+                .take_while(|at| crate::selected_read::continue_at(at.1))
+            {
                 let found = event(self.files, at).clone();
                 if found.k != Kind::Tool
                     || !matches!(found.n.as_deref(), Some("wait" | "wait_agent" | "wait_all"))
@@ -7015,6 +7070,7 @@ fn prepare_history_inner(
                 let mut offset = 0u64;
 
                 for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                    crate::selected_read::charge(std::mem::size_of::<Event>() + 128, line.len())?;
                     if line.len() > 32 * 1024 * 1024 || line.last() != Some(&b'\n') {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -7219,8 +7275,10 @@ fn build_sources_inner(
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
+            crate::selected_read::checkpoint($name)?;
             let started = std::time::Instant::now();
             let value = $body;
+            crate::selected_read::check()?;
             timings.push((
                 $name,
                 u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -8024,6 +8082,7 @@ fn build_sources_inner(
         }
     }
     if target == BuildTarget::Query {
+        crate::selected_read::check()?;
         let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
         let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
         ask_briefs.retain(|id, _| kept.contains(id));

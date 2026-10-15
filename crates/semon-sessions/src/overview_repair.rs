@@ -49,6 +49,10 @@ impl NativeRecords<'_> {
         (end <= 32 * 1024 * 1024).then(|| rest[..end].to_vec())
     }
     pub(crate) fn record(&self, path: &Path, offset: u64) -> Option<Value> {
+        if let Err(error) = crate::selected_read::check() {
+            self.error.replace(Some(error));
+            return None;
+        }
         if let Some(read) = &self.read {
             match read(path, offset) {
                 Ok(value) => return Some(value),
@@ -65,6 +69,7 @@ impl NativeRecords<'_> {
         path: &Path,
         location: &crate::native_handoff::CallRef,
     ) -> io::Result<crate::handoff::Call> {
+        crate::selected_read::check()?;
         location.read_with(|proof| {
             if let Some(read) = &self.evidence {
                 return read(path, proof);
@@ -113,7 +118,9 @@ impl NativeRecords<'_> {
     }
 }
 fn failure(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
+    crate::selected_read::check()
+        .err()
+        .unwrap_or_else(|| io::Error::other(error.to_string()))
 }
 /// A selected producer observation, using the same bounded migration as the
 /// hosted native reader. It publishes metadata without restoring native files.
@@ -179,12 +186,16 @@ fn connection(options: &Options) -> io::Result<Connection> {
     .map_err(failure)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(failure)?;
+    crate::selected_read::install(&db)?;
     Ok(db)
 }
 fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     let text = crate::history_projection::catalog(db, key).map_err(failure)?.or(db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?);
-    text.map(|text| serde_json::from_str(&text).map_err(failure))
-        .transpose()
+    text.map(|text| {
+        crate::selected_read::charge(512, text.len())?;
+        serde_json::from_str(&text).map_err(failure)
+    })
+    .transpose()
 }
 fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
     let has_tables = db.query_row("SELECT count(*)=2 FROM sqlite_schema WHERE name IN ('session_overview','session_trace_headers')",[],|row|row.get::<_,bool>(0)).map_err(failure)?;
@@ -685,6 +696,27 @@ pub fn repair_session_overview(
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> io::Result<bool> {
+    repair_session_overview_with_control(
+        options,
+        source_key,
+        key,
+        provider,
+        mode,
+        &crate::SelectedReadControl::default(),
+    )
+}
+
+/// Selected repair using the host's request-owned deadline/cancellation.
+pub fn repair_session_overview_with_control(
+    options: &Options,
+    source_key: &str,
+    key: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    control: &crate::SelectedReadControl,
+) -> io::Result<bool> {
+    let _scope = crate::selected_read::Scope::enter(control);
+    crate::selected_read::check()?;
     if source_key.is_empty() || source_key.len() > 4096 || key.is_empty() || key.len() > 4096 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -698,6 +730,7 @@ pub fn repair_session_overview(
     if ready(&tx, &rows[0])? {
         tx.commit().map_err(failure)?;
         let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
+        crate::selected_read::install(&writable)?;
         writable.busy_timeout(Duration::ZERO).map_err(failure)?;
         let tx = writable
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -711,6 +744,7 @@ pub fn repair_session_overview(
             )
             .map_err(failure)?;
         }
+        crate::selected_read::checkpoint("selected_publication")?;
         tx.commit().map_err(failure)?;
         return Ok(false);
     }
@@ -783,7 +817,9 @@ pub fn repair_session_overview(
     // Initialize through the owning schema migration. It preserves independent
     // current/history membership; the publication below does not touch either.
     let _schema = EventCache::open_scoped(&options.cache).map_err(failure)?;
+    crate::selected_read::check()?;
     let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
+    crate::selected_read::install(&writable)?;
     writable.busy_timeout(Duration::ZERO).map_err(failure)?;
     let tx = writable
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -807,6 +843,7 @@ pub fn repair_session_overview(
         }
     }
     for row in &repaired {
+        crate::selected_read::check()?;
         if let Some(summary) = &row.overview {
             crate::overview::publish(&tx, &row.key, row.last.unwrap_or(0), summary)
                 .map_err(failure)?;
@@ -831,6 +868,7 @@ pub fn repair_session_overview(
         )
         .map_err(failure)?;
     }
+    crate::selected_read::checkpoint("selected_publication")?;
     tx.commit().map_err(failure)?;
     Ok(true)
 }
@@ -843,6 +881,7 @@ fn with_records<T>(
     tx: rusqlite::Transaction<'_>,
     derive: impl FnOnce(&NativeRecords<'_>) -> io::Result<T>,
 ) -> io::Result<T> {
+    crate::selected_read::check()?;
     let mut unique = BTreeMap::new();
     for source in rows.iter().flat_map(|row| &row.sources) {
         if let Some(prior) = unique.insert(source.path.clone(), source.clone())
@@ -875,7 +914,26 @@ fn with_records<T>(
         .iter()
         .flat_map(|row| row.native_ids.iter().cloned())
         .collect();
-    let selected = EventCache::from_selected(&tx, &sources, &ids).ok();
+    let selected = match EventCache::from_selected(&tx, &sources, &ids) {
+        Ok(selected) => Some(selected),
+        Err(error) => {
+            // A terminal request failure must never switch to body replay.
+            crate::selected_read::check()?;
+            if matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::TooBig | rusqlite::ErrorCode::OperationInterrupted)
+            ) {
+                return Err(crate::selected_read::limit_error());
+            }
+            match error {
+                rusqlite::Error::InvalidQuery
+                | rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::InvalidColumnType(..)
+                | rusqlite::Error::QueryReturnedNoRows => None,
+                error => return Err(failure(error)),
+            }
+        }
+    };
     let mut fields = BTreeMap::new();
     if selected.is_some() {
         let mut field_bytes = 0;
@@ -893,7 +951,10 @@ fn with_records<T>(
             };
             let mut statement=tx.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND json_extract(metadata,'$.field') IS NOT NULL ORDER BY slot LIMIT 4096")).map_err(failure)?;
             for text in statement
-                .query_map([&row.key], |r| r.get::<_, Option<String>>(0))
+                .query_map([&row.key], |r| {
+                    crate::selected_read::row(r, 512)?;
+                    r.get::<_, Option<String>>(0)
+                })
                 .map_err(failure)?
             {
                 let Some(text) = text.map_err(failure)? else {
@@ -1014,11 +1075,16 @@ fn with_records<T>(
             |reader, refs| {
                 let bounded = crate::source_reader::BudgetedReader::new(reader, 1024);
                 for (path, source) in refs {
+                    crate::selected_read::charge(
+                        0,
+                        usize::try_from(source.offset).map_err(failure)?,
+                    )?;
                     let mut bytes =
                         Vec::with_capacity(usize::try_from(source.offset).map_err(failure)?);
                     let mut observed = None::<String>;
                     let mut length = None;
                     while (bytes.len() as u64) < source.offset {
+                        crate::selected_read::check()?;
                         let offset = bytes.len() as u64;
                         let max =
                             crate::SESSION_SOURCE_CHUNK_MAX.min((source.offset - offset) as usize);
@@ -1055,7 +1121,9 @@ fn with_records<T>(
             },
         )?;
     }
+    crate::selected_read::checkpoint("history_derivation")?;
     let result = derive(&native)?;
+    crate::selected_read::check()?;
     if let Some(error) = native.error.take() {
         return Err(error);
     }
@@ -1072,6 +1140,8 @@ pub(crate) fn with_query<T>(
     now: i64,
     read: impl FnOnce(crate::model::QueryData) -> T,
 ) -> io::Result<T> {
+    let _scope = crate::selected_read::Scope::ensure();
+    crate::selected_read::check()?;
     let mut db = connection(options)?;
     let tx = db.transaction().map_err(failure)?;
     let selection = query_selection(&tx, key)?;

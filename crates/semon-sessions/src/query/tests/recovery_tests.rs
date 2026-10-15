@@ -505,3 +505,259 @@ fn recovery_held_fallback_preserves_independent_reads_and_host_cancellation() {
         );
     });
 }
+
+#[test]
+fn recovery_selected_preparation_terminal_failures_never_replay_or_publish() {
+    for failure in ["before", "deadline", "decode", "cpu", "rows", "bytes"] {
+        let (home, key) = shared_home(128);
+        if failure == "cpu" {
+            // No leading user record: native marker lookup reaches the first
+            // assistant without provider I/O. Cancel inside event ordering.
+            for sid in ["first", "second"] {
+                let path = home
+                    .options
+                    .claude_home
+                    .join(format!("projects/-work-proj/{sid}.jsonl"));
+                let text = fs::read_to_string(&path).unwrap();
+                fs::write(path, text.split_once('\n').unwrap().1).unwrap();
+            }
+            publish(&home);
+        }
+        let args = json!({"id":key});
+        let expected = Query::from_sources(admitted(home.options.clone()))
+            .call_at("get_session", &args, NOW)
+            .unwrap();
+        let archives = Archives::take(&home, &key);
+        let generation = catalog_generation(&home);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(failure == "before"));
+        let deadline = if failure == "deadline" {
+            Instant::now()
+        } else {
+            Instant::now() + Duration::from_secs(20)
+        };
+        let mut control = crate::SelectedReadControl::new(deadline, cancelled.clone());
+        if failure == "rows" {
+            control = control.with_limits(8, usize::MAX);
+        }
+        if failure == "bytes" {
+            control = control.with_limits(usize::MAX, 1024);
+        }
+        if failure == "decode" || failure == "cpu" {
+            let flag = cancelled.clone();
+            crate::selected_read::set_hook(
+                if failure == "decode" {
+                    "selected_event"
+                } else {
+                    "history_event"
+                },
+                if failure == "decode" { 8 } else { 1 },
+                move || flag.store(true, Ordering::Release),
+            );
+        }
+        let mut query = Query::from_sources(admitted(home.options.clone()));
+        {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            assert!(
+                query
+                    .call_selected_at(
+                        "local",
+                        &key,
+                        "get_session",
+                        &args,
+                        Some(&archives),
+                        crate::SessionSourceReadMode::ProviderOnly,
+                        NOW
+                    )
+                    .is_err(),
+                "{failure}"
+            );
+        }
+        assert_eq!(
+            archives.work(),
+            (0, 0),
+            "{failure}: terminal preparation fell back to source bytes"
+        );
+        assert_eq!(
+            catalog_generation(&home),
+            generation,
+            "{failure}: publication changed"
+        );
+        assert!(
+            query.native.is_none(),
+            "failed preparation installed partial native evidence"
+        );
+        assert_eq!(
+            query
+                .call_selected_at(
+                    "local",
+                    &key,
+                    "get_session",
+                    &args,
+                    Some(&archives),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW
+                )
+                .unwrap(),
+            expected,
+            "{failure}: healthy next request lost complete native semantics"
+        );
+        for archive in archives.0.values() {
+            assert!(!home.options.claude_home.join(&archive.source.path).exists());
+        }
+    }
+}
+
+#[test]
+fn recovery_selected_nested_scopes_share_budget_and_restore_after_failure() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let control = crate::SelectedReadControl::default().with_limits(1, 1024);
+    {
+        let _outer = crate::selected_read::Scope::enter(&control);
+        db.query_row("SELECT 'first'", [], |row| {
+            crate::selected_read::row(row, 32)
+        })
+        .unwrap();
+        {
+            let _inner = crate::selected_read::Scope::enter(&crate::SelectedReadControl::default());
+            assert!(
+                db.query_row("SELECT 'second'", [], |row| crate::selected_read::row(
+                    row, 32
+                ))
+                .is_err()
+            );
+        }
+        assert_eq!(
+            crate::selected_read::check().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+    assert!(!crate::selected_read::active());
+    db.query_row("SELECT 'healthy'", [], |row| {
+        crate::selected_read::row(row, 32)
+    })
+    .unwrap();
+}
+
+#[test]
+fn recovery_selected_sql_progress_observes_request_cancellation() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control = crate::SelectedReadControl::new(
+        Instant::now() + Duration::from_secs(20),
+        cancelled.clone(),
+    );
+    let _scope = crate::selected_read::Scope::enter(&control);
+    crate::selected_read::install(&db).unwrap();
+    cancelled.store(true, Ordering::Release);
+    assert!(db.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0)).is_err());
+}
+
+#[test]
+fn recovery_selected_repair_cancellation_rolls_back_publication() {
+    for ready in [true, false] {
+        let (home, _) = shared_home(16);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        if !ready {
+            db.execute("UPDATE session_catalog SET metadata=json_remove(metadata,'$.query') WHERE session_key='first'", []).unwrap();
+        }
+        db.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('overview_needed:first','1')",
+            [],
+        )
+        .unwrap();
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='first'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let publication = || {
+            let mut statement = db.prepare("SELECT 'overview',summary FROM session_overview WHERE session_key='first' UNION ALL SELECT 'header',metadata FROM session_trace_headers WHERE session_key='first' UNION ALL SELECT 'turn',metadata FROM session_trace_turns WHERE session_key='first' UNION ALL SELECT 'edge',metadata FROM session_trace_edges WHERE session_key='first' ORDER BY 1,2").unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let original_publication = publication();
+        let generation = catalog_generation(&home);
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control =
+            crate::SelectedReadControl::new(Instant::now() + Duration::from_secs(20), flag.clone());
+        crate::selected_read::set_hook("selected_publication", 0, move || {
+            flag.store(true, Ordering::Release)
+        });
+        let error = crate::repair_session_overview_with_control(
+            &home.options,
+            "local",
+            "first",
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            &control,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(catalog_generation(&home), generation);
+        assert_eq!(publication(), original_publication);
+        assert_eq!(
+            db.query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='first'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            metadata
+        );
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='overview_needed:first')",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        crate::repair_session_overview(
+            &home.options,
+            "local",
+            "first",
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
+    let (home, _) = shared_home(128);
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let encoded: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='first'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded).unwrap();
+    db.execute(
+        "UPDATE files SET head_sha256=zeroblob(32) WHERE path=?1",
+        [row.sources[0].path.to_str().unwrap()],
+    )
+    .unwrap();
+    let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+    let _scope = crate::selected_read::Scope::enter(&crate::SelectedReadControl::default());
+    assert!(
+        crate::events::EventCache::from_selected(
+            &db,
+            &row.sources,
+            &std::collections::BTreeSet::from(["first".to_owned()])
+        )
+        .is_err()
+    );
+    assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), before);
+}

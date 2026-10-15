@@ -1484,6 +1484,23 @@ pub(super) fn read_selected(
             continue;
         }
         let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        crate::selected_read::check().map_err(crate::selected_read::sql_error)?;
+        let (_, ledger) = ledger_row(connection, path)?.ok_or(rusqlite::Error::InvalidQuery)?;
+        if (
+            ledger.stat.dev,
+            ledger.stat.ino,
+            ledger.offset,
+            ledger.prefix,
+            ledger.tail,
+        ) != (
+            source.dev,
+            source.ino,
+            source.offset,
+            source.prefix_sha256,
+            source.tail_sha256,
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let mut rows = statement.query([path])?;
         let row = rows.next()?.ok_or(rusqlite::Error::InvalidQuery)?;
         let (path, ledger, index) = read_file(&mut readers, row)?;
@@ -1510,6 +1527,7 @@ pub(super) fn read_selected(
     for id in native_ids {
         let mut rows = runs.query([id])?;
         while let Some(row) = rows.next()? {
+            crate::selected_read::row(row, 512)?;
             loaded.reported_runs.push(read_run(row)?);
         }
     }
@@ -4822,7 +4840,10 @@ fn read_tree_summary(
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
     let encoded: Option<Option<String>> = statement
-        .query_row([tree_summary_key(path)], |row| row.get(0))
+        .query_row([tree_summary_key(path)], |row| {
+            crate::selected_read::row(row, 512)?;
+            row.get(0)
+        })
         .optional()?;
     Ok(encoded.flatten().and_then(|text| {
         let record: TreeSummaryRecord = serde_json::from_str(&text).ok()?;
@@ -4888,7 +4909,10 @@ fn read_parent_marker(
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_marker::Index>> {
     let encoded: Option<Option<String>> = statement
-        .query_row([parent_marker_key(path)], |row| row.get(0))
+        .query_row([parent_marker_key(path)], |row| {
+            crate::selected_read::row(row, 512)?;
+            row.get(0)
+        })
         .optional()?;
     Ok(encoded.flatten().and_then(|text| {
         let record: ParentMarkerRecord = serde_json::from_str(&text).ok()?;
@@ -4963,7 +4987,10 @@ fn read_codex_header(
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_header::CodexHeader>> {
     let encoded: Option<Option<String>> = statement
-        .query_row([codex_header_key(path)], |row| row.get(0))
+        .query_row([codex_header_key(path)], |row| {
+            crate::selected_read::row(row, 512)?;
+            row.get(0)
+        })
         .optional()?;
     Ok(encoded.flatten().and_then(|text| {
         let record: CodexHeaderRecord = serde_json::from_str(&text).ok()?;
@@ -5032,7 +5059,10 @@ fn read_claude_sidecar(
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_sidecar::ClaudeSidecar>> {
     let encoded: Option<Option<String>> = statement
-        .query_row([claude_sidecar_key(path)], |row| row.get(0))
+        .query_row([claude_sidecar_key(path)], |row| {
+            crate::selected_read::row(row, 512)?;
+            row.get(0)
+        })
         .optional()?;
     Ok(encoded.flatten().and_then(|text| {
         let record: ClaudeSidecarRecord = serde_json::from_str(&text).ok()?;
@@ -5169,6 +5199,7 @@ fn read_file(
     readers: &mut Readers<'_>,
     row: &Row<'_>,
 ) -> rusqlite::Result<(String, Ledger, FileIndex)> {
+    crate::selected_read::row(row, std::mem::size_of::<FileIndex>())?;
     #[cfg(test)]
     super::FILE_READS.with(|reads| reads.set(reads.get() + 1));
     let file_id: i64 = row.get(0)?;
@@ -5190,6 +5221,9 @@ fn read_file(
     let mut extras = Vec::new();
     let mut rows = readers.events.query([file_id])?;
     while let Some(event_row) = rows.next()? {
+        crate::selected_read::row(event_row, std::mem::size_of::<Event>() + 32)?;
+        crate::selected_read::checkpoint("selected_event")
+            .map_err(crate::selected_read::sql_error)?;
         let (extra, seq, event) = read_event(event_row)?;
         let list = if extra { &mut extras } else { &mut events };
         if seq != list.len() {
@@ -5201,6 +5235,7 @@ fn read_file(
     let mut signals = Vec::new();
     let mut rows = readers.signals.query([file_id])?;
     while let Some(signal_row) = rows.next()? {
+        crate::selected_read::row(signal_row, std::mem::size_of::<Signal>() + 32)?;
         if seq_of(signal_row.get(0)?) != signals.len() {
             return Err(gap("signals"));
         }
@@ -5217,6 +5252,7 @@ fn read_file(
     let mut usage_by_id = BTreeMap::new();
     let mut rows = readers.usage.query([file_id])?;
     while let Some(usage_row) = rows.next()? {
+        crate::selected_read::row(usage_row, std::mem::size_of::<MessageUsage>() + 64)?;
         let (id, usage) = read_usage(usage_row)?;
         usage_by_id.insert(id, usage);
     }
@@ -5224,6 +5260,7 @@ fn read_file(
     let mut codex_usage_events = Vec::new();
     let mut rows = readers.codex_usage.query([file_id])?;
     while let Some(codex_row) = rows.next()? {
+        crate::selected_read::row(codex_row, std::mem::size_of::<CodexUsageEvent>() + 32)?;
         if seq_of(codex_row.get(0)?) != codex_usage_events.len() {
             return Err(gap("codex usage"));
         }

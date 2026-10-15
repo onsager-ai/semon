@@ -45,6 +45,10 @@ native line, and blocking rendering does not automatically stop when the client
 disconnects. Keep diagnostics sanitized; provider URLs, object keys and
 credential errors must not leak through parser failures.
 
+Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
+
+The complete selected fallback admits at most 131,072 decoded rows and 64 MiB of preparation accounting, charging fixed row representation plus eight times dynamic cell bytes before decoding. Individual SQLite rows are limited to 32 MiB. These are explicit work/availability limits, not measured whole-process or allocator peak bounds; the native body fallback retains its separate existing 64 MiB/1,024-request bounds and shares preparation accounting. An over-limit selection returns unavailable with a narrower-selection recommendation rather than truncated success. Successful admitted requests retain complete native semantics and may load complete selected Indexes; this path is not history-independent.
+
 The native-line oracle requests bounded chunks, pins generation and length,
 rejects incorrect offsets, overlarge/empty responses and cross-generation reads,
 and reads only complete consumed lines. It reuses the local transcript's JSON
