@@ -99,8 +99,29 @@ if (process.argv.includes('--native-pages')) {
         query.set('generation', selected.projection.generation);
         const key = JSON.stringify([sid, entry.slot]);
         if (entry.field) {
-          if (!Number.isSafeInteger(entry.field.chunks) || entry.field.chunks < 1)
-            throw Error('pushed-parity native field has no complete chunk count');
+          if (!Number.isSafeInteger(entry.field.chunks) || entry.field.chunks < 0)
+            throw Error(
+              'pushed-parity native field has an invalid chunk count (type ' +
+                typeof entry.field.chunks +
+                ')',
+            );
+          // Empty native strings have one checkpoint and therefore zero chunks.
+          // Their complete body already participates in exact transcript parity;
+          // there is no field chunk to request from the expansion endpoint.
+          if (entry.field.chunks === 0) {
+            if (
+              !['text', 'out'].includes(entry.field.name) ||
+              entry.field.complete !== true ||
+              entry.clipped !== false ||
+              entry[entry.field.name] !== '' ||
+              JSON.stringify(saved.field) !== JSON.stringify(entry.field) ||
+              saved.clipped !== false ||
+              saved[entry.field.name] !== ''
+            )
+              throw Error('pushed-parity zero-chunk native field is not complete empty content');
+            expansions[key] = { field: entry.field.name, text: '' };
+            continue;
+          }
           const anchor = entry.field.provenance ?? entry.provenance;
           let text = '';
           for (let chunk = 0; chunk < entry.field.chunks; chunk++) {
