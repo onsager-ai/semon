@@ -147,13 +147,13 @@ pub(crate) fn checkpoint(_phase: &'static str) -> io::Result<()> {
     {
         let hook = HOOK.with(|hook| {
             let mut hook = hook.borrow_mut();
-            if let Some((phase, skip, _)) = hook.as_mut() {
-                if *phase == _phase {
-                    if *skip == 0 {
-                        return hook.take().map(|(_, _, hook)| hook);
-                    }
-                    *skip -= 1;
+            if let Some((phase, skip, _)) = hook.as_mut()
+                && *phase == _phase
+            {
+                if *skip == 0 {
+                    return hook.take().map(|(_, _, hook)| hook);
                 }
+                *skip -= 1;
             }
             None
         });
