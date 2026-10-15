@@ -22,6 +22,18 @@ and credential encryption remains active. Independent VM recovery (#255) is
 future scope, not a prerequisite. Preserve writer exclusion and durable uncertain
 operation reconciliation without adding speculative recovery infrastructure.
 
+## Temporary collection scope
+
+The October 15, 2026 recovery candidate from Source `c402e481dbe23bcf03841e47b5f7eccd14c0e426` prioritizes collection, synchronization, monitoring and readable history (Source #380/#437 and Hub #267). Source #421's later unfinished framework remains preserved separately; this recovery does not adopt it. Two-way harness control, managed runtime delivery and broad cross-session full-text retrieval are paused, rather than retired or replaced.
+
+The active Source CLI, local HTTP API and shared collection reader offer no session creation/resume, send, approval/question answer, steering, interrupt or reconnect journey. `semon control`, `serve_with_control`, fresh managed guest and private SSH controller binaries refuse before input, listener, credential or controller initialization. Authenticated stale HTTP writes receive HTTP 503 with `capability_unavailable`; unauthenticated requests retain HTTP 403. The native control status endpoint returns no live authority without preparing a selected source. Hub owns the matching authorized product/API/MCP/provider boundaries.
+
+`find` is absent from CLI/MCP advertisement. Public Query (ordinary, selected and Catalog), CLI and MCP stale calls receive `capability_unavailable`, including malformed search arguments, before source discovery, body reads or provider admission. The existing metadata `q` index remains navigation by name/key/repository and recorded fields, not a full-text index. Deterministic paging, direct lookup, source/relationship indexes and generation-verified transcript/tool reads remain supported. Find data/tables are not deleted and no replacement search service/index is introduced. In-session navigation over already selected rendered text remains a reader function.
+
+Collection startup needs no model/compute credentials. Passive questions/approvals, tool outcomes, native identity, lineage/handoffs, native Archive/Unarchive, collection setup/enrollment/revocation, authorization, export and explicit data administration remain in scope. Existing credentials, operations and uncertain-result reconciliation remain intact. No installed process is terminated and no unknown write is replayed.
+
+Retained optional control/runtime engines and search matchers keep their independent semantic/security fixtures. Private test-only Query helpers qualify the existing search oracle; they are unavailable to product callers. The explicit `ssh-controller-qualification` example qualifies the unchanged retained controller implementation, while the default binary's refusal is separately tested. This fixture does not enable collection control. The manual native local product-control probe is paused; its historical receipts do not qualify the collection candidate. Candidate Rust, UI, browser and exact-pair evidence must be recorded separately from trusted-main, published-image, staging, PG and SSH release qualification. Existing approved visual references, security checks and thresholds remain unchanged.
+
 ## Ownership
 
 `native sources → Event Index and Catalog → focused Query/Transcript/Entry → Viewer/CLI/MCP`
@@ -45,8 +57,8 @@ with `scripts/verify-source-pair.sh`. Do not add another source pin.
   changed sources incrementally, reconcile disappearance/rewrite and distinguish
   current from retained history under generation fences. Unchanged sources reuse
   the existing Event Index without repeated full-history parsing.
-- Local/stdio and hosted MCP preserve list_sessions, get_session, read_transcript,
-  find and stalls through the shared native Query. Hosted requests admit native
+- Local/stdio and hosted MCP preserve list_sessions, get_session, read_transcript
+  and stalls through the shared native Query. Broad find is temporarily unavailable. Hosted requests admit native
   sources without ViewerCore, warming or workspace-model preparation.
 - Focused history reads retrieve only selected sources/ranges and bounded
   relationship context, verify identity/generation/integrity, avoid tenant locks
@@ -56,7 +68,7 @@ with `scripts/verify-source-pair.sh`. Do not add another source pin.
   expansion, embedded routes and native/no-JavaScript consumers migrate before
   deleting full-workspace model ownership, /api/model, model transaction/delta/SSE,
   compat=1, startup/push warming, global hydration and redundant caches.
-- Preserve session names, selection/navigation, composer disabled states, tool
+- Preserve session names, selection/navigation, the paused control boundary, tool
   rendering, collapsed Thinking, scroll/focus, responsive/accessibility behavior
   and current/retained history. Preserve the approved visual references and tests.
 - Measure baseline versus candidate on small/large unrelated histories, multiple

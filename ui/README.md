@@ -162,6 +162,8 @@ Content retries use bounded requests and the existing reader cadence. Native
 readiness retains its independent deadline and lifetime. Status changes update
 existing control leaves without replacing the transcript or losing drafts.
 
+The collection reader temporarily supplies no `ControlView`, launch control or native control stream and removes New Session navigation. Shared Session components render Composer only when an optional consumer explicitly supplies a `ControlView`; their direct fixtures continue qualifying drafts, unknown outcomes and lifecycle without granting collection authority. Passive recorded asks/outcomes and the independent runtime observation remain visible. Metadata search and in-session selected-text navigation remain active; broad full-text find is not advertised. See the [temporary collection scope](../docs/design/session-foundation-retirement.md#temporary-collection-scope).
+
 ## Formatting and local hooks
 
 Run `npm --prefix ui run format` for authored UI TypeScript, build/test MJS and

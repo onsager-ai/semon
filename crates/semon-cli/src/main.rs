@@ -218,6 +218,12 @@ fn parse_query_args(mut arguments: impl Iterator<Item = String>) -> Result<Query
         Some(name) if !name.starts_with('-') => name,
         _ => return Err(query_usage()),
     };
+    if tool == "find" {
+        return Err(
+            "capability_unavailable: full-text find is paused in the collection configuration"
+                .into(),
+        );
+    }
     let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
         return Err(format!("unknown tool: {tool}\n{}", query_usage()));
     };
@@ -698,6 +704,7 @@ fn machine_options(
 }
 
 fn run_control(args: Vec<String>) -> Result<(), String> {
+    semon_control::require_collection_control().map_err(|error| error.to_string())?;
     let usage = "Usage: semon control codex --codex NATIVE_PACKAGE/bin/codex --workspace PATH --state NEW_PRIVATE_DIR [--config MODEL_CONFIG]
        semon control observe --socket PATH --thread NATIVE_ID --codex-home PATH --journal PATH";
     let mode = args.first().ok_or_else(|| usage.to_owned())?;
@@ -913,7 +920,7 @@ fn usage() -> String {
          DIR/machines/, followed while serving; --no-local leaves this machine out. DIR is only read.\n\
          \n\
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
-         The agent read surface over native session evidence: list_sessions, get_session, read_transcript, find,\n\
+         The agent read surface over native session evidence: list_sessions, get_session, read_transcript,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
@@ -937,6 +944,29 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_delivery_refuses_stale_and_malformed_cli_calls_before_initialization() {
+        for arguments in [
+            vec![],
+            vec!["codex"],
+            vec!["observe", "--socket", "/missing/private.sock"],
+        ] {
+            let error =
+                run_control(arguments.into_iter().map(str::to_owned).collect()).unwrap_err();
+            assert!(error.starts_with("capability_unavailable:"), "{error}");
+        }
+        for arguments in [
+            vec!["find"],
+            vec!["find", "text"],
+            vec!["find", "--max-bytes", "not-a-number"],
+        ] {
+            let result = parse_query_args(arguments.into_iter().map(str::to_owned));
+            assert!(matches!(result, Err(error) if error.starts_with("capability_unavailable:")));
+        }
+        assert!(!usage().contains("read_transcript, find"));
+        assert!(!query_usage().contains("find"));
+    }
 
     #[test]
     fn unsupported_remote_flags_fail_before_source_discovery() {

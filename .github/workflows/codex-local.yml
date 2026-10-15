@@ -1,4 +1,5 @@
-# Explicit native qualification, separate from offline fixture and mock regressions.
+# Historical optional native qualification, separate from collection candidate gates.
+# The local product-control step is intentionally unavailable during the collection pause.
 name: Native local Codex control
 on:
   workflow_dispatch:

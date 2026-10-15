@@ -41,6 +41,21 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Two-way delivery is temporarily inactive in the collection product.
+/// Retained engines remain available for independent fixture qualification.
+pub const COLLECTION_CONTROL_PAUSED: bool = true;
+
+/// Refuse active product delivery before controller/provider initialization or writes.
+pub fn require_collection_control() -> std::io::Result<()> {
+    if COLLECTION_CONTROL_PAUSED {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "capability_unavailable: two-way control is paused in the collection configuration",
+        ));
+    }
+    Ok(())
+}
+
 /// Milliseconds on a monotonic clock that starts at the first call in this
 /// process. Every deadline (`expires_ms`, the delivery deadline, retention,
 /// refusal windows) is on this clock.

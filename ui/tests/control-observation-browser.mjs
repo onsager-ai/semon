@@ -354,3 +354,139 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+// Retained optional component qualification is separate from the collection reader,
+// which must neither request a controller nor offer Composer.
+for (const width of [390, 1280])
+  test(`optional cached source roots retain drafts, focus and input identity at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      await page.route('https://optional-controls.test/**', (route) =>
+        route.fulfill({
+          contentType: 'text/html',
+          body: '<!doctype html><div id="topbar"></div><div id="page"></div>',
+        }),
+      );
+      await page.goto('https://optional-controls.test/');
+      await page.addScriptTag({ content: bundle.outputFiles[0].text });
+      await page.evaluate(() => {
+        window.optionalWrites = 0;
+        window.fetch = async () => {
+          optionalWrites++;
+          throw Error('Optional fixture must not deliver');
+        };
+        const owner = Controls.createLocalControl(new Controls.EffectScope(), () => {});
+        const roots = new Map();
+        const snapshots = new Map();
+        let selected = '';
+        window.navigateOptional = (source) => {
+          selected = source;
+          owner.adopt({
+            thread: 'native',
+            generation: 'g',
+            activeTurn: null,
+            connected: true,
+            reason: null,
+            capabilities: {
+              input: true,
+              steer: false,
+              interrupt: false,
+              commandApproval: false,
+              fileApproval: false,
+              questions: false,
+            },
+            requests: [],
+            actions: {},
+          });
+          let root = roots.get(source);
+          if (!root) {
+            root = document.createElement('div');
+            roots.set(source, root);
+            snapshots.set(source, {
+              composerTarget: document.querySelector('#topbar'),
+              id: 'native',
+              name: source,
+              order: [],
+              blocks: [
+                {
+                  kind: 'loose',
+                  key: 'history',
+                  entries: [
+                    {
+                      kind: 'message',
+                      key: 'recorded',
+                      flavor: 'user',
+                      text: source + ' recorded history',
+                    },
+                  ],
+                },
+              ],
+            });
+          }
+          document.querySelector('#page').replaceChildren(root);
+          Controls.renderSessionScreen(
+            root,
+            {
+              ...snapshots.get(source),
+              control: owner.view('native', source + ':native'),
+            },
+            { committed() {} },
+          );
+        };
+        window.refreshOptional = () => {
+          const snapshot = snapshots.get(selected);
+          snapshot.blocks = [
+            {
+              kind: 'loose',
+              key: 'earlier',
+              entries: [
+                { kind: 'message', key: 'earlier', flavor: 'user', text: 'Earlier selected page' },
+              ],
+            },
+            ...snapshot.blocks,
+          ];
+          Controls.renderSessionScreen(
+            roots.get(selected),
+            {
+              ...snapshot,
+              control: owner.view('native', selected + ':native'),
+            },
+            { committed() {} },
+          );
+        };
+        navigateOptional('source-one');
+      });
+      await page.getByRole('button', { name: 'Open Composer' }).click();
+      await page.locator('textarea').fill('Retained native draft');
+      const originalInput = await page.locator('textarea').elementHandle();
+      await page.keyboard.press('Escape');
+      await page.evaluate(() => navigateOptional('source-two'));
+      await page.getByRole('button', { name: 'Open Composer' }).click();
+      assert.equal(await page.locator('textarea').inputValue(), '');
+      await page.locator('textarea').fill('Second source draft');
+      await page.keyboard.press('Escape');
+      await page.evaluate(() => navigateOptional('source-one'));
+      await page.getByRole('button', { name: 'Open Composer' }).click();
+      assert.equal(await page.locator('textarea').inputValue(), 'Retained native draft');
+      assert.equal(
+        await page.evaluate((node) => node === document.querySelector('textarea'), originalInput),
+        true,
+      );
+      await page.locator('textarea').focus();
+      await page.evaluate(() => refreshOptional());
+      assert.equal(await page.locator('textarea').inputValue(), 'Retained native draft');
+      assert.equal(
+        await page.evaluate((node) => node === document.activeElement, originalInput),
+        true,
+      );
+      assert.equal(await page.getByText('Earlier selected page', { exact: true }).count(), 1);
+      await page.keyboard.press('Escape');
+      await page.evaluate(() => navigateOptional('source-two'));
+      await page.getByRole('button', { name: 'Open Composer' }).click();
+      assert.equal(await page.locator('textarea').inputValue(), 'Second source draft');
+      assert.equal(await page.evaluate(() => optionalWrites), 0);
+    } finally {
+      await browser.close();
+    }
+  });

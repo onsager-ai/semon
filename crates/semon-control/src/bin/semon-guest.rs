@@ -21,6 +21,7 @@ fn request(input: impl Read) -> io::Result<Value> {
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 fn main() -> io::Result<()> {
+    semon_control::require_collection_control()?;
     // Bootstrap input arrives through protected coordinator stdin, never argv.
     let mut input = request(io::stdin().lock())?;
     if !matches!(
@@ -201,4 +202,14 @@ fn main() -> io::Result<()> {
     }
     fs::remove_file(ipc)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pause_tests {
+    #[test]
+    fn collection_guest_refuses_before_reading_bootstrap_or_writing() {
+        let error = super::main().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("capability_unavailable"));
+    }
 }

@@ -1,4 +1,4 @@
-import { readShellPreference, writeShellPreference, withReturnPath } from '../lib/navigation';
+import { readShellPreference, writeShellPreference } from '../lib/navigation';
 import {
   parseCatalogSourceCandidates,
   parseCatalogSourceCandidateProgress,
@@ -56,9 +56,7 @@ import {
   catalogSessionGroups,
 } from './sessionPresentation';
 import { NavigationController } from '../navigation/routes';
-import { createControlObservation } from './controlObservation';
 import { createRuntimeObservation } from './runtimeObservation';
-import { createLocalControl } from './localControl';
 import { EffectScope } from './effects';
 import {
   catalogTranscriptBlocks,
@@ -92,7 +90,6 @@ interface SelectedView {
   anchorNote?: string;
   ticket?: CatalogSelectionRequest;
   identityLoading: boolean;
-  lastControl?: ControlView;
   opening: boolean;
   retry?: number;
   retryDelay: number;
@@ -557,69 +554,10 @@ export function createCatalogViewer(
       overview.allRecent(key, false);
     },
   });
-  let launchControl = false;
-  const control = createLocalControl(scope, () => {
-    if (active) {
-      launchControl = false;
-      updateSessionControl(active.root, controlFor(active));
-    } else if (launchControl && navigation.route.v === 'home') {
-      overview.draw();
-      void overview.refresh();
-    }
-  });
-  function controlFor(view: SelectedView): ControlView | undefined {
-    const identity = selection.selectedIdentity();
-    const current =
-      active === view &&
-      identity?.source_key === view.sourceKey &&
-      identity?.catalog_key === view.key &&
-      identity.owner_qualification !== 'provisional' &&
-      identity.native_id
-        ? control.view(identity.native_id, identity.source_key + ':' + view.key)
-        : undefined;
-    if (current) view.lastControl = current;
-    const runtime = runtimeFor(view)?.observation,
-      terminal = runtime && runtime.state !== 'active';
-    if ((current && !terminal) || !view.lastControl)
-      return current ?? control.readOnly(view.key, view.sourceKey + ':' + view.key);
-    const previous = current ?? view.lastControl;
-    return {
-      ...previous,
-      get draft() {
-        return previous.draft;
-      },
-      busy: false,
-      uncertain: previous.uncertain,
-      canReconnect: false,
-      snapshot: {
-        ...previous.snapshot,
-        connected: false,
-        reason: terminal
-          ? 'Native controls are unavailable for this environment state.'
-          : 'Current connection status is unavailable.',
-        capabilities: {
-          ...previous.snapshot.capabilities,
-          input: false,
-          steer: false,
-          interrupt: false,
-          commandApproval: false,
-          fileApproval: false,
-          questions: false,
-        },
-      },
-      send: () => Promise.resolve(false),
-      interrupt() {},
-      answer() {},
-      reconnect() {},
-    };
+  // Collection observes native history; optional controllers never enter this reader.
+  function controlFor(_view: SelectedView): ControlView | undefined {
+    return undefined;
   }
-  const observation = createControlObservation({
-    scope,
-    navigation,
-    viewerHost,
-    catalogSelection: selection,
-    controlOwner: control,
-  });
   const runtimeObservation = createRuntimeObservation({
     scope,
     navigation,
@@ -703,21 +641,6 @@ export function createCatalogViewer(
     route: () => (viewerHost?.nativePage ? 'home' : navigation.route.v),
     selectedMachine: () => (navigation.route.v === 'machine' ? navigation.route.id : null),
     admin: () => standaloneAdmin,
-    observeLaunchControl(value) {
-      if (viewerHost || navigation.route.v !== 'home') return;
-      const next = control.prepare(value);
-      if (next?.launch) {
-        launchControl = true;
-        control.adopt(next);
-      } else if (launchControl && !control.view()?.busy && !control.view()?.uncertain) {
-        launchControl = false;
-        control.adopt(null);
-      }
-    },
-    launchControl: () =>
-      !viewerHost && launchControl && navigation.route.v === 'home'
-        ? control.view(undefined, 'local:' + control.view()?.snapshot.thread)
-        : undefined,
     machine(key) {
       history.pushState(
         null,
@@ -1123,7 +1046,17 @@ export function createCatalogViewer(
           : 'Recent on this machine';
     shell.update(
       projectShellNavigation(
-        viewerHost?.navigation ?? standaloneNavigation ?? { leading: viewerHost?.nativeNavigation },
+        {
+          ...(viewerHost?.navigation ?? standaloneNavigation),
+          leading: (
+            viewerHost?.navigation?.leading ??
+            standaloneNavigation?.leading ??
+            viewerHost?.nativeNavigation
+          )?.filter((item) => item.key !== 'new-session'),
+          trailing: (viewerHost?.navigation?.trailing ?? standaloneNavigation?.trailing)?.filter(
+            (item) => item.key !== 'new-session',
+          ),
+        },
         viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
           ? viewerHost.nativePage.nav
           : route === 'machine'
@@ -1132,15 +1065,6 @@ export function createCatalogViewer(
               ? 'sessions'
               : route,
         {
-          ...(!viewerHost?.nativePage &&
-          viewerHost?.navigation?.leading?.find((item) => item.key === 'new-session')
-            ? {
-                'new-session': withReturnPath(
-                  viewerHost.navigation.leading.find((item) => item.key === 'new-session')!.href,
-                  location.pathname + location.search,
-                ),
-              }
-            : {}),
           home: viewerHost?.navigation?.paths?.home ?? '/',
           analytics: viewerHost?.navigation?.paths?.analytics ?? '/analytics',
           sessions: '/sessions?' + browsingParams(),
@@ -2991,15 +2915,6 @@ export function createCatalogViewer(
           view.note =
             'Session identity is provisional while history is being discovered. Native controls are unavailable.';
         else if (view.note.startsWith('Session identity is provisional')) view.note = '';
-        if (!viewerHost) {
-          const value = object(await api('/api/session-control?' + p));
-          if (!disposed && active === view && view.ticket === ticket) {
-            const identity = selection.selectedIdentity();
-            const snapshot = control.prepare(value.control);
-            if (snapshot && snapshot.thread === identity?.native_id) control.observe(snapshot);
-            else control.unavailable();
-          }
-        }
         if (previousLabel !== sourceLabel(view.sourceKey)) {
           view.renderedRevision = -1;
           chrome();
@@ -3864,7 +3779,6 @@ export function createCatalogViewer(
       if (!viewerHost?.nativePage && history.scrollRestoration === 'manual')
         history.scrollRestoration = previousScrollRestoration;
       ++listEpoch;
-      observation.destroy();
       removeRuntimeListener();
       runtimeObservation.destroy();
       removeNavigation?.();
@@ -3876,7 +3790,6 @@ export function createCatalogViewer(
       viewerHost?.initialHome?.destroy();
       selection.destroy();
       navigation.destroy();
-      control.destroy();
       for (const view of selected.values()) {
         view.store.destroy();
         releaseScreen(view.root);
