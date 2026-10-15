@@ -363,22 +363,12 @@ fn expected(model: &Value) -> Vec<(&'static str, Value, Vec<&'static str>, Value
             ]}),
         ),
         (
-            "find",
-            json!({"text": "lexer", "limit": 1}),
-            vec!["lexer", "--limit", "1"],
-            json!({"text": "lexer", "matches": [
-                {"session": "cx", "position": 1, "turn": cx, "kind": "a", "part": "text", "at": at(5, 2),
-                    "snippet": "Fixed the lexer panic"},
-            ], "sessions": [
-                {"id": "cx", "name": "Codex run", "repo": null, "last_activity": at(5, 2), "fields": [], "entries": 1},
-            ], "scanned_bytes": "any", "truncated": true, "truncated_by": "limit"}),
-        ),
-        (
-            "find",
-            json!({"text": "nothing says this"}),
-            vec!["nothing says this"],
-            json!({"text": "nothing says this", "matches": [], "sessions": [], "scanned_bytes": "any",
-                "truncated": false, "truncated_by": null}),
+            "read_transcript",
+            json!({"id": "cx", "limit": 1}),
+            vec!["cx", "--limit", "1"],
+            json!({"sid": "cx", "from": 1, "to": 2, "total": 2, "calls": 0, "errors": 0, "entries": [
+                {"k": "a", "text": "Fixed the lexer panic", "turn": cx},
+            ]}),
         ),
         (
             "stalls",
@@ -411,6 +401,24 @@ fn matching(expected: &Value, value: &Value) -> Value {
 fn semon_query_pins_every_tool_and_writes_only_its_cache() {
     let home = Home::new();
     let before = home.inputs();
+    // A stale search never opens native evidence or creates the metadata cache,
+    // including missing text and malformed former arguments.
+    assert!(!home.root.join("state").exists());
+    for args in [
+        vec!["query", "find", "lexer", "--limit", "1", "--json"],
+        vec!["query", "find", "nothing says this", "--json"],
+        vec!["query", "find", "--json"],
+        vec!["query", "find", "lexer", "--limit", "malformed", "--json"],
+    ] {
+        let output = home.semon(&args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            output.stdout.is_empty(),
+            "paused search is not empty success"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("capability_unavailable"));
+        assert!(!home.root.join("state").exists());
+    }
     let model = home.native_contract();
     for (tool, _, args, answer) in expected(&model) {
         let mut all = vec!["query", tool];
@@ -666,13 +674,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         .collect();
     assert_eq!(
         names,
-        [
-            "list_sessions",
-            "get_session",
-            "read_transcript",
-            "find",
-            "stalls"
-        ]
+        ["list_sessions", "get_session", "read_transcript", "stalls"]
     );
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
@@ -685,7 +687,29 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         check_schema(name, &tool["inputSchema"]);
     }
 
-    // Every tool answers as `semon query` does.
+    // Stale search is an explicit tool error before native/cache admission,
+    // even when the old search arguments are malformed.
+    assert!(
+        !init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("find")
+    );
+    assert!(!home.root.join("state").exists());
+    for (id, arguments) in (4..).zip([
+        json!({"text": "lexer", "limit": 1}),
+        json!({"text": "nothing says this"}),
+        json!({}),
+        json!({"text": "lexer", "limit": "malformed"}),
+        Value::Null,
+    ]) {
+        let (error, failed) = content(&server.call(id, "find", arguments));
+        assert!(failed);
+        assert_eq!(error["error"]["code"], "capability_unavailable");
+        assert!(!home.root.join("state").exists());
+    }
+
+    // Every active tool answers as `semon query` does.
     for (id, (tool, arguments, _, answer)) in (10..).zip(expected(&model)) {
         let reply = server.call(id, tool, arguments.clone());
         let (value, failed) = content(&reply);
@@ -756,7 +780,14 @@ fn the_window_is_30_days_unless_widened_and_since_stays_inside_it() {
     let error: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(error["error"]["code"], "outside_window");
     assert!(error["error"]["window_start"].is_i64());
-    let inside = home.query(&["query", "find", "lexer", "--newer-than", "29d"]);
+    let inside = home.query(&[
+        "query",
+        "list_sessions",
+        "--harness",
+        "codex",
+        "--newer-than",
+        "29d",
+    ]);
     assert_eq!(window_of(&inside), 30 * DAY_MS);
 
     home.window = vec!["--since", "60d"];
@@ -786,6 +817,17 @@ fn the_window_is_30_days_unless_widened_and_since_stays_inside_it() {
     let (answer, failed) = content(&server.call(2, "list_sessions", json!({})));
     assert!(!failed);
     assert_eq!(window_of(&answer), 30 * DAY_MS);
+    let (inside, failed) = content(&server.call(
+        4,
+        "list_sessions",
+        json!({"harness": "codex", "since": "29d"}),
+    ));
+    assert!(!failed);
+    assert_eq!(window_of(&inside), 30 * DAY_MS);
+    let (inside, failed) =
+        content(&server.call(5, "stalls", json!({"idle_minutes": 5, "since": "29d"})));
+    assert!(!failed);
+    assert_eq!(window_of(&inside), 30 * DAY_MS);
     let (error, failed) =
         content(&server.call(3, "stalls", json!({"idle_minutes": 5, "since": "31d"})));
     assert!(failed);
