@@ -13,9 +13,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { context, ENV, launch, wide } from '../lib.mjs';
 import { writeLong } from '../long.mjs';
+import { installRefreshTracing, armRefreshPaint, readRefreshTrace } from './perf-refresh.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BIN = process.env.SEMON_BIN ?? path.resolve(here, '../../../target/debug/semon');
+const REFRESH_DIAGNOSTICS = process.env.SEMON_PERF_REFRESH_DIAGNOSTICS === '1';
 const BUCKETS = ['/api/sessions', '/api/session-transcript', 'other'];
 const SCREENS = [
   { name: 'phone', size: 'phone' },
@@ -405,7 +407,9 @@ function liveRecords({ sid, cwd, branch, sample, now }) {
         content: blocks,
       },
     });
-  const start = now - 30_000 + (sample - 1) * 10_000;
+  // The optional eight diagnostic appends remain before the fixture's fixed now.
+  const start =
+    sample <= 3 ? now - 30_000 + (sample - 1) * 10_000 : now - 8000 + (sample - 4) * 1000;
   const time = (i) => start + i * 100;
   const names = ['Bash', 'Read', 'Grep'];
   for (let i = 0; i < names.length; i++) {
@@ -457,6 +461,9 @@ async function runScreen(browser, screen, server, fixture) {
     ttfb: Object.fromEntries(BUCKETS.map((key) => [key, []])),
   };
   const managedPages = new Set();
+  const requestTimeline = [];
+  const refreshSamples = [];
+  let nextPage = 0;
   const metrics = {
     coldOpen: { samplesMs: [], medianMs: null },
     openAtEnd: null,
@@ -504,9 +511,11 @@ async function runScreen(browser, screen, server, fixture) {
     ctx = await context(browser, { size: screen.size });
     const makePage = async () => {
       const page = await ctx.newPage();
+      const pageId = nextPage++;
       page.setDefaultTimeout(60_000);
       page.setDefaultNavigationTimeout(60_000);
       page.on('pageerror', (error) => errors.push(error.message.split('\n')[0]));
+      if (REFRESH_DIAGNOSTICS) await page.addInitScript(installRefreshTracing);
       await page.addInitScript(() => {
         window.__perfLongTasks = [];
         window.__perfLongTaskObserver = null;
@@ -540,7 +549,28 @@ async function runScreen(browser, screen, server, fixture) {
       });
       const cdp = await ctx.newCDPSession(page);
       const byRequest = new Map();
+      const traces = new Map();
+      let clockOffset = null;
       cdp.on('Network.requestWillBeSent', (event) => {
+        if (REFRESH_DIAGNOSTICS && new URL(event.request.url).pathname.startsWith('/api/')) {
+          clockOffset ??= event.wallTime * 1000 - event.timestamp * 1000;
+          const url = new URL(event.request.url);
+          const trace = {
+            page: pageId,
+            requestId: event.requestId,
+            endpoint: url.pathname,
+            query: Object.fromEntries(
+              [...url.searchParams].filter(([key]) =>
+                ['machine', 'sid', 'after', 'limit', 'generation', 'errors_generation'].includes(
+                  key,
+                ),
+              ),
+            ),
+            admittedAt: event.timestamp * 1000 + clockOffset,
+          };
+          traces.set(event.requestId, trace);
+          requestTimeline.push(trace);
+        }
         if (event.redirectResponse) {
           const previous = byRequest.get(event.requestId);
           if (previous)
@@ -557,8 +587,28 @@ async function runScreen(browser, screen, server, fixture) {
         const key = byRequest.get(event.requestId);
         if (key) network.bytes[key] += Math.max(0, Number(event.encodedDataLength ?? 0));
         byRequest.delete(event.requestId);
+        const trace = traces.get(event.requestId);
+        if (trace) {
+          trace.completedAt = event.timestamp * 1000 + clockOffset;
+          trace.encodedBytes = event.encodedDataLength;
+        }
       });
-      cdp.on('Network.loadingFailed', (event) => byRequest.delete(event.requestId));
+      cdp.on('Network.responseReceived', (event) => {
+        const trace = traces.get(event.requestId);
+        if (trace) {
+          trace.responseAt = event.timestamp * 1000 + clockOffset;
+          trace.status = event.response.status;
+        }
+      });
+      cdp.on('Network.loadingFailed', (event) => {
+        byRequest.delete(event.requestId);
+        const trace = traces.get(event.requestId);
+        if (trace) {
+          trace.failedAt = event.timestamp * 1000 + clockOffset;
+          trace.error = event.errorText;
+          trace.canceled = event.canceled ?? false;
+        }
+      });
       await cdp.send('Network.enable');
       await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
       await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
@@ -744,12 +794,14 @@ async function runScreen(browser, screen, server, fixture) {
       record(metrics.switch.relayToMarathon, await clickAndPaint(switchPage.page, 'marathon'));
     }
 
-    for (let i = 1; i <= 3; i++) {
+    const sampleLive = async (i, phase = null) => {
       const page = switchPage.page;
       await page.evaluate(() => {
         window.__perfPaintWait = null;
       });
+      if (REFRESH_DIAGNOSTICS) await page.evaluate(armRefreshPaint, `PERF_LIVE_${i}_LAST`);
       const started = await page.evaluate(() => performance.now());
+      const appendedAt = Date.now();
       fs.appendFileSync(
         fixture.marathonFile,
         liveRecords({
@@ -762,7 +814,19 @@ async function runScreen(browser, screen, server, fixture) {
           .map((record) => JSON.stringify(record) + '\n')
           .join(''),
       );
-      await waitPaint(page, `PERF_LIVE_${i}_LAST`);
+      try {
+        await waitPaint(page, `PERF_LIVE_${i}_LAST`);
+      } catch (error) {
+        if (REFRESH_DIAGNOSTICS)
+          refreshSamples.push({
+            sample: i,
+            phase,
+            appendedAt,
+            error: error.message,
+            ...(await page.evaluate(readRefreshTrace, appendedAt)),
+          });
+        throw error;
+      }
       const measured = await page.evaluate((start) => {
         const end = performance.now();
         const observer = window.__perfLongTaskObserver;
@@ -779,12 +843,20 @@ async function runScreen(browser, screen, server, fixture) {
           appendedJsonlEntries: 10,
         };
       }, started);
-      metrics.liveUpdate.samples.push({
+      const sample = {
         paintMs: round(measured.paintMs),
         longestTaskMs: round(measured.longestTaskMs),
         appendedJsonlEntries: measured.appendedJsonlEntries,
-      });
-    }
+      };
+      if (REFRESH_DIAGNOSTICS) {
+        const trace = await page.evaluate(readRefreshTrace, appendedAt);
+        if (trace.commitAt === null || trace.visibleAt === null)
+          throw new Error(`refresh sample ${i} has no commit/visible observation`);
+        refreshSamples.push({ sample: i, phase, appendedAt, ...sample, ...trace });
+      }
+      return sample;
+    };
+    for (let i = 1; i <= 3; i++) metrics.liveUpdate.samples.push(await sampleLive(i));
 
     for (let i = 0; i < 3; i++) {
       metrics.scroll.samples.push(
@@ -873,6 +945,45 @@ async function runScreen(browser, screen, server, fixture) {
       clearInterval(writer);
     }
 
+    // Keep the original three samples and all switch/scroll assertions unchanged.
+    // Sweep a full selected-observation period twice, anchored to naturally
+    // occurring metadata requests. These waits issue no product requests.
+    if (REFRESH_DIAGNOSTICS) {
+      for (let i = 0; i < 8; i++) {
+        const page = switchPage.page;
+        const previous = await page.evaluate(() => window.__perfFetchTrace.length);
+        await page.waitForFunction(
+          (after) =>
+            window.__perfFetchTrace.some(
+              (entry) =>
+                entry.id >= after &&
+                entry.endpoint === '/api/sessions' &&
+                entry.query.sid === 'marathon' &&
+                entry.query.limit === '1',
+            ),
+          previous,
+          { timeout: 60_000, polling: 50 },
+        );
+        const anchor = await page.evaluate(
+          (after) =>
+            window.__perfFetchTrace.find(
+              (entry) =>
+                entry.id >= after &&
+                entry.endpoint === '/api/sessions' &&
+                entry.query.sid === 'marathon' &&
+                entry.query.limit === '1',
+            ),
+          previous,
+        );
+        const offsetMs = (i % 4) * 750;
+        await page.waitForFunction(
+          ({ at, offset }) => performance.timeOrigin + performance.now() >= at + offset,
+          { at: anchor.admittedAt, offset: offsetMs },
+          { polling: 50 },
+        );
+        await sampleLive(i + 4, { cycle: Math.floor(i / 4), offsetMs, anchor });
+      }
+    }
     await finishPage(switchPage);
   } catch (error) {
     failures.push(error.stack ?? String(error));
@@ -930,7 +1041,33 @@ async function runScreen(browser, screen, server, fixture) {
       },
     ]),
   );
-  return { metrics, requests, pageErrors: errors, failures };
+  const endpoints = Object.fromEntries(
+    [...new Set(requestTimeline.map((entry) => entry.endpoint))].map((endpoint) => {
+      const entries = requestTimeline.filter((entry) => entry.endpoint === endpoint);
+      return [
+        endpoint,
+        {
+          admitted: entries.length,
+          responded: entries.filter((entry) => entry.responseAt != null).length,
+          completed: entries.filter((entry) => entry.completedAt != null).length,
+          failed: entries.filter((entry) => entry.failedAt != null).length,
+          canceled: entries.filter((entry) => entry.canceled).length,
+          outstanding: entries.filter(
+            (entry) => entry.completedAt == null && entry.failedAt == null,
+          ).length,
+        },
+      ];
+    }),
+  );
+  return {
+    metrics,
+    requests,
+    pageErrors: errors,
+    failures,
+    ...(REFRESH_DIAGNOSTICS
+      ? { refreshDiagnostics: { samples: refreshSamples, endpoints, requestTimeline } }
+      : {}),
+  };
 }
 
 function markdownTable(screens) {
@@ -995,6 +1132,8 @@ async function main() {
   }
 
   const report = {
+    source: process.env.SEMON_PERF_SOURCE ?? null,
+    browser: browser?.version() ?? null,
     fixture: fixtureSummary ?? null,
     cpuThrottlingRate: 4,
     screens,

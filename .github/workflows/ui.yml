@@ -13,6 +13,10 @@ on:
         description: Include historical sample-mockup pixel reports
         type: boolean
         default: false
+      refresh_diagnostics:
+        description: Compare recovery live refresh with the pinned recovery baseline
+        type: boolean
+        default: false
   pull_request:
   push:
     branches: [main]
@@ -85,12 +89,28 @@ jobs:
       - name: Strip debug symbols from transferred binaries
         run: strip --strip-debug target/debug/semon target/debug/examples/ui-account-server
 
+      # Temporary recovery qualification; ordinary runs build only the candidate.
+      # Keep the exact candidate binary while reusing dependencies for the baseline.
+      - name: Build the pinned recovery baseline for refresh comparison
+        if: github.event.pull_request.number == 438 || inputs.refresh_diagnostics
+        env:
+          REFRESH_BASELINE: c402e481dbe23bcf03841e47b5f7eccd14c0e426
+        run: |
+          cp target/debug/semon "$RUNNER_TEMP/semon-refresh-candidate"
+          git fetch --no-tags --depth=1 origin "$REFRESH_BASELINE"
+          git worktree add --detach "$RUNNER_TEMP/refresh-baseline" "$REFRESH_BASELINE"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/refresh-baseline/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
+          strip --strip-debug target/debug/semon
+          mv target/debug/semon target/debug/semon-refresh-baseline
+          cp "$RUNNER_TEMP/semon-refresh-candidate" target/debug/semon
+
       - name: Upload test binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: viewer-test-binaries
           path: |
             target/debug/semon
+            target/debug/semon-refresh-baseline
             target/debug/examples/ui-account-server
           if-no-files-found: error
           retention-days: 1
@@ -120,6 +140,9 @@ jobs:
           path: target/debug
       - name: Restore executable permissions
         run: chmod +x target/debug/semon target/debug/examples/ui-account-server
+      - name: Restore baseline executable permissions
+        if: matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics)
+        run: chmod +x target/debug/semon-refresh-baseline
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -241,6 +264,18 @@ jobs:
         working-directory: tests/ui
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+          SEMON_PERF_SOURCE: ${{ github.sha }}
+          SEMON_PERF_REFRESH_DIAGNOSTICS: ${{ (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) && '1' || '0' }}
+        run: node checks/perf.mjs
+
+      - name: Same-run pinned baseline live-refresh comparison
+        if: ${{ !cancelled() && matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) }}
+        working-directory: tests/ui
+        env:
+          SEMON_BIN: ${{ github.workspace }}/target/debug/semon-refresh-baseline
+          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/refresh-baseline
+          SEMON_PERF_SOURCE: c402e481dbe23bcf03841e47b5f7eccd14c0e426
+          SEMON_PERF_REFRESH_DIAGNOSTICS: '1'
         run: node checks/perf.mjs
 
       # Requests, bytes and long tasks per screen (perf step 0). Report only: it prints the lines over tests/ui/perf-budget.json
