@@ -28,6 +28,7 @@ export function installRefreshTracing() {
       const response = await nativeFetch.call(this, input, init);
       entry.responseAt = now();
       entry.status = response.status;
+      entry.ok = response.ok;
       // Wrap only the method the application already calls. In particular, do
       // not read error bodies that requestJson intentionally cancels unread.
       const nativeJson = response.json;
@@ -98,11 +99,16 @@ export function readRefreshTrace(start) {
   const end = state.visibleAt ?? performance.timeOrigin + performance.now();
   return {
     ...state,
-    // Retain requests admitted before the append if they were still outstanding.
+    // Retain JSON reads admitted before the append while their application read
+    // is outstanding. Error headers already handed to requestJson are terminal
+    // here; its unread-body cancellation has its own CDP transport terminal event.
     fetches: window.__perfFetchTrace.filter(
       (entry) =>
         entry.admittedAt <= end &&
-        (entry.jsonCompletedAt ?? entry.jsonFailedAt ?? entry.failedAt ?? Infinity) >= start,
+        (entry.jsonCompletedAt ??
+          entry.jsonFailedAt ??
+          entry.failedAt ??
+          (entry.ok === false ? entry.responseAt : Infinity)) >= start,
     ),
   };
 }
