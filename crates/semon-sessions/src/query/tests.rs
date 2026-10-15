@@ -5930,6 +5930,16 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
     let factory = |_: &str, _: &str| -> io::Result<Box<dyn crate::SessionSourceReader>> {
         panic!("paused find admitted a provider")
     };
+    let controls = [
+        crate::SelectedReadControl::new(
+            std::time::Instant::now() + Duration::from_secs(20),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ),
+        crate::SelectedReadControl::new(
+            std::time::Instant::now(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ),
+    ];
     assert!(!query_tools().iter().any(|tool| tool.name == "find"));
     for args in [
         json!({"text":"private"}),
@@ -5965,6 +5975,24 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
                 .code,
             "capability_unavailable"
         );
+        for control in &controls {
+            assert_eq!(
+                query
+                    .call_selected_with_control(
+                        "local",
+                        "lead",
+                        "find",
+                        &args,
+                        None,
+                        crate::SessionSourceReadMode::LocalThenProvider,
+                        control
+                    )
+                    .unwrap_err()
+                    .code,
+                "capability_unavailable"
+            );
+            assert!(!crate::selected_read::active());
+        }
         assert_eq!(
             query
                 .call_catalog_at(

@@ -1058,6 +1058,8 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         control: &crate::SelectedReadControl,
     ) -> Result<Value, QueryError> {
+        // Paused tools refuse before cancellation/admission, including stale callers.
+        validate_query_call(tool, args)?;
         let _scope = crate::selected_read::Scope::enter(control);
         crate::selected_read::check().map_err(|error| selected_error(&error))?;
         let result = self.call_selected_at(
