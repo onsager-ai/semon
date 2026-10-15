@@ -8,7 +8,7 @@ import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 
 const root = new URL('../../', import.meta.url).pathname;
 test(
-  'served canonical Home, Analytics and contextual Composer across layouts and themes',
+  'served collection Home, Analytics and selected session across layouts and themes',
   {
     skip: !process.env.SEMON_CATALOG_SERVED_BIN,
   },
@@ -64,6 +64,20 @@ test(
           .map((value) => value.split(';')[0])
           .join('; '),
       };
+      // The real collection server rejects stale delivery before parsing its
+      // payload; no controller or synthetic product bypass is supplied here.
+      for (const body of [
+        JSON.stringify({ op: 'send', id: 'harbor', text: 'synthetic refused input' }),
+        'malformed control fixture request',
+      ]) {
+        const refused = await fetch(address[1] + '/api/control', {
+          method: 'POST',
+          headers: { ...headers, origin: address[1], 'content-type': 'application/json' },
+          body,
+        });
+        assert.equal(refused.status, 503, 'authenticated stale control is unavailable');
+        assert.equal((await refused.json()).error.code, 'capability_unavailable');
+      }
       let home;
       for (let attempt = 0; attempt < 120; attempt++) {
         const response = await fetch(address[1] + '/api/viewer/home', { headers });
@@ -126,13 +140,18 @@ test(
               if (captures)
                 await page.screenshot({
                   path: join(captures, `${name}-${width}-${colorScheme}.png`),
-                  fullPage: name !== 'composer',
+                  fullPage: name !== 'session-menu',
                 });
             };
             const navigate = async (destination) => {
               if (width === 390 && (await page.locator('#topbar .trace-back').count())) {
                 await page.locator('#topbar .trace-back').click();
-                await page.locator('.session-composer-trigger').waitFor();
+                await page
+                  .getByRole('button', {
+                    name: 'Session menu: details, cost and actions',
+                    exact: true,
+                  })
+                  .waitFor();
               }
               if (width === 390)
                 await page.getByRole('button', { name: 'Open menu', exact: true }).click();
@@ -254,15 +273,31 @@ test(
               await page.locator('#page [aria-label="Conversation controls"]').count(),
               0,
             );
-            const trigger = page.getByRole('button', { name: 'Open Composer', exact: true });
+            assert.equal(
+              await page.getByRole('button', { name: 'Open Composer', exact: true }).count(),
+              0,
+              'paused Composer is not advertised',
+            );
+            assert.equal(await page.locator('.session-composer-trigger').count(), 0);
+            assert.equal(
+              await page.getByRole('dialog', { name: 'Session Composer', exact: true }).count(),
+              0,
+            );
+            assert.equal(await page.locator('#nav [data-go="new-session"]').count(), 0);
+            const trigger = page.getByRole('button', {
+              name: 'Session menu: details, cost and actions',
+              exact: true,
+            });
+            await trigger.waitFor();
             assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
             await trigger.click();
-            const panel = page.getByRole('dialog', { name: 'Session Composer', exact: true });
+            const panel = page.getByRole('dialog', { name: /^Session menu for .+/ });
             await panel.waitFor();
             assert.equal(await trigger.getAttribute('aria-expanded'), 'true');
-            await screenshot('composer');
+            await screenshot('session-menu');
             await page.keyboard.press('Escape');
             assert.equal(await panel.count(), 0);
+            assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
             assert.equal(await trigger.evaluate((node) => node === document.activeElement), true);
             await page.waitForFunction(() => !history.state?.sheet);
             const sessionUrl = page.url();
@@ -270,8 +305,14 @@ test(
             assert.equal(await page.evaluate(() => history.state?.sheet), 1);
             await page.goBack();
             await panel.waitFor({ state: 'detached' });
-            assert.equal(page.url(), sessionUrl, 'Back closes Composer on the same session');
+            assert.equal(page.url(), sessionUrl, 'Back closes the menu on the same session');
+            assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
             assert.equal(await trigger.evaluate((node) => node === document.activeElement), true);
+            assert.equal(
+              requests.includes('/api/control'),
+              false,
+              'reader issues no control writes',
+            );
             assert.equal(
               await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1),
               false,
