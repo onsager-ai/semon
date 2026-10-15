@@ -30,6 +30,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { context, ENV, launch, settled } from '../lib.mjs';
 import { writeLong } from '../long.mjs';
+import { installRefreshTracing, armRefreshPaint, readRefreshTrace } from './perf-refresh.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BIN = process.env.SEMON_BIN ?? path.resolve(here, '../../../target/debug/semon');
@@ -550,13 +551,24 @@ const scenarios = {
 
   live: (server, vp, browser, fixture) =>
     open(browser, vp, async (page, rec) => {
+      await page.addInitScript(installRefreshTracing);
       await page.goto(url(server, '/s/claude/marathon'), { waitUntil: 'load' });
       const opened = await sessionOpened(page, rec);
+      const initialTotal = await page.evaluate(
+        () =>
+          window.__perfFetchTrace.findLast(
+            (entry) => entry.endpoint === '/api/session-transcript' && entry.jsonCompletedAt,
+          )?.total,
+      );
+      const marker = `BUDGET_LIVE_${LIVE_BATCHES}_LAST`;
+      await page.evaluate(armRefreshPaint, marker);
       const since = await nowIn(page);
       await rec.reset();
       const started = Date.now();
+      const appends = [];
       for (let k = 1; k <= LIVE_BATCHES; k++) {
         await sleep(Math.max(0, started + (k - 1) * LIVE_EVERY_MS - Date.now()));
+        appends.push({ batch: k, at: Date.now() });
         fs.appendFileSync(
           fixture.marathonFile,
           liveRecords(fixture, k)
@@ -572,7 +584,7 @@ const scenarios = {
         `BUDGET_LIVE_${LIVE_BATCHES}_LAST`,
       );
       const snapshot = await rec.snapshot();
-      const updates = LIVE_BATCHES; // Native publications produced in this measured window.
+      const updates = LIVE_BATCHES; // Append batches offered, not completed publications.
       const each = (n) => (updates ? round(n / updates) : null);
       const tasks = await longTasks(page, since);
       const metrics = summarize(snapshot.paths, tasks, {
@@ -584,6 +596,50 @@ const scenarios = {
         txRequestsPerUpdate: each(snapshot.paths['/api/session-transcript']?.count ?? 0),
         txDecodedBytesPerUpdate: each(snapshot.paths['/api/session-transcript']?.decodedBytes ?? 0),
       });
+      // Preserve the original measured window and ceilings. Observe catch-up
+      // separately, without admitting requests or changing the product poller.
+      // Marker traces end at final-marker visibility; paths remains the full
+      // original-window request census even if that marker appears earlier.
+      const windowTrace = await page.evaluate(readRefreshTrace, started);
+      const caughtUp = await softly(
+        page.waitForFunction(() => window.__perfRefreshPaint.state.visibleAt !== null, null, {
+          timeout: 60_000,
+        }),
+      );
+      const catchUpTrace = await page.evaluate(readRefreshTrace, started);
+      const integrity = await page.evaluate(
+        ({ expected, batches }) => {
+          const keys = [
+            ...document.querySelectorAll('[aria-label="Transcript"] [data-entry-key]'),
+          ].map((node) => node.dataset.entryKey);
+          const completions = window.__perfFetchTrace.filter(
+            (entry) => entry.endpoint === '/api/session-transcript' && entry.jsonCompletedAt,
+          );
+          const latest = completions.at(-1);
+          return {
+            expectedTotal: expected,
+            observedTotal: latest?.total ?? null,
+            generation: latest?.generation ?? null,
+            uniqueVisibleEntryKeys: keys.length === new Set(keys).size,
+            markers: Array.from({ length: batches }, (_, i) => {
+              const marker = `BUDGET_LIVE_${i + 1}_LAST`;
+              return [
+                ...document.querySelectorAll('[aria-label="Transcript"] .msg.assistant'),
+              ].filter((node) => node.textContent.includes(marker)).length;
+            }),
+          };
+        },
+        { expected: initialTotal + LIVE_BATCHES * 7, batches: LIVE_BATCHES },
+      );
+      const qualified =
+        opened.drawn &&
+        caughtUp &&
+        Number.isSafeInteger(initialTotal) &&
+        integrity.observedTotal === integrity.expectedTotal &&
+        typeof integrity.generation === 'string' &&
+        integrity.uniqueVisibleEntryKeys &&
+        integrity.markers.every((count) => count === 1);
+      console.log(`Native continuous-write catch-up ${vp.width}: qualified=${qualified}`);
       return {
         live: {
           metrics,
@@ -596,6 +652,19 @@ const scenarios = {
           quiet,
           lastUpdateSeen: seen,
           opened,
+          refreshDiagnostics: {
+            appends,
+            initialTotal,
+            windowTrace,
+            caughtUp,
+            qualified,
+            catchUpAfterLastAppendMs:
+              catchUpTrace.visibleAt === null
+                ? null
+                : round(catchUpTrace.visibleAt - appends.at(-1).at),
+            catchUpTrace,
+            integrity,
+          },
         },
       };
     }),
