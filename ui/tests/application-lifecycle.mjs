@@ -393,9 +393,9 @@ for (const width of [390, 1280])
                   !document.querySelector('[aria-label="Open Composer"]'),
                   'paused Composer was advertised',
                 );
-                document
-                  .querySelector('[aria-label="Session menu: details, cost and actions"]')
-                  .click();
+                const sessionMenu = document.querySelector('#more-btn[aria-label="Session menu"]');
+                assert(sessionMenu, 'selected session menu trigger is missing');
+                sessionMenu.click();
                 await settle();
                 assert(document.querySelector('dialog'), 'session menu panel did not open');
                 panelBody = document.querySelector('dialog .panel-b');
