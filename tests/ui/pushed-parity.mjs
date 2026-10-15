@@ -45,8 +45,8 @@ if (process.argv.includes('--native-pages')) {
       .getSetCookie()
       .map((value) => value.split(';')[0])
       .join('; ');
-    const get = async (query) => {
-      const response = await fetch(base + '/api/session-entry?' + query, { headers: { cookie } });
+    const get = async (query, endpoint = '/api/session-entry') => {
+      const response = await fetch(base + endpoint + '?' + query, { headers: { cookie } });
       if (!response.ok) throw Error('pushed-parity native expansion: ' + response.status);
       return response.json();
     };
@@ -62,7 +62,7 @@ if (process.argv.includes('--native-pages')) {
           after: String(entry.slot),
           limit: '1',
         });
-        const selected = await get(query);
+        const selected = await get(query, '/api/session-transcript');
         const saved = selected.entries[0];
         if (
           selected.identity.source_key !== machine ||
