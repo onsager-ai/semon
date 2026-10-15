@@ -5995,3 +5995,5 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
     assert!(!home.options.cache.exists());
     assert!(!crate::events::EventCache::path(&home.options.cache).exists());
 }
+
+mod recovery_tests;
