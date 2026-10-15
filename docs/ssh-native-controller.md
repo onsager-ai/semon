@@ -1,6 +1,8 @@
 # Native Codex controller on SSH
 
-Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+Current collection scope: all SSH capabilities are paused, including onboarding/testing, remote installation/bootstrap/update, tunnels and SSH-mediated collection/execution. Public Rust transport APIs and the fixture installer return `capability_unavailable` before credentials, temporary files, sockets or SSH processes. Execution capabilities are all false; pure identity and saved-receipt handling remain available. Existing accepted history, credentials, known-host custody, installations and sessions are preserved. Local native collection and non-SSH Push/receive remain active. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
+The implementation and protocol contracts below describe retained private engines and historical qualification, not active product setup. Real-SSH fixture scripts refuse immediately, and OpenSSH/native-controller CI jobs are explicitly deferred. Offline security, receipt identity, supervisor lifetime and non-SSH checkpoint custody tests remain active. Deferred jobs are not passes; reactivation requires a future scope decision and isolated fixture adaptation, without a product bypass.
 
 This explicit opt-in controller builds on the private receipt broker. It does not
 run during host discovery, connection tests or mirrored-history setup. The
@@ -69,7 +71,7 @@ explicitly authorizes its one expected shell command through owner-only IPC.
 Hosted approval/question/interrupt capabilities stay unadvertised; existence of
 this controller does not grant permission to expose those operations.
 
-Current capabilities: separately authorized native launch, initial input,
+Retained engine capabilities (inactive product): separately authorized native launch, initial input,
 read-only observation/reconciliation, same-thread transport reconnect, idle
 API-key repair and permanent execution revocation with shutdown proof. Restarting
 a lost controller currently confirms shutdown and preserves receipt/history
@@ -78,7 +80,7 @@ would create a new native session. Compute pause/snapshot/restore/replacement/
 deletion, automatic native resume after expiry and environment recovery are absent.
 Mirrored history remains viewable independently of those execution capabilities.
 
-## Qualification
+## Historical qualification (real-SSH command currently refuses)
 
 ```sh
 cargo build -p semon-control --bin semon-ssh-controller -p semon-ssh --example controller-install --locked

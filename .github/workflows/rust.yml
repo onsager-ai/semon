@@ -91,6 +91,8 @@ jobs:
           cargo test -p semon-sessions --lib --locked collection_control_refuses_ -- --nocapture
           cargo test -p semon-cli --bin semon --locked paused_delivery_refuses_ -- --nocapture
           cargo test -p semon-control --bins --locked collection_ -- --nocapture
+          cargo test -p semon-ssh --lib --locked collection_ssh_ -- --nocapture
+          cargo test -p semon-ssh --example controller-install --locked collection_controller_install_refuses -- --nocapture
 
       - name: Recovery core journey and selected fallback diagnostics
         env:
