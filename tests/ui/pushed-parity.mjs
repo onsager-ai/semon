@@ -38,6 +38,20 @@ const arg = (name) => {
 // turn/handoff body and supported field/output expansion on the exact served pair.
 if (process.argv.includes('--native-pages')) {
   const { data } = await import('./lib.mjs');
+  // Entry identity intentionally includes the admitted source key (local versus
+  // the received machine). Map only that proven carrier identity after validating
+  // each side; native provenance, every content field and unknown fields compare
+  // unchanged. No byte-proof/source-reference difference is normalized away.
+  const addressedEntry = (sid, entry) => {
+    if (
+      typeof entry.entry_id !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(entry.entry_id) ||
+      !Number.isSafeInteger(entry.slot) ||
+      entry.slot < 0
+    )
+      throw Error('pushed-parity native entry has an invalid identity/address');
+    return { ...entry, entry_id: JSON.stringify([sid, entry.slot]) };
+  };
   const nativeCorpus = async (base, token) => {
     const fixture = await data({ base, token });
     const landing = await fetch(base + '/?t=' + token);
@@ -50,8 +64,17 @@ if (process.argv.includes('--native-pages')) {
       if (!response.ok) throw Error('pushed-parity native expansion: ' + response.status);
       return response.json();
     };
-    const expansions = {};
+    const expansions = {},
+      transcripts = {};
     for (const [sid, entries] of Object.entries(fixture.TX)) {
+      const identities = new Set();
+      transcripts[sid] = entries.map((entry, ordinal) => {
+        const addressed = addressedEntry(sid, entry);
+        if (entry.slot !== ordinal || identities.has(entry.entry_id))
+          throw Error('pushed-parity native entry identity/slot repeated or out of order');
+        identities.add(entry.entry_id);
+        return addressed;
+      });
       for (const entry of entries) {
         if (!entry.field && !entry.cut) continue;
         const machine = fixture.SOURCES[fixture.SESS[sid].machine];
@@ -113,12 +136,12 @@ if (process.argv.includes('--native-pages')) {
             JSON.stringify(page.entries[0].provenance) !== JSON.stringify(entry.provenance)
           )
             throw Error('pushed-parity native output generation/range changed');
-          expansions[key] = page.entries[0];
+          expansions[key] = addressedEntry(sid, page.entries[0]);
         }
       }
     }
     return {
-      transcripts: fixture.TX,
+      transcripts,
       transcript_metadata: fixture.TXM,
       handoffs: fixture.H,
       turns: fixture.turns,
