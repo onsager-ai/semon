@@ -3555,6 +3555,98 @@ mod tests {
         }
     }
     #[test]
+    fn qualification_withdrawal_preserves_a_newer_pointer_revision_or_job() {
+        for replacement in ["metadata", "revision", "job"] {
+            for callback_error in [false, true] {
+                let (mut fixture, job) = finish_fixture(false);
+                let other = Connection::open(super::super::super::EventCache::path(
+                    &fixture.options.cache,
+                ))
+                .unwrap();
+                let calls = Cell::new(0);
+                let old_metadata = serde_json::json!({"complete":true});
+                let newer_metadata = serde_json::json!({"complete":true,"publication":2});
+                let result = fixture.store.qualify(
+                    &job,
+                    &old_metadata,
+                    &|_, _| {
+                        calls.set(calls.get() + 1);
+                        if calls.get() == 1 {
+                            return Ok(true);
+                        }
+                        // This runs after the attempted Ready publication is
+                        // committed. Its cleanup must own every pointer field
+                        // and the exact job revision it intends to withdraw.
+                        match replacement {
+                            "metadata" => {
+                                other.execute("UPDATE native_query_ready SET metadata=?1 WHERE view_key=?2", params![json(&newer_metadata).unwrap(),job.spec.view_key])?;
+                            }
+                            "revision" => {
+                                other.execute("UPDATE native_query_jobs SET revision=revision+1 WHERE job=?1", [job.id])?;
+                            }
+                            "job" => {
+                                other.execute("UPDATE native_query_jobs SET view_key=view_key||'-superseded' WHERE job=?1", [job.id])?;
+                                other.execute("INSERT INTO native_query_jobs SELECT job+100,?2,version,catalog_generation,runtime,phase,revision,cursor,state,sources,owners FROM native_query_jobs WHERE job=?1", params![job.id,job.spec.view_key])?;
+                                other.execute("INSERT INTO native_query_sources SELECT job+100,path,metadata,present,dev,ino,size,mtime_ns,ctime_ns,resume_at,prefix,tail,claim,archive,mutation FROM native_query_sources WHERE job=?1", [job.id])?;
+                                other.execute("INSERT INTO native_query_owners SELECT job+100,identity,session_key,catalog,history,private_header,trace_header,slot_header,history_header FROM native_query_owners WHERE job=?1", [job.id])?;
+                                other.execute("UPDATE native_query_ready SET job=job+100 WHERE view_key=?1", [&job.spec.view_key])?;
+                            }
+                            _ => unreachable!(),
+                        }
+                        if callback_error {
+                            Err(rusqlite::Error::InvalidQuery)
+                        } else {
+                            Ok(false)
+                        }
+                    },
+                    &|| false,
+                );
+                if callback_error {
+                    assert!(result.is_err());
+                } else {
+                    assert_eq!(result.unwrap(), Outcome::Conflict);
+                }
+                assert_eq!(calls.get(), 2);
+                let pointer: (i64, String) = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT job,metadata FROM native_query_ready WHERE view_key=?1",
+                        [&job.spec.view_key],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    pointer.0,
+                    job.id + if replacement == "job" { 100 } else { 0 }
+                );
+                assert_eq!(
+                    serde_json::from_str::<Value>(&pointer.1).unwrap(),
+                    if replacement == "metadata" {
+                        newer_metadata
+                    } else {
+                        old_metadata
+                    }
+                );
+                let preserved: (String, i64) = fixture
+                    .store
+                    .connection
+                    .query_row(
+                        "SELECT phase,revision FROM native_query_jobs WHERE job=?1",
+                        [pointer.0],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(preserved.0, "ready");
+                assert_eq!(
+                    preserved.1,
+                    job.revision + if replacement == "revision" { 2 } else { 1 }
+                );
+                assert_eq!(ready_pointer_count(&fixture), 1);
+            }
+        }
+    }
+    #[test]
     fn qualification_full_closure_sees_a_new_wal_owner_after_snapshot_release() {
         let (mut fixture, job) = finish_fixture(false);
         let other = Connection::open(super::super::super::EventCache::path(
