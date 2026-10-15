@@ -164,14 +164,15 @@ fn recovery_shared_owner_fallback_scope_measurement() {
         let mut oracle = Query::from_sources(admitted(home.options.clone()));
         let mut cases = Vec::new();
         for key in [&stub, "unsent:missing"] {
-            cases.push((
-                key.to_owned(),
-                "get_session",
-                json!({"id":key}),
-                oracle
-                    .call_at("get_session", &json!({"id":key}), NOW)
-                    .unwrap(),
-            ));
+            // Native unsent owners have transcript slots but no Session row.
+            // Preserve that exact get_session error as well as supported pages.
+            let detail = oracle.call_at("get_session", &json!({"id":key}), NOW);
+            if key == "unsent:missing" {
+                assert_eq!(detail.as_ref().unwrap_err().code, "unknown_session");
+            } else {
+                assert!(detail.is_ok());
+            }
+            cases.push((key.to_owned(), "get_session", json!({"id":key}), detail));
             // Walk every native page, including the terminal empty page. Exact
             // equality pins anchors, total, order and every supported entry.
             let mut after = 0;
@@ -180,7 +181,7 @@ fn recovery_shared_owner_fallback_scope_measurement() {
                 let expected = oracle.call_at("read_transcript", &args, NOW).unwrap();
                 let done = expected["entries"].as_array().unwrap().is_empty();
                 let next = expected["to"].as_u64().unwrap();
-                cases.push((key.to_owned(), "read_transcript", args, expected));
+                cases.push((key.to_owned(), "read_transcript", args, Ok(expected)));
                 if done {
                     break;
                 }
@@ -197,17 +198,15 @@ fn recovery_shared_owner_fallback_scope_measurement() {
             let before_work = archives.work();
             let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
             let started = Instant::now();
-            let actual = query
-                .call_selected_at(
-                    "local",
-                    &key,
-                    tool,
-                    &args,
-                    Some(&archives),
-                    crate::SessionSourceReadMode::ProviderOnly,
-                    NOW,
-                )
-                .unwrap();
+            let actual = query.call_selected_at(
+                "local",
+                &key,
+                tool,
+                &args,
+                Some(&archives),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            );
             let elapsed_us = started.elapsed().as_micros();
             let io = before_io
                 .zip(process_io())
@@ -313,7 +312,7 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                 let slot = entry["slot"].as_u64().unwrap();
                 assert!(slots.insert(slot), "duplicate native slot across pages");
                 after = slot + 1;
-                if matches!(entry["k"].as_str(), Some("u" | "a")) {
+                if matches!(entry["k"].as_str(), Some("h" | "u" | "a")) {
                     texts.push(entry["text"].as_str().unwrap().to_owned());
                 }
                 if entry["k"] == "tool" {
