@@ -10,8 +10,8 @@
 //
 // Two comparisons per screen, both against the screen's mapped mockup rendered in the same browser:
 //
-//   port    The mockup's own code on the served data: the mockup file with its data block replaced by what /api/model and
-//           /api/tx serve, and with the clock formatters and Analytics timestamp adapter changed for served epoch milliseconds.
+//   port    The mockup's own code on the served data: the mockup file with its data block replaced by fixture metadata and
+//           native transcript pages, with the clock formatters and Analytics timestamp adapter changed for served epoch milliseconds.
 //           This isolates the frontend port:
 //           the served page must match it within the anti-aliasing tolerance. Enforced.
 //   sample  The previous sample mockup exactly as committed, with its own data. The differences are the fixture's gaps (gaps.json:
@@ -498,11 +498,19 @@ async function ready(page) {
   );
   await page.waitForTimeout(120);
 }
-async function shot(page, size) {
+async function shot(page, size, catalog = false) {
   await ready(page);
-  return PNG.sync.read(
-    await page.screenshot({ fullPage: size === 'phone', animations: 'disabled', caret: 'hide' }),
-  );
+  const deadline = Date.now() + 5000;
+  do {
+    if (catalog) await settledCatalog(page, Math.max(1, deadline - Date.now()));
+    const capture = await page.screenshot({
+      fullPage: size === 'phone',
+      animations: 'disabled',
+      caret: 'hide',
+    });
+    if (!catalog || (await page.evaluate(catalogQualified))) return PNG.sync.read(capture);
+  } while (Date.now() < deadline);
+  throw Error('Catalog observation changed throughout its bounded capture');
 }
 
 const compare = (a, b) => comparePixels(a, b, THRESHOLD);
@@ -578,6 +586,19 @@ async function nav(page, route, D, mockup) {
     dispatchEvent(new PopStateEvent('popstate', { state: r }));
   }, route);
   await page.waitForTimeout(80);
+}
+
+function catalogQualified() {
+  return (
+    document.querySelector('#page .ph .sub')?.textContent.endsWith(' · Cached history') &&
+    !document.querySelector('[data-session-row="list"] [aria-label="Status unavailable"]')
+  );
+}
+async function settledCatalog(page, timeout) {
+  // Push publishes native bytes before their paired runtime facts. Compare
+  // settled observations rather than an intermediate unavailable status. A
+  // reader that never recovers still fails the normal bounded browser deadline.
+  await page.waitForFunction(catalogQualified, undefined, { timeout });
 }
 
 // Masked in every comparison: the jump-to-latest button, a transient control that floats at a scroll position (its place shifts a pixel or two
@@ -728,6 +749,7 @@ function saveMismatch(row, name, scheme, p) {
 
 (async () => {
   const D = await data(),
+    referenceData = REF_BASE ? await data({ base: REF_BASE, token: REF_TOKEN }) : D,
     S = sample('semon-sample.html'),
     ids = sampleIds(D, S),
     list = screens(D, S, ids);
@@ -764,10 +786,10 @@ function saveMismatch(row, name, scheme, p) {
         ref = other ? 'served' : enforced ? mapped : 'overhaul';
       const port = other ?? (await portFor(ref));
       await nav(page, s.served, D, false);
-      const a = await shot(page, size);
-      if (other) await nav(port, s.served, D, false);
+      const a = await shot(page, size, !!other && s.served.v === 'sessions');
+      if (other) await nav(port, s.served, referenceData, false);
       else await nav(port, s.port, D, true);
-      const b = await shot(port, size);
+      const b = await shot(port, size, !!other && s.served.v === 'sessions');
       const p = compare(a, b);
       const row = {
         scheme,

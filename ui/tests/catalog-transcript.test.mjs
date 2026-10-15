@@ -35,6 +35,7 @@ const page = () => ({
     freshness: { state: 'cached' },
   },
   session: {
+    lifecycle: 'current',
     key: 'session',
     name: 'Saved native session',
     harness: 'claude',
@@ -53,7 +54,12 @@ const page = () => ({
     source_refs: [{ source: source(), state: 'unavailable' }],
     freshness: { state: 'unavailable' },
   },
-  projection: { version: 5, generation: 'b'.repeat(64), total: 3 },
+  projection: {
+    version: 5,
+    generation: 'b'.repeat(64),
+    errors_generation: 'b'.repeat(64),
+    total: 3,
+  },
   range: { first: 0, end: 2, next: 2 },
   entries: [
     {
@@ -105,6 +111,7 @@ test('ranged native content rejects holes, stale scope and fabricated complete c
     (p) => (p.entries[1].entry_id = p.entries[0].entry_id),
     (p) => (p.range.next = null),
     (p) => (p.projection.generation = 'not-sha'),
+    (p) => (p.projection.errors_generation = 'not-sha'),
     (p) => (p.relationship_context.state = 'complete'),
     (p) => (p.relationship_context.handoffs = [{}]),
     (p) => (p.entries[1].text = null),
@@ -236,6 +243,34 @@ test('retained-history range intent cannot silently accept a current-scope proje
   assert.equal(store.accept(store.request(0, 2), historical), true);
   assert.equal(store.selectedPage().identity.native_selection.state, 'retired');
 });
+test('losing current source observation invalidates live presentation while native content remains unchanged', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const initial = page();
+  initial.session.details = {
+    state: 'work',
+    turns: 1,
+    calls: 0,
+    errors: 0,
+    tool_calls: {},
+    signals: {},
+    cost: { usd: null },
+    copied_usage: false,
+    copilot: null,
+    reported_runs: [],
+    cost_check: [],
+    live_observation: true,
+  };
+  store.accept(store.request(0, 2), initial);
+  const revision = store.revision,
+    content = store.entries();
+  const offline = structuredClone(initial);
+  offline.session.details.live_observation = false;
+  assert.equal(store.accept(store.request(0, 2), offline), true);
+  assert.ok(store.revision > revision);
+  assert.deepEqual(store.entries(), content);
+  assert.equal(store.selectedPage().session.details.live_observation, false);
+});
 
 test('incomplete action prompts and derived boundaries stay readable without source authority', () => {
   const raw = page();
@@ -250,4 +285,64 @@ test('incomplete action prompts and derived boundaries stay readable without sou
   raw.entries[1].k = 'u';
   raw.entries[1].text = 'Unprovenanced native message';
   assert.throws(() => parseCatalogTranscriptPage(raw));
+});
+
+test('visiting distant native ranges evicts old windows while preserving accepted identity and restoration', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const window = (first, count = 60) => {
+    const value = page();
+    value.projection.total = 2000;
+    value.range = { first, end: first + count, next: first + count };
+    value.entries = Array.from({ length: count }, (_, index) => ({
+      k: 'a',
+      text: 'Original native ' + (first + index),
+      slot: first + index,
+      entry_id: 'native-' + (first + index),
+      provenance: provenance(),
+    }));
+    return value;
+  };
+  for (let first = 0; first < 900; first += 100) {
+    store.accept(store.request(first, 60), window(first));
+    assert.ok(store.entries().length <= 300);
+    assert.ok(store.loadedRanges().length <= 5);
+  }
+  assert.equal(store.entries()[0].slot, 400);
+  const ticket = store.request(800, 60);
+  store.accept(ticket, window(800));
+  store.accept(store.request(1200, 100), window(1200, 100));
+  assert.ok(
+    store.entries().some((entry) => entry.slot === 800),
+    'recently revisited window is retained',
+  );
+  assert.ok(store.entries().length <= 300);
+  store.retainRanges([{ first: 800, end: 860 }]);
+  assert.deepEqual(store.loadedRanges(), [{ first: 800, end: 860 }]);
+  assert.equal(store.request(700).generation, 'b'.repeat(64));
+});
+
+test('runtime observation fences loaded ranges while preserving their source identity', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const first = store.request(0, 2);
+  assert.equal(first.errorsGeneration, null);
+  store.accept(first, page());
+  const pending = store.request(0, 2);
+  assert.equal(pending.errorsGeneration, 'b'.repeat(64));
+  const stopped = page();
+  stopped.projection.errors_generation = 'c'.repeat(64);
+  stopped.entries[0].text = 'New qualified runtime rendering';
+  assert.throws(
+    () => store.accept(pending, stopped),
+    (error) => error.status === 409,
+  );
+  assert.equal(store.selectedPage().projection.errorsGeneration, 'b'.repeat(64));
+  assert.equal(store.entries()[0].entry.text, 'Original native text');
+  const fresh = new CatalogTranscriptStore();
+  fresh.select({ source_key: 'source', catalog_key: 'session' });
+  assert.equal(fresh.accept(fresh.request(0, 2), stopped), true);
+  assert.equal(fresh.selectedPage().projection.generation, 'b'.repeat(64));
+  assert.equal(fresh.selectedPage().projection.errorsGeneration, 'c'.repeat(64));
+  assert.equal(fresh.entries()[0].entry.text, 'New qualified runtime rendering');
 });

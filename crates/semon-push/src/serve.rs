@@ -147,7 +147,7 @@ impl ServeOptions {
     }
 }
 
-/// The listen rule, as `semon-relay receive` has it: any loopback address;
+/// The generic mirror listen rule: any loopback address;
 /// any other only with TLS and at least one token. Plain HTTP off loopback
 /// is always refused.
 pub fn check_listen(

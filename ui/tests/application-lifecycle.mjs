@@ -10,8 +10,8 @@ import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 const root = new URL('../../', import.meta.url).pathname;
 const binary = process.env.SEMON_BIN ?? join(root, 'target/debug/semon');
 for (const width of [390, 1280])
-  for (const mode of ['full', 'sidebar', 'native', 'host']) {
-    test(`owned application teardown and late model response ${width} ${mode}`, async () => {
+  for (const mode of ['full', 'native', 'host']) {
+    test(`canonical application teardown and late overview response ${width} ${mode}`, async () => {
       const scratch = await mkdtemp(join(tmpdir(), 'semon-app-life-'));
       const fixture = spawnSync(process.execPath, [join(root, 'tests/ui/fixture.mjs'), scratch], {
         encoding: 'utf8',
@@ -73,15 +73,21 @@ for (const width of [390, 1280])
         await page.route('**/viewer.js', (route) =>
           route.fulfill({ contentType: 'text/javascript', body: bundle.outputFiles[0].text }),
         );
-        await page.goto(match[1] + '/?t=' + match[2] + '&compat=1');
+        await page.goto(match[1] + '/?t=' + match[2]);
         const result = await page.evaluate(async (mode) => {
           const assert = (condition, message) => {
             if (!condition) throw Error(message);
           };
           const settle = () =>
             new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const originalFetch = window.fetch,
-            model = await originalFetch('/api/model?delta=1').then((r) => r.json());
+          const originalFetch = window.fetch;
+          let model;
+          for (let attempt = 0; attempt < 200; attempt++) {
+            model = await originalFetch('/api/viewer/home').then((r) => r.json());
+            if (model.recent?.length) break;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          assert(model.recent?.length, 'bounded producer did not publish Home');
           const add = EventTarget.prototype.addEventListener,
             remove = EventTarget.prototype.removeEventListener;
           const registrations = new Map();
@@ -205,21 +211,16 @@ for (const width of [390, 1280])
           const count = () =>
             [...registrations.values()].reduce((sum, list) => sum + list.length, 0);
           const app = document.querySelector('.app');
-          if (mode === 'sidebar') {
-            app.dataset.viewer = 'sidebar';
-            app.dataset.viewerNav = 'sessions';
-          }
           let destroys = 0,
-            accounts = 0,
             pendingResolve,
             pendingSignal,
-            nativeResolve,
-            nativeSignal,
-            staleDestroyed = 0,
             requests = 0,
+            pendingObservation = false,
             hold = false;
+          const requestPaths = [];
           window.fetch = (path, options) => {
-            if (String(path).startsWith('/api/model')) {
+            requestPaths.push(String(path).split('?')[0]);
+            if (String(path).startsWith('/api/viewer/home')) {
               requests++;
               if (hold) {
                 pendingSignal = options?.signal;
@@ -233,12 +234,24 @@ for (const width of [390, 1280])
                 });
               }
               return Promise.resolve(
-                new Response(JSON.stringify(model), {
-                  headers: { 'Content-Type': 'application/json' },
-                }),
+                new Response(
+                  JSON.stringify(
+                    pendingObservation
+                      ? {
+                          ...model,
+                          observations: [
+                            { source_key: model.machines[0].key, state: 'catalog_unavailable' },
+                          ],
+                        }
+                      : model,
+                  ),
+                  {
+                    headers: { 'Content-Type': 'application/json' },
+                  },
+                ),
               );
             }
-            if (String(path).startsWith('/api/tx'))
+            if (String(path).startsWith('/api/session-transcript'))
               return new Promise((resolve) =>
                 originalTimers.setTimeout.call(window, resolve, 100),
               ).then(() => originalFetch(path, options));
@@ -250,26 +263,23 @@ for (const width of [390, 1280])
                   machinesPath: '/manage/machines',
                   nativePage:
                     mode === 'native' ? { title: 'Workspace', nav: 'machines' } : undefined,
+                  navigation: {
+                    leading: [
+                      {
+                        key: 'new-session',
+                        label: 'New Session',
+                        icon: 'plus',
+                        href: '/sessions/new?return_to=%2Fsessions',
+                        current: false,
+                      },
+                    ],
+                  },
                   initialMachines: {
                     element: document.createElement('div'),
                     destroy() {
                       destroys++;
+                      this.element.remove();
                     },
-                  },
-                  loadMachines(signal) {
-                    nativeSignal = signal;
-                    return new Promise((resolve) => {
-                      nativeResolve = () =>
-                        resolve({
-                          element: document.createElement('div'),
-                          destroy() {
-                            staleDestroyed++;
-                          },
-                        });
-                    });
-                  },
-                  modelAccount() {
-                    accounts++;
                   },
                 }
               : null;
@@ -277,11 +287,14 @@ for (const width of [390, 1280])
             if (mode === 'native') {
               const nativeHost = () => {
                 const value = host();
+                history.replaceState(null, '', '/workspace/settings');
+                document.querySelector('#page').replaceChildren(value.initialMachines.element);
                 value.initialMachines.element.innerHTML =
                   '<form><input name="task" value="Retained task"></form>';
                 return value;
               };
               for (let i = 0; i < 4; i++) {
+                const before = requests;
                 const owner = Application.mountViewerApplication(nativeHost());
                 await settle();
                 assert(
@@ -298,8 +311,17 @@ for (const width of [390, 1280])
                   'native host Machines path was lost',
                 );
                 assert(
-                  !document.querySelector('#lanes .srow') && requests === 0,
-                  'native chrome started a complete reader',
+                  document.querySelector('#nav [data-go="new-session"]')?.getAttribute('href') ===
+                    '/sessions/new?return_to=%2Fsessions',
+                  'shared chrome overwrote the native host return destination',
+                );
+                assert(
+                  document.querySelector('#lanes .srow') && requests === before + 1,
+                  'native chrome did not share the bounded Recent publication',
+                );
+                assert(
+                  requestPaths.every((path) => path === '/api/viewer/home'),
+                  'native chrome loaded session bodies or a workspace model',
                 );
                 assert(count() > 0, 'native chrome owns no document effects');
                 owner.destroy();
@@ -309,7 +331,10 @@ for (const width of [390, 1280])
                 assert(!document.querySelector('#page input'), 'native content survived teardown');
                 window.dispatchEvent(new Event('semon:refresh'));
                 await settle();
-                assert(requests === 0, 'disposed native shell started a model read');
+                assert(
+                  requests === before + 1,
+                  'disposed native shell started another overview read',
+                );
               }
               const first = Application.mountViewerApplication(nativeHost());
               await settle();
@@ -325,12 +350,13 @@ for (const width of [390, 1280])
               second.destroy();
               await settle();
               assert(
-                count() === 0 && effects() === 0 && requests === 0,
-                'native replacement leaked effects or read the model',
+                count() === 0 && effects() === 0 && requests === 6,
+                'native replacement leaked effects or duplicated overview reads',
               );
               return { requests, destroys };
             }
             for (let i = 0; i < 3; i++) {
+              history.replaceState(null, '', '/');
               const owner = Application.mountViewerApplication(host());
               await ready();
               assert(
@@ -351,7 +377,7 @@ for (const width of [390, 1280])
                     originalTimers.setTimeout.call(window, resolve, 50),
                   );
                 assert(document.querySelector('#page .turns'), 'session did not commit');
-                document.querySelector('#more-btn').click();
+                document.querySelector('[aria-label="Open Composer"]').click();
                 await settle();
                 assert(document.querySelector('dialog'), 'session panel did not open');
                 panelBody = document.querySelector('dialog .panel-b');
@@ -359,20 +385,18 @@ for (const width of [390, 1280])
               if (mode === 'host') {
                 document.querySelector('#nav [data-go="home"]').click();
                 await settle();
-                document.querySelector('#nav [data-go="machines"]').click();
-                await settle();
+                assert(
+                  document.querySelector('#nav [data-go="machines"]').getAttribute('href') ===
+                    '/manage/machines',
+                  'native destination path changed',
+                );
               }
               owner.destroy();
               owner.destroy();
               await settle();
               assert(count() === 0, 'document effects leaked after destroy: ' + count());
               assert(effects() === 0, 'timers or animation frames leaked: ' + effects());
-              if (mode === 'host') {
-                assert(nativeSignal.aborted, 'native destination was not aborted');
-                nativeResolve();
-                await settle();
-                assert(staleDestroyed === i + 1, 'late native content was not destroyed');
-              }
+
               assert(
                 !document.querySelector('dialog') &&
                   !document.querySelector('#lanes .srow') &&
@@ -384,20 +408,32 @@ for (const width of [390, 1280])
               await settle();
               assert(requests === before, 'disposed refresh listener polled');
             }
+            history.replaceState(null, '', '/');
+            pendingObservation = true;
+            const retrying = Application.mountViewerApplication(host());
+            await ready();
+            assert(
+              document.body.textContent.includes('Retrying'),
+              'pending observation was not shown',
+            );
+            retrying.destroy();
+            await settle();
+            assert(count() === 0 && effects() === 0, 'pending overview retry survived teardown');
+            const retiredRequests = requests;
+            await new Promise((resolve) => originalTimers.setTimeout.call(window, resolve, 600));
+            assert(requests === retiredRequests, 'retired overview retry made another request');
+            pendingObservation = false;
+            history.replaceState(null, '', '/');
             hold = true;
             const old = Application.mountViewerApplication(host());
             await settle();
             assert(pendingResolve, 'boot was not pending');
             old.destroy();
             assert(pendingSignal?.aborted, 'pending model was not aborted');
-            const before = document.body.textContent,
-              beforeAccounts = accounts;
+            const before = document.body.textContent;
             pendingResolve();
             await settle();
-            assert(
-              document.body.textContent === before && accounts === beforeAccounts,
-              'late model revived a root or host callback',
-            );
+            assert(document.body.textContent === before, 'late overview revived a root');
             hold = false;
             const first = Application.mountViewerApplication(host());
             await ready();
@@ -427,221 +463,3 @@ for (const width of [390, 1280])
       }
     });
   }
-
-test('error-navigation request owners stay bounded across polls and mode changes', async () => {
-  const contract = await build({
-    absWorkingDir: join(root, 'ui'),
-    stdin: {
-      contents:
-        "export { createErrorNavigation } from './src/navigation/errors'; export { EffectScope } from './src/app/effects';",
-      resolveDir: join(root, 'ui'),
-      loader: 'ts',
-    },
-    bundle: true,
-    write: false,
-    format: 'iife',
-    globalName: 'ErrorOwnership',
-    platform: 'browser',
-    tsconfig: 'tsconfig.json',
-  });
-  const browser = await chromium.launch();
-  try {
-    const page = await browser.newPage();
-    await page.route('http://errors.test/**', (route) =>
-      route.fulfill({
-        contentType: route.request().url().endsWith('.js') ? 'text/javascript' : 'text/html',
-        body: route.request().url().endsWith('.js')
-          ? contract.outputFiles[0].text
-          : '<!doctype html><main id="page"></main><script src="/contract.js"></script>',
-      }),
-    );
-    await page.goto('http://errors.test/');
-    await page.evaluate(async () => {
-      const check = (ok, message) => {
-        if (!ok) throw Error(message);
-      };
-      const retired = new ErrorOwnership.EffectScope();
-      retired.destroy();
-      check(retired.request().signal.aborted, 'disposed scope admitted a live request');
-      const scopes = new Map(),
-        prototype = ErrorOwnership.EffectScope.prototype;
-      const request = prototype.request,
-        release = prototype.releaseRequest,
-        destroy = prototype.destroy;
-      prototype.request = function () {
-        const controller = request.call(this);
-        let owned = scopes.get(this);
-        if (!owned) scopes.set(this, (owned = new Set()));
-        owned.add(controller);
-        return controller;
-      };
-      prototype.releaseRequest = function (controller) {
-        scopes.get(this)?.delete(controller);
-        return release.call(this, controller);
-      };
-      prototype.destroy = function () {
-        scopes.delete(this);
-        return destroy.call(this);
-      };
-      const timerOwner = new ErrorOwnership.EffectScope(),
-        clear0 = window.clearTimeout;
-      let canceled = 0;
-      window.clearTimeout = (id) => {
-        canceled++;
-        clear0.call(window, id);
-      };
-      const timer = timerOwner.timeout(() => {
-        throw Error('canceled callback ran');
-      }, 60000);
-      timerOwner.clearTimeout(timer);
-      timerOwner.destroy();
-      window.clearTimeout = clear0;
-      check(canceled === 1, 'a canceled timer retained its teardown cleanup');
-      const retained = () => [...scopes.values()].reduce((count, items) => count + items.size, 0);
-      const requestOwner = new ErrorOwnership.EffectScope(),
-        aborted = requestOwner.request();
-      aborted.abort();
-      check(retained() === 0, 'aborted request retained scope ownership');
-      requestOwner.destroy();
-      let resolvePending,
-        signal,
-        hold = false,
-        draws = 0,
-        tails = 0;
-      const fetch0 = window.fetch;
-      window.fetch = (_url, options) =>
-        hold
-          ? new Promise((resolve) => {
-              signal = options.signal;
-              resolvePending = resolve;
-            })
-          : Promise.resolve(
-              new Response(JSON.stringify({ slots: [], errors: 0, version: 'stable' }), {
-                headers: { 'Content-Type': 'application/json' },
-              }),
-            );
-      const host = {
-        navigation: { route: { v: 'session', id: 's' } },
-        TX: { s: [] },
-        TXM: { s: { from: 0, to: 0, total: 0, tok: 'a' } },
-        TOK: {},
-        SESS: { s: { signals: {} } },
-        show: { tools: true },
-        sidebarOnly: false,
-        page: () => document.getElementById('page'),
-        drawSessionBar() {
-          draws++;
-        },
-        render() {
-          draws++;
-        },
-        keepFocus: (fn) => fn(),
-        countOf: () => 0,
-        capture: () => ({}),
-        restore() {},
-        opener: () => null,
-        resetPagerInput() {},
-        stopOpeningEndPin() {},
-        clearFind() {},
-        centre() {},
-        fetchTx: async () => null,
-        dropTx() {},
-        spread() {},
-        tail: async () => {
-          tails++;
-          return null;
-        },
-      };
-      const owner = ErrorOwnership.createErrorNavigation(host);
-      try {
-        for (let mode = 0; mode < 3; mode++) {
-          host.show = { tools: false };
-          host.TOK = { s: 'a' };
-          owner.open('s');
-          check(host.show.tools, 'error mode used a stale replaced view state');
-          await owner.live();
-          check(retained() === 1, 'completed error-list request remained owned');
-          for (let poll = 0; poll < 10; poll++) {
-            await owner.live();
-            check(retained() === 1, 'polls accumulated completed request controllers');
-          }
-          host.TXM.s = { from: 1, to: 1, total: 1 };
-          owner.close();
-          await Promise.resolve();
-          check(!host.show.tools && tails === 0, 'error close used stale view/growth state');
-          check(retained() === 0, 'closed error mode retained its request owner');
-        }
-        const queue = [];
-        window.fetch = (_url, options) =>
-          new Promise((resolve, reject) => {
-            options.signal.addEventListener(
-              'abort',
-              () => reject(new DOMException('Aborted', 'AbortError')),
-              { once: true },
-            );
-            queue.push({ resolve, reject });
-          });
-        owner.open('s');
-        const refreshed = owner.live();
-        queue[1].resolve(
-          new Response(JSON.stringify({ slots: [], errors: 0, version: 'fresh' }), {
-            headers: { 'Content-Type': 'application/json' },
-          }),
-        );
-        await refreshed;
-        await Promise.resolve();
-        check(
-          !owner.state.notice && !document.body.textContent.includes("Couldn't list"),
-          'superseded initial request reported a false failure',
-        );
-        const failed = owner.live();
-        queue[2].reject(new Error('Current request failed'));
-        let rejected = false;
-        try {
-          await failed;
-        } catch {
-          rejected = true;
-        }
-        check(rejected, 'current transport failure was suppressed');
-        owner.close();
-        window.fetch = (_url, options) =>
-          hold
-            ? new Promise((resolve) => {
-                signal = options.signal;
-                resolvePending = resolve;
-              })
-            : Promise.resolve(
-                new Response(JSON.stringify({ slots: [], errors: 0, version: 'stable' }), {
-                  headers: { 'Content-Type': 'application/json' },
-                }),
-              );
-        owner.open('s');
-        await owner.live();
-        hold = true;
-        const pending = owner.live();
-        check(signal && !signal.aborted, 'pending error-list request lacks a live owner');
-        owner.destroy();
-        check(
-          signal.aborted && retained() === 0,
-          'error-navigation destroy leaked a pending request',
-        );
-        const before = draws;
-        resolvePending(
-          new Response(JSON.stringify({ slots: [1], errors: 1, version: 'late' }), {
-            headers: { 'Content-Type': 'application/json' },
-          }),
-        );
-        await pending;
-        check(draws === before, 'late error-list response drew after destroy');
-      } finally {
-        owner.destroy();
-        window.fetch = fetch0;
-        prototype.request = request;
-        prototype.releaseRequest = release;
-        prototype.destroy = destroy;
-      }
-    });
-  } finally {
-    await browser.close();
-  }
-});

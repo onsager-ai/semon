@@ -36,6 +36,7 @@ const source = (key) => ({
   tail_sha256: Array(32).fill(2),
 });
 const meta = (key) => ({
+  lifecycle: 'current',
   key,
   name: 'Session ' + key,
   harness: 'claude',
@@ -110,7 +111,12 @@ function transcript(key, p, total = 65, generation = 'b') {
     api: 1,
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
-    projection: { version: 5, generation: generation.repeat(64), total },
+    projection: {
+      version: 5,
+      generation: generation.repeat(64),
+      errors_generation: generation.repeat(64),
+      total,
+    },
     range: { first, end, next: end < total ? end : null },
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
@@ -202,7 +208,20 @@ for (const width of [390, 1280])
           if (u.pathname === '/api/sessions')
             return route.fulfill({
               json: {
-                ...list([meta('one'), meta('two')]),
+                ...list(
+                  [meta('one'), meta('two')].map((item) =>
+                    u.searchParams.get('sid') === item.key
+                      ? {
+                          ...item,
+                          transcript: {
+                            generation: nativeGeneration.repeat(64),
+                            errors_generation: nativeGeneration.repeat(64),
+                            total: nativeTotal,
+                          },
+                        }
+                      : item,
+                  ),
+                ),
                 machine: u.searchParams.get('machine'),
                 machine_info: {
                   key: u.searchParams.get('machine'),
@@ -300,10 +319,12 @@ for (const width of [390, 1280])
         const original = await page.evaluateHandle(() =>
           document.querySelector('#page [data-entry-key="one:5"]'),
         );
-        const draft = page.locator('#page textarea');
+        await page.getByRole('button', { name: 'Open Composer' }).click();
+        const draft = page.locator('dialog.session-composer-panel textarea');
         await draft.fill('Retained native draft');
         await draft.focus();
         const draftNode = await draft.elementHandle();
+        await page.keyboard.press('Escape');
         await page.getByRole('button', { name: 'Load recorded text', exact: true }).click();
         await page.getByRole('button', { name: 'Load more text', exact: true }).waitFor();
         assert.match(
@@ -320,10 +341,14 @@ for (const width of [390, 1280])
           await page.locator('#page [data-entry-key="one:6"]').innerText(),
           /and final native text chunk/,
         );
+        await page.getByRole('button', { name: 'Open Composer' }).click();
         assert.equal(await draft.inputValue(), 'Retained native draft');
+        await page.keyboard.press('Escape');
         await page.getByRole('button', { name: 'Load earlier records' }).first().click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
+        await page.getByRole('button', { name: 'Open Composer' }).click();
         assert.equal(await draft.inputValue(), 'Retained native draft');
+        await page.keyboard.press('Escape');
         await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
         await page.locator('#page [data-id="two"]').click();
         await page.locator('#page [data-entry-key="two:5"]').waitFor();
@@ -344,15 +369,33 @@ for (const width of [390, 1280])
           true,
         );
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        await page.evaluate(() => document.querySelector('.catalog-sources').click());
+        if (await page.locator('dialog.session-composer-panel').count()) {
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !history.state?.sheet);
+        }
+        await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
+        await page.getByRole('menuitem', { name: 'Choose a machine', exact: true }).click();
         await page.locator('[data-source-key="second"]').click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
-        await page.locator('#page textarea').fill('Second source draft');
-        await page.evaluate(() => document.querySelector('.catalog-sources').click());
+        await page.getByRole('button', { name: 'Open Composer' }).click();
+        await page.locator('dialog.session-composer-panel textarea').fill('Second source draft');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !history.state?.sheet);
+        if (await page.locator('dialog.session-composer-panel').count()) {
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !history.state?.sheet);
+        }
+        await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
+        await page.getByRole('menuitem', { name: 'Choose a machine', exact: true }).click();
         await page.locator('[data-source-key="source"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        if (!(await page.locator('dialog.session-composer-panel').count()))
+          await page.getByRole('button', { name: 'Open Composer' }).click();
+        assert.equal(
+          await page.locator('dialog.session-composer-panel textarea').inputValue(),
+          'Retained native draft',
+        );
         assert.equal(
           await page.evaluate(
             (node) => node === document.querySelector('#page [data-entry-key="one:5"]'),
@@ -360,25 +403,62 @@ for (const width of [390, 1280])
           ),
           true,
         );
+        if (await page.locator('dialog.session-composer-panel').count()) {
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !history.state?.sheet);
+        }
         await page.goBack();
         await page.locator('[data-source-key="second"]').waitFor();
         assert.equal(new URL(page.url()).searchParams.get('choose_source'), '1');
+        if (await page.locator('dialog.session-composer-panel').count()) {
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !history.state?.sheet);
+        }
         await page.goBack();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Second source draft');
         await page.goForward();
         await page.locator('[data-source-key="source"]').waitFor();
         await page.goForward();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        if (!(await page.locator('dialog.session-composer-panel').count()))
+          await page.getByRole('button', { name: 'Open Composer' }).click();
+        assert.equal(
+          await page.locator('dialog.session-composer-panel textarea').inputValue(),
+          'Retained native draft',
+        );
+        // A panel deliberately adds an overlay history entry. Complete the
+        // Forward transaction before opening it, then independently revisit
+        // the other Source to prove its draft survived route restoration.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !history.state?.sheet);
+        await page.goBack();
+        await page.locator('[data-source-key="second"]').waitFor();
+        await page.goBack();
+        await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        await page.getByRole('button', { name: 'Open Composer' }).click();
+        assert.equal(
+          await page.locator('dialog.session-composer-panel textarea').inputValue(),
+          'Second source draft',
+        );
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !history.state?.sheet);
+        await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
+        await page.getByRole('menuitem', { name: 'Choose a machine', exact: true }).click();
+        await page.locator('[data-source-key="source"]').click();
+        await page.locator('#page [data-entry-key="one:0"]').waitFor();
         if (process.env.SEMON_CATALOG_OUT)
           await page.screenshot({
             path: process.env.SEMON_CATALOG_OUT + '/selected-' + width + '-' + colorScheme + '.png',
           });
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        if (!(await page.locator('dialog.session-composer-panel').count()))
+          await page.getByRole('button', { name: 'Open Composer' }).click();
+        assert.equal(
+          await page.locator('dialog.session-composer-panel textarea').inputValue(),
+          'Retained native draft',
+        );
         assert.equal(
           await page.evaluate(
-            (node) => node === document.querySelector('#page textarea'),
+            (node) => node === document.querySelector('dialog.session-composer-panel textarea'),
             draftNode,
           ),
           true,
@@ -387,7 +467,7 @@ for (const width of [390, 1280])
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.scrollIntoView({ block: 'start' }));
         await page
-          .locator('#page textarea')
+          .locator('dialog.session-composer-panel textarea')
           .evaluate((node) => node.focus({ preventScroll: true }));
         const anchorBefore = await page
           .locator('#page [data-entry-key="one:0"]')
@@ -396,7 +476,12 @@ for (const width of [390, 1280])
         nativeTotal = 66;
         await page.clock.runFor(3100);
         await page.locator('#page [data-entry-key="one:65"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        if (!(await page.locator('dialog.session-composer-panel').count()))
+          await page.getByRole('button', { name: 'Open Composer' }).click();
+        assert.equal(
+          await page.locator('dialog.session-composer-panel textarea').inputValue(),
+          'Retained native draft',
+        );
         assert.equal(
           await page.evaluate((node) => node === document.activeElement, draftNode),
           true,
@@ -411,16 +496,24 @@ for (const width of [390, 1280])
         );
         await page.getByRole('button', { name: 'Reload recorded text', exact: true }).waitFor();
         assert.equal(requests.filter((p) => p.startsWith('/api/session-entry')).length, 2);
+        await page.keyboard.press('Escape');
         await page.getByRole('button', { name: /Jump to bottom/ }).click();
         await page.waitForFunction(
           () => document.querySelector('#page > div')?.getAttribute('aria-busy') === 'false',
         );
-        await page.locator('#page textarea').focus();
+        if (!(await page.locator('dialog.session-composer-panel').count()))
+          await page.getByRole('button', { name: 'Open Composer' }).click();
+        await page.locator('dialog.session-composer-panel textarea').focus();
         nativeGeneration = 'd';
         nativeTotal = 67;
         await page.clock.runFor(3100);
         await page.locator('#page [data-entry-key="one:66"]').waitFor({ state: 'attached' });
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        if (!(await page.locator('dialog.session-composer-panel').count()))
+          await page.getByRole('button', { name: 'Open Composer' }).click();
+        assert.equal(
+          await page.locator('dialog.session-composer-panel textarea').inputValue(),
+          'Retained native draft',
+        );
         assert.equal(
           await page.evaluate((node) => node === document.activeElement, draftNode),
           true,
@@ -519,9 +612,12 @@ test('temporary boot failure and pending projection recover without starting glo
         },
       });
     });
-    await page.getByText('Session history is unavailable.', { exact: false }).waitFor();
+    await page
+      .getByText('The source is updating or temporarily unavailable.', { exact: false })
+      .waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
+    await page.getByRole('button', { name: 'Open Composer' }).click();
     await page
       .getByRole('region', { name: 'Environment status' })
       .getByText('This session has ended.', { exact: true })
@@ -535,6 +631,7 @@ test('temporary boot failure and pending projection recover without starting glo
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
     );
+    await page.keyboard.press('Escape');
     ready = true;
     await page.clock.runFor(8100);
     await page
@@ -542,6 +639,7 @@ test('temporary boot failure and pending projection recover without starting glo
       .waitFor();
     await page.clock.runFor(1100);
     await page.locator('#page [data-entry-key="one:5"]').waitFor();
+    await page.getByRole('button', { name: 'Open Composer' }).click();
     await page
       .getByRole('region', { name: 'Environment status' })
       .getByText('This session has ended.', { exact: true })
@@ -642,7 +740,9 @@ for (const width of [390, 1280])
           },
         });
       });
-      await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
+      await page
+        .getByText('The source is updating or temporarily unavailable.', { exact: false })
+        .waitFor();
       assert.equal(requests.includes('/api/session-capabilities'), false);
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
@@ -1074,8 +1174,7 @@ for (const width of [390, 1280])
       name = 'Meaningful later name';
       await page.clock.runFor(8100);
       await page.waitForFunction(
-        () =>
-          document.querySelector('.catalog-session-name')?.textContent === 'Meaningful later name',
+        () => document.querySelector('#topbar .l1 .t')?.textContent === 'Meaningful later name',
       );
       assert.equal(reads, firstReads);
       assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
@@ -1088,10 +1187,7 @@ for (const width of [390, 1280])
         }),
       );
       await page.clock.runFor(3100);
-      assert.equal(
-        await page.locator('.catalog-session-name').textContent(),
-        'Meaningful later name',
-      );
+      assert.equal(await page.locator('#topbar .l1 .t').textContent(), 'Meaningful later name');
       assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
       await page.getByRole('button', { name: 'Back to sessions' }).click();
       assert.match(
@@ -1102,3 +1198,88 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`loaded Catalog parent navigation and expansion stay focused at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+        const requests = [],
+          children = Array.from({ length: 7 }, (_, i) => ({
+            ...meta('child-' + i),
+            parent: 'parent',
+            presentation_kind: 'Subagent',
+          })),
+          items = [meta('parent'), ...children, { ...meta('orphan'), parent: 'unloaded-parent' }];
+        await page.route('http://catalog.test/**', (route) => {
+          const u = new URL(route.request().url());
+          requests.push(u.pathname + u.search);
+          if (u.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(false) });
+          if (u.pathname === '/api/sessions') return route.fulfill({ json: list(items) });
+          if (u.pathname === '/api/session-identity')
+            return route.fulfill({
+              json: { ...identity(u.searchParams.get('sid')), read_scope: 'retained_history' },
+            });
+          return route.fulfill({
+            contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+            body: u.pathname === '/viewer.css' ? css : html,
+          });
+        });
+        await page.goto('http://catalog.test/sessions');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+          Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            get: () => 'hidden',
+          });
+        });
+        const parent = page.locator('.kids-wrap > [data-id="parent"]');
+        await parent.waitFor();
+        assert.equal(await page.locator('.kids .nrow.child').count(), 5);
+        assert.equal(await page.locator('[data-id="orphan"][data-session-row="list"]').count(), 1);
+        await parent.evaluate((node) => {
+          window.parentRow = node;
+        });
+        const more = page.getByRole('button', { name: 'Show 2 more', exact: true });
+        const before = requests.length;
+        await more.focus();
+        await more.press('Enter');
+        assert.equal(await page.locator('.kids .nrow.child').count(), 7);
+        const fewer = page.getByRole('button', { name: 'Show fewer', exact: true });
+        assert.equal(await fewer.getAttribute('aria-expanded'), 'true');
+        assert.equal(await fewer.evaluate((node) => node === document.activeElement), true);
+        await fewer.press('Enter');
+        assert.equal(await page.locator('.kids .nrow.child').count(), 5);
+        assert.equal(
+          await page.evaluate(
+            () => parentRow === document.querySelector('.kids-wrap > [data-id="parent"]'),
+          ),
+          true,
+        );
+        assert.equal(requests.length, before, 'local expansion requested source preparation');
+        const child = page.locator('.kids .nrow.child[data-id="child-0"]');
+        assert.match(await child.innerText(), /Subagent/);
+        assert.ok(
+          await child.evaluate(
+            (node, minimum) => node.getBoundingClientRect().height >= minimum,
+            width < 761 ? 44 : 36,
+          ),
+        );
+        await child.press('Enter');
+        await page.waitForFunction(
+          () => history.state?.v === 'session' && history.state.id === 'child-0',
+        );
+        assert.equal(
+          requests.some(
+            (path) => path.startsWith('/api/model') || path.startsWith('/api/session-transcript'),
+          ),
+          false,
+        );
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });

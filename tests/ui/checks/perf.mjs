@@ -16,7 +16,7 @@ import { writeLong } from '../long.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BIN = process.env.SEMON_BIN ?? path.resolve(here, '../../../target/debug/semon');
-const BUCKETS = ['/api/model', '/api/tx', 'other'];
+const BUCKETS = ['/api/sessions', '/api/session-transcript', 'other'];
 const SCREENS = [
   { name: 'phone', size: 'phone' },
   { name: 'desktop', size: 'desktop' },
@@ -29,13 +29,14 @@ const median = (values) => {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
 const round = (value) => (value == null ? null : Math.round(value * 10) / 10);
-const sessionUrl = (base, token, id) =>
-  `${base}/s/claude/${encodeURIComponent(id)}?t=${token}&compat=1`;
+const sessionUrl = (base, token, id) => `${base}/s/claude/${encodeURIComponent(id)}?t=${token}`;
 
 function bucket(url) {
   try {
     const pathname = new URL(url).pathname;
-    return pathname === '/api/model' || pathname === '/api/tx' ? pathname : 'other';
+    return pathname === '/api/sessions' || pathname === '/api/session-transcript'
+      ? pathname
+      : 'other';
   } catch {
     return 'other';
   }
@@ -611,10 +612,13 @@ async function runScreen(browser, screen, server, fixture) {
     };
     const openMarathon = (managed) => openSession(managed.page, 'marathon');
     const prepareSidebarRow = async (page, id) => {
-      await page.waitForSelector(`.srow[data-id="${id}"]`, { state: 'attached', timeout: 60_000 });
+      await page.waitForSelector(
+        `.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}]`,
+        { state: 'attached', timeout: 60_000 },
+      );
       const mobile = await page.evaluate(() => matchMedia('(max-width: 760px)').matches);
       if (mobile && !(await page.evaluate(() => document.body.classList.contains('drawer-open')))) {
-        await page.locator('#lead-btn').click();
+        await page.locator('#topbar .lead').click();
       }
       await page.waitForFunction(
         (selector) => {
@@ -623,14 +627,18 @@ async function runScreen(browser, screen, server, fixture) {
             !!row && row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().height > 0
           );
         },
-        `.srow[data-id="${id}"]`,
+        `.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}]`,
         { timeout: 60_000 },
       );
     };
     // Click a session in the sidebar; `feedbackMs` is when the top bar names it, `paintMs` when its last message has painted.
     const clickAndPaint = async (page, id, marker = PAINT_MARKERS[id]) => {
       await prepareSidebarRow(page, id);
-      const name = (await page.locator(`.srow[data-id="${id}"] .nm`).textContent()).trim();
+      const name = (
+        await page
+          .locator(`.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}] .nm`)
+          .textContent()
+      ).trim();
       // The click is made in the page and everything is timed there, so none of this harness's own round trips (or the polling
       // of a wait started from here) is counted. `clickMs` is the click's own task. Feedback is the second animation frame after
       // the top bar names the session (the browser has drawn it by then). Paint is the second frame after the transcript's last
@@ -639,7 +647,7 @@ async function runScreen(browser, screen, server, fixture) {
         ([id, expected, marker]) =>
           new Promise((resolve, reject) => {
             const row = [...document.querySelectorAll('.srow[data-id]')].find(
-                (x) => x.dataset.id === id,
+                (x) => x.dataset.id === JSON.stringify(['local', id]),
               ),
               t0 = performance.now();
             row.click();
@@ -930,7 +938,7 @@ function markdownTable(screens) {
   const request = (entry) =>
     `${entry.count} / ${entry.encodedBytes} B / ${number(entry.ttfbMs.median)} / ${number(entry.ttfbMs.max)} ms`;
   const rows = [
-    '| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Click task marathon→relay ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |',
+    '| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Click task marathon→relay ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/sessions`: req / bytes / TTFB median / max | `/api/session-transcript`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |',
     '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
   ];
   for (const name of ['phone', 'desktop']) {
@@ -945,7 +953,7 @@ function markdownTable(screens) {
         ]),
       );
     rows.push(
-      `| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.switch.marathonToRelay.medianClickTaskMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r['/api/model'])} | ${request(r['/api/tx'])} | ${request(r.other)} |`,
+      `| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.switch.marathonToRelay.medianClickTaskMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r['/api/sessions'])} | ${request(r['/api/session-transcript'])} | ${request(r.other)} |`,
     );
   }
   return rows.join('\n');

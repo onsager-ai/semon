@@ -9,7 +9,8 @@ const ready = (page, view) =>
     (v) =>
       history.state?.v === v &&
       !document.querySelector('#page[aria-busy="true"]') &&
-      document.querySelector('#topbar .t'),
+      document.querySelector('#topbar .t') &&
+      (v !== 'trace' || document.querySelector('#page .trace-summary')),
     view,
   );
 const closePage = async (page) => {
@@ -26,14 +27,19 @@ export default async function viewerBacklog(browser) {
       await page.evaluate(() => document.querySelector('.nav-item[data-go="sessions"]').click());
       await ready(page, 'sessions');
       await page.locator('#sq').fill('harbor');
-      assert.equal(new URL(page.url()).searchParams.get('q'), 'harbor');
+      // Read the browser's URL directly: Playwright's frame URL cache can lag
+      // a synchronous replaceState when typing intentionally starts no request.
+      assert.equal(
+        await page.evaluate(() => new URL(location.href).searchParams.get('q')),
+        'harbor',
+      );
       await page.locator('#sq').fill('');
-      assert.equal(new URL(page.url()).searchParams.has('q'), false);
+      assert.equal(await page.evaluate(() => new URL(location.href).searchParams.has('q')), false);
       await page.reload();
       await ready(page, 'sessions');
       assert.equal(await page.locator('#sq').inputValue(), '');
       await page.waitForTimeout(100);
-      const rows = await page.locator('[data-session-row="list"]').evaluateAll((rows) =>
+      const rows = await page.locator('[data-session-row="list"]:not(.child)').evaluateAll((rows) =>
         rows.map((row) => {
           const meta = row.querySelector('.session-row-meta');
           return {
@@ -50,6 +56,31 @@ export default async function viewerBacklog(browser) {
         rows.length > 0 &&
           rows.every((x) => x.main && x.model && x.fits && x.items.every((v) => !v.cut)),
         size + ': metadata must drop complete values',
+      );
+      const children = await page.locator('[data-session-row="list"].child').evaluateAll((rows) =>
+        rows.map((row) => ({
+          main: !!row.querySelector('.session-row-main'),
+          name: row.querySelector('.nm')?.textContent,
+          status: row.querySelector('.dot')?.getAttribute('aria-label'),
+          identity: row.getAttribute('data-id'),
+          parent: !!row.closest('.kids-wrap')?.querySelector(':scope > .nrow:not(.child)'),
+          metadata: !!row.querySelector('.session-row-meta'),
+          fits: row.scrollWidth <= row.clientWidth + 1,
+        })),
+      );
+      assert(
+        children.length > 0 &&
+          children.every(
+            (row) =>
+              row.main &&
+              row.name &&
+              row.status &&
+              row.identity &&
+              row.parent &&
+              !row.metadata &&
+              row.fits,
+          ),
+        size + ': compact native children retain names, status and canonical navigation',
       );
       assert(
         (await page.locator('#lanes [data-session-row="compact"] .session-row-main').count()) > 0,
@@ -90,26 +121,21 @@ export default async function viewerBacklog(browser) {
         );
       }
       await goto(page, { v: 'sessions' }, D);
-      for (const [close, label, value] of [
-        ['escape', 'Harness', 'claude'],
-        ['back', 'Repo', 'harbor'],
+      for (const [name, value] of [
+        ['harness', 'claude'],
+        ['repo', 'harbor'],
       ]) {
-        await page.locator('.facet-btn').click();
-        const select = page.locator('.filters-sheet .sh-select[data-label="' + label + '"]');
-        await select.locator('.sh-select-trigger').click();
-        await select.locator('[role="option"][data-value="' + value + '"]').click();
-        if (close === 'escape') await page.keyboard.press('Escape');
-        else await page.goBack();
-        await page.waitForFunction(
-          () => !document.querySelector('dialog[open]') && !history.state?.sheet,
+        await page.locator('input[name="' + name + '"]').fill(value);
+        await page.locator('.catalog-apply').click();
+        await ready(page, 'sessions');
+        assert.equal(
+          new URL(page.url()).searchParams.get(name),
+          value,
+          'source filters are bookmarked in the canonical URL',
         );
-        const chip = page.locator('.facet-chip[data-facet="' + label.toLowerCase() + '"]');
-        await chip.waitFor({ state: 'visible' });
-        assert(
-          (await chip.getAttribute('aria-label')).includes((await chip.textContent()).trim()),
-          'chip accessible name contains its visible text',
-        );
-        await chip.click();
+        await page.locator('input[name="' + name + '"]').fill('');
+        await page.locator('.catalog-apply').click();
+        await ready(page, 'sessions');
       }
       const sid = Object.keys(D.TX).find((sid) => D.TX[sid].length > 20) ?? Object.keys(D.SESS)[0];
       await goto(page, { v: 'session', id: sid }, D);
@@ -166,23 +192,50 @@ export default async function viewerBacklog(browser) {
   // A pid permission wait with no handoff must still appear once on Home.
   const page = await served(browser, { size: 'desktop' });
   try {
-    const model = structuredClone(D.model),
-      sid = Object.keys(model.sessions).find((id) => model.sessions[id].lane);
-    const versions = Object.keys(model.sessions).slice(0, 2);
-    model.sessions[versions[0]].model = 'gpt-6-sol';
-    model.sessions[versions[1]].model = 'gpt-6.1-sol';
-    model.sessions[sid].state = 'wait';
-    model.sessions[sid].waiting_for = 'permission prompt';
-    model.handoffs = model.handoffs.filter((h) => h.from !== sid || h.status !== 'wait');
-    model.version += '-wait';
-    await page.route('**/api/model**', (r) => r.fulfill({ json: model }));
+    const home = await (await page.request.get(ENV.base + '/api/viewer/home')).json(),
+      row = structuredClone(home.recent[0]),
+      waitId = 'wait:' + JSON.stringify([row.source_key, row.catalog_key]);
+    row.session.state = 'wait';
+    row.session.waiting_for = 'permission prompt';
+    row.event = {
+      id: waitId,
+      at: home.now,
+      done: null,
+      ask: 'decision',
+      status: 'wait',
+      brief: 'permission prompt',
+      answer: null,
+      declined: false,
+    };
+    home.inbox = home.inbox.filter((item) => item.catalog_key !== row.catalog_key);
+    home.inbox.push(row);
+    home.totals.waiting = home.inbox.length;
+    home.version += '-wait';
+    const retired = [];
+    page.on('request', (request) => {
+      if (/\/api\/(model|tx|events)(?:[?/#]|$)/.test(request.url())) retired.push(request.url());
+    });
+    await page.route('**/api/viewer/home**', (r) => r.fulfill({ json: home }));
     await page.reload();
     await ready(page, 'home');
-    assert.equal(await page.locator('[data-h="wait:' + sid + '"]').count(), 1);
-    assert.match(
-      await page.locator('[data-h="wait:' + sid + '"]').textContent(),
-      /permission prompt/,
-    );
+    const inbox = page.locator('[data-h]').filter({ hasText: 'permission prompt' });
+    assert.equal(await inbox.count(), 1);
+    assert.equal(await inbox.getAttribute('data-h'), JSON.stringify([row.source_key, waitId]));
+    const versions = [];
+    await page.route('**/api/sessions?**', async (route) => {
+      const response = await route.fetch();
+      if (response.status() !== 200) return route.fulfill({ response });
+      const catalog = await response.json();
+      if (!new URL(route.request().url()).searchParams.has('sid')) {
+        const keys = new Set(catalog.items.map((item) => item.key));
+        const roots = catalog.items.filter((item) => !item.parent || !keys.has(item.parent));
+        assert(roots.length >= 2, 'fixture needs two root model labels');
+        versions.splice(0, versions.length, ...roots.slice(0, 2).map((item) => item.key));
+        roots[0].model = 'gpt-6-sol';
+        roots[1].model = 'gpt-6.1-sol';
+      }
+      await route.fulfill({ response, json: catalog });
+    });
     await goto(page, { v: 'sessions' }, D);
     assert.equal(
       await page.locator('.nrow[data-id="' + versions[0] + '"] .row-model').textContent(),
@@ -192,6 +245,7 @@ export default async function viewerBacklog(browser) {
       await page.locator('.nrow[data-id="' + versions[1] + '"] .row-model').textContent(),
       'sol 6.1',
     );
+    assert.equal(retired.length, 0);
   } finally {
     await closePage(page);
   }

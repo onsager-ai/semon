@@ -19,6 +19,12 @@
   },
   "regions": [
     {
+      "name": "machine-content",
+      "selector": "#page",
+      "top": true,
+      "screens": ["machine-"]
+    },
+    {
       "name": "topbar",
       "selector": "#topbar",
       "top": true,

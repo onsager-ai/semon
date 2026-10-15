@@ -77,19 +77,6 @@ export function createViewerBar() {
       view.mode === 'normal' ? (
         <>
           <div class="l1">
-            {view.ancestors.map((item) => (
-              <span key={item.id} class="viewer-crumb">
-                <button
-                  class="crumb"
-                  type="button"
-                  aria-label={'Open ' + item.name}
-                  onClick={(event) => active(event.currentTarget, () => host.ancestor(item.id))}
-                >
-                  {screenText(item.name)}
-                </button>
-                <span class="crumb-sep">›</span>
-              </span>
-            ))}
             {view.crumb && (
               <>
                 <button
@@ -103,6 +90,19 @@ export function createViewerBar() {
                 <span class="crumb-sep">›</span>
               </>
             )}
+            {view.ancestors.map((item) => (
+              <span key={item.id} class="viewer-crumb">
+                <button
+                  class="crumb"
+                  type="button"
+                  aria-label={'Open ' + item.name}
+                  onClick={(event) => active(event.currentTarget, () => host.ancestor(item.id))}
+                >
+                  {screenText(item.name)}
+                </button>
+                <span class="crumb-sep">›</span>
+              </span>
+            ))}
             {view.showState && view.state && (
               <span class="l1-state" data-tip={view.stateTip}>
                 {state(view.state, view.stateLabel ?? view.state)}
@@ -300,7 +300,9 @@ export function createViewerBar() {
           </button>
           <div class="find errnav">
             <span class="errs-dot" aria-hidden="true" />
-            <span class="errnav-count">{view.errorText}</span>
+            <span class="errnav-count" role="status" aria-live="polite">
+              {view.errorText}
+            </span>
           </div>
           {([-1, 1] as const).map((direction) => (
             <button

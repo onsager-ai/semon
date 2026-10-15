@@ -38,6 +38,7 @@ export function releaseScreen(root: HTMLElement) {
   cleanups.get(root)?.();
   cleanups.delete(root);
   kinds.delete(root);
+  root.classList.remove('machine-page');
   const state = sessionsState.get(root);
   if (state) {
     cancelAnimationFrame(state.frame);
@@ -125,6 +126,7 @@ export interface HarnessMark {
   darkTheme: boolean;
 }
 export interface LiveRow extends MachineRow {
+  age?: string;
   harness?: HarnessMark;
   activity?: readonly [string, string, number];
 }
@@ -148,6 +150,7 @@ export interface ActivityHost {
   committed(): void;
 }
 export interface HomeSnapshot {
+  observation?: string;
   control?: ControlView;
   waiting: number;
   working: number;
@@ -158,12 +161,18 @@ export interface HomeSnapshot {
   answered: readonly InboxRow[];
   totalAnswered: number;
   allAnswered: boolean;
+  moreInbox?: boolean;
+  moreLive?: boolean;
+  moreAnswered?: boolean;
 }
 export interface HomeHost extends ActivityHost {
   answered(): void;
+  more?(section: 'inbox' | 'working' | 'answered'): void;
 }
 export interface MachineSnapshot {
   name: string;
+  observation?: string;
+  more?: boolean;
   sessions: readonly LiveRow[];
   totalSessions: number;
   off: readonly LiveRow[];
@@ -233,7 +242,15 @@ function Section({ heading, count }: { heading: string; count: number }) {
     </div>
   );
 }
-function Live({ row, host }: { row: LiveRow; host: ActivityHost }) {
+function Live({
+  row,
+  host,
+  machine = false,
+}: {
+  row: LiveRow;
+  host: ActivityHost;
+  machine?: boolean;
+}) {
   return (
     <button
       class="nrow"
@@ -251,10 +268,16 @@ function Live({ row, host }: { row: LiveRow; host: ActivityHost }) {
       />
       <span class="nm">{screenText(row.name)}</span>
       <span class="ag">
-        {row.harness && <Harness mark={row.harness} />}
-        {screenText(row.status)}
+        {machine ? (
+          screenText(row.age ?? '')
+        ) : (
+          <>
+            {row.harness && <Harness mark={row.harness} />}
+            {screenText(row.status)}
+          </>
+        )}
       </span>
-      <span class="for">{screenText(row.detail)}</span>
+      {(!machine || !row.activity) && <span class="for">{screenText(row.detail)}</span>}
       {row.activity && (
         <span class="act">
           <span class="spin" />
@@ -338,6 +361,11 @@ function Inbox({ row, host }: { row: InboxRow; host: ActivityHost }) {
 export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: HomeHost }) {
   return (
     <>
+      {snapshot.observation && (
+        <p class="catalog-note" role="status">
+          {snapshot.observation}
+        </p>
+      )}
       <div class="ph">
         <h1>Home</h1>
         <div class="sub">
@@ -359,6 +387,11 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
         {snapshot.inbox.map((row) => (
           <Inbox key={row.id} row={row} host={host} />
         ))}
+        {snapshot.moreInbox && (
+          <button class="more" type="button" onClick={() => host.more?.('inbox')}>
+            Load more requests
+          </button>
+        )}
         {!snapshot.waiting && <p class="empty">Nothing is waiting on you.</p>}
       </div>
       <Section heading="Working now" count={snapshot.working} />
@@ -366,6 +399,11 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
         {snapshot.live.map((row) => (
           <Live key={row.id} row={row} host={host} />
         ))}
+        {snapshot.moreLive && (
+          <button class="more" type="button" onClick={() => host.more?.('working')}>
+            Load more working sessions
+          </button>
+        )}
         {!snapshot.working && <p class="empty">Nothing is running.</p>}
       </div>
       {snapshot.totalAnswered > 0 && (
@@ -375,6 +413,11 @@ export function HomeView({ snapshot, host }: { snapshot: HomeSnapshot; host: Hom
             {snapshot.answered.map((row) => (
               <Inbox key={row.id} row={row} host={host} />
             ))}
+            {snapshot.allAnswered && snapshot.moreAnswered && (
+              <button class="more" type="button" onClick={() => host.more?.('answered')}>
+                Load more answered
+              </button>
+            )}
             {!snapshot.allAnswered && snapshot.totalAnswered > 3 && (
               <button
                 class="more"
@@ -398,28 +441,41 @@ export function renderHomeScreen(root: HTMLElement, snapshot: HomeSnapshot, host
   kinds.set(root, 'home');
   host.committed();
 }
-export function MachineView({ snapshot, host }: { snapshot: MachineSnapshot; host: ActivityHost }) {
+export function MachineView({
+  snapshot,
+  host,
+}: {
+  snapshot: MachineSnapshot;
+  host: ActivityHost & { moreSessions?(): void };
+}) {
   return (
     <>
-      <div class="ph sr">
-        <h1>{screenText(snapshot.name)}</h1>
-      </div>
+      {snapshot.observation && (
+        <p class="catalog-note" role="status">
+          {snapshot.observation}
+        </p>
+      )}
       {snapshot.totalSessions > 0 && (
         <>
           <Section heading="Sessions" count={snapshot.totalSessions} />
           <div class="list">
             {snapshot.sessions.map((row) => (
-              <Live key={row.id} row={row} host={host} />
+              <Live key={row.id} row={row} host={host} machine />
             ))}
           </div>
         </>
+      )}
+      {snapshot.more && host.moreSessions && (
+        <button class="more" type="button" onClick={() => host.moreSessions?.()}>
+          Show all {snapshot.totalSessions} sessions
+        </button>
       )}
       {snapshot.off.length > 0 && (
         <>
           <Section heading="Moved off" count={snapshot.off.length} />
           <div class="list">
             {snapshot.off.map((row) => (
-              <Live key={row.id} row={row} host={host} />
+              <Live key={row.id} row={row} host={host} machine />
             ))}
           </div>
         </>
@@ -443,8 +499,9 @@ export function MachineView({ snapshot, host }: { snapshot: MachineSnapshot; hos
 export function renderMachineScreen(
   root: HTMLElement,
   snapshot: MachineSnapshot,
-  host: ActivityHost,
+  host: ActivityHost & { moreSessions?(): void },
 ) {
+  root.classList.add('machine-page');
   commitApplicationView(root, <MachineView snapshot={snapshot} host={host} />);
   owned.add(root);
   kinds.set(root, 'machine');
@@ -453,6 +510,7 @@ export function renderMachineScreen(
 
 export interface SessionRow {
   id: string;
+  kind?: string;
   name: string;
   state: string;
   stateLabel: string;
@@ -504,10 +562,18 @@ export function fitSessionRows(root: ParentNode) {
     }
   }
 }
-function Session({ row, host }: { row: SessionRow; host: SessionsHost }) {
+export function SessionRowView({
+  row,
+  host,
+  child = false,
+}: {
+  row: SessionRow;
+  host: Pick<SessionsHost, 'session'>;
+  child?: boolean;
+}) {
   return (
     <button
-      class="nrow"
+      class={'nrow' + (child ? ' child' : '')}
       type="button"
       data-id={row.id}
       data-session-row="list"
@@ -524,78 +590,81 @@ function Session({ row, host }: { row: SessionRow; host: SessionsHost }) {
         />
         <span class="nm" data-tip={row.name} data-tip-clipped="">
           {screenText(row.name)}
+          {child && row.kind && <span class="kind"> · {screenText(row.kind)}</span>}
         </span>
         <span class="ag">{row.age}</span>
       </span>
-      <span class="session-row-meta srow-meta for">
-        {row.harness && (
-          <span
-            class="hicon hi-screen"
-            data-harness={row.harness.id}
-            role="img"
-            aria-label={row.harness.name}
-            data-tip={row.harness.name}
-          >
-            {row.harness.light === row.harness.dark ? (
-              <img src={row.harness.light} alt="" draggable={false} decoding="async" />
-            ) : (
-              <>
-                <img
-                  class="hi-light"
-                  loading={row.harness.darkTheme ? 'lazy' : undefined}
-                  src={row.harness.light}
-                  alt=""
-                  draggable={false}
-                  decoding="async"
-                />
-                <img
-                  class="hi-dark"
-                  loading={row.harness.darkTheme ? undefined : 'lazy'}
-                  src={row.harness.dark}
-                  alt=""
-                  draggable={false}
-                  decoding="async"
-                />
-              </>
-            )}
+      {!child && (
+        <span class="session-row-meta srow-meta for">
+          {row.harness && (
+            <span
+              class="hicon hi-screen"
+              data-harness={row.harness.id}
+              role="img"
+              aria-label={row.harness.name}
+              data-tip={row.harness.name}
+            >
+              {row.harness.light === row.harness.dark ? (
+                <img src={row.harness.light} alt="" draggable={false} decoding="async" />
+              ) : (
+                <>
+                  <img
+                    class="hi-light"
+                    loading={row.harness.darkTheme ? 'lazy' : undefined}
+                    src={row.harness.light}
+                    alt=""
+                    draggable={false}
+                    decoding="async"
+                  />
+                  <img
+                    class="hi-dark"
+                    loading={row.harness.darkTheme ? undefined : 'lazy'}
+                    src={row.harness.dark}
+                    alt=""
+                    draggable={false}
+                    decoding="async"
+                  />
+                </>
+              )}
+            </span>
+          )}
+          <span class="row-model" data-tip={row.modelTip}>
+            {screenText(row.model)}
           </span>
-        )}
-        <span class="row-model" data-tip={row.modelTip}>
-          {screenText(row.model)}
+          {row.delegation && (
+            <svg
+              class="icon row-delegation"
+              data-tip="Delegated session"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d={row.delegation} />
+            </svg>
+          )}
+          {row.fields.map((field) => (
+            <span
+              key={field.priority}
+              class={field.className + (field.icon ? ' row-field' : '')}
+              data-drop={field.priority}
+              data-tip={field.tip}
+            >
+              {field.icon ? (
+                <>
+                  <Glyph path={field.icon} />
+                  <span class="field-value">{screenText(field.text)}</span>
+                </>
+              ) : (
+                screenText(field.text)
+              )}
+            </span>
+          ))}
         </span>
-        {row.delegation && (
-          <svg
-            class="icon row-delegation"
-            data-tip="Delegated session"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d={row.delegation} />
-          </svg>
-        )}
-        {row.fields.map((field) => (
-          <span
-            key={field.priority}
-            class={field.className + (field.icon ? ' row-field' : '')}
-            data-drop={field.priority}
-            data-tip={field.tip}
-          >
-            {field.icon ? (
-              <>
-                <Glyph path={field.icon} />
-                <span class="field-value">{screenText(field.text)}</span>
-              </>
-            ) : (
-              screenText(field.text)
-            )}
-          </span>
-        ))}
-      </span>
+      )}
     </button>
   );
 }
@@ -705,7 +774,7 @@ export function renderSessionsScreen(
             )}
             <div class="list">
               {group.rows.map((row) => (
-                <Session key={row.id} row={row} host={host} />
+                <SessionRowView key={row.id} row={row} host={host} />
               ))}
             </div>
           </div>

@@ -10,6 +10,48 @@ use crate::Tokens;
 pub(crate) type Records = BTreeMap<String, BTreeSet<String>>;
 pub(crate) type Shared = BTreeMap<String, String>;
 
+/// Native copied-usage totals across a paged usage stream. Per-shared-identity
+/// output stays with the indexed producer; the cursor contains only totals.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EvidenceCursor {
+    observed: Tokens,
+    exclusive: Tokens,
+    shared: bool,
+}
+
+impl EvidenceCursor {
+    pub(crate) fn new(shared: bool) -> Self {
+        Self {
+            observed: Tokens::default(),
+            exclusive: Tokens::default(),
+            shared,
+        }
+    }
+
+    pub(crate) fn push(&mut self, tokens: &Tokens, copied: bool) {
+        add(&mut self.observed, tokens);
+        if !copied {
+            add(&mut self.exclusive, tokens);
+        }
+    }
+
+    pub(crate) fn finish(
+        self,
+        copied: BTreeMap<String, Tokens>,
+        models: BTreeMap<String, Option<String>>,
+    ) -> Option<ClaudeUsageEvidence> {
+        self.shared.then_some(ClaudeUsageEvidence {
+            observed: self.observed,
+            exclusive: self.exclusive,
+            shared: copied,
+            shared_models: models,
+            fresh: None,
+            shared_owner: None,
+        })
+    }
+}
+
 /// Primary token fields contain only exclusive observations when this is present.
 /// Neither an exclusive observation nor a copied record establishes a native bill.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,27 +130,18 @@ pub(crate) fn evidence<'a>(
     if shared.is_empty() {
         return None;
     }
-    let mut observed = Tokens::default();
-    let mut exclusive = Tokens::default();
+    let mut cursor = EvidenceCursor::new(true);
     let mut copied = BTreeMap::new();
     let mut shared_models = BTreeMap::new();
     for (id, tokens, model) in usage {
-        add(&mut observed, tokens);
-        if let Some(key) = shared.get(id) {
+        let key = shared.get(id);
+        cursor.push(tokens, key.is_some());
+        if let Some(key) = key {
             copied.insert(key.clone(), tokens.clone());
             shared_models.insert(key.clone(), model.map(str::to_owned));
-        } else {
-            add(&mut exclusive, tokens);
         }
     }
-    Some(ClaudeUsageEvidence {
-        observed,
-        exclusive,
-        shared: copied,
-        shared_models,
-        fresh: None,
-        shared_owner: None,
-    })
+    cursor.finish(copied, shared_models)
 }
 
 fn add(total: &mut Tokens, tokens: &Tokens) {
@@ -145,5 +178,38 @@ mod tests {
         assert_eq!(groups["a"], groups["b"]);
         assert_eq!(groups["b"], groups["streamed"]);
         assert!(!groups.contains_key("c"));
+    }
+
+    #[test]
+    fn native_usage_evidence_cursor_resumes_exclusive_and_shared_totals() {
+        let tokens = Tokens {
+            input: 8,
+            cached_input: 3,
+            output: 5,
+            ..Tokens::default()
+        };
+        let mut cursor = EvidenceCursor::new(true);
+        cursor.push(&tokens, true);
+        let mut cursor: EvidenceCursor =
+            serde_json::from_str(&serde_json::to_string(&cursor).unwrap()).unwrap();
+        cursor.push(&tokens, false);
+        let evidence = cursor
+            .finish(
+                BTreeMap::from([("copy".into(), tokens.clone())]),
+                BTreeMap::from([("copy".into(), Some("model".into()))]),
+            )
+            .unwrap();
+        assert_eq!(evidence.exclusive, tokens);
+        assert_eq!(evidence.observed.input, 16);
+        assert_eq!(evidence.observed.cached_input, 6);
+        assert_eq!(evidence.observed.output, 10);
+        assert_eq!(evidence.shared["copy"], tokens);
+        assert_eq!(evidence.fresh, None);
+        assert_eq!(evidence.shared_owner, None);
+        assert!(
+            EvidenceCursor::new(false)
+                .finish(BTreeMap::new(), BTreeMap::new())
+                .is_none()
+        );
     }
 }

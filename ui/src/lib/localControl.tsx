@@ -1,6 +1,6 @@
 import { useState, useRef } from 'preact/hooks';
 import type { ControlRequest, ControlView } from './control';
-import type { JsonObject } from './model';
+import type { JsonObject } from './api';
 function visible(value: unknown): string {
   return String(value ?? '').replace(
     /[\u00ad\u202a-\u202e\u2066-\u2069]/g,

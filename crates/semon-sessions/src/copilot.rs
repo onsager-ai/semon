@@ -124,39 +124,19 @@ pub(crate) fn snapshot(data: &Value) -> Option<CopilotUsage> {
     }
     let mut snapshot = CopilotUsage::default();
     for (model, report) in models {
-        let usage = report.get("usage")?;
-        let [
-            Some(input),
-            Some(output),
-            Some(read),
-            Some(write),
-            Some(reasoning),
-        ] = [
-            "inputTokens",
-            "outputTokens",
-            "cacheReadTokens",
-            "cacheWriteTokens",
-            "reasoningTokens",
-        ]
-        .map(|key| usage.get(key).and_then(Value::as_u64))
-        else {
-            return None;
-        };
-        snapshot.tokens.input += input;
-        snapshot.tokens.output += output;
-        snapshot.tokens.cached_input += read;
-        snapshot.tokens.reasoning_output += reasoning;
-        snapshot.tokens.total += input + output;
-        snapshot.by_model.insert(
-            model.clone(),
-            ModelTokens {
-                input,
-                output,
-                cache_read: read,
-                cache_write: write,
-            },
-        );
-        snapshot.reasoning_by_model.insert(model.clone(), reasoning);
+        let mut source = crate::events::native_harness::record::ValueRecord { record: report };
+        let mut cursor = crate::events::native_harness::copilot_usage::Cursor::default();
+        while cursor.result().is_none() {
+            cursor = crate::events::native_producer::complete(
+                crate::events::native_harness::copilot_usage::step(&mut source, &cursor),
+            );
+        }
+        let row = cursor.result().expect("native usage report completed")?;
+        row.add_tokens(&mut snapshot.tokens);
+        snapshot.by_model.insert(model.clone(), row.model_tokens());
+        snapshot
+            .reasoning_by_model
+            .insert(model.clone(), row.reasoning);
     }
     Some(snapshot)
 }

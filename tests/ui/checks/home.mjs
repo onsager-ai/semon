@@ -27,13 +27,15 @@ const afterTitle = (page, text) =>
   page.waitForFunction(
     (t) =>
       document.querySelector('#topbar .t')?.textContent === t &&
-      !document.querySelector('#page').hasAttribute('aria-busy'),
+      !document.querySelector('#page').hasAttribute('aria-busy') &&
+      (history.state?.v !== 'session' || !!document.querySelector('#page [data-entry-key]')),
     text,
   );
 
 export default async function homeCheck(browser) {
   const D = await data();
   const r = reporter('home');
+  const qualified = (id) => JSON.stringify([D.SOURCES?.[D.SESS[id]?.machine] ?? 'local', id]);
   const spawned = new Set(D.H.filter((h) => h.kind === 'spawn').map((h) => h.to));
   const roots = Object.values(D.SESS)
     .filter((s) => s.lane && !spawned.has(s.id))
@@ -145,7 +147,7 @@ export default async function homeCheck(browser) {
     out.tree = {
       expectedRoots: Math.min(8, roots.length),
       expectedTreeRows,
-      pair: treePair ? { parent: treePair.from, child: treePair.to } : null,
+      pair: treePair ? { parent: qualified(treePair.from), child: qualified(treePair.to) } : null,
     };
     if (treePair) {
       out.tree.collapse = await page.evaluate(({ parent, child }) => {
@@ -231,7 +233,7 @@ export default async function homeCheck(browser) {
           [...document.querySelectorAll('#lanes > .treeitem .srow')]
             .find((x) => x.dataset.id === id)
             ?.click(),
-        treePair.from,
+        qualified(treePair.from),
       );
       await afterTitle(page, D.SESS[treePair.from].name);
       await page.waitForFunction(() => {
@@ -256,21 +258,30 @@ export default async function homeCheck(browser) {
         (x) => x.textContent + (x.getAttribute('aria-pressed') === 'true' ? '*' : ''),
       ),
     }));
-    for (const g of ['project', 'machine', 'harness']) {
-      await page.click('.page .groupby button[data-g="' + g + '"]');
-      await page.waitForTimeout(60);
-      out['group_' + g] = await page.evaluate(() =>
-        [...document.querySelectorAll('.page .sess .sec-h')].map((h) => h.textContent).join(' | '),
-      );
+    await page.locator('[data-session-row="list"]').first().waitFor();
+    out.sessionsFilters = {};
+    for (const name of ['Harness', 'Repository', 'Model', 'Search session details']) {
+      out.sessionsFilters[name] = await page.getByRole('textbox', { name, exact: true }).count();
     }
-    out.sessionsGroupRows = {};
-    for (const g of ['project', 'machine', 'harness', 'recent']) {
-      await page.click('.page .groupby button[data-g="' + g + '"]');
-      await page.waitForTimeout(60);
-      out.sessionsGroupRows[g] = await page.evaluate(
-        () => document.querySelectorAll('.page .nrow').length,
-      );
-    }
+    out.sessionsPage.rows = await page.locator('[data-session-row="list"]').count();
+    // Browse one machine's bounded catalog; clearing metadata filters restores its rows.
+    const filter = page.getByRole('textbox', { name: 'Harness', exact: true });
+    await filter.fill('codex');
+    await filter.press('Enter');
+    await page.waitForFunction(
+      () =>
+        location.search.includes('harness=codex') &&
+        [...document.querySelectorAll('[data-session-row="list"]')].every((row) =>
+          row.querySelector('.hicon[data-harness="codex"]'),
+        ),
+    );
+    out.sessionsFilteredRows = await page.locator('[data-session-row="list"]').count();
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+    await page.waitForFunction(
+      (count) => document.querySelectorAll('[data-session-row="list"]').length === count,
+      out.sessionsPage.rows,
+    );
+    out.sessionsRestoredRows = await page.locator('[data-session-row="list"]').count();
     out.sessionsOver = await over();
     await nav('machines');
     out.machines = await page.evaluate(() => ({
@@ -290,18 +301,26 @@ export default async function homeCheck(browser) {
     for (const m of ms) {
       await nav('machines');
       await page.click('.nrow[data-m="' + m + '"]');
-      await page.waitForTimeout(120);
+      const machineId = Object.keys(D.MACHINE).find((id) => (D.SOURCES?.[id] ?? id) === m);
+      const machineName = D.MACHINE[machineId ?? m];
+      r.expect(!!machineName, 'the selected source has an independently observed machine name');
+      await afterTitle(page, machineName);
+      await page.locator('#page .nrow[data-id]').first().waitFor();
       const info = await page.evaluate(() => ({
-        h1: document.querySelector('.page h1')?.textContent,
+        h1: document.querySelector('#topbar .t')?.textContent,
+        rows: document.querySelectorAll('#page .nrow[data-id]').length,
+        source: new URLSearchParams(location.search).get('machine'),
         up: document.querySelector('.uplink')?.textContent,
         crumb: document.querySelector('.topbar .crumb')?.textContent,
         cur: document.querySelector('.nav-item[aria-current="page"]')?.textContent,
         secs: [...document.querySelectorAll('.page .sec-h')].map((s) => s.textContent),
-        sub: document.querySelector('.topbar .l2')?.textContent,
+        sub: document.querySelector('.topbar .meta-line')?.textContent,
         moves: [...document.querySelectorAll('.page .ib')].map(
           (x) => x.querySelector('.org')?.textContent.slice(0, 60) ?? null,
         ),
       }));
+      info.expectedName = machineName;
+      info.expectedSource = m;
       info.over = await over();
       out.machinePages.push(info);
       await page.screenshot({
@@ -328,7 +347,7 @@ export default async function homeCheck(browser) {
           ? document.scrollingElement
           : document.querySelector('#main');
         return {
-          title: document.querySelector('.page h1')?.textContent,
+          title: document.querySelector('#topbar .t')?.textContent,
           gap: s.scrollHeight - s.scrollTop - s.clientHeight,
         };
       });
@@ -342,13 +361,15 @@ export default async function homeCheck(browser) {
         () =>
           history.state?.v === 'session' &&
           !!history.state?.turn &&
-          !!document.querySelector('.turn[data-turn="' + CSS.escape(history.state.turn) + '"]'),
+          !!document.querySelector(
+            '.turn.flash[data-turn="' + CSS.escape(history.state.turn) + '"]',
+          ),
       );
       out.itemOpens = await page.evaluate(() => {
         const t = document.querySelector('.turn.flash'),
           bar = document.querySelector('#topbar').getBoundingClientRect();
         return {
-          h1: document.querySelector('.page h1')?.textContent,
+          h1: document.querySelector('#topbar .t')?.textContent,
           turn: history.state?.turn,
           flash: t?.dataset.turn,
           belowBar: !!t && t.getBoundingClientRect().top >= bar.bottom - 1,
@@ -514,16 +535,28 @@ export default async function homeCheck(browser) {
       'opening a sidebar session did not land at the end',
     );
   }
-  const baseRows = out.sessionsPage.rows;
-  for (const g of ['project', 'machine', 'harness', 'recent'])
+  r.expect(
+    out.sessionsPage.rows > 0 && out.sessionsPage.rows <= 60,
+    'the selected catalog page must be bounded',
+  );
+  r.expect(
+    Object.values(out.sessionsFilters).every((count) => count === 1),
+    'the selected catalog must expose each metadata filter once',
+  );
+  r.expect(
+    out.sessionsFilteredRows > 0 &&
+      out.sessionsFilteredRows < out.sessionsPage.rows &&
+      out.sessionsRestoredRows === out.sessionsPage.rows,
+    'metadata filtering and clearing must preserve the selected catalog',
+  );
+  for (const mp of out.machinePages)
     r.expect(
-      out.sessionsGroupRows[g] === baseRows,
-      'grouping by ' +
-        g +
-        ' changed the row count: ' +
-        out.sessionsGroupRows[g] +
-        ' vs ' +
-        baseRows,
+      mp.h1 === mp.expectedName &&
+        mp.source === mp.expectedSource &&
+        mp.crumb === 'Machines' &&
+        mp.rows > 0 &&
+        mp.rows <= 60,
+      'a machine opens bounded native activity under its exact source and name',
     );
   r.expect(
     !!out.liveRowOpens && out.liveRowOpens.title !== 'Home' && out.liveRowOpens.gap <= 1,

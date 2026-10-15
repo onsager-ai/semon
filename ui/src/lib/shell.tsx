@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import { safePath } from './account';
+import { setGeometry, releaseGeometry } from './geometry';
 import { createAccountChrome, type AccountChromeHost, type AccountChrome } from './account-chrome';
 import type { AccountMenuProps } from './AccountMenu';
 
@@ -155,6 +156,10 @@ export function createShellChrome(host: ShellHost): ShellChrome {
   let lead: HTMLButtonElement | null = null,
     destroyed = false,
     sx: number | null = null;
+  let barObserver: ResizeObserver | null = null;
+  const measureBar = () => {
+    if (app && !destroyed) setGeometry(app, 'barHeight', bar.getBoundingClientRect().height);
+  };
   let destinations: ShellDestination[] = [],
     rail = false;
   const listeners: (() => void)[] = [];
@@ -255,19 +260,23 @@ export function createShellChrome(host: ShellHost): ShellChrome {
   }
   function drawerAccount(props: AccountMenuProps | null) {
     ready();
-    if (phoneAccount) {
+    if (props && phoneAccount) {
+      account.update(phoneAccount, props);
+    } else if (props) {
+      phoneAccount = account.mount(props);
+      phoneAccount.id = 'account-drawer';
+      sidebar.append(phoneAccount);
+    } else if (phoneAccount) {
       account.unmount(phoneAccount);
       phoneAccount.remove();
       phoneAccount = null;
     }
-    if (props) {
-      phoneAccount = account.mount(props);
-      phoneAccount.id = 'account-drawer';
-      sidebar.append(phoneAccount);
-    }
   }
   function unmount() {
     if (!app) return;
+    barObserver?.disconnect();
+    barObserver = null;
+    releaseGeometry(app, ['barHeight']);
     closeDrawer(true);
     dropDesktop();
     drawerAccount(null);
@@ -328,6 +337,9 @@ export function createShellChrome(host: ShellHost): ShellChrome {
       recent = required('#side-list');
       content = required('#page');
       app = container;
+      barObserver = new ResizeObserver(measureBar);
+      barObserver.observe(bar);
+      measureBar();
       paintHead();
       listen(scrim, 'click', () => closeDrawer());
       listen(
@@ -375,8 +387,9 @@ export function createShellChrome(host: ShellHost): ShellChrome {
     },
     topbar(props) {
       ready();
+      const leadFocused = lead !== null && document.activeElement === lead;
       account.close();
-      dropDesktop();
+      if (!props.account) dropDesktop();
       lead = null;
       const nodes: HTMLElement[] = [];
       if (!props.mode && props.lead) {
@@ -406,8 +419,10 @@ export function createShellChrome(host: ShellHost): ShellChrome {
         if (props.actions) nodes.push(...props.actions);
       }
       if (props.account) {
-        desktopAccount = account.mount(props.account);
-        if (props.accountTarget) props.accountTarget.append(desktopAccount);
+        if (desktopAccount) account.update(desktopAccount, props.account);
+        else desktopAccount = account.mount(props.account);
+        if (props.accountTarget && desktopAccount.parentElement !== props.accountTarget)
+          props.accountTarget.append(desktopAccount);
         else nodes.push(desktopAccount);
       }
       bar.classList.remove('scrolled');
@@ -425,6 +440,8 @@ export function createShellChrome(host: ShellHost): ShellChrome {
         cursor.remove();
         cursor = next;
       }
+      if (leadFocused) lead?.focus();
+      measureBar();
     },
     drawerAccount,
     openDrawer,

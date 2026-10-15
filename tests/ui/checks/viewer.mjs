@@ -29,7 +29,7 @@
 //    with it on is wider than 68ch and fills its column.
 //  - the desktop dialog: at least one "View all" is visible on the sample's first expanded step, the dialog is not
 //    sideways-clipped off the 1280px viewport, and a backdrop click closes it (closedByBackdrop === true).
-//  - background commands (synthetic /api/tx pages and the bgcmd fixture), at 390 and 1280: each background step is one line
+//  - background commands (qualified selected ranges and the bgcmd fixture), at 390 and 1280: each background step is one line
 //    whose outcome ("running 8m 18s", "exit 0 · 1m 0s", "failed · 2m 0s") shows whole (scrollWidth <= clientWidth); at 390
 //    the word "background" gives way to a marker named "background" before the verb, at 1280 the word stays; a summary
 //    with finished background commands shows its counts ("(1 failed, 1 stopped)") inside its box on both.
@@ -38,6 +38,7 @@
 //    after= request, from the end), and the call still flips to its outcome when its finish row arrives, or to "no end
 //    recorded" when the page says it no longer runs.
 import path from 'node:path';
+import { selectedFixture } from '../selected-fixture.mjs';
 import { ENV, served, data, goto, reporter, wide, overflow } from '../lib.mjs';
 
 // The shown background steps' layout: the outcome as drawn (innerText, so the hidden word drops out), whether it shows whole
@@ -119,336 +120,113 @@ const backgroundSummaries = (page) =>
       }),
   );
 
-// Synthetic /api/tx pages cover background lifecycles without reading another transcript fixture.
+// Qualified selected ranges cover background lifecycles without reading another transcript fixture.
 async function backgroundCommands(browser, r) {
   const results = {};
   for (const size of ['phone', 'desktop']) {
-    const page = await served(browser, { size, path: '/s/claude/harbor' });
+    const page = await served(browser, { size });
+    let current = true,
+      phase = 'running',
+      reads = 0;
+    const retired = [];
     try {
-      const normal = (text) => text.replace(/\s+/g, ' ').trim();
-      const tool = (tid, bg) => ({
-        k: 'tool',
-        name: 'Bash',
-        arg: 'git fetch ' + tid,
-        tid,
-        ok: true,
-        secs: '0.5s',
-        out: 'Command running in background with ID: ' + tid,
-        bg,
+      page.on('request', (request) => {
+        if (/\/api\/(model|tx|events)(?:[?#/]|$)/.test(request.url())) retired.push(request.url());
       });
-      const foreground = {
-        k: 'tool',
-        name: 'Bash',
-        arg: 'git status',
-        ok: true,
-        secs: '0.2s',
-        out: 'Clean',
-      };
-      const read = {
-        k: 'tool',
-        name: 'Read',
-        arg: 'README.md',
-        ok: true,
-        secs: '0.1s',
-        out: 'Read',
-      };
-      let entries = [
-        tool('running', { state: 'running', secs: '8m 18s', since: ENV.now - 498000 }),
-        foreground,
-        read,
-      ];
-      await page.route(/\/api\/tx\?/, async (route) => {
-        const response = await route.fetch(),
-          p = await response.json();
-        if (p.sid !== 'harbor') {
-          await route.fulfill({ response });
-          return;
-        }
-        const rows = [
-          { k: 'u', text: 'Background command coverage', turn: p.entries[0]?.turn },
-          ...entries,
-        ];
-        await route.fulfill({
-          response,
-          json: { ...p, from: 0, to: rows.length, total: rows.length, entries: rows },
-        });
-      });
-      const reload = async () => {
-        await page.reload({ waitUntil: 'load' });
-        await page.waitForFunction(() => !!document.querySelector('.step[data-tid]'));
-        await page.evaluate(() =>
-          document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((n) => n.click()),
-        );
-      };
-      await reload();
-      const running = await page.evaluate(() => {
-        const step = document.querySelector('.step[data-tid="running"]');
-        return {
-          sd: step.querySelector('.sd').textContent,
-          spin: step.querySelectorAll(':scope > button > .spin').length,
-          summary: step.closest('.tgroup').querySelector('.tsum').textContent,
-        };
-      });
-      r.expect(
-        normal(running.sd) === 'background · running 8m 18s' && running.spin === 1,
-        size + ': running background label and spinner: ' + JSON.stringify(running),
+      await selectedFixture(
+        page,
+        'harbor',
+        (data) => {
+          const base = data.entries.find((row) => row.k === 'tool'),
+            owner = base.turn ?? data.entries.find((row) => row.turn)?.turn;
+          data.session.details.live_observation = current;
+          data.session.details.state = current ? 'work' : 'off';
+          data.entries = [
+            { ...base, k: 'u', text: 'Background command coverage', turn: owner },
+            {
+              ...base,
+              k: 'tool',
+              name: 'Bash',
+              arg: 'git fetch origin',
+              tid: 'native-background',
+              live: current,
+              ok: true,
+              secs: '0.5s',
+              turn: owner,
+              out: 'Command running in background',
+              bg:
+                phase === 'running'
+                  ? { state: 'running', secs: '8m 18s', since: ENV.now - 498000 }
+                  : {
+                      state: 'failed',
+                      exit: 1,
+                      secs: '2m 0s',
+                      summary: '<script>literal</script> failed',
+                    },
+              more: undefined,
+              field: undefined,
+              clipped: false,
+            },
+          ];
+          reads++;
+        },
+        { publication: () => ({ revision: [phase, current], total: 2 }) },
       );
+      const D = await data();
+      await goto(page, { v: 'session', id: 'harbor' }, D);
+      await page.waitForSelector('.step[data-tid="native-background"]');
+      if (await page.locator('.tsum[aria-expanded="false"]').count())
+        await page.locator('.tsum[aria-expanded="false"]').click();
+      const running = await backgroundRows(page);
       r.expect(
-        normal(running.summary).includes('Ran 2 commands, read 1 file') &&
-          normal(running.summary).includes('· running 8m 18s'),
-        size + ': background command counts as running: ' + running.summary,
+        running.length === 1 && running[0].whole && running[0].oneLine,
+        size + ': qualified background outcome fits its reading row',
       );
-      const runningRows = await backgroundRows(page);
-      expectRows(r, size + ' running', size, runningRows, ['running 8m 18s']);
       await page.clock.setFixedTime(ENV.now + 2000);
+      await page.waitForFunction(() =>
+        document
+          .querySelector('.step[data-tid="native-background"] .sd')
+          ?.textContent.includes('8m 20s'),
+      );
+      const ticked = await backgroundRows(page);
+      r.expect(ticked[0].shown.includes('8m 20s'), size + ': current qualified activity ticks');
+      phase = 'done';
+      const before = reads;
+      await page.clock.setFixedTime(ENV.now + 12000);
       await page.waitForFunction(
         () =>
           document
-            .querySelector('.step[data-tid="running"] .sd')
-            ?.textContent.replace(/\s+/g, ' ')
-            .trim() === 'background · running 8m 20s',
+            .querySelector('.step[data-tid="native-background"] .sd')
+            ?.textContent.includes('failed'),
+        null,
+        { timeout: 15000 },
       );
-      expectRows(r, size + ' ticked', size, await backgroundRows(page), ['running 8m 20s']);
-      const ticked = await page.locator('.tsum .tl').textContent();
+      r.expect(reads > before, size + ': selected range revalidation updates the terminal outcome');
+      await page.locator('.step[data-tid="native-background"] > button').click();
       r.expect(
-        normal(ticked) === '· running 8m 20s',
-        size + ': the group ticker follows the background call: ' + ticked,
+        (await page.locator('.finished').textContent()).includes('<script>literal</script>') &&
+          (await page.locator('.finished script').count()) === 0,
+        size + ': background terminal text remains escaped',
       );
-      await page.clock.setFixedTime(ENV.now);
-      const summary = 'Background command "<script>literal</script>" completed (exit code 0)';
-      entries = [
-        tool('done:1', { state: 'done', exit: 0, secs: '12.0s', summary }),
-        tool('failed', { state: 'failed', exit: 2, secs: '3.0s', summary: 'Failed (exit code 2)' }),
-        tool('killed', { state: 'killed', secs: '4.0s' }),
-        tool('unknown', { state: 'unknown' }),
-        tool('done-no-exit', { state: 'done', secs: '5.0s' }),
-        foreground,
-        read,
-        {
-          k: 'bgend',
-          call: 'done:1',
-          state: 'done',
-          exit: 0,
-          label: 'Fetch changes ' + 'with a long description '.repeat(8),
-        },
-        { k: 'bgend', call: 'failed', state: 'failed', exit: 2, label: 'Fetch failed' },
-        { k: 'bgend', call: 'killed', state: 'killed', label: 'Fetch stopped' },
-        { k: 'bgend', call: 'done-no-exit', state: 'done', label: 'Fetch done' },
-        { k: 'bgend', call: 'earlier-page', state: 'done', label: 'Earlier command' },
-        { ...foreground, arg: 'git diff' },
-      ];
-      await reload();
-      const ended = await page.evaluate(() => {
-        const steps = [...document.querySelectorAll('.step[data-tid]')];
-        return {
-          steps: steps.map((n) => ({
-            tid: n.dataset.tid,
-            sd: n.querySelector('.sd').textContent,
-            spin: n.querySelectorAll(':scope > button > .spin').length,
-            err: n.classList.contains('err'),
-          })),
-          groups: document.querySelectorAll('.tgroup').length,
-          summary: document.querySelector('.tsum .tt')?.textContent,
-          ends: [...document.querySelectorAll('.bgend')].map((n) => ({
-            text: n.textContent,
-            button: !!n.querySelector('button'),
-            err: n.classList.contains('err'),
-          })),
-        };
-      });
-      const expected = [
-        'background · exit 0 · 12.0s',
-        'background · failed · 3.0s',
-        'background · stopped · 4.0s',
-        'background · no end recorded',
-        'background · done · 5.0s',
-      ];
+      current = false;
+      phase = 'running';
+      await page.reload();
+      await page.waitForSelector('.step[data-tid="native-background"]');
+      const frozen = await page.locator('.step[data-tid="native-background"] .sd').textContent();
+      await page.clock.setFixedTime(ENV.now + 120000);
+      await page.waitForTimeout(1200);
       r.expect(
-        ended.steps.length === 5 &&
-          ended.steps.every(
-            (n, i) => normal(n.sd) === expected[i] && n.spin === 0 && n.err === (i === 1),
-          ),
-        size + ': terminal and unknown labels, errors and spinners: ' + JSON.stringify(ended.steps),
+        (await page.locator('.step[data-tid="native-background"] .sd').textContent()) === frozen,
+        size + ': recorded history cannot gain a running clock',
       );
-      r.expect(
-        ended.groups === 1,
-        size + ': completion rows must stay inside one run: ' + ended.groups,
-      );
-      r.expect(
-        normal(ended.summary) ===
-          'Finished 5 background commands (1 failed, 1 stopped), ran 7 commands, read 1 file',
-        size + ': completion counts and tool verbs: ' + ended.summary,
-      );
-      r.expect(
-        ended.ends.length === 5 &&
-          normal(ended.ends[0].text).startsWith('Background command completed · Fetch changes') &&
-          normal(ended.ends[1].text) === 'Background command failed · Fetch failed' &&
-          ended.ends[1].err &&
-          normal(ended.ends[2].text) === 'Background command stopped · Fetch stopped',
-        size + ': arrival rows: ' + JSON.stringify(ended.ends),
-      );
-      r.expect(
-        ended.ends.slice(0, 4).every((n) => n.button) && ended.ends[4].button === false,
-        size + ': only loaded originating calls get a jump button',
-      );
-      const endedRows = await backgroundRows(page);
-      expectRows(r, size + ' ended', size, endedRows, [
-        'exit 0 · 12.0s',
-        'failed · 3.0s',
-        'stopped · 4.0s',
-        'no end recorded',
-        'done · 5.0s',
-      ]);
-      const endedSummary = await backgroundSummaries(page);
-      r.expect(
-        endedSummary.length === 1 &&
-          endedSummary[0].counts === '(1 failed, 1 stopped)' &&
-          endedSummary[0].inside &&
-          endedSummary[0].shown.startsWith(
-            size === 'phone'
-              ? '5 background (1 failed, 1 stopped), 7 commands'
-              : 'Finished 5 background commands (1 failed, 1 stopped), ran 7 commands',
-          ),
-        size + ": the summary's counts show: " + JSON.stringify(endedSummary),
-      );
-      const done = page.locator('.step[data-tid="done:1"]');
-      await done.locator(':scope > button').click();
-      const finished = await done.locator('.out .io').allTextContents();
-      r.expect(
-        finished.at(-1) === 'Finished' &&
-          (await done.locator('.out .finished').textContent()) === summary,
-        size + ': expanded Finished summary is literal text',
-      );
-      r.expect(
-        (await done.locator('script').count()) === 0,
-        size + ': summary text must not create markup',
-      );
-      await page.locator('.bgend > button').first().click();
-      r.expect(
-        await done.evaluate((n) => n.classList.contains('flash')),
-        size + ': the completion row highlights its originating call',
-      );
-      const over = await overflow(page);
-      r.expect(over === 0, size + ': background rows must not scroll sideways: ' + over);
-      r.expect(
-        page.errors.length === 0,
-        size + ': background page errors: ' + page.errors.join(' | '),
-      );
-      // Find counts a background command once: its step matches, and its finish row shows beside it without adding a match.
-      let found = null;
-      if (size === 'desktop') {
-        await page.click('#find-btn');
-        await page.keyboard.type('fetch failed', { delay: 10 });
-        await page.waitForTimeout(200);
-        found = await page.evaluate(() => ({
-          count: document.querySelector('#topbar .fcount')?.textContent,
-          steps: document.querySelectorAll('.turns .step[data-tid="failed"]').length,
-          ends: document.querySelectorAll('.turns .bgend').length,
-        }));
-        r.expect(
-          found.count === '1 match' && found.steps === 1 && found.ends === 1,
-          size +
-            ': find counts a background command and its finish row as one match: ' +
-            JSON.stringify(found),
-        );
-        await page.click('#topbar [aria-label="Close find"]');
-        await page.waitForTimeout(150);
-      }
-      // A finish in another run owns the failure count; a failed call without a loaded finish owns its own count.
-      entries = [
-        tool('late-failure', { state: 'failed', exit: 2, secs: '3.0s' }),
-        foreground,
-        { k: 'a', text: 'The command finished during the next run.' },
-        { k: 'bgend', call: 'late-failure', state: 'failed', label: 'Late failure' },
-        tool('no-finish-row', { state: 'failed', exit: 2, secs: '3.0s' }),
-        foreground,
-      ];
-      await reload();
-      const split = await page.evaluate(() =>
-        [...document.querySelectorAll('.tsum')].map((n) => ({
-          text: n.textContent.replace(/\s+/g, ' ').trim(),
-          failure: n.querySelector('.tf')?.textContent.replace(/\s+/g, ' ').trim() ?? '',
-        })),
-      );
-      r.expect(
-        split.length === 2 &&
-          split[0].failure === '' &&
-          split[1].text.includes('Finished 1 background command (1 failed)') &&
-          split[1].failure === '· 1 failed',
-        size +
-          ': each background failure is counted in its finish run, or its call run when no finish is loaded: ' +
-          JSON.stringify(split),
-      );
-      await page.locator('.tsum').first().click(); // hide the originating step in the earlier run
-      await page.locator('.bgend > button').click();
-      r.expect(
-        (await page.locator('.tsum').first().getAttribute('aria-expanded')) === 'true',
-        size + ': jumping to a call opens its collapsed run',
-      );
-      // Load earlier: the initially plain completion row must become a jump button.
-      await page.unroute(/\/api\/tx\?/);
-      const prior = tool('paged-call', { state: 'done', exit: 0, secs: '1.0s' });
-      await page.route(/\/api\/tx\?/, async (route) => {
-        const response = await route.fetch(),
-          p = await response.json();
-        if (p.sid !== 'harbor') {
-          await route.fulfill({ response });
-          return;
-        }
-        const before = new URL(route.request().url()).searchParams.has('before');
-        const rows = before
-          ? [{ k: 'u', text: 'Earlier call', turn: p.entries[0]?.turn }, prior]
-          : [
-              {
-                k: 'bgend',
-                call: 'paged-call',
-                state: 'done',
-                label: 'Earlier call',
-                turn: p.entries[0]?.turn,
-              },
-            ];
-        await route.fulfill({
-          response,
-          json: { ...p, from: before ? 0 : 2, to: before ? 2 : 3, total: 3, entries: rows },
-        });
-      });
-      await page.reload({ waitUntil: 'load' });
-      await page.waitForFunction(() => !!document.querySelector('.bgend'));
-      r.expect(
-        (await page.locator('.bgend > button').count()) === 0,
-        size + ': an unloaded originating call has a plain completion row',
-      );
-      await page.getByRole('button', { name: 'Load earlier', exact: true }).click();
-      await page.waitForFunction(() => !!document.querySelector('.bgend > button'));
-      r.expect(
-        (await page.locator('.step[data-tid="paged-call"]').count()) === 1 &&
-          (await page.locator('.bgend > button').count()) === 1,
-        size + ': loading the earlier page enables the completion link',
-      );
-      r.expect(
-        page.errors.length === 0,
-        size + ': pagination background page errors: ' + page.errors.join(' | '),
-      );
-      results[size] = {
-        running,
-        ticked,
-        ended,
-        finished,
-        overflow: over,
-        split,
-        runningRows,
-        endedRows,
-        endedSummary,
-        found,
-      };
+      r.expect(retired.length === 0 && page.errors.length === 0, size + ': no workspace reader');
+      results[size] = { running, ticked, reads, frozen };
     } finally {
       await page.context().close();
     }
   }
   return results;
 }
-
-// Screenshot a real synthetic Claude log at every size and theme, with the run and Finished output open.
 async function backgroundScreenshots(browser, r) {
   const results = {};
   for (const [size, dark] of [
@@ -492,16 +270,18 @@ async function backgroundScreenshots(browser, r) {
         };
       });
       r.expect(
-        shown.labels[0] === 'background · running 9m 0s' &&
+        shown.labels[0] === 'background · no end recorded' &&
           shown.labels[1] === 'background · exit 0 · 1m 0s' &&
           shown.labels[2] === 'background · failed · 2m 0s' &&
           shown.labels[3] === 'background · stopped · 3m 0s',
-        tag + ': fixture covers running and all terminal states: ' + JSON.stringify(shown.labels),
+        tag +
+          ': recorded fixture covers unknown and all terminal states: ' +
+          JSON.stringify(shown.labels),
       );
       r.expect(
         shown.ends.length === 3 &&
           shown.summary.includes(
-            'Finished 3 background commands (1 failed, 1 stopped), ran 4 commands',
+            'Finished 3 background commands (1 failed, 1 stopped), ran 1 command',
           ),
         tag + ': screenshot includes completion rows and summary: ' + JSON.stringify(shown),
       );
@@ -520,7 +300,7 @@ async function backgroundScreenshots(browser, r) {
       );
       const rows = await backgroundRows(page);
       expectRows(r, tag, size, rows, [
-        'running 9m 0s',
+        'no end recorded',
         'exit 0 · 1m 0s',
         'failed · 2m 0s',
         'stopped · 3m 0s',
@@ -532,9 +312,7 @@ async function backgroundScreenshots(browser, r) {
           summary[0].inside &&
           !summary[0].clamped &&
           summary[0].shown ===
-            (size === 'phone'
-              ? '3 background (1 failed, 1 stopped), 4 commands'
-              : 'Finished 3 background commands (1 failed, 1 stopped), ran 4 commands'),
+            'Finished 3 background commands (1 failed, 1 stopped), ran 1 command',
         tag + ': the summary shows its counts, unclamped: ' + JSON.stringify(summary),
       );
       const over = await overflow(page);
@@ -555,267 +333,8 @@ async function backgroundScreenshots(browser, r) {
 
 // A live update with a running background call on an earlier turn: only the new tail is fetched (one after= request, from the
 // end), and the call flips to its outcome from the finish row, or to "no end recorded" when the page no longer lists it running.
-async function backgroundTail(browser, r) {
-  const results = {};
-  for (const size of ['phone', 'desktop']) {
-    const page = await served(browser, { size, path: '/s/claude/harbor' });
-    try {
-      const normal = (text) => text.replace(/\s+/g, ' ').trim();
-      const turns = await page.evaluate(() =>
-        fetch('/api/model?since=', { credentials: 'same-origin' })
-          .then((x) => x.json())
-          .then((m) => m.turns.filter((t) => t.sid === 'harbor').map((t) => t.id)),
-      );
-      // The fixture's harbor has one turn: a second, later one is added to the served model (as bar.mjs's bare turns are), so
-      // the running calls and the tail that ends them are in different turns.
-      r.expect(
-        turns.length >= 1,
-        size + ': harbor has a turn to start the tail test in: ' + turns.length,
-      );
-      const later = 'bt-tail-later';
-      const since = ENV.now - 498000,
-        launched = (tid, arg) => ({
-          k: 'tool',
-          name: 'Bash',
-          arg,
-          tid,
-          ok: true,
-          secs: '0.3s',
-          out: 'Command running in background with ID: ' + tid,
-          bg: { state: 'running', secs: '8m 18s', since },
-        });
-      const rows = [
-        { k: 'u', text: 'Start the dev server and watch the checks', turn: turns[0] },
-        launched('early-dev', 'npm run dev'),
-        launched('early-watch', 'gh pr checks --watch'),
-        { k: 'a', text: 'Both are running in the background.' },
-        { k: 'u', text: 'Carry on', turn: later },
-        { k: 'tool', name: 'Read', arg: 'README.md', ok: true, secs: '0.1s', out: 'Read' },
-        { k: 'a', text: 'Read it.' },
-      ].map((e, slot) => ({ ...e, slot }));
-      const finish = {
-        k: 'bgend',
-        call: 'early-dev',
-        state: 'done',
-        exit: 0,
-        label: 'Dev server',
-        slot: rows.length,
-        bg: {
-          state: 'done',
-          status: 'completed',
-          exit: 0,
-          secs: '9m 0s',
-          summary: 'Background command "npm run dev" completed (exit code 0)',
-        },
-      };
-      let ended = false,
-        resumed = false,
-        paused = false,
-        late = false,
-        bump = null;
-      const afters = [];
-      await page.route(/\/api\/tx\?/, async (route) => {
-        const url = new URL(route.request().url()),
-          q = url.searchParams;
-        if (q.get('sid') !== 'harbor' || q.has('errors')) {
-          await route.continue();
-          return;
-        }
-        const lateFinish = {
-          ...finish,
-          call: 'early-watch',
-          slot: rows.length + 1,
-          label: 'Checks',
-          bg: { state: 'failed', exit: 1, secs: '10m 0s' },
-        };
-        const all = late ? [...rows, finish, lateFinish] : ended ? [...rows, finish] : rows,
-          running =
-            resumed && !paused && !late
-              ? ['early-watch']
-              : ended
-                ? []
-                : ['early-dev', 'early-watch'];
-        if (q.has('after')) afters.push(q.get('after'));
-        const from = q.has('after') ? Math.min(Number(q.get('after')), all.length) : 0;
-        await route.fulfill({
-          json: {
-            sid: 'harbor',
-            from,
-            to: all.length,
-            total: all.length,
-            calls: 5,
-            errors: 0,
-            entries: all.slice(from),
-            bg_running: running,
-          },
-        });
-      });
-      // A moved mark for harbor, as when its log grows: the next poll's update fetches its tail.
-      // The page's first model is /api/model with no query; later polls add ?since=. Both get the added turn.
-      await page.route(/\/api\/model(\?|$)/, async (route) => {
-        const url = new URL(route.request().url());
-        if (bump) url.searchParams.set('since', '');
-        const response = await route.fetch({ url: url.toString() });
-        if (response.status() !== 200) {
-          await route.fulfill({ response });
-          return;
-        } // a 304 has no body
-        const m = await response.json(),
-          base = m.turns.filter((t) => t.sid === 'harbor').at(-1);
-        m.turns.push({
-          id: later,
-          sid: 'harbor',
-          at: base?.at ?? 0,
-          start: null,
-          u: false,
-          text: '',
-          sent: [],
-          end: null,
-        });
-        if (bump) {
-          const [a, b, ...rest] = String(m.tx.harbor).split('.');
-          m.version = bump;
-          m.tx = {
-            ...m.tx,
-            harbor: [
-              Number(a) + (late ? 4 : paused ? 3 : resumed ? 2 : 1),
-              Number(b) + (late ? 4 : paused ? 3 : resumed ? 2 : 1),
-              ...rest,
-            ].join('.'),
-          };
-        }
-        await route.fulfill({ response, json: m });
-      });
-      await page.reload({ waitUntil: 'load' });
-      await page.waitForFunction(() => document.querySelectorAll('.step[data-tid]').length === 2);
-      r.expect(
-        (await page.locator('section.turn[data-turn="' + later + '"]').count()) === 1,
-        size + ': the added later turn is drawn',
-      );
-      const sd = (tid) =>
-        page.evaluate(
-          (tid) =>
-            document
-              .querySelector('.step[data-tid="' + tid + '"] .sd')
-              ?.textContent.replace(/\s+/g, ' ')
-              .trim(),
-          tid,
-        );
-      const before = [await sd('early-dev'), await sd('early-watch')];
-      r.expect(
-        before.every((t) => t === 'background · running 8m 18s'),
-        size + ': both calls run before the update: ' + JSON.stringify(before),
-      );
-      ended = true;
-      bump = 'bgtail-' + size;
-      await page.waitForFunction(
-        () =>
-          document
-            .querySelector('.step[data-tid="early-dev"] .sd')
-            ?.textContent.replace(/\s+/g, ' ')
-            .trim() === 'background · exit 0 · 9m 0s',
-        null,
-        { timeout: 15000 },
-      );
-      await page.waitForTimeout(300);
-      await page.evaluate(() => {
-        document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click());
-        document
-          .querySelector('.step[data-tid="early-dev"] > button[aria-expanded="false"]')
-          ?.click();
-      });
-      const after = await page.evaluate(() => ({
-        watch: document
-          .querySelector('.step[data-tid="early-watch"] .sd')
-          ?.textContent.replace(/\s+/g, ' ')
-          .trim(),
-        spins: [...document.querySelectorAll('.step[data-tid] > button > .spin')].length,
-        finished:
-          document.querySelector('.step[data-tid="early-dev"] .finished')?.textContent ?? null,
-        callTurn:
-          document.querySelector('.step[data-tid="early-dev"]')?.closest('section.turn')?.dataset
-            .turn ?? null,
-        endTurn: document.querySelector('.bgend')?.closest('section.turn')?.dataset.turn ?? null,
-        ends: [...document.querySelectorAll('.bgend')].map((n) => ({
-          text: n.textContent.replace(/\s+/g, ' ').trim(),
-          button: !!n.querySelector('button'),
-        })),
-      }));
-      r.expect(
-        after.watch === 'background · no end recorded' && after.spins === 0,
-        size +
-          ': a call no longer listed as running stops, with no spinner left: ' +
-          JSON.stringify(after),
-      );
-      r.expect(
-        after.finished === finish.bg.summary &&
-          after.ends.length === 1 &&
-          after.ends[0].button &&
-          normal(after.ends[0].text) === 'Background command completed · Dev server',
-        size + ': the finish row arrives and links its call: ' + JSON.stringify(after),
-      );
-      r.expect(
-        after.callTurn === turns[0] && after.endTurn === later,
-        size +
-          ": the finish row is drawn in the later turn, after the running calls' turn: " +
-          JSON.stringify(after),
-      );
-      r.expect(
-        afters.length === 1 && afters[0] === String(rows.length),
-        size +
-          ': the update fetches only the new tail, from the end (after=' +
-          rows.length +
-          '), not from the running call: ' +
-          JSON.stringify(afters),
-      );
-      resumed = true;
-      bump = 'bg-resumed-' + size;
-      await page.waitForFunction(
-        () =>
-          document
-            .querySelector('.step[data-tid="early-watch"]')
-            ?.classList.contains('background-running'),
-        null,
-        { timeout: 15000 },
-      );
-      r.expect(
-        (await sd('early-watch')) === 'background · running —',
-        size + ': a previously unknown call resumes without a fabricated start time',
-      );
-      paused = true;
-      bump = 'bg-paused-' + size;
-      await page.waitForFunction(
-        () =>
-          document
-            .querySelector('.step[data-tid="early-watch"] .sd')
-            ?.textContent.includes('no end recorded'),
-        null,
-        { timeout: 15000 },
-      );
-      late = true;
-      bump = 'bg-late-finish-' + size;
-      await page.waitForFunction(
-        () =>
-          document
-            .querySelector('.step[data-tid="early-watch"] .sd')
-            ?.textContent.replace(/\s+/g, ' ')
-            .includes('failed · 10m 0s'),
-        null,
-        { timeout: 15000 },
-      );
-      r.expect(
-        (await sd('early-watch')) === 'background · failed · 10m 0s',
-        size + ': a late finish patches a call before the tail cut',
-      );
-      r.expect(page.errors.length === 0, size + ': tail page errors: ' + page.errors.join(' | '));
-      results[size] = { before, after, afters };
-    } finally {
-      await page.context().close();
-    }
-  }
-  return results;
-}
-
+// Native range growth and later-turn isolation are covered by viewer-backlog,
+// catalog-served and the selected store tests; no workspace model is patched here.
 export default async function viewerCheck(browser) {
   const D = await data();
   const r = reporter('viewer');
@@ -1083,7 +602,6 @@ export default async function viewerCheck(browser) {
 
   R.background = await backgroundCommands(browser, r);
   R.backgroundScreenshots = await backgroundScreenshots(browser, r);
-  R.backgroundTail = await backgroundTail(browser, r);
   r.results = R;
   r.expect(
     (R.phoneErrors ?? []).length === 0,

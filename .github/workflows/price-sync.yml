@@ -127,7 +127,6 @@ jobs:
             crates/semon-sessions/src/model/golden/relays.json \
             crates/semon-sessions/src/model/golden/spawns.json \
             crates/semon-sessions/src/model/golden/turns.json \
-            crates/semon-sessions/tests/golden/model.json \
             scripts/pricing/fixtures/anthropic.html \
             scripts/pricing/fixtures/openai.html
           git commit -F "$commit_message"

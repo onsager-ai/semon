@@ -11,11 +11,11 @@ discover ui-design from dev-skills revision
 CSS roles, router and transcript controls. Hub owns machine enrollment and its
 native domain pages. No shared skill change or managed projection edit was needed.
 
-The bounded workflow is metadata discovery, selected native history, failure
-inspection and return to the same list context. Catalog-v1 supports scoped
-metadata search and ranged native records, not global conversation search or a
-complete agent graph. The explicit compatibility reader retains its existing
-complete-model capabilities.
+This record documents the earlier catalog inspection work. Its bounded workflow
+covered metadata discovery, selected native history, failure inspection and return
+to the same list context. The current [canonical Viewer](../viewer-ownership.md)
+also owns Home, Analytics and bounded causal navigation; the former compatibility
+reader has been removed. Metadata search remains scoped to the selected Source.
 
 ## Design evidence
 
@@ -114,10 +114,10 @@ the same unchanged native response shape. This isolates the pre-existing parser
 failure without rebuilding the backend. Other baseline captures came from the
 original running UI. [Filtered phone](after/filtered-390.png) and
 [filtered desktop](after/filtered-1280.png) show the selected canvas state.
-The existing compatibility view was also exercised with nested activity and
+The former compatibility view was also exercised with nested activity and
 an expanded real failure at both widths; [evidence](validation/compatibility.json)
-and [desktop capture](after/compatibility-nested-1280.png) retain that separate
-capability without claiming a complete graph in catalog-v1.
+and [desktop capture](after/compatibility-nested-1280.png) retain historical evidence
+from before the canonical migration.
 
 Visual review compared 390/1280 frames with actual screenshots: reading width,
 16px phone gutters, persistent labels, stacked 44px phone controls, contiguous
@@ -133,7 +133,7 @@ Use Node 22+ and Rust from the repository toolchain. From the repository root:
 ```sh
 npm --prefix ui ci --no-audit --no-fund
 npm --prefix ui run build
-cargo build --locked -p semon-store --bin semon --features semon-sessions/test-clock
+cargo build --locked -p semon-cli --bin semon --features semon-sessions/test-clock
 fixture_dir=$(mktemp -d)
 fixture_now=$(node tests/ui/fixture.mjs "$fixture_dir" --extras)
 SEMON_TEST_NOW="$fixture_now" target/debug/semon sessions --serve \
@@ -145,7 +145,7 @@ SEMON_TEST_NOW="$fixture_now" target/debug/semon sessions --serve \
 
 Open the local token URL printed by your server; do not publish it. Search harbor,
 open harbor, expand the failed Bash call, inspect complete output, then use Back.
-Use `compat=1` for the existing complete relationship view. The delivered workspace
+The default reader includes the recorded relationship view. The delivered workspace
 preview runs on port 8082; authentication tokens are intentionally excluded from
 the artifacts. The fixture uses synthetic session messages, paths and identities.
 

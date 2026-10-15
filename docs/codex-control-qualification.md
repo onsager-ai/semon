@@ -78,7 +78,7 @@ state must be new and private. Managed native configuration is not qualified.
 npm install --prefix /path/to/native @openai/codex@0.160.0
 python3 -m venv /path/to/probe-venv
 /path/to/probe-venv/bin/pip install -r tests/spikes/requirements-control.txt
-cargo build --locked -p semon-store
+cargo build --locked -p semon-cli
 npm --prefix tests/ui ci
 npm --prefix tests/ui exec -- playwright install chromium
 
@@ -87,7 +87,7 @@ npm --prefix tests/ui exec -- playwright install chromium
 /path/to/probe-venv/bin/python tests/spikes/codex-control.py --codex "$NATIVE" --output "$OUT/qualification.json"
 /path/to/probe-venv/bin/python tests/spikes/codex-terminal.py --codex "$NATIVE" --output "$OUT/terminal.json"
 /path/to/probe-venv/bin/python tests/spikes/codex-local.py --codex "$NATIVE" \
-  --semon target/debug/semon --browser tests/ui/local-control.mjs \
+  --semon target/debug/semon --browser tests/ui/conversation-control.mjs \
   --tmux /usr/bin/tmux --output "$OUT/local.json"
 python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
 
@@ -119,3 +119,28 @@ implementation PR. Native fixtures are reproducible evidence, not the complete
 viewer CI aggregate. No existing pixel threshold or baseline is changed; CI
 aggregate status remains a separate merge gate. No deployment or remote control
 activation is performed.
+
+## Native foundation requalification (#380)
+
+The current product probe uses qualified source-selected Catalog identity and
+`/api/session-control`; it asserts that retired `/api/model` returns 404. Browser
+qualification selects the launched native session and its contextual controls.
+The original October 4 probe bytes are retained as `codex-local.probe` beside the
+recorded fixtures; their original SHA-256 remains unchanged in the manifest.
+Those recordings do not qualify the updated native consumer.
+
+A newly launched empty thread has no resumable rollout until its first message.
+The current native identity/control admission must be tested for this bootstrap
+case. Do not seed a transcript, send the initial message through a bypass or
+restore model transport to make the probe pass. A bootstrap refusal is a P0
+release gap, separate from the recalibrated cold-indexing budget. Actual native
+probe/browser outcomes belong to the exact Source/Hub integration receipt.
+
+The current bootstrap repair uses the confined launcher's empty native-thread
+receipt for one initial input through the existing Home control component. The
+native probe requires identity 404, null Catalog control and zero rollouts before
+that input; the browser must send the actual first message and confirm its exact
+acceptance receipt. Creation authority must then withdraw, a real rollout must
+publish through the ordinary producer, and selected identity/control must qualify
+before the original native operation/security cases continue. Passing fixture
+checks alone does not qualify this repair; record the exact native/browser run.

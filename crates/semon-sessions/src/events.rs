@@ -27,13 +27,33 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
-mod store;
+pub(crate) mod native_event;
+pub(crate) mod native_harness;
+pub(crate) mod native_producer;
+pub(crate) mod store;
 pub(crate) use store::open_regular;
+pub(crate) use store::{archive_index_retained, retain_archive_index};
 
 #[cfg(test)]
 thread_local! {
     /// Reads of the persisted event cache on this thread.
     pub(crate) static CACHE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Full per-file event/signal row decodes, including exact-path loads.
+    pub(crate) static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CODEX_HEADER_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CLAUDE_SIDECAR_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static AFTER_CLAUDE_SIDECAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_CODEX_HEADER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_codex_header_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_HEADER.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CLAUDE_SIDECAR.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// The parser's version: what the fold functions derive from a line. The
@@ -63,7 +83,7 @@ thread_local! {
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
 /// v23: native connector completions and tool search are tools, including
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
-const CACHE_VERSION: u32 = 23;
+const CACHE_VERSION: u32 = 24;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +247,8 @@ pub(crate) struct DirtyRows {
     pub(crate) before_extras: usize,
     pub(crate) before_signals: usize,
     pub(crate) before_codex_usage: usize,
+    pub(crate) busy: BTreeMap<i64, Option<i64>>,
+    pub(crate) links: BTreeSet<(String, String)>,
 }
 
 impl DirtyRows {
@@ -260,6 +282,32 @@ impl DirtyRows {
                 .filter(|id| old.usage_by_id.get(*id) != new.usage_by_id.get(*id))
                 .cloned()
                 .collect(),
+            busy: {
+                let old: BTreeMap<_, _> = old.busy.iter().copied().collect();
+                let new: BTreeMap<_, _> = new.busy.iter().copied().collect();
+                old.keys()
+                    .chain(new.keys())
+                    .filter_map(|start| {
+                        (old.get(start) != new.get(start))
+                            .then_some((*start, new.get(start).copied()))
+                    })
+                    .collect()
+            },
+            links: [
+                ("session", &old.links.session_ids, &new.links.session_ids),
+                (
+                    "continued",
+                    &old.links.continued_in,
+                    &new.links.continued_in,
+                ),
+                ("bridge", &old.links.bridges, &new.links.bridges),
+            ]
+            .into_iter()
+            .flat_map(|(kind, old, new)| {
+                new.symmetric_difference(old)
+                    .map(move |id| (kind.to_owned(), id.clone()))
+            })
+            .collect(),
             ..Self::begin(old)
         }
     }
@@ -270,6 +318,14 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    pub(crate) tree_summary: Option<crate::native_tree::Summary>,
+    pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
+    pub(crate) marker_index: Option<crate::native_marker::Index>,
+    pub(crate) handoff_index: Option<crate::native_handoff::Index>,
+    /// Allowlisted first-record metadata observed on the same native generation.
+    pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
+    /// A subagent sidecar has its own generation, separate from the native log.
+    pub(crate) claude_sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
@@ -380,53 +436,23 @@ pub(crate) fn short_hash(text: &str) -> String {
 /// longer value is cut and ends in `#` and a hash of the whole value, so two
 /// values that share a long prefix stay different.
 fn bounded(text: &str) -> Option<String> {
-    let safe = !text.is_empty()
-        && text.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'_' | b'-' | b'.' | b':' | b'/' | b'[' | b']' | b'+' | b' '
-                )
-        });
-    if !safe {
+    let mut cursor = native_harness::tag::Cursor::default();
+    cursor.push(text.as_bytes());
+    if cursor.rejected() {
         return None;
     }
-    // The text is ASCII, so bytes and characters agree.
-    Some(if text.len() > TAG_MAX {
-        format!("{}#{}", &text[..TAG_MAX - 9], short_hash(text))
-    } else {
-        text.to_owned()
-    })
+    cursor.result(&Sha256::digest(text.as_bytes()).into())
 }
 
 /// Pushes a signal whose tag is already bounded, without the compaction dedupe.
 fn note(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, n: String, v: Option<u64>) {
-    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
-    summary.signals.push(Signal {
-        k,
-        o,
-        t,
-        at,
-        n: Some(n),
-        v,
-    });
+    native_producer::complete(native_producer::note(summary, k, o, t, n, v));
 }
 
 /// Records a run setting when `value` is the first seen or differs from the
 /// last one recorded for `k`. A missing value changes nothing.
 fn setting(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, value: Option<&str>) {
-    let Some(value) = value.and_then(bounded) else {
-        return;
-    };
-    let last = summary
-        .signals
-        .iter()
-        .rev()
-        .find(|signal| signal.k == k)
-        .and_then(|signal| signal.n.as_deref());
-    if last != Some(value.as_str()) {
-        note(summary, k, o, t, value, None);
-    }
+    native_producer::complete(native_producer::setting(summary, k, o, t, value));
 }
 
 /// A policy as Codex writes it: a name, or an object naming its type or mode
@@ -727,7 +753,7 @@ impl FileIndex {
 }
 
 /// A file as last stat'ed: its identity, size and modified time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Stat {
     pub(crate) dev: u64,
     pub(crate) ino: u64,
@@ -737,11 +763,11 @@ pub(crate) struct Stat {
 }
 
 impl Stat {
-    fn of(path: &Path) -> io::Result<Self> {
+    pub(crate) fn of(path: &Path) -> io::Result<Self> {
         Self::from_metadata(&fs::metadata(path)?)
     }
 
-    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         let modified_ns = metadata
             .modified()?
             .duration_since(UNIX_EPOCH)
@@ -764,6 +790,10 @@ impl Stat {
 /// Filesystem change time fences metadata-identical rewrites without reading
 /// source bodies. None means this platform/legacy observation cannot prove it.
 pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
+    #[cfg(test)]
+    if let Some(value) = FIXED_CHANGE_TIME.with(std::cell::Cell::get) {
+        return Some(value);
+    }
     #[cfg(unix)]
     {
         Some(i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()))
@@ -775,13 +805,41 @@ pub(crate) fn change_time_ns(metadata: &fs::Metadata) -> Option<i128> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIXED_CHANGE_TIME: std::cell::Cell<Option<i128>> = const { std::cell::Cell::new(None) };
+}
+
+/// Model indistinguishable change stamps deterministically across filesystems.
+#[cfg(test)]
+pub(crate) fn fixed_change_time_for_test(value: i128) -> impl Drop {
+    struct Restore(Option<i128>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FIXED_CHANGE_TIME.with(|time| time.set(self.0));
+        }
+    }
+    Restore(FIXED_CHANGE_TIME.with(|time| time.replace(Some(value))))
+}
+
 /// How many bytes the ledger's tail hash covers before its offset.
 const WINDOW: u64 = 4096;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static CATALOG_DERIVED_SOURCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static CATALOG_PUBLISHED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static SOURCE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static SOURCE_HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// What the index records about a file it has read: the stat it was read
 /// at, the offset its complete lines end at, and SHA-256 hashes of the
 /// complete consumed prefix and of the tail window before that offset.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Ledger {
     pub(crate) stat: Stat,
     pub(crate) offset: u64,
@@ -790,11 +848,27 @@ pub(crate) struct Ledger {
 }
 
 impl Ledger {
+    fn source(&self, path: &Path, native_id: &str) -> crate::model::summary::CatalogSource {
+        crate::model::summary::CatalogSource {
+            path: path.to_owned(),
+            native_id: native_id.to_owned(),
+            dev: self.stat.dev,
+            ino: self.stat.ino,
+            size: self.stat.size,
+            modified_ns: self.stat.modified_ns,
+            changed_ns: self.stat.changed_ns,
+            offset: self.offset,
+            prefix_sha256: self.prefix,
+            tail_sha256: self.tail,
+            native_role: None,
+        }
+    }
+
     /// The file still holds what was read, so reading resumes at the
     /// offset: the same identity, at least as long, and the consumed prefix
     /// unchanged. That covers a file that grew and one only touched; any
     /// other change (a rewrite, a truncation, a new inode) rereads it.
-    fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
+    pub(crate) fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
             && self.offset <= stat.size
@@ -809,7 +883,13 @@ impl Ledger {
 fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8; 32])> {
     file.seek(SeekFrom::Start(0))?;
     let mut prefix = Sha256::new();
-    if io::copy(&mut (&mut *file).take(offset), &mut prefix)? != offset {
+    let bytes = io::copy(&mut (&mut *file).take(offset), &mut prefix)?;
+    #[cfg(test)]
+    {
+        HASHED_BYTES.with(|count| count.set(count.get() + bytes + offset.min(WINDOW)));
+        SOURCE_HASHED_BYTES.with(|count| count.set(count.get() + bytes + offset.min(WINDOW)));
+    }
+    if bytes != offset {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "consumed prefix shortened",
@@ -851,6 +931,9 @@ pub(crate) enum Outcome {
     /// The ledger row wasn't the one the change was based on: another
     /// process moved the file on first. Nothing was written.
     Conflict,
+    /// A bounded original-custody checkpoint committed. Current publication and
+    /// its durable source claims remain pending for the next producer step.
+    Deferred,
     /// Another version of Semon rebuilt the store for its own parser or
     /// schema. Nothing was written.
     Stale,
@@ -892,20 +975,114 @@ pub(crate) trait IndexStore: Send {
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
 
+    /// Existing scalar recipes at the exact source and catalog generations.
+    /// Optional reuse never grants source access or changes publication CAS.
+    fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError>;
+
     /// Replaces one complete source-validated metadata catalog atomically.
-    fn publish_session_catalog(
+    fn publish_session_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
-    ) -> Result<Outcome, StoreError>;
+    ) -> Result<(Outcome, Option<String>), StoreError>;
 
     fn publish_partial_catalog(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
+    ) -> Result<(Outcome, Option<String>), StoreError>;
+    fn publish_closed_catalog_fenced(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+    ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
+    fn backfill_state(&self) -> Result<Option<String>, StoreError>;
+    fn discover_catalog_sources(
+        &mut self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<(), StoreError>;
+    fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError>;
+    fn resolve_catalog_input(
+        &mut self,
+        path: &str,
+        revision: i64,
+        native: Option<(&str, &str)>,
+        log: Option<&str>,
     ) -> Result<Outcome, StoreError>;
+    fn relocate_codex(
+        &mut self,
+        path: &str,
+        stat: &Stat,
+        id: &str,
+        file: &mut LogFile,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Result<Option<String>, StoreError>;
+    fn append_evidence(
+        &self,
+        path: &str,
+    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
+    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
+    fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
+    fn catalog_component_paths(
+        &self,
+        paths: &[String],
+        keys: &[String],
+        native_parents: &[(String, String)],
+    ) -> Result<Option<Vec<String>>, StoreError>;
+
+    fn begin_semantic_stage(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+    ) -> Result<Outcome, StoreError> {
+        let _ = (paths, runtime);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn semantic_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
+        let _ = limit;
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn record_semantic_batch(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<Outcome, StoreError> {
+        let _ = (batch, prepared);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn publish_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        let _ = (batch, prepared);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+    fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
+        let _ = epoch;
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
+
+    fn semantic_select(
+        &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> Result<crate::model::relation_stage::Selection, StoreError> {
+        let _ = (epoch, selector);
+        Err(StoreError::Data("semantic staging unavailable".into()))
+    }
 
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
@@ -913,9 +1090,21 @@ pub(crate) trait IndexStore: Send {
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
 
+    /// A committed tree summary and its evidence, without event/signal rows.
+    fn load_tree(
+        &self,
+        path: &str,
+        expected: &Stat,
+    ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError>;
+
     /// Commits `path`'s new ledger and index if its ledger is still
     /// `expected`. `changes` names rows the append parser touched. Without
     /// it the file's rows are replaced; no previous index is needed.
+    fn commit_initial_files(
+        &mut self,
+        files: &[(String, Ledger, Arc<FileIndex>)],
+    ) -> Result<Outcome, StoreError>;
+
     fn commit_file(
         &mut self,
         path: &str,
@@ -952,7 +1141,9 @@ pub(crate) trait IndexStore: Send {
 /// One file's index in memory, and the ledger it was read at.
 struct CachedFile {
     ledger: Ledger,
-    index: Arc<FileIndex>,
+    // A published scoped producer keeps source identity, not every transcript
+    // payload. The existing durable index reloads a selected generation lazily.
+    index: Option<Arc<FileIndex>>,
 }
 
 /// The event index: every file's [`FileIndex`] in memory, written through
@@ -965,6 +1156,11 @@ pub(crate) struct EventCache {
     store: Option<Box<dyn IndexStore>>,
     scoped: bool,
     retention_base: Vec<(String, Option<Ledger>)>,
+    /// Source fences for the lazy producer, independently of legacy reopen state.
+    lock_cache: Option<PathBuf>,
+    /// Cold ingestion advances complete records by a bounded byte slice.
+    pub(crate) scan_byte_budget: Option<u64>,
+    cold_writes: Vec<(String, Ledger, Arc<FileIndex>)>,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -976,6 +1172,10 @@ pub(crate) struct EventCache {
     gone: Vec<(String, Option<Ledger>)>,
     /// Time spent cloning a cached index during the current scan.
     index_clone: Duration,
+    scan_timing: bool,
+    parse_duration: Duration,
+    index_write_duration: Duration,
+    scan_measurements: crate::native_timing::Measurements,
     /// Files reread from byte zero this scan: offsets in cached text may
     /// now refer to different records, even if their new size is larger.
     replaced: BTreeSet<String>,
@@ -1021,6 +1221,38 @@ struct LastProjectRun {
     last_model_usage: Option<BTreeMap<String, crate::facts::ReportedModelUsage>>,
 }
 
+impl LastProjectRun {
+    fn snapshot(self, capture_at: i64) -> Option<crate::facts::ReportedRunSnapshot> {
+        Some(crate::facts::ReportedRunSnapshot {
+            last_session_id: self.last_session_id?,
+            last_start_time: self.last_start_time?,
+            last_cost: self.last_cost,
+            last_duration: self.last_duration,
+            last_api_duration: self.last_api_duration,
+            last_tool_duration: self.last_tool_duration,
+            last_lines_added: self.last_lines_added,
+            last_lines_removed: self.last_lines_removed,
+            last_model_usage: self.last_model_usage.unwrap_or_default(),
+            capture_at,
+        })
+    }
+}
+
+// Reuse the existing allowlisted parser for a content-free runtime observation.
+// Account/configuration fields never enter this value or persisted fingerprints.
+pub(crate) fn current_reported_runs(path: &Path) -> Vec<crate::facts::ReportedRunSnapshot> {
+    crate::read_regular_at_most(path, 64 * 1024 * 1024)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ClaudeJson>(&bytes).ok())
+        .map(|root| {
+            root.projects
+                .into_values()
+                .filter_map(|project| project.snapshot(0))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Says once per process that the index runs in memory, and why.
 fn warn_unavailable(what: &str, error: &dyn std::fmt::Display) {
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -1054,7 +1286,6 @@ impl EventCache {
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
     /// No store is attached, so native projection cannot mutate global rows.
-    #[cfg(test)]
     pub(crate) fn from_selected(
         connection: &rusqlite::Connection,
         sources: &[crate::model::summary::CatalogSource],
@@ -1063,9 +1294,25 @@ impl EventCache {
         store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
     }
 
-    /// The store beside V1's metadata cache: `sessions-index.json` gives
-    /// `sessions-index.sqlite3`. `semon sessions`, `--watch` and `--json`
-    /// never open it.
+    pub(crate) fn selected_index(&self, path: &Path) -> Option<Arc<FileIndex>> {
+        self.files
+            .get(path.to_str()?)
+            .and_then(|file| file.index.as_ref().map(Arc::clone))
+    }
+
+    /// Current ownership needs ledger and independent role evidence only.
+    /// Keep this inside the caller's Catalog snapshot without loading events,
+    /// transcript slots, byte-proof pages or unrelated source metadata.
+    pub(crate) fn selected_roles_current(
+        connection: &rusqlite::Connection,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> rusqlite::Result<bool> {
+        store::selected_roles_current(connection, sources)
+    }
+
+    /// The shared Session Event Index. Preserve the configured cache stem:
+    /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
+    /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
         v1_cache.with_extension("sqlite3")
     }
@@ -1109,6 +1356,7 @@ impl EventCache {
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
         cache.scoped = true;
+        cache.lock_cache = Some(v1_cache.to_owned());
         Ok(cache)
     }
 
@@ -1127,6 +1375,10 @@ impl EventCache {
         Ok(())
     }
 
+    pub(crate) fn scoped_store_lost(&self) -> bool {
+        self.scoped && self.store.is_none()
+    }
+
     pub(crate) fn is_scoped(&self) -> bool {
         self.scoped
     }
@@ -1142,6 +1394,158 @@ impl EventCache {
         Ok(())
     }
 
+    pub(crate) fn resolve_catalog_input(
+        &mut self,
+        options: &crate::Options,
+        path: &str,
+    ) -> io::Result<()> {
+        let input = crate::native_evidence::source_input(Path::new(path), options)
+            .ok_or_else(|| io::Error::other("input journal outside allowlist"))?;
+        let _lock = crate::source_change::SourceLock::acquire(
+            options,
+            &crate::source_change::lock_key(options, &input),
+            false,
+        )?;
+        store::resume_runtime_input(options, path)?;
+        let revision = self.catalog_claims(&[path.to_owned()])?[0]
+            .1
+            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "input intent changed"))?;
+        let log = input.path.ends_with(".meta.json").then(|| {
+            input
+                .full_path(options)
+                .with_extension("")
+                .with_extension("jsonl")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let native =
+            if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
+                let value = crate::open_input(&input.full_path(options))
+                    .ok()
+                    .and_then(|file| {
+                        let mut bytes = Vec::new();
+                        file.take(65537).read_to_end(&mut bytes).ok()?;
+                        (bytes.len() <= 65536)
+                            .then(|| serde_json::from_slice::<Value>(&bytes).ok())
+                            .flatten()
+                    });
+                value.and_then(|value| value["sessionId"].as_str().map(str::to_owned))
+            } else {
+                None
+            };
+        match self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .resolve_catalog_input(
+                path,
+                revision,
+                native.as_deref().map(|id| ("claude", id)),
+                log.as_deref(),
+            ) {
+            Ok(Outcome::Written) => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "input publication changed",
+            )),
+            Err(error) => Err(io::Error::other(error.to_string())),
+        }
+    }
+
+    pub(crate) fn backfill_state(&self) -> io::Result<Option<String>> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .backfill_state()
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn discover_catalog_sources(
+        &mut self,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        complete: bool,
+    ) -> io::Result<()> {
+        let paths = inputs
+            .iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .discover_catalog_sources(&paths, complete)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn finish_catalog_backfill(&mut self, generation: &str) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .finish_catalog_backfill(Some(generation))
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn retire_scoped_sources(
+        &mut self,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        seen: &BTreeSet<String>,
+        machine: &crate::facts::MachineFacts,
+    ) -> io::Result<()> {
+        for input in inputs {
+            let path = input.full_path(options);
+            let key = path.to_string_lossy().into_owned();
+            if seen.contains(&key) {
+                continue;
+            }
+            let absent = fs::symlink_metadata(&path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+            let deselected = input.root == crate::InputRoot::Codex
+                && !machine.codex_rollout_is_current(options, &path);
+            if !absent && !deselected {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "selected source cannot be qualified",
+                ));
+            }
+            let recorded = self.recorded(&key);
+            if recorded.is_some() {
+                match self
+                    .store
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("native producer unavailable"))?
+                    .remove_files(&[(key.clone(), recorded)])
+                {
+                    Ok(Outcome::Written) => {
+                        self.files.remove(&key);
+                    }
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "source disappearance changed",
+                        ));
+                    }
+                    Err(error) => return Err(io::Error::other(error.to_string())),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pending_catalog_sources(&self, limit: usize) -> io::Result<Vec<String>> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .pending_catalog_sources(limit)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn qualified_catalog(&self) -> io::Result<bool> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .qualified_catalog()
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
     pub(crate) fn catalog_claims(
         &self,
         paths: &[String],
@@ -1153,8 +1557,79 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
-    pub(crate) fn publish_partial_catalog(
+    pub(crate) fn catalog_component_paths(
+        &self,
+        inputs: &[crate::inputs::Input],
+        keys: &[String],
+        native_parents: &[(String, String)],
+        options: &crate::Options,
+    ) -> io::Result<Option<Vec<crate::inputs::Input>>> {
+        let paths = inputs
+            .iter()
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let paths = self
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .catalog_component_paths(&paths, keys, native_parents)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        paths
+            .map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(Path::new(&path), options).ok_or_else(
+                            || {
+                                io::Error::other(
+                                    "Catalog component source is outside the native allowlist",
+                                )
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
+    pub(crate) fn semantic_select(
         &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> io::Result<crate::model::relation_stage::Selection> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_select(epoch, selector)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn begin_semantic_stage(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+    ) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .begin_semantic_stage(paths, runtime)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn semantic_batch(
+        &mut self,
+        limit: usize,
+    ) -> io::Result<Option<crate::model::relation_stage::Batch>> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_batch(limit)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn record_semantic_batch(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
         prepared: &crate::model::PreparedSources,
     ) -> io::Result<Outcome> {
         if self.busy || !self.unpersisted.is_empty() {
@@ -1165,8 +1640,75 @@ impl EventCache {
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .record_semantic_batch(batch, prepared)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn publish_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<(Outcome, Option<String>)> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::other(
+                "native producer sources not durably observed",
+            ));
+        }
+        let result = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_semantic_catalog(batch, prepared)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        #[cfg(test)]
+        if result.0 == Outcome::Written {
+            CATALOG_PUBLISHED_ROWS
+                .with(|count| count.set(count.get() + prepared.rows.len() as u64));
+            if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn finish_semantic_stage(&mut self, epoch: i64) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .finish_semantic_stage(epoch)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_partial_catalog(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Outcome> {
+        self.publish_partial_catalog_fenced(prepared)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Return this transaction's generation, rather than reading a generation
+    /// another producer may already have replaced after the commit.
+    pub(crate) fn publish_partial_catalog_fenced(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<(Outcome, Option<String>)> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::other(
+                "native producer sources not durably observed",
+            ));
+        }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .publish_partial_catalog(
                 &crate::slot_projection::Publication {
+                    points: Some(&prepared.native_points),
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
                 },
@@ -1176,14 +1718,91 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    pub(crate) fn publish_closed_catalog(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Option<Outcome>> {
+        self.publish_closed_catalog_fenced(prepared)
+            .map(|result| result.map(|(outcome, _)| outcome))
+    }
+
+    /// Carry the committed generation through the source-closure check.
+    pub(crate) fn publish_closed_catalog_fenced(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Option<(Outcome, Option<String>)>> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native producer sources not durably observed",
+            ));
+        }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        let outcome = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_closed_catalog_fenced(
+                &crate::slot_projection::Publication {
+                    points: Some(&prepared.native_points),
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                },
+                prepared.base_generation.as_deref(),
+                &prepared.claims,
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        #[cfg(test)]
+        if matches!(outcome, Some((Outcome::Written, _))) {
+            CATALOG_PUBLISHED_ROWS
+                .with(|count| count.set(count.get() + prepared.rows.len() as u64));
+            if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+        }
+        Ok(outcome)
+    }
+
     /// Ends a scan, and with it the refresh: the store gets its writes again.
     pub(crate) fn end_scan(&mut self) {
         self.busy = false;
     }
 
+    /// Drop only durably committed producer payloads after Catalog publication.
+    /// Ledgers and membership remain available to incremental change detection
+    /// and disappearance reconciliation. In-memory-only/busy evidence stays.
+    #[cfg(test)]
+    pub(crate) fn resident_index_payloads(&self) -> usize {
+        self.files
+            .values()
+            .filter(|file| file.index.is_some())
+            .count()
+    }
+
+    pub(crate) fn release_published_indexes(&mut self) {
+        if self.scoped && self.store.is_some() && !self.busy {
+            for (path, file) in &mut self.files {
+                if !self.unpersisted.contains(path) {
+                    file.index = None;
+                }
+            }
+        }
+    }
+
     /// Time spent cloning cached file indexes in the current scan.
     pub(crate) fn index_clone_duration(&self) -> Duration {
         self.index_clone
+    }
+
+    pub(crate) fn scan_durations(&self) -> (Duration, Duration) {
+        (self.parse_duration, self.index_write_duration)
+    }
+
+    pub(crate) fn emit_scan_measurements(&self, producer: &str) {
+        self.scan_measurements.emit(producer, "scan");
     }
 
     /// Starts a scan: an index kept in memory tries its store again, at most
@@ -1254,6 +1873,19 @@ impl EventCache {
             .flatten()
     }
 
+    pub(crate) fn session_slots(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        expected_generation: Option<&str>,
+        max: usize,
+    ) -> Option<Vec<crate::slot_projection::SavedSlot>> {
+        self.store
+            .as_ref()?
+            .session_slots(row, expected_generation, max)
+            .ok()
+            .flatten()
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_session_catalog(
         &mut self,
@@ -1262,6 +1894,7 @@ impl EventCache {
     ) {
         self.publish_session_projection(
             &crate::slot_projection::Publication {
+                points: None,
                 rows,
                 transcripts: None,
             },
@@ -1274,11 +1907,50 @@ impl EventCache {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) {
-        if !self.busy
-            && self.unpersisted.is_empty()
-            && let Some(store) = self.store.as_mut()
-        {
-            let _ = store.publish_session_catalog(publication, expected_generation);
+        let _ = self.publish_catalog_projection(publication, expected_generation);
+    }
+
+    /// A complete native observation is acknowledged only after its source
+    /// evidence and Catalog publication are durable in the same generation.
+    pub(crate) fn publish_catalog_projection(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> io::Result<()> {
+        self.publish_catalog_projection_fenced(publication, expected_generation)
+            .map(|_| ())
+    }
+
+    pub(crate) fn publish_catalog_projection_fenced(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> io::Result<Option<String>> {
+        if self.busy || !self.unpersisted.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native producer sources not durably observed",
+            ));
+        }
+        let (outcome, generation) = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .publish_session_catalog_fenced(publication, expected_generation)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        match outcome {
+            Outcome::Written => {
+                #[cfg(test)]
+                if let Some(hook) = AFTER_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take())
+                {
+                    hook();
+                }
+                Ok(generation)
+            }
+            Outcome::Deferred | Outcome::Conflict | Outcome::Stale => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native Catalog publication generation changed",
+            )),
         }
     }
 
@@ -1287,7 +1959,12 @@ impl EventCache {
     }
 
     pub(crate) fn begin_scan(&mut self) {
+        self.cold_writes.clear();
         self.index_clone = Duration::ZERO;
+        self.scan_timing = crate::native_timing::enabled();
+        self.parse_duration = Duration::ZERO;
+        self.index_write_duration = Duration::ZERO;
+        self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
         if self.store.is_some() || self.reopen_at.is_none_or(|at| Instant::now() < at) {
             return;
@@ -1334,7 +2011,7 @@ impl EventCache {
                         path,
                         CachedFile {
                             ledger,
-                            index: Arc::new(index),
+                            index: Some(Arc::new(index)),
                         },
                     )
                 })
@@ -1389,6 +2066,72 @@ impl EventCache {
         self.files.keys().map(String::as_str)
     }
 
+    pub(crate) fn indexed_stat(&self, path: &Path) -> Option<Stat> {
+        self.files
+            .get(path.to_string_lossy().as_ref())
+            .map(|file| file.ledger.stat)
+    }
+
+    pub(crate) fn source(
+        &self,
+        path: &Path,
+        native_id: &str,
+    ) -> Option<crate::model::summary::CatalogSource> {
+        let file = self.files.get(path.to_string_lossy().as_ref())?;
+        Some(file.ledger.source(path, native_id))
+    }
+
+    /// Warm trees read the existing metadata regions only. Changed sources or
+    /// incomplete metadata use the ordinary parser/ledger CAS; never put a
+    /// partial FileIndex in the producer cache.
+    pub(crate) fn tree(
+        &mut self,
+        path: &Path,
+        harness: &str,
+        native_id: &str,
+        dirty: &mut bool,
+    ) -> io::Result<(
+        crate::model::summary::CatalogSource,
+        crate::native_tree::Metadata,
+    )> {
+        let key = path.to_string_lossy();
+        let stat = Stat::of(path)?;
+        if !self.unpersisted.contains(key.as_ref()) {
+            if let Some(file) = self.files.get(key.as_ref())
+                && file.ledger.stat == stat
+                && let Some(index) = &file.index
+                && let Some(metadata) = crate::native_tree::Metadata::from_index(index)
+            {
+                return Ok((file.ledger.source(path, native_id), metadata));
+            }
+            match self
+                .store
+                .as_ref()
+                .map(|store| store.load_tree(&key, &stat))
+            {
+                Some(Ok(Some((ledger, metadata)))) if ledger.stat == stat => {
+                    return Ok((ledger.source(path, native_id), metadata));
+                }
+                Some(Err(StoreError::Data(_))) | Some(Ok(_)) | None => {}
+                Some(Err(error)) => self.store_failed(&error),
+            }
+        }
+        let index = scan_file(path, harness, self, dirty)?;
+        let metadata = crate::native_tree::Metadata::from_index(&index)
+            .ok_or_else(|| io::Error::other("native tree metadata unavailable"))?;
+        let source = self
+            .source(path, native_id)
+            .ok_or_else(|| io::Error::other("native tree source unavailable"))?;
+        Ok((source, metadata))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_index(&self, path: &Path) -> Option<&FileIndex> {
+        self.files
+            .get(path.to_string_lossy().as_ref())
+            .and_then(|file| file.index.as_deref())
+    }
+
     pub(crate) fn reported_runs(&self) -> impl Iterator<Item = &crate::facts::ReportedRunSnapshot> {
         self.reported_runs.values().flat_map(|runs| runs.values())
     }
@@ -1432,23 +2175,11 @@ impl EventCache {
         *dirty = true;
         let mut read = Vec::new();
         for project in root.projects.into_values() {
-            let (Some(session_id), Some(start)) =
-                (project.last_session_id, project.last_start_time)
-            else {
+            let Some(snapshot) = project.snapshot(capture_at) else {
                 continue;
             };
-            let snapshot = crate::facts::ReportedRunSnapshot {
-                last_session_id: session_id.clone(),
-                last_start_time: start,
-                last_cost: project.last_cost,
-                last_duration: project.last_duration,
-                last_api_duration: project.last_api_duration,
-                last_tool_duration: project.last_tool_duration,
-                last_lines_added: project.last_lines_added,
-                last_lines_removed: project.last_lines_removed,
-                last_model_usage: project.last_model_usage.unwrap_or_default(),
-                capture_at,
-            };
+            let session_id = snapshot.last_session_id.clone();
+            let start = snapshot.last_start_time;
             read.push(snapshot.clone());
             self.reported_runs
                 .entry(session_id)
@@ -1515,7 +2246,7 @@ impl EventCache {
             .as_mut()
             .map(|store| store.remove_files(&self.gone));
         match removed {
-            Some(Ok(Outcome::Written | Outcome::Conflict)) => self.gone.clear(),
+            Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) => self.gone.clear(),
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error),
             None => {}
@@ -1541,7 +2272,9 @@ impl EventCache {
                         self.lose_store(&"another version of semon rebuilt it");
                     }
                     Some(Err(error)) => self.store_failed(&error),
-                    Some(Ok(Outcome::Written | Outcome::Conflict)) | None => return None,
+                    Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) | None => {
+                        return None;
+                    }
                 }
             }
             Some(Err(error)) => self.store_failed(&error),
@@ -1555,8 +2288,9 @@ impl EventCache {
     fn base(&mut self, path: &str, ledger: &Ledger) -> Base {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
+            && let Some(index) = &entry.index
         {
-            return Base::Found(Arc::clone(&entry.index));
+            return Base::Found(Arc::clone(index));
         }
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
         match loaded {
@@ -1568,6 +2302,35 @@ impl EventCache {
                 Base::Unreadable
             }
         }
+    }
+
+    /// Parsing happens before the write reservation. Cold complete new files
+    /// share one bounded commit; no offset or dirty revision can escape alone.
+    pub(crate) fn flush_cold_writes(&mut self) -> io::Result<()> {
+        let files = std::mem::take(&mut self.cold_writes);
+        if files.is_empty() {
+            return Ok(());
+        }
+        let started = self.scan_timing.then(Instant::now);
+        let outcome = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("cold batch store unavailable"))?
+            .commit_initial_files(&files)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if let Some(started) = started {
+            self.index_write_duration += started.elapsed();
+        }
+        if outcome != Outcome::Written {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "cold index batch generation changed",
+            ));
+        }
+        for (path, _, _) in files {
+            self.unpersisted.remove(&path);
+        }
+        Ok(())
     }
 
     /// Writes a file's change through to the store. `true` when another
@@ -1588,15 +2351,19 @@ impl EventCache {
         if self.busy {
             return false;
         }
+        let started = self.scan_timing.then(Instant::now);
         let committed = self
             .store
             .as_mut()
             .map(|store| store.commit_file(path, expected, changes, ledger, index));
+        if let Some(started) = started {
+            self.index_write_duration += started.elapsed();
+        }
         match committed {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
             }
-            Some(Ok(Outcome::Conflict)) => return true,
+            Some(Ok(Outcome::Conflict | Outcome::Deferred)) => return true,
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error)) => self.store_failed(&error),
             None => {}
@@ -1608,6 +2375,7 @@ impl EventCache {
 #[cfg(test)]
 thread_local! {
     /// Lines parsed by [`scan_file`] on this thread: a warm build parses none.
+    pub(crate) static PARSED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static PARSED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// What [`scan_file`] did with each file on this thread: `unchanged`,
     /// `append`, `replace` or `conflict`.
@@ -1632,6 +2400,12 @@ const COMMIT_ATTEMPTS: usize = 3;
 /// touched), and reads it from the start otherwise. The change commits to
 /// the store only if no other process recorded the file meanwhile; if one
 /// did, it is redone from what that process recorded.
+pub(crate) fn crate_id_for_relocation(path: &Path) -> Option<String> {
+    crate::codex_native_id_prefix(path, Stat::of(path).ok()?.size)
+        .ok()
+        .flatten()
+}
+
 pub(crate) fn scan_file(
     path: &Path,
     harness: &str,
@@ -1639,48 +2413,163 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    let started = cache.scan_measurements.start();
+    let _source_lock = cache
+        .lock_cache
+        .as_ref()
+        .or(cache.v1_cache.as_ref())
+        .filter(|_| cache.store.is_some())
+        .map(|v1| {
+            crate::source_change::SourceLock::acquire(
+                &crate::Options {
+                    cache: v1.clone(),
+                    ..crate::Options::default()
+                },
+                &key,
+                false,
+            )
+        })
+        .transpose()?;
+    cache.scan_measurements.record("source_lock", started, 1);
+    let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
     if let Some(entry) = cache.files.get(&key)
+        && let Some(index) = &entry.index
         && !cache.unpersisted.contains(&key)
+        && (harness == "copilot" || index.tree_summary.is_some())
+        && index.source_chunks.is_some()
+        && (harness == "copilot" || index.marker_index.is_some())
+        && index.handoff_index.is_some()
+        && (harness != "codex" || index.codex_header.is_some())
+        && (!agent
+            || index
+                .claude_sidecar
+                .as_ref()
+                .is_some_and(|sidecar| sidecar.current(path)))
         && entry.ledger.stat == Stat::of(path)?
     {
         trace("unchanged");
-        return Ok(Arc::clone(&entry.index));
+        return Ok(Arc::clone(index));
     }
     *dirty = true;
     let mut attempt = 0;
+    let mut force_replace = false;
+    let mut conservative_append = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
         // Stat'ed before reading: a line that lands during the read makes
         // the next check see a change.
+        let started = cache.scan_measurements.start();
         let mut file = LogFile::open(path)?;
         let stat = Stat::from_metadata(&file.metadata()?)?;
+        cache.scan_measurements.record("open_stat", started, 1);
+        let started = cache.scan_measurements.start();
+        if harness == "codex" {
+            let recorded_started = cache.scan_measurements.start();
+            let absent = cache.recorded(&key).is_none();
+            cache
+                .scan_measurements
+                .record("relocation_recorded", recorded_started, 1);
+            if absent {
+                let prefix_started = cache.scan_measurements.start();
+                let id = crate::codex_native_id_prefix(path, stat.size)?;
+                cache
+                    .scan_measurements
+                    .record("relocation_prefix", prefix_started, 1);
+                if let Some(id) = id
+                    && let Some(store) = cache.store.as_mut()
+                    && let Some(old) = store
+                        .relocate_codex(&key, &stat, &id, &mut file, &mut cache.scan_measurements)
+                        .map_err(|error| io::Error::other(error.to_string()))?
+                {
+                    cache.files.remove(&old);
+                }
+            }
+        }
+        cache
+            .scan_measurements
+            .record("relocation_lookup", started, 1);
+        let started = cache.scan_measurements.start();
         let recorded = cache.recorded(&key);
         let mut base = None;
+        let mut trusted_append = false;
         if let Some(ledger) = &recorded
-            && (ledger.stat == stat || ledger.resumes(&stat, &mut file))
+            && !force_replace
         {
-            match cache.base(&key, ledger) {
-                Base::Found(index) => base = Some(index),
-                Base::Moved if !last => continue,
-                Base::Moved | Base::Unreadable => {}
+            let evidence = !conservative_append
+                && cache
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.append_evidence(&key).ok().flatten())
+                    .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat));
+            if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
+                match cache.base(&key, ledger) {
+                    Base::Found(index) => {
+                        trusted_append = evidence
+                            && index
+                                .source_chunks
+                                .as_ref()
+                                .is_some_and(|chunks| chunks.resume.is_some());
+                        if ledger.stat == stat
+                            || trusted_append
+                            || !evidence
+                            || ledger.resumes(&stat, &mut file)
+                        {
+                            base = Some(index);
+                        }
+                    }
+                    Base::Moved if !last => continue,
+                    Base::Moved | Base::Unreadable => {}
+                }
             }
-            // Another process already read it as it is now.
-            if ledger.stat == stat
-                && let Some(index) = &base
-            {
-                trace("unchanged");
-                // The store holds it as it is now: nothing waits to be written.
-                cache.unpersisted.remove(&key);
-                cache.files.insert(
-                    key,
-                    CachedFile {
-                        ledger: ledger.clone(),
-                        index: Arc::clone(index),
-                    },
-                );
-                return Ok(Arc::clone(index));
+        }
+        cache.scan_measurements.record("ledger_base", started, 1);
+        let started = agent.then(|| cache.scan_measurements.start()).flatten();
+        let sidecar = if agent {
+            match crate::native_sidecar::ClaudeSidecar::observe(
+                path,
+                base.as_ref()
+                    .and_then(|index| index.claude_sidecar.as_ref()),
+            ) {
+                Ok(sidecar) => sidecar,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    if last {
+                        None
+                    } else {
+                        continue;
+                    }
+                }
+                Err(error) => return Err(error),
             }
+        } else {
+            None
+        };
+        cache.scan_measurements.record("sidecar", started, 1);
+        // Another process already read it as it is now.
+        if let Some(ledger) = &recorded
+            && ledger.stat == stat
+            && let Some(index) = &base
+            && (harness == "copilot" || index.tree_summary.is_some())
+            && index.source_chunks.is_some()
+            && (harness == "copilot" || index.marker_index.is_some())
+            && index.handoff_index.is_some()
+            && (harness != "codex" || index.codex_header.is_some())
+            && (!agent
+                || sidecar
+                    .as_ref()
+                    .is_some_and(|observed| index.claude_sidecar.as_ref() == Some(observed)))
+        {
+            trace("unchanged");
+            // The store holds it as it is now: nothing waits to be written.
+            cache.unpersisted.remove(&key);
+            cache.files.insert(
+                key,
+                CachedFile {
+                    ledger: ledger.clone(),
+                    index: Some(Arc::clone(index)),
+                },
+            );
+            return Ok(Arc::clone(index));
         }
         let from = match (&recorded, &base) {
             (Some(ledger), Some(_)) => ledger.offset,
@@ -1702,26 +2591,241 @@ pub(crate) fn scan_file(
         if shared {
             cache.index_clone += clone_started.elapsed();
         }
+        let started = (harness == "codex")
+            .then(|| cache.scan_measurements.start())
+            .flatten();
+        let header_bytes = if harness == "codex" {
+            // Preserve first-physical-line and unfinished-header semantics.
+            // The same open native handle supplies the event ledger and header.
+            file.seek(SeekFrom::Start(0))?;
+            let mut line = Vec::new();
+            BufReader::new(&mut file).read_until(b'\n', &mut line)?;
+            #[cfg(test)]
+            CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            writable.codex_header = Some(
+                serde_json::from_slice::<Value>(&line)
+                    .ok()
+                    .as_ref()
+                    .map(crate::native_header::CodexHeader::from_record)
+                    .unwrap_or_default(),
+            );
+            #[cfg(test)]
+            if let Some(hook) = AFTER_CODEX_HEADER.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+            Some(line)
+        } else {
+            None
+        };
+        cache.scan_measurements.record("native_header", started, 1);
+        writable.claude_sidecar = sidecar;
+        #[cfg(test)]
+        if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        if harness != "copilot" && writable.tree_summary.is_none() {
+            let started = cache.scan_measurements.start();
+            let (summary, observed) =
+                crate::native_tree::Summary::repair(&mut file, from, harness)?;
+            cache.scan_measurements.record("tree_repair", started, 1);
+            if append
+                && recorded
+                    .as_ref()
+                    .is_some_and(|ledger| observed != ledger.prefix)
+            {
+                if last {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native tree metadata generation changed",
+                    ));
+                }
+                force_replace = true;
+                continue;
+            }
+            writable.tree_summary = Some(summary);
+        }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
-        let offset = parse(&mut file, from, harness, writable)?;
+        if harness != "copilot" && writable.marker_index.is_none() {
+            let started = cache.scan_measurements.start();
+            writable.marker_index = Some(crate::native_marker::Index::repair(&mut file, from)?);
+            cache.scan_measurements.record("marker_repair", started, 1);
+        }
+        if let Some(markers) = &mut writable.marker_index {
+            markers.begin_append();
+        }
+        if writable.handoff_index.is_none() {
+            let started = cache.scan_measurements.start();
+            writable.handoff_index = Some(crate::native_handoff::Index::repair(&mut file, from)?);
+            cache.scan_measurements.record("handoff_repair", started, 1);
+        }
+        if let Some(handoffs) = &mut writable.handoff_index {
+            handoffs.begin_append();
+        }
+        let parse_started = cache.scan_timing.then(Instant::now);
+        let (offset, parsed, bounded) =
+            parse(&mut file, from, harness, writable, cache.scan_byte_budget)?;
+        if let Some(started) = parse_started {
+            cache.parse_duration += started.elapsed();
+        }
+        let bounded = bounded && offset < stat.size;
         let changes = writable
             .dirty_rows
             .take()
             .expect("parser tracks dirty rows");
-        let (prefix, tail) = consumed_hashes(&mut file, offset)?;
+        let started = cache.scan_measurements.start();
+        let captured = if trusted_append {
+            let previous = writable
+                .source_chunks
+                .as_ref()
+                .expect("trusted chunks exist");
+            match crate::source_chunks::capture_append(
+                &mut file,
+                offset,
+                from,
+                previous,
+                recorded.as_ref().expect("trusted ledger exists").prefix,
+            ) {
+                Ok(captured) => captured,
+                Err(_) if !last => {
+                    conservative_append = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            crate::source_chunks::capture(&mut file, offset, from)?
+        };
+        cache.scan_measurements.record("chunk_capture", started, 1);
+        if captured.parsed != parsed
+            || (append
+                && recorded
+                    .as_ref()
+                    .is_some_and(|ledger| captured.before != ledger.prefix))
+        {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native source changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
+        let (prefix, tail) = (captured.prefix, captured.tail);
+        writable.source_chunks = Some(Arc::new(captured.chunks));
+        if let Some(header) = header_bytes {
+            let started = cache.scan_measurements.start();
+            file.seek(SeekFrom::Start(0))?;
+            let mut verified = Vec::new();
+            BufReader::new(&mut file).read_until(b'\n', &mut verified)?;
+            #[cfg(test)]
+            CODEX_HEADER_READS.with(|reads| reads.set(reads.get() + 1));
+            cache.scan_measurements.record("native_header", started, 1);
+            if verified != header {
+                if last {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "native Codex header changed while indexing",
+                    ));
+                }
+                continue;
+            }
+        }
+        if writable
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(path))
+        {
+            if last {
+                // Keep the native session under bounded sidecar churn, using
+                // its existing metadata fallback without an eviction proof.
+                writable.claude_sidecar = None;
+            } else {
+                continue;
+            }
+        }
         let ledger = Ledger {
-            stat,
+            stat: if bounded {
+                Stat {
+                    size: offset,
+                    ..stat
+                }
+            } else {
+                stat
+            },
             offset,
             prefix,
             tail,
         };
+        // A byte slice must retain one exact physical generation across its
+        // checkpoint. Untrusted changes never qualify the continuation proof.
+        if bounded && Stat::of(path).ok().as_ref() != Some(&stat) {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "cold source changed during checkpoint",
+                ));
+            }
+            continue;
+        }
+        let started = writable
+            .marker_index
+            .as_ref()
+            .and_then(|_| cache.scan_measurements.start());
+        let invalid_markers = writable
+            .marker_index
+            .as_ref()
+            .is_some_and(|markers| !markers.valid(&ledger) || markers.verify(&mut file).is_err());
+        cache.scan_measurements.record("marker_verify", started, 1);
+        if invalid_markers {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native parent marker changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
+        let started = writable
+            .handoff_index
+            .as_ref()
+            .and_then(|_| cache.scan_measurements.start());
+        let invalid_handoffs = writable.handoff_index.as_ref().is_some_and(|handoffs| {
+            !handoffs.valid(&ledger) || handoffs.verify(&mut file).is_err()
+        });
+        cache.scan_measurements.record("handoff_verify", started, 1);
+        if invalid_handoffs {
+            if last {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native launch evidence changed while indexing",
+                ));
+            }
+            force_replace = true;
+            continue;
+        }
         #[cfg(test)]
         {
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
                 hook();
             }
         }
-        if cache.commit(
+        if cache.scan_byte_budget.is_some()
+            && recorded.is_none()
+            && !bounded
+            && ledger.offset == ledger.stat.size
+            && cache.scoped
+            && cache.store.is_some()
+        {
+            if cache.cold_writes.len() >= 64 {
+                return Err(io::Error::other("cold index batch exceeds source budget"));
+            }
+            cache.unpersisted.insert(key.clone());
+            cache
+                .cold_writes
+                .push((key.clone(), ledger.clone(), Arc::clone(&index)));
+        } else if cache.commit(
             &key,
             recorded.as_ref(),
             append.then_some(&changes),
@@ -1732,11 +2836,19 @@ pub(crate) fn scan_file(
             trace("conflict");
             continue;
         }
+        if bounded && !cache.unpersisted.contains(&key) {
+            let stem = cache
+                .lock_cache
+                .as_ref()
+                .or(cache.v1_cache.as_ref())
+                .ok_or_else(|| io::Error::other("bounded source requires a durable store"))?;
+            super::events::store::checkpoint_source_scan(stem, &key, &ledger, &stat)?;
+        }
         cache.files.insert(
             key,
             CachedFile {
                 ledger,
-                index: Arc::clone(&index),
+                index: Some(Arc::clone(&index)),
             },
         );
         return Ok(index);
@@ -1746,23 +2858,63 @@ pub(crate) fn scan_file(
 /// Folds the complete lines of `file` from `from` into `index`, and returns
 /// the offset they end at. A last line without its newline is left for the
 /// next read.
-fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) -> io::Result<u64> {
+fn parse(
+    file: &mut LogFile,
+    from: u64,
+    harness: &str,
+    index: &mut FileIndex,
+    budget: Option<u64>,
+) -> io::Result<(u64, [u8; 32], bool)> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
     let mut line = Vec::new();
+    let mut parsed = Sha256::new();
+    let mut bounded = false;
     loop {
+        if budget.is_some_and(|budget| offset.saturating_sub(from) >= budget) {
+            bounded = true;
+            break;
+        }
         line.clear();
         let length = reader.read_until(b'\n', &mut line)?;
-        if length == 0 || !line.ends_with(b"\n") {
+        if length == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            if let Some(markers) = &mut index.marker_index
+                && let Ok(value) = serde_json::from_slice(&line)
+            {
+                markers.observe(&line, offset, false, &value);
+            }
+            if let Some(handoffs) = &mut index.handoff_index
+                && let Ok(value) = serde_json::from_slice(&line)
+            {
+                handoffs.observe(&line, offset, false, &value)?;
+            }
             break;
         }
         let line_offset = offset;
         offset += length as u64;
+        parsed.update(&line);
         #[cfg(test)]
-        PARSED.with(|parsed| parsed.set(parsed.get() + 1));
-        match serde_json::from_slice::<Value>(&line) {
+        {
+            PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+            PARSED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
+            SOURCE_HASHED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
+        }
+        let record = serde_json::from_slice::<Value>(&line);
+        if let Some(summary) = &mut index.tree_summary {
+            summary.observe(record.as_ref().ok(), harness);
+        }
+        match record {
             Ok(record) if record.is_object() => {
+                if let Some(markers) = &mut index.marker_index {
+                    markers.observe(&line, line_offset, true, &record);
+                }
+                if let Some(handoffs) = &mut index.handoff_index {
+                    handoffs.observe(&line, line_offset, true, &record)?;
+                }
                 if harness == "copilot" {
                     copilot(index, &record, line_offset);
                 } else if harness == "claude" {
@@ -1774,7 +2926,7 @@ fn parse(file: &mut LogFile, from: u64, harness: &str, index: &mut FileIndex) ->
             _ => gap(index, line_offset),
         }
     }
-    Ok(offset)
+    Ok((offset, parsed.finalize().into(), bounded))
 }
 
 /// Busy clustering: consecutive line timestamps no more than this far apart
@@ -1967,40 +3119,57 @@ pub(crate) struct Links {
 
 /// Parses an RFC 3339 timestamp to epoch milliseconds.
 pub(crate) fn parse_ms(value: &str) -> Option<i64> {
-    let seconds = i64::try_from(crate::parse_rfc3339(value)?).ok()?;
-    let fraction = value.get(19..).and_then(|tail| tail.strip_prefix('.'));
-    let millis = fraction
-        .map(|digits| {
-            let digits: String = digits
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .chain("000".chars())
-                .take(3)
-                .collect();
-            digits.parse::<i64>().unwrap_or(0)
-        })
-        .unwrap_or(0);
-    Some(seconds * 1000 + millis)
+    let mut cursor = native_harness::time::Cursor::default();
+    cursor.push(value.as_bytes());
+    cursor.millis()
 }
 
+/// The one native clustering decision. A timestamp can affect at most its
+/// predecessor and successor in the already clustered interval list.
+struct BusyUpdate {
+    first: usize,
+    remove: usize,
+    interval: (i64, i64),
+    changed: bool,
+}
+impl BusyUpdate {
+    fn new(busy: &[(i64, i64)], time: i64) -> Self {
+        let position = if busy.last().is_none_or(|last| time >= last.0) {
+            busy.len()
+        } else {
+            busy.partition_point(|interval| interval.0 <= time)
+        };
+        let change = native_harness::activity::cluster(
+            position.checked_sub(1).map(|at| busy[at]),
+            busy.get(position).copied(),
+            time,
+        );
+        let first = if change.left.is_some() {
+            position - 1
+        } else {
+            position
+        };
+        let remove = usize::from(change.left.is_some()) + usize::from(change.right.is_some());
+        let interval = change.interval;
+        let changed = change.changed;
+        Self {
+            first,
+            remove,
+            interval,
+            changed,
+        }
+    }
+    fn apply(self, busy: &mut Vec<(i64, i64)>) {
+        if self.changed {
+            busy.splice(self.first..self.first + self.remove, [self.interval]);
+        }
+    }
+}
 /// Adds one timestamp to a sorted interval list whose intervals are more than
 /// [`BUSY_GAP_MS`] apart. Clustering per file and merging later is the same
 /// as clustering every stamp of a lineage at once.
 pub(crate) fn busy_add(busy: &mut Vec<(i64, i64)>, time: i64) {
-    if let Some(last) = busy.last_mut()
-        && time >= last.0
-    {
-        if time - last.1 <= BUSY_GAP_MS {
-            last.1 = last.1.max(time);
-            return;
-        }
-        busy.push((time, time));
-        return;
-    }
-    busy.push((time, time));
-    busy.sort_unstable();
-    let merged = busy_merge(std::mem::take(busy));
-    *busy = merged;
+    BusyUpdate::new(busy, time).apply(busy);
 }
 
 /// Merges sorted intervals that are no more than [`BUSY_GAP_MS`] apart.
@@ -2020,15 +3189,7 @@ pub(crate) fn busy_merge(mut intervals: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 }
 
 fn push(summary: &mut FileIndex, event: Event) {
-    if event.k == Kind::Gap
-        && summary
-            .events
-            .last()
-            .is_some_and(|last| last.k == Kind::Gap)
-    {
-        return;
-    }
-    summary.events.push(event);
+    native_producer::complete(native_producer::push(summary, event));
 }
 
 /// Compaction dedupe has two limits: an interrupt between lines of one
@@ -2042,39 +3203,7 @@ fn signal(
     n: Option<&str>,
     v: Option<u64>,
 ) {
-    let n = n
-        .filter(|tag| {
-            tag.len() <= 32
-                && tag
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b' '))
-        })
-        .map(str::to_owned);
-    let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
-    if k == SignalKind::Compact
-        && let Some(index) = summary
-            .signals
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, signal)| !signal.k.annotates())
-            .map(|(index, _)| index)
-        && let Some(last) = summary.signal_mut(index)
-        && last.k == SignalKind::Compact
-        && last.at == at
-    {
-        if last.n.is_none() {
-            last.n = n;
-        }
-        if last.v.is_none() {
-            last.v = v;
-        }
-        if last.t.is_none() {
-            last.t = t;
-        }
-        return;
-    }
-    summary.signals.push(Signal { k, o, t, at, n, v });
+    native_producer::complete(native_producer::signal(summary, k, o, t, n, v));
 }
 
 /// Adds a transcript-only marker. The viewer groups consecutive thinking
@@ -2095,13 +3224,12 @@ pub(crate) fn gap(summary: &mut FileIndex, offset: u64) {
 }
 
 pub(crate) fn record_time(record: &Value) -> Option<i64> {
-    field(record, "timestamp")
-        .or_else(|| {
-            record
-                .get("payload")
-                .and_then(|payload| field(payload, "timestamp"))
-        })
-        .and_then(parse_ms)
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut cursor = native_harness::record_time::Cursor::default();
+    while cursor.result().is_none() {
+        cursor = native_producer::complete(native_harness::record_time::step(&mut source, &cursor));
+    }
+    cursor.result().expect("completed native record time")
 }
 
 fn absolute_reset_ms(value: &Value) -> Option<i64> {
@@ -2492,50 +3620,23 @@ fn result_flags(name: Option<&str>, result: Option<&Value>) -> (u8, Option<Strin
 }
 
 fn resolve(summary: &mut FileIndex, id: &str, reply: impl FnOnce(Option<&str>) -> Reply) {
-    let Some(index) = summary.pending.remove(id) else {
-        return;
-    };
-    if let Some(event) = summary.event_mut(index)
-        && event.k == Kind::Tool
-    {
-        event.r = Some(reply(event.n.as_deref()));
-        event.code_mode_open = false;
-    }
+    native_producer::complete(native_producer::resolve(summary, id, reply));
 }
 
 /// Stops unresolved code-mode calls from claiming items in a later turn.
 fn close_code_mode(summary: &mut FileIndex) {
-    for index in summary.pending.values().copied().collect::<Vec<_>>() {
-        if let Some(event) = summary.event_mut(index)
-            && event.k == Kind::Tool
-            && event.code_mode
-        {
-            event.code_mode_open = false;
-        }
-    }
+    native_producer::close_complete(summary);
 }
 
 fn non_code_mode_tool(summary: &FileIndex, id: &str) -> bool {
-    summary.tool_ids.get(id).is_some_and(|indices| {
-        indices.iter().any(|index| {
-            summary
-                .events
-                .get(*index)
-                .is_some_and(|event| event.k == Kind::Tool && !event.code_mode)
-        })
-    })
+    use native_producer::ToolStore;
+    native_producer::complete(summary.latest_tool(id, true, 0)).is_some()
 }
 
 /// The one code-mode call open for item attribution, if exactly one is.
 fn open_code_mode_call(summary: &FileIndex) -> Option<usize> {
-    let mut open = summary.pending.values().copied().filter(|index| {
-        summary
-            .events
-            .get(*index)
-            .is_some_and(|event| event.k == Kind::Tool && event.code_mode && event.code_mode_open)
-    });
-    let first = open.next()?;
-    open.next().is_none().then_some(first)
+    use native_producer::ToolStore;
+    native_producer::complete(summary.unique_open_code_mode())
 }
 
 /// A code-mode script failed: the harness's header, the output's first
@@ -2569,75 +3670,24 @@ fn ident_char(c: char) -> bool {
 /// unescaped, or `None` for a template with `${…}`; and where it ends. An
 /// unterminated literal ends at the end of `text`.
 fn read_literal(text: &str, start: usize) -> (Option<String>, usize) {
-    let mut chars = text[start..].char_indices();
-    let Some((_, quote)) = chars.next() else {
+    use crate::json_string::native_js::{Cursor, Quote};
+    let Some(quote) = text[start..].chars().next().and_then(Quote::of) else {
         return (None, text.len());
     };
+    let mut cursor = Cursor::new(quote);
+    let mut at = start + 1;
     let mut value = String::new();
-    let mut plain = true;
-    // Hex digits only: `from_str_radix` would also take a leading `+`.
-    let hex = |digits: &str| {
-        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
+    while at < text.len() {
+        let step = cursor
+            .step(&text[at..], true, 32 * 1024)
+            .expect("native literal budget");
+        at += step.consumed;
+        value.push_str(&step.output);
+        if cursor.complete {
+            return (cursor.plain.then_some(value), at);
         }
-        u32::from_str_radix(digits, 16).ok()
-    };
-    while let Some((at, c)) = chars.next() {
-        match c {
-            _ if c == quote => return (plain.then_some(value), start + at + c.len_utf8()),
-            '$' if quote == '`' && text[start + at..].starts_with("${") => plain = false,
-            '\\' => {
-                let Some((_, escaped)) = chars.next() else {
-                    break;
-                };
-                let rest = chars.as_str();
-                let code = match escaped {
-                    'n' => Some('\n'),
-                    't' => Some('\t'),
-                    'r' => Some('\r'),
-                    'b' => Some('\u{8}'),
-                    'f' => Some('\u{c}'),
-                    'v' => Some('\u{b}'),
-                    '0' => Some('\0'),
-                    '\n' => None,
-                    'x' => {
-                        let code = rest.get(..2).and_then(hex).and_then(char::from_u32);
-                        if code.is_some() {
-                            chars.nth(1);
-                        }
-                        code.or(Some('x'))
-                    }
-                    'u' if rest.starts_with('{') => {
-                        // `{`, at most six digits and `}`: never a scan
-                        // of the rest of the script.
-                        let close = rest
-                            .char_indices()
-                            .take(8)
-                            .find(|(_, c)| *c == '}')
-                            .map(|(close, _)| close);
-                        let code = close
-                            .and_then(|close| hex(&rest[1..close]))
-                            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'));
-                        if let (Some(close), Some(_)) = (close, code) {
-                            chars.nth(close);
-                        }
-                        code.or(Some('u'))
-                    }
-                    'u' => {
-                        let code = rest
-                            .get(..4)
-                            .and_then(hex)
-                            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'));
-                        if code.is_some() {
-                            chars.nth(3);
-                        }
-                        code.or(Some('u'))
-                    }
-                    other => Some(other),
-                };
-                value.extend(code);
-            }
-            _ => value.push(c),
+        if step.consumed == 0 {
+            break;
         }
     }
     (None, text.len())
@@ -2848,84 +3898,12 @@ fn yielded_session(output: Option<&Value>) -> Option<String> {
 /// operations of its own, or one that failed, stays a step of its own, but
 /// the chunk it printed of an open command is still that command's output.
 fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, offset: u64) {
-    let Some(event) = summary.events.get(index) else {
-        return;
-    };
-    let (call_offset, flags, linked) = (event.o, event.script, event.poll);
-    let failed = event.r.as_ref().is_some_and(|reply| reply.e);
-    let operations = summary
-        .extras
-        .iter()
-        .rev()
-        .take_while(|extra| extra.o > call_offset)
-        .any(|extra| extra.k == Kind::Operation && extra.parent == Some(index));
-    let session = yielded_session(output);
-    // A poll of an open command, by the session id its output names.
-    let known = session
-        .as_ref()
-        .filter(|_| flags & STDIN != 0)
-        .and_then(|session| summary.yields.get(session).copied())
-        .filter(|start| *start < index);
-    if operations || failed {
-        summary.event_mut(index).expect("event exists").poll = None;
-        if let Some(start) = known {
-            push_poll(summary, start, offset);
-        }
-        return;
-    }
-    // The command's completion arrived while this poll ran: its last poll.
-    let ended_here = linked.filter(|start| {
-        summary
-            .events
-            .get(*start)
-            .and_then(|found| found.y.as_ref())
-            .and_then(|yielded| yielded.done.as_ref())
-            .is_some_and(|done| done.o > call_offset)
-    });
-    let start = match session {
-        None => ended_here,
-        Some(_) if known.is_some() => known,
-        Some(_) if ended_here.is_some() => ended_here,
-        // A command these logs haven't seen yet: a new start, whether this
-        // script started it or polls one started where these logs can't
-        // see.
-        Some(session) => {
-            if summary.yields.len() >= YIELDS_MAX
-                && !summary.yields.contains_key(&session)
-                && let Some(oldest) = summary
-                    .yields
-                    .iter()
-                    .min_by_key(|(_, start)| **start)
-                    .map(|(session, _)| session.clone())
-            {
-                summary.yields.remove(&oldest);
-            }
-            summary.yields.insert(session, index);
-            summary.event_mut(index).expect("event exists").poll = None;
-            summary.event_mut(index).expect("event exists").y = Some(Box::default());
-            return;
-        }
-    };
-    let Some(start) = start.filter(|start| *start < index) else {
-        summary.event_mut(index).expect("event exists").poll = None;
-        return;
-    };
-    summary.event_mut(index).expect("event exists").poll = Some(start);
-    push_poll(summary, start, offset);
-}
-
-/// Adds a poll's output line to the yielded command it polled, up to
-/// [`POLLS_MAX`]; past that the command's output is marked cut.
-fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
-    if let Some(found) = summary.event_mut(start)
-        && let Some(yielded) = found.y.as_mut()
-    {
-        if yielded.polls.len() < POLLS_MAX {
-            yielded.polls.push(offset);
-        } else {
-            yielded.cut = true;
-        }
-    }
+    native_producer::complete(native_producer::fold_yield(
+        summary,
+        index,
+        yielded_session(output),
+        offset,
+    ));
 }
 
 /// The yielded command a poll that hasn't answered yet is taken to poll:
@@ -2938,55 +3916,16 @@ fn open_poll(summary: &FileIndex, flags: u8) -> Option<usize> {
 }
 
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
-    if summary.pending.contains_key(id) {
-        resolve(summary, id, |_| Reply {
-            o: offset,
-            t: time,
-            e: code != 0,
-            ..Reply::default()
-        });
-        return;
-    }
-    // A later structured exit code settles an unknown outcome.
-    if let Some(index) = summary
-        .events
-        .iter()
-        .enumerate()
-        .rev()
-        .take(512)
-        .find(|(_, event)| event.k == Kind::Tool && event.id.as_deref() == Some(id))
-        .map(|(index, _)| index)
-        && let Some(reply) = summary.event_mut(index).and_then(|event| event.r.as_mut())
-    {
-        reply.e = code != 0;
-        reply.f &= !UNKNOWN;
-    }
+    native_producer::complete(native_producer::exit_code(summary, id, code, offset, time));
 }
 
 /// Links the plain call `id` to the item at `offset` that completed it.
 fn link_item(summary: &mut FileIndex, id: &str, offset: u64) {
-    let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
-        indices.iter().rev().copied().find(|index| {
-            summary
-                .events
-                .get(*index)
-                .is_some_and(|event| event.k == Kind::Tool && !event.code_mode)
-        })
-    }) else {
-        return;
-    };
-    summary.event_mut(index).expect("event exists").item = Some(offset);
+    native_producer::complete(native_producer::link_item(summary, id, offset));
 }
 
 fn tool_event(summary: &mut FileIndex, event: Event) {
-    if let Some(id) = &event.id {
-        let index = summary.events.len();
-        summary.tool_ids.entry(id.clone()).or_default().push(index);
-        if event.r.is_none() {
-            summary.pending.insert(id.clone(), index);
-        }
-    }
-    summary.events.push(event);
+    native_producer::complete(native_producer::tool_event(summary, event));
 }
 
 /// A completed native connector call is a tool even when no legacy call was
@@ -3056,11 +3995,25 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
 /// Claude Code lines: `offset` is the line's byte offset.
 fn activity(summary: &mut FileIndex, time: Option<i64>) {
     if let Some(time) = time {
-        busy_add(&mut summary.busy, time);
+        if let Some(dirty) = &mut summary.dirty_rows {
+            let update = BusyUpdate::new(&summary.busy, time);
+            if update.changed {
+                for (start, _) in &summary.busy[update.first..update.first + update.remove] {
+                    dirty.busy.insert(*start, None);
+                }
+                dirty
+                    .busy
+                    .insert(update.interval.0, Some(update.interval.1));
+            }
+            update.apply(&mut summary.busy);
+        } else {
+            busy_add(&mut summary.busy, time);
+        }
         // Earliest and latest, not first and last line: lines aren't always
         // written in time order.
-        summary.first = Some(summary.first.map_or(time, |first| first.min(time)));
-        summary.last = Some(summary.last.map_or(time, |last| last.max(time)));
+        let (first, last) = native_harness::activity::bounds(summary.first, summary.last, time);
+        summary.first = Some(first);
+        summary.last = Some(last);
     }
 }
 
@@ -3071,16 +4024,15 @@ fn number(value: &Value, key: &str) -> u64 {
 pub(crate) fn claude(summary: &mut FileIndex, record: &Value, offset: u64) {
     claude_events(summary, record, offset);
     if let Some(uuid) = field(record, "uuid") {
-        let indices: Vec<_> = summary
-            .events
-            .iter()
-            .enumerate()
-            .rev()
-            .take_while(|(_, event)| event.o == offset)
-            .map(|(index, _)| index)
-            .collect();
-        for index in indices {
-            summary.event_mut(index).expect("event exists").u = Some(uuid.to_owned());
+        let identity = uuid.to_owned();
+        let mut before = None;
+        loop {
+            match native_producer::complete(native_harness::claude_record_identity_step(
+                summary, offset, &identity, before,
+            )) {
+                native_harness::RecordIdentity::Progress(sequence) => before = Some(sequence),
+                native_harness::RecordIdentity::Complete => break,
+            }
         }
     }
 }
@@ -3094,100 +4046,44 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
     if let Some(branch) = field(record, "gitBranch") {
         summary.branch = Some(branch.to_owned());
     }
-    // Tokens de-duplicated by message id, as V1 counts them.
-    if let Some(message) = record.get("message")
-        && let (Some(id), Some(usage)) = (field(message, "id"), message.get("usage"))
-    {
-        let input = number(usage, "input_tokens");
-        let cache_write = number(usage, "cache_creation_input_tokens");
-        let cache_read = number(usage, "cache_read_input_tokens");
-        let output = number(usage, "output_tokens");
-        let split = usage
-            .get("cache_creation")
-            .and_then(Value::as_object)
-            .and_then(|cache_creation| {
-                let five = cache_creation
-                    .get("ephemeral_5m_input_tokens")
-                    .and_then(Value::as_u64)?;
-                let one = cache_creation
-                    .get("ephemeral_1h_input_tokens")
-                    .and_then(Value::as_u64)?;
-                (five.saturating_add(one) == cache_write).then_some((five, one))
-            });
-        let (cache_write_5m, cache_write_1h, split_unknown) = split
-            .map(|(five, one)| (five, one, false))
-            .unwrap_or((cache_write, 0, true));
-        let web_search_requests = usage
-            .get("server_tool_use")
-            .and_then(|tools| tools.get("web_search_requests"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let timestamp = time;
-        if let Some(dirty) = &mut summary.dirty_rows {
-            dirty.usage.insert(id.to_owned());
-        }
-        let mut record_ids = summary
-            .usage_by_id
-            .get(id)
-            .map(|usage| usage.record_ids.clone())
-            .unwrap_or_default();
-        if field(record, "type") == Some("assistant")
-            && let Some(uuid) = field(record, "uuid")
-        {
-            record_ids.insert(uuid.to_owned());
-        }
-        summary.usage_by_id.insert(
-            id.to_owned(),
-            MessageUsage {
-                record_ids,
-                model: field(message, "model").map(str::to_owned),
-                tokens: Tokens {
-                    input: input + cache_write + cache_read,
-                    cached_input: cache_read,
-                    output,
-                    reasoning_output: 0,
-                    total: input + cache_write + cache_read + output,
-                },
-                model_tokens: ModelTokens {
-                    input,
-                    output,
-                    cache_write,
-                    cache_read,
-                },
-                billing: BillingUsage {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write_5m,
-                    cache_write_1h,
-                    web_search_requests,
-                    speed: field(usage, "speed").map(str::to_owned),
-                    service_tier: field(usage, "service_tier").map(str::to_owned),
-                    prompt_size: input
-                        .saturating_add(cache_read)
-                        .saturating_add(cache_write_5m)
-                        .saturating_add(cache_write_1h),
-                    timestamp,
-                    split_unknown,
-                },
-            },
-        );
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut usage = native_harness::claude_usage::Cursor::default();
+    while usage.result().is_none() {
+        usage = native_producer::complete(native_harness::claude_usage::step(
+            &mut source,
+            &usage,
+            time,
+        ));
+    }
+    if let Some(Some(report)) = usage.result() {
+        native_producer::complete(native_harness::claude_usage::Store::claude_report(
+            summary,
+            report.clone(),
+        ));
     }
     if let Some(id) = field(record, "session_id")
         && Some(id) != field(record, "sessionId")
+        && summary.links.session_ids.insert(id.to_owned())
+        && let Some(dirty) = &mut summary.dirty_rows
     {
-        summary.links.session_ids.insert(id.to_owned());
+        dirty.links.insert(("session".into(), id.to_owned()));
     }
     match field(record, "type") {
         Some("continued-in") => {
-            if let Some(id) = field(record, "continuedInSessionId") {
-                summary.links.continued_in.insert(id.to_owned());
+            if let Some(id) = field(record, "continuedInSessionId")
+                && summary.links.continued_in.insert(id.to_owned())
+                && let Some(dirty) = &mut summary.dirty_rows
+            {
+                dirty.links.insert(("continued".into(), id.to_owned()));
             }
             return;
         }
         Some("bridge-session") => {
-            if let Some(id) = field(record, "bridgeSessionId") {
-                summary.links.bridges.insert(id.to_owned());
+            if let Some(id) = field(record, "bridgeSessionId")
+                && summary.links.bridges.insert(id.to_owned())
+                && let Some(dirty) = &mut summary.dirty_rows
+            {
+                dirty.links.insert(("bridge".into(), id.to_owned()));
             }
             return;
         }
@@ -3844,41 +4740,33 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
 }
 
 /// Native Copilot records preserve exact physical event and call identities.
-fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
-    let Some(identity) = field(record, "id").filter(|id| !id.is_empty()) else {
-        gap(summary, offset);
-        return;
-    };
-    let data = &record["data"];
-    if summary.copilot.is_none() {
-        if field(record, "type") != Some("session.start") {
+pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut admission = native_harness::copilot_admission::Cursor::default();
+    while admission.result().is_none() {
+        let prepared = native_producer::complete(native_harness::copilot_admission::prepare(
+            &mut source,
+            summary,
+            &admission,
+        ));
+        native_producer::complete(native_harness::copilot_admission::apply(
+            summary,
+            &mut admission,
+            prepared,
+        ));
+    }
+    let (admitted, identity) = admission.result().expect("completed native admission");
+    match admitted {
+        native_harness::Admission::Gap => {
+            gap(summary, offset);
             return;
         }
-        summary.copilot = Some(crate::copilot::Index {
-            version: field(data, "copilotVersion").unwrap_or("").to_owned(),
-            session_id: field(data, "sessionId").unwrap_or("").to_owned(),
-            ..Default::default()
-        });
+        native_harness::Admission::BeforeStart | native_harness::Admission::Duplicate => return,
+        native_harness::Admission::Accepted => {}
     }
-    if !summary
-        .copilot
-        .as_mut()
-        .expect("initialized")
-        .seen
-        .insert(identity.to_owned())
-    {
-        return;
-    }
+    let identity = identity.expect("admitted native identity").as_str();
+    let data = &record["data"];
     let time = record_time(record);
-    if let Some(timestamp) = field(record, "timestamp")
-        && time.is_some()
-    {
-        let index = summary.copilot.as_mut().expect("initialized");
-        if index.first.is_none() {
-            index.first = Some(timestamp.into());
-        }
-        index.last = Some(timestamp.into());
-    }
     activity(summary, time);
     let event = Event {
         o: offset,
@@ -3886,198 +4774,54 @@ fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
         u: Some(identity.to_owned()),
         ..Default::default()
     };
-    match field(record, "type").unwrap_or("") {
-        "session.start" => {
-            summary.cwd = data
-                .get("context")
-                .and_then(|c| field(c, "cwd"))
-                .map(str::to_owned);
-            summary.entrypoint = Some("copilot-cli".into());
-            summary.last_model = field(data, "selectedModel").map(str::to_owned);
-            setting(
-                summary,
-                SignalKind::Model,
-                offset,
-                time,
-                field(data, "selectedModel"),
-            );
-            setting(
-                summary,
-                SignalKind::Effort,
-                offset,
-                time,
-                field(data, "reasoningEffort"),
-            );
-            summary.copilot.as_mut().expect("initialized").lifecycle = Some("session.start".into());
-        }
-        "session.resume" => {
-            summary.copilot.as_mut().expect("initialized").lifecycle = Some("session.resume".into())
-        }
-        "session.model_change" => {
-            let model = field(data, "newModel").or_else(|| field(data, "model"));
-            setting(summary, SignalKind::Model, offset, time, model);
-            if let Some(model) = model {
-                summary.last_model = Some(model.to_owned());
-            }
-        }
-        "user.message" => {
-            if field(data, "content").is_some() {
-                summary.events.push(Event {
-                    k: Kind::U,
-                    id: field(data, "messageId").map(str::to_owned),
-                    ..event
-                });
-            }
-        }
-        "assistant.message" => {
-            if let Some(model) = field(data, "model") {
-                summary.last_model = Some(model.into());
-                setting(summary, SignalKind::Model, offset, time, Some(model));
-            }
-            if field(data, "content").is_some_and(|text| !text.is_empty()) {
-                summary.events.push(Event {
-                    k: Kind::A,
-                    id: field(data, "messageId").map(str::to_owned),
-                    ..event.clone()
-                });
-            }
-            for (block, request) in data
-                .get("toolRequests")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .enumerate()
-            {
-                let id = field(request, "toolCallId").filter(|id| !id.is_empty());
-                if let Some(indices) = id.and_then(|id| summary.tool_ids.get(id)).cloned() {
-                    for index in indices {
-                        if let Some(event) = summary.event_mut(index) {
-                            event.r = None;
-                        }
-                    }
-                }
-                // Repeated native call ids are ambiguous, never resolved by proximity.
-                tool_event(
-                    summary,
-                    Event {
-                        k: Kind::Tool,
-                        b: block as u32,
-                        id: id.map(str::to_owned),
-                        n: field(request, "name").map(str::to_owned),
-                        ..event.clone()
-                    },
-                );
-            }
-        }
-        "tool.execution_start" => {
-            // A start is metadata for the assistant's exact request; no fabricated
-            // call from an orphan start or name/timing attribution.
-        }
-        "tool.execution_complete" => {
-            let Some(id) = field(data, "toolCallId") else {
-                return;
-            };
-            if summary
-                .tool_ids
-                .get(id)
-                .is_none_or(|indices| indices.len() != 1)
-            {
-                return;
-            }
-            let success = data.get("success").and_then(Value::as_bool);
-            let exit = data
-                .get("shellExecution")
-                .and_then(|s| s.get("exitCode"))
-                .and_then(Value::as_i64);
-            let denied = data.get("error").and_then(|e| field(e, "code")) == Some("denied");
-            let mut flags = if denied { DENIED } else { 0 };
-            if success.is_none()
-                || (summary
-                    .tool_ids
-                    .get(id)
-                    .and_then(|v| v.first())
-                    .and_then(|i| summary.events.get(*i))
-                    .and_then(|e| e.n.as_deref())
-                    == Some("bash")
-                    && exit.is_none()
-                    && success == Some(true))
-            {
-                flags |= UNKNOWN;
-            }
-            if denied {
-                note(
-                    summary,
-                    SignalKind::Denial,
-                    offset,
-                    time,
-                    "permission_denied".into(),
-                    call_index(summary, id),
-                );
-            }
-            resolve(summary, id, |_| Reply {
-                o: offset,
-                t: time,
-                e: success == Some(false) || exit.is_some_and(|code| code != 0),
-                f: flags,
-                ..Default::default()
-            });
-        }
-        "abort" => {
-            // No toolCallId: retain cancellation; pending calls remain unknown.
-            setting(
-                summary,
-                SignalKind::Interrupt,
-                offset,
-                time,
-                field(data, "reason"),
-            );
-        }
-        "session.compaction_complete" => {
-            note(
-                summary,
-                SignalKind::Compact,
-                offset,
-                time,
-                "manual".into(),
-                None,
-            );
-        }
-        "subagent.started" | "subagent.completed" => {
-            summary.extras.push(Event {
-                k: Kind::Harness,
-                n: field(record, "type").map(str::to_owned),
-                id: field(data, "toolCallId").map(str::to_owned),
-                ..event
-            });
-        }
-        "session.shutdown" => {
-            let index = summary.copilot.as_mut().expect("initialized");
-            index.lifecycle = Some("session.shutdown".into());
-            // Each shutdown replaces the preceding cumulative snapshot, including
-            // child usage. Never add agentMetrics or compaction metrics to it.
-            index.usage = crate::copilot::snapshot(data);
-            index.usage_source = Some(crate::copilot::Observation {
-                event_id: identity.into(),
-                offset,
-                timestamp: time,
-            });
-            index.usage_events = index
-                .usage
-                .as_ref()
-                .map(|usage| {
-                    usage
-                        .by_model
-                        .iter()
-                        .map(|(model, tokens)| CodexUsageEvent {
-                            model: model.clone(),
-                            tokens: tokens.clone(),
-                            timestamp: time,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-        }
-        _ => {}
+    let mut source = native_harness::record::ValueRecord { record };
+    let mut metadata = native_harness::copilot_metadata::Cursor::new(offset, time);
+    while metadata.result().is_none() {
+        let prepared = native_producer::complete(native_harness::copilot_metadata::prepare(
+            &mut source,
+            summary,
+            &metadata,
+        ));
+        native_producer::complete(native_harness::copilot_metadata::apply(
+            summary,
+            &mut metadata,
+            prepared,
+        ));
+    }
+    if metadata.result() == Some(true) {
+        let index = summary.copilot.as_mut().expect("initialized");
+        // Each shutdown replaces the preceding cumulative snapshot, including
+        // child usage. Never add agentMetrics or compaction metrics to it.
+        index.usage = crate::copilot::snapshot(data);
+        index.usage_source = Some(crate::copilot::Observation {
+            event_id: identity.into(),
+            offset,
+            timestamp: time,
+        });
+        index.usage_events = index
+            .usage
+            .as_ref()
+            .map(|usage| {
+                usage
+                    .by_model
+                    .iter()
+                    .map(|(model, tokens)| CodexUsageEvent {
+                        model: model.clone(),
+                        tokens: tokens.clone(),
+                        timestamp: time,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let mut record = native_harness::record::ValueRecord { record };
+    let mut cursor = native_harness::copilot::Cursor::new(event.into());
+    while !cursor.complete() {
+        native_producer::complete(native_harness::copilot::step(
+            &mut record,
+            summary,
+            &mut cursor,
+        ));
     }
 }
 
@@ -5039,7 +5783,10 @@ mod tests {
             .files
             .get(key.as_ref())
             .expect("the rollout is stored");
-        assert_eq!(format!("{:?}", entry.index), format!("{fresh_index:?}"));
+        assert_eq!(
+            format!("{:?}", entry.index.as_ref().unwrap()),
+            format!("{fresh_index:?}")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5509,6 +6256,47 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
+    #[test]
+    fn missing_or_unsupported_source_proofs_repair_without_event_replay() {
+        let root = scratch("chunk-proof-repair");
+        let path = root.join("lead.jsonl");
+        let cache_path = root.join("index.json");
+        write_lines(&path, &[claude_tool("call")]);
+        let mut cache = EventCache::open(&cache_path);
+        let initial = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let proof = initial.source_chunks.clone().unwrap();
+        let ledger = cache.revision(&path).unwrap();
+        drop(cache);
+        let key = format!(
+            "native_source_chunks:{:x}:header",
+            Sha256::digest(path.to_string_lossy().as_bytes())
+        );
+        for missing in [false, true] {
+            let connection = rusqlite::Connection::open(EventCache::path(&cache_path)).unwrap();
+            if missing {
+                connection
+                    .execute("DELETE FROM meta WHERE key=?1", [&key])
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
+                        [&key],
+                    )
+                    .unwrap();
+            }
+            drop(connection);
+            let mut cache = EventCache::open(&cache_path);
+            let parsed = PARSED.with(std::cell::Cell::get);
+            let repaired = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert_eq!(PARSED.with(std::cell::Cell::get), parsed);
+            assert_eq!(repaired.events.len(), initial.events.len());
+            assert_eq!(repaired.source_chunks, Some(proof.clone()));
+            assert_eq!(cache.revision(&path), Some(ledger));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn append_lines(path: &Path, lines: &[Value]) {
         use std::io::Write;
         let mut text = String::new();
@@ -5554,7 +6342,7 @@ mod tests {
         assert!(cache.store.is_some(), "the store opens");
         let key = path.to_string_lossy();
         let entry = cache.files.get(key.as_ref()).expect("the file is stored");
-        format!("{:?}", entry.index)
+        format!("{:?}", entry.index.as_ref().unwrap())
     }
 
     /// The store's bytes and its WAL's, as text: a value stored in any row
@@ -5576,6 +6364,104 @@ mod tests {
 
     fn parsed() -> u64 {
         PARSED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn receiver_append_chain_reads_only_boundary_and_recovers_interrupted_or_corrupt_proofs() {
+        use std::io::Write;
+        for history_bytes in [4 * 1024 * 1024, 16 * 1024 * 1024] {
+            let root = scratch("receiver-append-chain");
+            let options = crate::Options {
+                cache: root.join("index.json"),
+                claude_home: root.join("claude"),
+                ..crate::Options::default()
+            };
+            let input = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/project/session.jsonl".into(),
+            };
+            let path = input.full_path(&options);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let line = format!(
+                "{}\n",
+                serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"session","padding":"x".repeat(8192)})
+            );
+            fs::write(&path, line.repeat(history_bytes / line.len())).unwrap();
+            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let append = "{\"type\":\"system\",\"sessionId\":\"session\"}\n";
+            let generation = "0123456789abcdef0123456789abcdef";
+            // Receiver intents survive replay as one generation-bound chain.
+            let before = SOURCE_READ_BYTES.with(std::cell::Cell::get);
+            let hashed = SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
+            let full = HASHED_BYTES.with(std::cell::Cell::get);
+            let parsed = PARSED.with(std::cell::Cell::get);
+            for _ in 0..5 {
+                let from = fs::metadata(&path).unwrap().len();
+                let intent =
+                    crate::SessionSourceWrite::begin(&options, &input, Some(generation), from)
+                        .unwrap();
+                assert_eq!(
+                    scan_file(&path, "claude", &mut cache, &mut false)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::WouldBlock,
+                    "producer admitted an active Raw write"
+                );
+                let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writer.write_all(append.as_bytes()).unwrap();
+                writer.sync_all().unwrap();
+                intent.complete(from + append.len() as u64).unwrap();
+            }
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let reads = SOURCE_READ_BYTES.with(std::cell::Cell::get) - before;
+            let hashes = SOURCE_HASHED_BYTES.with(std::cell::Cell::get) - hashed;
+            assert_eq!(PARSED.with(std::cell::Cell::get) - parsed, 5);
+            assert_eq!(
+                HASHED_BYTES.with(std::cell::Cell::get),
+                full,
+                "trusted append rehashed full history"
+            );
+            assert!(reads < 512 * 1024, "trusted append read {reads} bytes");
+            assert!(hashes < 512 * 1024, "trusted append hashed {hashes} bytes");
+            eprintln!(
+                "trusted-chain history_bytes={history_bytes} records=5 source_read_bytes={reads} source_hashed_bytes={hashes} full_prefix_hashed_bytes=0"
+            );
+            // A crash between Raw fsync and evidence commit withdraws trust.
+            let from = fs::metadata(&path).unwrap().len();
+            let intent =
+                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+            let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writer.write_all(append.as_bytes()).unwrap();
+            writer.sync_all().unwrap();
+            drop(intent);
+            let full = HASHED_BYTES.with(std::cell::Cell::get);
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert!(
+                HASHED_BYTES.with(std::cell::Cell::get) - full >= from,
+                "interrupted proof bypassed conservative verification"
+            );
+            // Corrupt continuation words cannot bless the previous prefix.
+            let from = fs::metadata(&path).unwrap().len();
+            let intent =
+                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+            writer.write_all(append.as_bytes()).unwrap();
+            writer.sync_all().unwrap();
+            intent.complete(from + append.len() as u64).unwrap();
+            drop(cache);
+            let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+            db.execute("UPDATE meta SET value=json_set(value,'$.resume.words[0]',0) WHERE key LIKE 'native_source_chunks:%:header'",[]).unwrap();
+            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            let full = HASHED_BYTES.with(std::cell::Cell::get);
+            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert!(
+                HASHED_BYTES.with(std::cell::Cell::get) - full >= from,
+                "corrupt chaining state bypassed prefix repair"
+            );
+            drop(cache);
+            drop(db);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -5606,6 +6492,69 @@ mod tests {
         assert_eq!(format!("{grown:?}"), format!("{loaded:?}"));
         drop(cache);
         drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn published_scoped_payloads_release_without_losing_ledgers_or_reparsing_history() {
+        let root = scratch("released-published-index");
+        let path = root.join("log.jsonl");
+        let cache_path = root.join("index.json");
+        write_lines(&path, &[claude_tool("call")]);
+        let mut cache = EventCache::open_scoped(&cache_path).unwrap();
+        let first = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let weak = Arc::downgrade(&first);
+        let expected = format!("{first:?}");
+        let revision = cache.revision(&path);
+        let source = cache.source(&path, "selected").unwrap();
+        drop(first);
+        cache.release_published_indexes();
+        assert!(
+            weak.upgrade().is_none(),
+            "published payload remains resident"
+        );
+        assert!(cache.selected_index(&path).is_none());
+        assert_eq!(cache.revision(&path), revision);
+        assert_eq!(cache.source(&path, "selected").unwrap(), source);
+        assert_eq!(cache.paths().collect::<Vec<_>>(), [path.to_str().unwrap()]);
+        let before = parsed();
+        ledger_trace();
+        let unchanged = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(format!("{unchanged:?}"), expected);
+        assert_eq!(parsed(), before, "released history was reparsed");
+        assert_eq!(ledger_trace(), ["unchanged"]);
+        drop(unchanged);
+        cache.release_published_indexes();
+        append_lines(&path, &[claude_result("call"), claude_tool("next")]);
+        touch(&path, 1);
+        let appended = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(parsed() - before, 2, "append reread the old generation");
+        assert!(appended.events[0].r.is_some());
+        assert_eq!(format!("{appended:?}"), stored(&cache_path, &path));
+        drop(appended);
+        let key = path.to_string_lossy().into_owned();
+        cache.unpersisted.insert(key.clone());
+        cache.release_published_indexes();
+        assert!(
+            cache.selected_index(&path).is_some(),
+            "uncommitted evidence was evicted"
+        );
+        cache.unpersisted.remove(&key);
+        cache.busy = true;
+        cache.release_published_indexes();
+        assert!(
+            cache.selected_index(&path).is_some(),
+            "busy evidence was evicted"
+        );
+        cache.busy = false;
+        cache.store = None;
+        cache.release_published_indexes();
+        assert!(
+            cache.selected_index(&path).is_some(),
+            "memory-only evidence was evicted"
+        );
+        drop(cache);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,4 +1,4 @@
-import type { JsonObject } from './model';
+import type { JsonObject } from './api';
 export interface ControlRequest {
   id: string;
   kind: 'permission' | 'question';
@@ -20,6 +20,8 @@ export interface ControlRuntimeStatus {
   updating?: boolean;
 }
 export interface ControlSnapshot {
+  /** First input to a newly created isolated local thread; no Catalog ownership. */
+  launch?: true;
   runtime?: ControlRuntimeStatus;
   thread: string;
   generation: string;
@@ -113,6 +115,17 @@ export function parseControl(value: unknown): ControlSnapshot | null {
     )
       throw new Error('Invalid control request');
   }
+  if (
+    value.launch !== undefined &&
+    (value.launch !== true ||
+      value.activeTurn !== null ||
+      value.requests.length !== 0 ||
+      Object.keys(value.actions).length !== 0 ||
+      ['steer', 'interrupt', 'commandApproval', 'fileApproval', 'questions'].some(
+        (key) => record(value.capabilities) && value.capabilities[key] === true,
+      ))
+  )
+    throw new Error('Invalid launch authority');
   return value as unknown as ControlSnapshot;
 }
 export interface ControlView {

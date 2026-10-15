@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 import { test } from 'node:test';
+import { build } from 'esbuild';
 import { auditText } from '../../tests/ui/text-audit.mjs';
 const root = new URL('../../', import.meta.url).pathname;
 test(
@@ -145,6 +146,58 @@ test(
         await new Promise((r) => setTimeout(r, 50));
       }
       assert.ok(url, output);
+      // A supported host can resolve a bookmark while its native Catalog is
+      // still publishing. Keep the real authorized response, marking only the
+      // first two successful replies incomplete as a slow producer would.
+      const bookmark = await browser.newPage();
+      const { outputFiles } = await build({
+        absWorkingDir: join(root, 'ui'),
+        stdin: {
+          contents:
+            "import {mountViewerApplication} from './src/application'; queueMicrotask(()=>mountViewerApplication({catalogSources:true}));",
+          resolveDir: join(root, 'ui'),
+        },
+        bundle: true,
+        write: false,
+        format: 'iife',
+      });
+      let bookmarkReads = 0;
+      const bookmarkRequests = [];
+      bookmark.on('request', (request) => bookmarkRequests.push(new URL(request.url()).pathname));
+      await bookmark.route('**/viewer.js', (route) =>
+        route.fulfill({ contentType: 'text/javascript', body: outputFiles[0].text }),
+      );
+      await bookmark.route('**/api/session-locate?*', async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const body = await response.json();
+        bookmarkReads++;
+        return route.fulfill({
+          response,
+          json: bookmarkReads <= 2 ? { ...body, unavailable: 1 } : body,
+        });
+      });
+      await bookmark.goto(url[1] + '/s/codex/deps?t=' + url[2]);
+      await bookmark.getByText('The recorded session index is updating. Retrying…').waitFor();
+      await bookmark.waitForFunction(
+        () => document.querySelector('#topbar .t')?.textContent === 'deps audit',
+        {},
+        { timeout: 5000 },
+      );
+      assert.ok(bookmarkReads >= 3, 'incomplete native lookups retry before selection');
+      assert.equal(new URL(bookmark.url()).searchParams.get('machine'), 'local');
+      const sourceLabel = (await readFile(join(home, 'proc/sys/kernel/hostname'), 'utf8')).trim();
+      await bookmark.waitForFunction(
+        (label) =>
+          document.querySelector('#page .divider.started .dv-machine')?.textContent === label,
+        sourceLabel,
+        { timeout: 5000 },
+      );
+      assert.ok(
+        bookmarkRequests.every((path) => !/^\/api\/(model|tx|events)(?:\/|$)/.test(path)),
+        'bookmark resolution does not warm a workspace model',
+      );
+      await bookmark.close();
       const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }),
         errors = [],
         requests = [],
@@ -190,11 +243,26 @@ test(
           }),
         );
       const start = performance.now();
-      await page.goto(url[1] + '/?t=' + url[2]);
+      await page.goto(url[1] + '/sessions?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
       const firstList = performance.now() - start;
       const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      const beforeTyping = requests.length;
       await query.fill('backlog');
+      assert.equal(
+        await page.evaluate(() => new URL(location.href).searchParams.get('q')),
+        'backlog',
+      );
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+      assert.ok(
+        requests.slice(beforeTyping).every((path) => {
+          const target = new URL(path, url[1]);
+          return target.pathname !== '/api/sessions' || target.searchParams.get('q') !== 'backlog';
+        }),
+        'typing a draft does not submit native metadata reads',
+      );
       await query.press('Enter');
       await page.waitForFunction(
         () => document.querySelectorAll('#page [data-session-row="list"]').length === 1,
@@ -204,7 +272,7 @@ test(
       const key = 'backlog';
       const selectedStart = performance.now();
       await page.locator('#page [data-id="backlog"]').click();
-      await page.locator('#page [data-entry-key]').first().waitFor({ timeout: 60000 });
+      await page.locator('#page [data-entry-key]:visible').first().waitFor({ timeout: 60000 });
       const selected = performance.now() - selectedStart;
       const preview = page.getByRole('button', { name: 'Load recorded text', exact: true });
       await preview.waitFor();
@@ -228,7 +296,7 @@ test(
       await page.locator(`#page [data-id="${key}"]`).waitFor();
       const warmStart = performance.now();
       await page.locator(`#page [data-id="${key}"]`).click();
-      await page.locator('#page [data-entry-key]').first().waitFor();
+      await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
       const warm = performance.now() - warmStart;
       assert.equal(
         await page.locator('#page [data-entry-key]').first().getAttribute('data-entry-key'),
@@ -240,7 +308,7 @@ test(
         false,
       );
       const visual = [];
-      for (const width of [390, 1280]) {
+      for (const width of [390, 820, 1280]) {
         for (const colorScheme of ['light', 'dark']) {
           const context = await browser.newContext({
             viewport: { width, height: 860 },
@@ -248,10 +316,10 @@ test(
           });
           const check = await context.newPage();
           check.on('pageerror', (e) => errors.push(e.message));
-          await check.goto(url[1] + '/?t=' + url[2]);
+          await check.goto(url[1] + '/sessions?t=' + url[2]);
           await check.locator('#page [data-id="backlog"]').waitFor();
           await check.locator('#page [data-id="backlog"]').click();
-          await check.locator('#page [data-entry-key]').first().waitFor();
+          await check.locator('#page [data-entry-key]:visible').first().waitFor();
           await check.evaluate(() => document.fonts.ready);
           const audit = await auditText(check);
           assert.equal(audit.smallCount, 0, JSON.stringify(audit.small));
@@ -308,6 +376,48 @@ test(
           await context.close();
         }
       }
+      const nativeContext = await browser.newContext({ javaScriptEnabled: false });
+      try {
+        const nativePage = await nativeContext.newPage();
+        const nativeRequests = [];
+        nativePage.on('request', (request) => nativeRequests.push(new URL(request.url()).pathname));
+        const listing = await nativePage.goto(url[1] + '/sessions?native=1&t=' + url[2]);
+        assert.equal(listing.status(), 200);
+        await nativePage.locator('a[href^="/s/claude/backlog?"]').click();
+        await nativePage.getByRole('region', { name: 'Session transcript' }).waitFor();
+        const earlier = nativePage.getByRole('link', { name: 'Earlier records', exact: true });
+        const anchor = new URL(await earlier.getAttribute('href'), url[1]);
+        assert.ok(anchor.searchParams.get('generation'), 'HTML paging binds its native generation');
+        assert.equal(anchor.searchParams.get('machine'), 'local');
+        await earlier.click();
+        assert.equal(
+          new URL(nativePage.url()).searchParams.get('generation'),
+          anchor.searchParams.get('generation'),
+        );
+        assert.ok(
+          (await nativePage
+            .locator('section[aria-label="Session transcript"] > article')
+            .count()) <= 60,
+        );
+        await nativePage.goto(url[1] + '/s/codex/native-tools?machine=local&native=1');
+        const thinking = nativePage
+          .locator('details')
+          .filter({ has: nativePage.locator('summary', { hasText: /^Thinking$/ }) });
+        assert.ok(
+          (await thinking.count()) > 0,
+          'native reasoning remains accessible without JavaScript',
+        );
+        assert.equal(
+          await thinking.first().getAttribute('open'),
+          null,
+          'Thinking starts collapsed',
+        );
+        assert.ok(
+          nativeRequests.every((path) => !/^\/api\/(model|tx|events|analytics)(?:\/|$)/.test(path)),
+        );
+      } finally {
+        await nativeContext.close();
+      }
       const representative = [];
       for (const session of ['harbor', 'q-codex', 'h-failed', 'native-tools']) {
         const check = await browser.newPage({ viewport: { width: 1280, height: 860 } });
@@ -321,15 +431,22 @@ test(
           )
             nativeRanges.push(response.json());
         });
-        await check.goto(url[1] + '/?t=' + url[2]);
+        await check.goto(url[1] + '/sessions?t=' + url[2]);
         const row = check.locator(`#page [data-id="${session}"]`);
         await row.waitFor();
         await row.click();
-        await check.locator('#page [data-entry-key]').first().waitFor();
+        await check.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
         assert.equal(await check.getByText('Invalid string', { exact: true }).count(), 0);
         assert.equal(await check.getByText('Invalid object', { exact: true }).count(), 0);
         const failed = check.locator('#page .step.err').first();
         if (await failed.count()) {
+          // Native tools retain the shared collapsed event-group presentation.
+          await failed.evaluate((node) =>
+            node
+              .closest('.tgroup')
+              ?.querySelector(':scope > button[aria-expanded="false"]')
+              ?.click(),
+          );
           await failed.locator(':scope > button').click();
           assert.equal(
             await failed.locator(':scope > button').getAttribute('aria-expanded'),
@@ -341,8 +458,17 @@ test(
           );
         }
         const body = await check.locator('#page').innerText();
-        if (session === 'harbor')
-          assert.ok(body.includes('Original action prompt is unavailable.'));
+        if (session === 'harbor') {
+          assert.equal(body.includes('Original action prompt is unavailable.'), false);
+          assert.ok(
+            await check.locator('#page .child-card').count(),
+            'recorded child sessions are presented',
+          );
+          assert.ok(
+            await check.locator('#page [data-turn]').count(),
+            'recorded turn navigation is retained',
+          );
+        }
         if (session === 'native-tools') {
           const nativeEntries = (await Promise.all(nativeRanges)).flatMap((range) => range.entries);
           const tools = nativeEntries.filter((entry) => entry.k === 'tool');
@@ -379,6 +505,8 @@ test(
       assert.deepEqual(errors, []);
       // Losing the observed native source must remain visible without erasing useful
       // previously loaded history or issuing a complete-model restoration request.
+      await page.bringToFront();
+      await page.waitForFunction(() => document.visibilityState === 'visible');
       const retainedEntry = await page.locator('#page [data-entry-key]').first().elementHandle();
       await rm(join(home, 'claude', backlog));
       await page.waitForFunction(

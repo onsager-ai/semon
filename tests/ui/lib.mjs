@@ -62,14 +62,6 @@ export async function context(browser, { size = 'phone', dark = false, viewport 
   });
 }
 
-// These existing suites exercise the complete-model compatibility surface.
-// Default catalog coverage owns its own bounded producer/browser fixtures.
-export function compatibilityUrl(value) {
-  const url = new URL(value);
-  url.searchParams.set('compat', '1');
-  return url.href;
-}
-
 // A page on the served viewer at `path` (such as "/" or "/s/claude/harbor"), signed in with the token. Only the served
 // origin is reachable. `page.errors` collects page errors. `extras: true` opens the extras fixture's server.
 export async function served(browser, opts = {}) {
@@ -93,9 +85,7 @@ export async function served(browser, opts = {}) {
       : r.abort(),
   );
   await page.goto(
-    compatibilityUrl(
-      base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
-    ),
+    base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
     { waitUntil: 'load' },
   );
   await settled(page);
@@ -125,6 +115,7 @@ export async function settled(page) {
       document.querySelector('#topbar .t, #topbar #find') &&
       panel?.childElementCount > 0 &&
       !panel.hasAttribute('aria-busy') &&
+      !panel.querySelector('[aria-busy="true"]') &&
       (history.state.v !== 'session' || panel.querySelector("section[aria-label='Transcript']"))
     );
   });
@@ -143,10 +134,43 @@ export async function closePage(page) {
 
 // Goes to a route the way the mockup's check scripts did: a history entry and a popstate, then waits for its screen.
 export async function goto(page, route, D) {
-  await page.evaluate((r) => {
-    history.pushState(r, '');
-    dispatchEvent(new PopStateEvent('popstate', { state: r }));
-  }, route);
+  const sid = route.id ?? route.sid,
+    session = D.SESS[sid],
+    machine = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
+    key = D.KEYS?.[sid] ?? sid,
+    machineKey = D.SOURCES?.[route.id] ?? route.id,
+    paths = { home: '/', analytics: '/analytics', sessions: '/sessions', machines: '/machines' },
+    destination =
+      route.v === 'session'
+        ? '/s/' + (session?.harness ?? 'native') + '/' + encodeURIComponent(key)
+        : route.v === 'trace'
+          ? '/trace/' +
+            (session?.harness ?? 'native') +
+            '/' +
+            encodeURIComponent(key) +
+            '/' +
+            encodeURIComponent(route.turn)
+          : route.v === 'machine'
+            ? '/machines/' + encodeURIComponent(machineKey)
+            : paths[route.v];
+  const url = new URL(destination, page.url());
+  if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
+  if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
+  await page.evaluate(
+    ({ r, url }) => {
+      history.pushState(r, '', url);
+      dispatchEvent(new PopStateEvent('popstate', { state: r }));
+    },
+    {
+      r:
+        route.v === 'machine'
+          ? { ...route, id: machineKey }
+          : ['session', 'trace'].includes(route.v)
+            ? { ...route, ...(route.id ? { id: key } : { sid: key }) }
+            : route,
+      url: url.pathname + url.search + url.hash,
+    },
+  );
   const title = titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
   if (title) {
@@ -154,7 +178,8 @@ export async function goto(page, route, D) {
       await page.waitForFunction(
         (t) =>
           document.querySelector('#topbar .t')?.textContent === t &&
-          !document.querySelector('#page').hasAttribute('aria-busy'),
+          !document.querySelector('#page').hasAttribute('aria-busy') &&
+          !document.querySelector('#page [aria-busy="true"]'),
         title,
       );
     } catch (error) {
@@ -176,58 +201,344 @@ export async function goto(page, route, D) {
   }
   if (route.v === 'session')
     await page.waitForFunction(
-      () => !!document.querySelector("#page section[aria-label='Transcript']"),
+      () =>
+        !!document.querySelector("#page section[aria-label='Transcript']") &&
+        !!document.querySelector('#page [data-entry-key]'),
     );
   // Analytics draws whole once the server's answer for its range is in (/api/analytics).
   if (route.v === 'analytics')
     await page.waitForFunction(() =>
       document.querySelector('.analytics-metrics[data-analytics-ready]'),
     );
+  if (route.v === 'trace') {
+    try {
+      await page.waitForFunction(() => document.querySelector('#page .trace-summary'));
+    } catch (error) {
+      throw Error(
+        'Trace ' +
+          sid +
+          ' turn ' +
+          route.turn +
+          ': ' +
+          (await page.locator('#page').innerText()) +
+          '; ' +
+          error.message,
+      );
+    }
+  }
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(60);
 }
 
-// The served data in the mockup's shapes: SESS, H, MACHINE, MACHINE_UP, NOW, every transcript in full as TX, and the
-// server's turn index.
-export async function data({ extras = false } = {}) {
-  const base = extras ? ENV.extraBase : ENV.base,
-    token = extras ? ENV.extraToken : ENV.token;
-  const get = async (p) => {
-    const r = await fetch(base + p + (p.includes('?') ? '&' : '?') + 't=' + token);
-    if (!r.ok) throw new Error(p + ': ' + r.status);
-    return r.json();
-  };
-  const model = await get('/api/model');
-  const SESS = model.sessions,
-    H = model.handoffs,
-    TX = {},
-    TXM = {};
-  for (const [id, s] of Object.entries(SESS)) s.id = id;
-  for (const sid of Object.keys(SESS)) {
-    let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
-      entries = page.entries;
-    while (page.from > 0) {
-      page = await get('/api/tx?sid=' + encodeURIComponent(sid) + '&before=' + page.from);
-      entries = page.entries.concat(entries);
+// Test expectations in the reference fixture's shapes, assembled exclusively
+// from source-qualified native publications and generation-fenced body reads.
+// Exhaustive fixture census is test work; production readers remain selected.
+export async function data(options = {}) {
+  // A fixture census spans several source-qualified publications. If refresh
+  // moves a preview generation, discard the entire census and reacquire it;
+  // never combine its old relationships with bytes from the new observation.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await nativeFixtureData(options);
+    } catch (error) {
+      if (attempt >= 2 || error.cause?.nativeObservationChanged !== true) throw error;
     }
-    TX[sid] = entries;
-    TXM[sid] = { calls: page.calls, errors: page.errors };
   }
-  const machines = model.machines ?? [model.machine];
+}
+async function nativeFixtureData({ extras = false, base: sourceBase, token: sourceToken } = {}) {
+  const base = sourceBase ?? (extras ? ENV.extraBase : ENV.base),
+    token = sourceToken ?? (extras ? ENV.extraToken : ENV.token);
+  const landing = await fetch(base + '/?t=' + token);
+  const cookie = landing.headers
+    .getSetCookie()
+    .map((value) => value.split(';')[0])
+    .join('; ');
+  const get = async (path) => {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const response = await fetch(base + path, { headers: cookie ? { cookie } : {} });
+      if (response.ok) {
+        const result = await response.json();
+        if (!path.startsWith('/api/sessions?') || result.completeness.state === 'complete')
+          return result;
+      } else if (response.status !== 503 || !path.startsWith('/api/sessions?')) {
+        const body = await response.json().catch(() => null);
+        throw Error('Native fixture ' + path + ': ' + response.status, {
+          cause: {
+            nativeObservationChanged:
+              response.status === 409 &&
+              path.startsWith('/api/session-home?') &&
+              body?.error?.code === 'home_details_unavailable' &&
+              body.error.retryable === true,
+          },
+        });
+      }
+      if (Date.now() >= deadline)
+        throw Error('Native fixture Catalog publication deadline: ' + path);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  const inventory = [];
+  let cursor = null;
+  do {
+    const page = await get(
+      '/api/session-sources' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''),
+    );
+    inventory.push(...page.items);
+    cursor = page.next_cursor;
+  } while (cursor);
+  const labelCounts = new Map();
+  for (const source of inventory)
+    labelCounts.set(source.label, (labelCounts.get(source.label) ?? 0) + 1);
+  // Reference machine IDs are presentation labels. Keep source authority in
+  // SOURCES rather than using internal directory keys in filenames/routes.
+  const machineIds = new Map(
+    inventory.map((source, index) => [
+      source.source_key,
+      labelCounts.get(source.label) === 1 ? source.label : source.label + '@' + (index + 1),
+    ]),
+  );
+  const records = [],
+    nativeKeys = new Set();
+  for (const source of inventory) {
+    cursor = null;
+    do {
+      const query = new URLSearchParams({
+        machine: source.source_key,
+        scope: 'retained_history',
+        limit: '100',
+      });
+      if (cursor) query.set('cursor', cursor);
+      const page = await get('/api/sessions?' + query);
+      if (page.machine !== source.source_key) throw Error('Native fixture Catalog source changed');
+      for (const item of page.items) {
+        nativeKeys.add(item.key);
+        records.push({ source, item });
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+  }
+  const overview = await get('/api/viewer/home');
+  records.sort(
+    (a, b) =>
+      a.item.key.localeCompare(b.item.key) ||
+      a.source.source_key.localeCompare(b.source.source_key),
+  );
+  const counts = new Map();
+  for (const { item } of records) counts.set(item.key, (counts.get(item.key) ?? 0) + 1);
+  const ids = new Map(
+    records.map(({ source, item }) => [
+      JSON.stringify([source.source_key, item.key]),
+      counts.get(item.key) === 1 ? item.key : item.key + '@' + machineIds.get(source.source_key),
+    ]),
+  );
+  const qualify = (source, key) =>
+    key == null || key === 'you' ? key : (ids.get(JSON.stringify([source, key])) ?? key);
+  const SESS = {},
+    TX = {},
+    TXM = {},
+    turns = new Map(),
+    handoffs = new Map();
+  const headers = new Map(),
+    previews = new Map();
+  const copyPresent = (value) =>
+    Object.fromEntries(Object.entries(value).filter(([, field]) => field !== null));
+  for (const { source, item } of records) {
+    const sid = qualify(source.source_key, item.key),
+      entries = [];
+    let after = 0,
+      generation = null,
+      page;
+    do {
+      const query = new URLSearchParams({
+        machine: source.source_key,
+        scope: 'retained_history',
+        sid: item.key,
+        limit: '100',
+        after: String(after),
+      });
+      if (generation) query.set('generation', generation);
+      page = await get('/api/session-transcript?' + query);
+      generation ??= page.projection.generation;
+      if (
+        page.identity.source_key !== source.source_key ||
+        page.identity.catalog_key !== item.key ||
+        page.projection.generation !== generation ||
+        page.range.first !== after ||
+        page.range.end !== after + page.entries.length ||
+        (page.range.end <= after && page.projection.total > after)
+      )
+        throw Error('Native fixture transcript identity, generation or range changed: ' + sid);
+      const context = page.relationship_context;
+      for (const [key, header] of Object.entries(context.sessions))
+        headers.set(JSON.stringify([source.source_key, key]), header);
+      for (const [key, version] of Object.entries(context.previews))
+        previews.set(JSON.stringify([source.source_key, key]), version);
+      for (const turn of context.turns)
+        turns.set(JSON.stringify([source.source_key, turn.id]), {
+          ...copyPresent(turn),
+          sid: qualify(source.source_key, turn.sid),
+        });
+      for (const edge of context.handoffs)
+        handoffs.set(JSON.stringify([source.source_key, edge.id]), {
+          ...copyPresent(edge),
+          from: qualify(source.source_key, edge.from),
+          to: qualify(source.source_key, edge.to),
+        });
+      entries.push(
+        ...page.entries.map((entry) =>
+          entry.ret
+            ? { ...entry, ret: { ...entry.ret, to: qualify(source.source_key, entry.ret.to) } }
+            : entry,
+        ),
+      );
+      after = page.range.end;
+    } while (after < page.projection.total);
+    const details = page.session.details;
+    const header = headers.get(JSON.stringify([source.source_key, item.key]));
+    if (!details) throw Error('Native fixture selected metadata unavailable: ' + sid);
+    SESS[sid] = {
+      ...copyPresent(item),
+      ...copyPresent(header ?? {}),
+      ...copyPresent(details),
+      id: sid,
+      machine: machineIds.get(source.source_key),
+      parent: item.parent == null ? undefined : qualify(source.source_key, item.parent),
+      kind: item.presentation_kind ?? undefined,
+    };
+    previews.set(JSON.stringify([source.source_key, item.key]), details.content_generation);
+    // The reference census uses the supported default 24-hour observation
+    // window. Native retained evidence itself remains complete.
+    const cutoff = overview.now - 24 * 60 * 60 * 1000;
+    SESS[sid].busy = details.busy
+      .filter(([, end]) => end >= cutoff)
+      .map(([start, end]) => [Math.max(start, cutoff), end]);
+    TX[sid] = entries;
+    TXM[sid] = { calls: details.calls, errors: details.errors };
+  }
+  // Native publications hold addresses, never prompt/answer bodies. Resolve
+  // bounded groups through their original owner and content generation.
+  for (const { source, item } of records) {
+    const address = JSON.stringify([source.source_key, item.key]),
+      generation = previews.get(address);
+    if (!generation) throw Error('Native fixture content generation unavailable: ' + item.key);
+    const edges = [...handoffs.entries()].filter(([key, edge]) => {
+      const [owner] = JSON.parse(key);
+      return (
+        owner === source.source_key &&
+        (edge.brief_session === item.key || edge.result_session === item.key)
+      );
+    });
+    const ownerTurns = [...turns.entries()].filter(
+      ([key, turn]) =>
+        JSON.parse(key)[0] === source.source_key &&
+        turn.sid === qualify(source.source_key, item.key),
+    );
+    const selections = [
+      ...edges.map(([key, edge]) => ({ key, event: edge.id })),
+      ...ownerTurns.map(([key, turn]) => ({ key, turn: turn.id })),
+    ];
+    for (let start = 0; start < Math.max(1, selections.length); start += 8) {
+      const group = selections.slice(start, start + 8);
+      const query = new URLSearchParams({
+        machine: source.source_key,
+        scope: 'retained_history',
+        sid: item.key,
+        generation,
+        events: JSON.stringify(group.flatMap((value) => (value.event ? [value.event] : []))),
+        turns: JSON.stringify(group.flatMap((value) => (value.turn ? [value.turn] : []))),
+      });
+      const detail = await get('/api/session-home?' + query);
+      if (
+        detail.identity.source_key !== source.source_key ||
+        detail.identity.catalog_key !== item.key ||
+        detail.generation !== generation ||
+        detail.incomplete
+      )
+        throw Error(
+          'Native fixture preview identity, generation or completeness changed: ' + item.key,
+        );
+      const activity = detail.session.activity;
+      SESS[qualify(source.source_key, item.key)].activity =
+        activity == null
+          ? undefined
+          : [
+              activity[0],
+              activity[1],
+              Math.floor((overview.now - activity[3]) / 1000),
+              activity[3],
+            ];
+      for (const value of group) {
+        if (value.turn) {
+          if (!(value.turn in detail.turns))
+            throw Error('Native fixture turn prompt unavailable: ' + value.turn);
+          turns.get(value.key).text = detail.turns[value.turn];
+        } else {
+          const edge = handoffs.get(value.key),
+            text = detail.events[value.event];
+          if (!text) throw Error('Native fixture handoff text unavailable: ' + value.event);
+          if (edge.brief_session === item.key) {
+            edge.brief = text.brief;
+            if (text.answer != null) edge.answer = text.answer;
+          }
+          if (edge.result_session === item.key && text.result != null) edge.result = text.result;
+        }
+      }
+    }
+  }
+  const machines = overview.machines.map((source) => ({
+    id: machineIds.get(source.key),
+    name: source.label,
+    up: source.up,
+    last: source.last,
+  }));
+  // Home owns current wait observations that need not belong to a transcript
+  // turn. Borrow those published events; do not infer them from tool text.
+  for (const row of [...overview.inbox, ...overview.answered]) {
+    const key = JSON.stringify([row.source_key, row.event.id]);
+    if (!handoffs.has(key))
+      handoffs.set(key, {
+        ...copyPresent(row.event),
+        kind: 'toyou',
+        from: qualify(row.source_key, row.catalog_key),
+        to: 'you',
+      });
+  }
+  const H = [...handoffs.values()].sort(
+      (a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    ),
+    nativeTurns = [...turns.values()];
+  const model = {
+    sessions: SESS,
+    handoffs: H,
+    turns: nativeTurns,
+    now: overview.now,
+    machine: machines[0],
+    machines,
+  };
   return {
     model,
     SESS,
     H,
     TX,
     TXM,
-    turns: model.turns,
-    NOW: model.now,
-    MACHINE: Object.fromEntries(machines.map((m) => [m.id, m.name])),
-    MACHINE_UP: Object.fromEntries(machines.map((m) => [m.id, m.up])),
-    MACHINE_LAST: Object.fromEntries(
-      machines.filter((m) => m.last != null).map((m) => [m.id, m.last]),
+    nativeKeys,
+    turns: nativeTurns,
+    NOW: overview.now,
+    SOURCES: Object.fromEntries(
+      inventory.map((source) => [machineIds.get(source.source_key), source.source_key]),
     ),
-    ADMIN: model.admin ?? null,
+    KEYS: Object.fromEntries(
+      records.map(({ source, item }) => [qualify(source.source_key, item.key), item.key]),
+    ),
+    MACHINE: Object.fromEntries(machines.map((machine) => [machine.id, machine.name])),
+    MACHINE_UP: Object.fromEntries(machines.map((machine) => [machine.id, machine.up])),
+    MACHINE_LAST: Object.fromEntries(
+      machines
+        .filter((machine) => machine.last != null)
+        .map((machine) => [machine.id, machine.last]),
+    ),
+    ADMIN: null,
   };
 }
 

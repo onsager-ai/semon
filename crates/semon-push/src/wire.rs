@@ -12,6 +12,10 @@ pub const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 /// `POST <url>/v1/mirror/append`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Append {
+    /// Optional native Codex relocation; receivers that lack this extension
+    /// return an ordinary offset conflict and the sender uses normal transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocation: Option<Relocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
     pub root: String,
@@ -25,6 +29,15 @@ pub struct Append {
     /// Truncate the file first; `offset` is then 0.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replace: bool,
+}
+
+/// Verified prefix reuse between Codex's two native rollout namespaces.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relocation {
+    pub from_path: String,
+    pub native_id: String,
+    pub prefix_sha256: String,
 }
 
 /// The receiver's answer to an append: 200 with the new length, or 409 with

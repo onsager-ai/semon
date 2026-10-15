@@ -21,8 +21,9 @@
 //     card names its kind once (in its meta line, after the harness mark, #146) and never uses the person icon or a delegation glyph, and the top bar names the kind as a plain label.
 //   - no page errors.
 import path from 'node:path';
-import { ENV, served, goto, data, reporter, overflow, compatibilityUrl } from '../lib.mjs';
+import { ENV, served, goto, data, reporter, overflow, settled } from '../lib.mjs';
 import { XSS, XSS_KEY } from '../fixture.mjs';
+import { catalogPagingCheck } from '../catalog-paging-check.mjs';
 
 const inView = (page, sel) =>
   page.evaluate((sel) => {
@@ -32,610 +33,21 @@ const inView = (page, sel) =>
     const r = e.getBoundingClientRect();
     return r.top >= bar.bottom - 1 && r.top < innerHeight - 40;
   }, sel);
-const pager = (page) =>
-  page.evaluate(() =>
-    [...document.querySelectorAll('.turns > .list > button.more')].map((b) => ({
-      text: b.textContent,
-      first: b.parentElement === document.querySelector('.turns').firstElementChild,
-      last: b.parentElement === document.querySelector('.turns').lastElementChild,
-    })),
-  );
+// Waiting is tied to source-qualified selected reads, with no child workspace poller.
 function trackChildRequests(page) {
-  const requests = new Set(),
-    idle = [];
+  const requests = new Set();
+  const selected = (request) => new URL(request.url()).pathname === '/api/session-transcript';
   page.on('request', (request) => {
-    const url = new URL(request.url());
-    if (url.pathname === '/api/tx' && url.searchParams.has('turn')) requests.add(request);
+    if (selected(request)) requests.add(request);
   });
-  const finished = (request) => {
-    if (requests.delete(request) && !requests.size) idle.splice(0).forEach((resolve) => resolve());
-  };
-  page.on('requestfinished', finished);
-  page.on('requestfailed', finished);
+  const done = (request) => requests.delete(request);
+  page.on('requestfinished', done);
+  page.on('requestfailed', done);
   return async () => {
-    for (;;) {
-      await page.evaluate(
-        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-      );
-      if (!requests.size) return;
-      await new Promise((resolve) => idle.push(resolve));
-    }
+    for (let n = 0; requests.size && n < 100; n++) await page.waitForTimeout(20);
+    if (requests.size) throw Error('Selected requests did not settle');
   };
 }
-
-const pagingAnchor = (page) =>
-  page.evaluate(() => {
-    const top = innerWidth <= 760 ? 0 : document.querySelector('#main').getBoundingClientRect().top;
-    const entry = [
-      ...document.querySelectorAll('.turns [data-e][data-entry-key]:not(.tgroup)'),
-    ].find((n) => {
-      const rect = n.getBoundingClientRect();
-      return rect.height && rect.top >= top;
-    });
-    return entry ? { id: entry.dataset.entryKey, top: entry.getBoundingClientRect().top } : null;
-  });
-const entryCount = (page) => page.locator('.turns [data-e]').count();
-const scrollTranscript = (page, end = false) =>
-  page.evaluate((end) => {
-    const box = innerWidth <= 760 ? document.scrollingElement : document.querySelector('#main');
-    box.scrollTop = end ? box.scrollHeight : 0;
-  }, end);
-
-async function automaticPaging(browser, size, D, r, dark = false) {
-  const page = await served(browser, { extras: true, size, dark });
-  const requests = [],
-    afterRequests = [],
-    held = [],
-    tag = size + (dark ? '-dark' : '-light');
-  let next = 'hold',
-    holdStarted;
-  const waitForHold = () =>
-    new Promise((resolve) => {
-      holdStarted = resolve;
-    });
-  page.on('request', (request) => {
-    const url = new URL(request.url());
-    if (
-      url.pathname === '/api/tx' &&
-      url.searchParams.get('sid') === 'backlog' &&
-      url.searchParams.has('before')
-    )
-      requests.push(url.searchParams.get('before'));
-    if (
-      url.pathname === '/api/tx' &&
-      url.searchParams.get('sid') === 'backlog' &&
-      url.searchParams.has('after')
-    )
-      afterRequests.push(url.searchParams.get('after'));
-  });
-  await page.route('**/api/tx?**', async (route) => {
-    const url = new URL(route.request().url());
-    if (url.searchParams.get('sid') !== 'backlog' || !url.searchParams.has('before'))
-      return route.fallback();
-    const action = next;
-    if (action === 'fail') {
-      next = null;
-      return route.fulfill({ status: 500, contentType: 'text/plain', body: 'paging unavailable' });
-    }
-    if (action === 'hold')
-      await new Promise((resolve) => {
-        held.push(resolve);
-        holdStarted();
-      });
-    return route.fallback();
-  });
-  const opened = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return (
-      url.pathname === '/api/tx' &&
-      url.searchParams.get('sid') === 'backlog' &&
-      !url.searchParams.has('before') &&
-      !url.searchParams.has('after')
-    );
-  });
-  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
-  const range = await (await opened).json();
-  await page.waitForSelector('.turns > .turn');
-  r.expect(range.from > 0, size + ': backlog opens on a partial last page');
-  await page.waitForTimeout(500);
-  r.expect(requests.length === 0, size + ': the opening end pin makes no earlier request');
-  const before = await entryCount(page);
-  const firstHeld = waitForHold();
-  await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
-  await page.mouse.wheel(0, -1); // reader input releases the opening pin
-  await scrollTranscript(page);
-  await page.waitForFunction(() => document.querySelector('[data-load-earlier]')?.disabled);
-  await firstHeld;
-  const loading = await page.locator('[data-load-earlier]').evaluate((b) => ({
-    text: b.textContent,
-    spin: !!b.querySelector('.spin'),
-    disabled: b.disabled,
-  }));
-  r.expect(
-    loading.text === 'Loading earlier…' && loading.spin && loading.disabled,
-    size + ': automatic paging shows its disabled loading control',
-  );
-  r.expect(
-    (await page.locator('.pager-label').getAttribute('aria-live')) === 'polite',
-    tag + ': the busy label is announced politely',
-  );
-  if (size === 'phone')
-    r.expect(
-      (await page
-        .locator('[data-load-earlier]')
-        .evaluate((b) => b.getBoundingClientRect().height)) >= 44,
-      tag + ': the pager has a 44px tap height',
-    );
-  await page.screenshot({ path: path.join(ENV.out, 'extras-auto-paging-busy-' + tag + '.png') });
-  // Scroll again while the response is held: anchoring must use this position, rather than the request's starting point.
-  await page.evaluate(() => {
-    const box = innerWidth <= 760 ? document.scrollingElement : document.querySelector('#main');
-    box.scrollTop += 120;
-  });
-  const anchor = await pagingAnchor(page);
-  r.expect(anchor !== null, size + ': a turn is available for anchoring during the request');
-  await page.locator('[data-load-earlier]').evaluate((b) => {
-    b.click();
-    b.click();
-  });
-  await page.waitForTimeout(100);
-  r.expect(
-    requests.length === 1 && requests[0] === String(range.from),
-    size +
-      ': observer and button do not duplicate the initial before request: ' +
-      JSON.stringify(requests),
-  );
-  // The next page, whether reached immediately within the margin or by another scroll, fails once.
-  next = 'fail';
-  held.shift()();
-  await page.waitForFunction(
-    (n) => document.querySelectorAll('.turns [data-e]').length > n,
-    before,
-  );
-  const after =
-    anchor &&
-    (await page.evaluate(
-      (id) =>
-        document.querySelector('[data-entry-key="' + CSS.escape(id) + '"]')?.getBoundingClientRect()
-          .top ?? null,
-      anchor.id,
-    ));
-  r.expect(
-    after !== null && anchor !== null && Math.abs(after - anchor.top) <= 2,
-    size +
-      ': automatic earlier paging keeps the turn within 2px: ' +
-      JSON.stringify({ anchor, after }),
-  );
-  await scrollTranscript(page);
-  await page.waitForFunction(() =>
-    document.querySelector('[data-load-earlier]')?.textContent.includes('Retry'),
-  );
-  const retry = page.locator('[data-load-earlier]');
-  r.expect(
-    (await retry.textContent()).replace(/\u2009/g, '').replace(/\s+/g, ' ') ===
-      "Couldn't load earlier entries · Retry",
-    size + ': a failed page offers Retry',
-  );
-  const failedRequests = requests.slice();
-  await page.screenshot({ path: path.join(ENV.out, 'extras-auto-paging-failed-' + tag + '.png') });
-  r.expect(
-    new Set(failedRequests).size === failedRequests.length,
-    size +
-      ': each automatic before boundary is requested only once: ' +
-      JSON.stringify(failedRequests),
-  );
-  await page.waitForTimeout(3000);
-  r.expect(
-    requests.length === failedRequests.length,
-    size + ': a failed pager makes no automatic retry for 3 seconds',
-  );
-  const beforeRetry = await entryCount(page);
-  await retry.click();
-  await page.waitForFunction(
-    (n) => document.querySelectorAll('.turns [data-e]').length > n,
-    beforeRetry,
-  );
-  r.expect(
-    requests.filter((from) => from === failedRequests.at(-1)).length === 2,
-    size + ': clicking Retry requests the failed boundary once more',
-  );
-
-  // A fresh last page still works from the keyboard, even while its opening pin is active.
-  await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('[data-load-earlier]');
-  const keyboardBefore = await entryCount(page),
-    keyboardRequests = requests.length;
-  next = 'hold';
-  const keyboardHeld = waitForHold();
-  await page.locator('[data-load-earlier]').evaluate((b) => b.focus({ preventScroll: true }));
-  await page.keyboard.press('Enter');
-  await page.waitForFunction(() => document.querySelector('[data-load-earlier]')?.disabled);
-  await keyboardHeld;
-  await page.waitForTimeout(100);
-  r.expect(
-    requests.length === keyboardRequests + 1,
-    size + ': Enter starts exactly one earlier request',
-  );
-  next = null;
-  held.shift()();
-  await page.waitForFunction(
-    (n) => document.querySelectorAll('.turns [data-e]').length > n,
-    keyboardBefore,
-  );
-
-  next = 'fail';
-  await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('[data-load-earlier]');
-  await page.mouse.wheel(0, -1);
-  await scrollTranscript(page);
-  await page.waitForFunction(() =>
-    document.querySelector('[data-load-earlier]')?.textContent.includes('Retry'),
-  );
-  await goto(page, { v: 'home' }, D);
-  await goto(page, { v: 'session', id: 'backlog' }, D);
-  r.expect(
-    (await page.locator('[data-load-earlier]').textContent()) === 'Load earlier',
-    tag + ': leaving the session clears its failed pager state',
-  );
-  const revisited = await entryCount(page);
-  await page.locator('[data-load-earlier]').evaluate((b) => b.click());
-  await page.waitForFunction(
-    (n) => document.querySelectorAll('.turns [data-e]').length > n,
-    revisited,
-  );
-
-  // The other margin loads toward the end of a middle page without a click.
-  const older = D.turns.filter((t) => t.sid === 'backlog')[1];
-  await page.goto(
-    compatibilityUrl(ENV.extraBase + '/s/claude/backlog?turn=' + encodeURIComponent(older.id)),
-    {
-      waitUntil: 'load',
-    },
-  );
-  await page.waitForSelector('.turns > .turn');
-  const landedRequests = requests.length,
-    landedLater = afterRequests.length;
-  await page.waitForTimeout(2200); // programmatic placement must stay idle even after the opening-pin interval
-  r.expect(
-    requests.length === landedRequests && afterRequests.length === landedLater,
-    tag + ': a deep-link landing makes no automatic before or after request',
-  );
-  await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
-  await page.mouse.wheel(0, 1);
-  await scrollTranscript(page, true);
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Backlog triaged: 460 issues read.'),
-  );
-  r.expect(
-    !(await page.locator('[data-pager-where="after"]').count()),
-    size + ': scrolling to the end automatically loads the later page',
-  );
-  r.expect(
-    page.errors.length === 0,
-    size + ': automatic paging page errors: ' + page.errors.join(' | '),
-  );
-  const result = {
-    range: { from: range.from, to: range.to },
-    loading,
-    anchor,
-    after,
-    failedRequests,
-    requests,
-    afterRequests,
-  };
-  await page.context().close();
-  return result;
-}
-
-async function pagingBoundaryCheck(browser, size, D, r) {
-  const page = await served(browser, { extras: true, size }),
-    turn = D.turns.find((t) => t.sid === 'backlog').id;
-  const tool = (slot) => ({
-    k: 'tool',
-    slot,
-    name: 'Read',
-    arg: 'retained tool ' + slot,
-    in: 'read file ' + slot,
-    out: 'Retained output ' + slot,
-    ok: true,
-    secs: 1,
-  });
-  const message = (slot) => ({
-    k: 'a',
-    slot,
-    text:
-      'Boundary entry ' +
-      slot +
-      '.\n\n' +
-      'This paragraph keeps enough room to scroll while paging.\n\n'.repeat(4),
-  });
-  let release, started;
-  const held = new Promise((resolve) => {
-    started = resolve;
-  });
-  await page.route('**/api/tx?**', async (route) => {
-    const url = new URL(route.request().url());
-    if (url.searchParams.get('sid') !== 'backlog') return route.fallback();
-    const before = url.searchParams.has('before');
-    if (before)
-      await new Promise((resolve) => {
-        release = resolve;
-        started();
-      });
-    const entries = before
-      ? [...Array.from({ length: 8 }, (_, slot) => message(slot)), tool(8), tool(9)]
-      : [tool(10), tool(11), ...Array.from({ length: 8 }, (_, i) => message(i + 12))];
-    entries[0].turn = turn; // both pages continue the same turn, including the boundary between slots 9 and 10
-    return route.fulfill({
-      json: {
-        sid: 'backlog',
-        from: before ? 0 : 10,
-        to: before ? 10 : 20,
-        total: 20,
-        calls: 4,
-        errors: 0,
-        entries,
-      },
-    });
-  });
-  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
-  await page.waitForSelector('.tgroup');
-  await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
-  await page.mouse.wheel(0, -1);
-  await scrollTranscript(page);
-  await held;
-  await page.evaluate(() => {
-    document.querySelector('.tsum').click();
-    document.querySelector('.step[data-entry-key="backlog#slot:10"] > button').click();
-  });
-  await scrollTranscript(page);
-  const anchor = await pagingAnchor(page);
-  const oldKey = await page.locator('[data-entry-key="backlog#slot:10"]').getAttribute('data-e');
-  r.expect(
-    anchor?.id === 'backlog#slot:10',
-    size + ': the boundary check anchors the first entry in the continuing turn',
-  );
-  release();
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Boundary entry 0.'),
-  );
-  await page.evaluate(
-    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-  );
-  const after = await page.locator('[data-entry-key="backlog#slot:10"]').evaluate((n) => ({
-    top: n.getBoundingClientRect().top,
-    key: n.dataset.e,
-    group: n.closest('.tgroup')?.querySelector('.tsum')?.getAttribute('aria-expanded'),
-    step: n.querySelector(':scope > button')?.getAttribute('aria-expanded'),
-    output: !n.querySelector(':scope > .out')?.hidden,
-  }));
-  r.expect(
-    after.key !== oldKey,
-    size + ": loading the older prefix changes the entry's turn-relative key",
-  );
-  r.expect(
-    anchor !== null && Math.abs(after.top - anchor.top) <= 2,
-    size +
-      ': a mid-turn page boundary keeps the anchored entry within 2px: ' +
-      JSON.stringify({ anchor, after }),
-  );
-  r.expect(
-    after.group === 'true' && after.step === 'true' && after.output,
-    size + ': paging keeps the merged group and its open step/output',
-  );
-  r.expect(
-    page.errors.length === 0,
-    size + ': boundary paging page errors: ' + page.errors.join(' | '),
-  );
-  await page.context().close();
-  return { anchor, after, oldKey };
-}
-
-async function pagingChainCheck(browser, size, D, r) {
-  const page = await served(browser, { extras: true, size }),
-    turn = D.turns.find((t) => t.sid === 'backlog').id,
-    requests = [];
-  await page.route('**/api/tx?**', (route) => {
-    const url = new URL(route.request().url());
-    if (url.searchParams.get('sid') !== 'backlog') return route.fallback();
-    const before = url.searchParams.get('before'),
-      from = before === null ? 20 : Number(before) - 1;
-    if (before !== null) requests.push(Number(before));
-    return route.fulfill({
-      json: {
-        sid: 'backlog',
-        from,
-        to: before === null ? 21 : Number(before),
-        total: 21,
-        calls: 0,
-        errors: 0,
-        entries: [{ k: 'a', slot: from, turn, text: 'Short page ' + from }],
-      },
-    });
-  });
-  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
-  await page.waitForSelector('[data-load-earlier]');
-  await page.waitForTimeout(2200);
-  r.expect(
-    requests.length === 0,
-    size + ': the opening pin ending does not arm paging on a short page',
-  );
-  await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
-  await page.mouse.wheel(0, -1);
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Short page 17'),
-  );
-  await page.waitForTimeout(500);
-  r.expect(
-    requests.length === 3,
-    size + ': a short-page chain stops after three automatic loads: ' + JSON.stringify(requests),
-  );
-  r.expect(
-    new Set(requests).size === requests.length,
-    size + ': a short-page chain has no duplicate boundary requests',
-  );
-  await page.locator('[data-load-earlier]').evaluate((b) => b.click());
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Short page 16'),
-  );
-  await page.waitForTimeout(250);
-  r.expect(
-    requests.length === 4,
-    size + ': the button still works after the automatic chain limit',
-  );
-  // The scroller's unguarded scroll event represents a scrollbar drag and arms a new chain.
-  await scrollTranscript(page);
-  await page.evaluate(() => {
-    const box = innerWidth <= 760 ? document.scrollingElement : document.querySelector('#main');
-    box.dispatchEvent(new Event('scroll', { bubbles: true }));
-  });
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Short page 13'),
-  );
-  await page.waitForTimeout(500);
-  r.expect(requests.length === 7, size + ': a new reader scroll arms another three-page chain');
-
-  // Find and narrowed transcript filters keep their fallback button while automatic paging is off.
-  await page.click('#find-btn');
-  const beforeFind = requests.length;
-  await page.mouse.wheel(0, -1);
-  await scrollTranscript(page);
-  await page.waitForTimeout(250);
-  r.expect(
-    requests.length === beforeFind,
-    size + ': find-in-transcript suppresses automatic paging',
-  );
-  await page.locator('[data-load-earlier]').evaluate((b) => b.click());
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Short page 12'),
-  );
-  r.expect(
-    requests.length === beforeFind + 1,
-    size + ': the pager button works while find is active',
-  );
-  // Transcript modes now live inside Find instead of a separate filter popover.
-  await page.click('.find-chips [data-filter="messages"]');
-  const beforeFilter = requests.length;
-  await page.mouse.wheel(0, -1);
-  await scrollTranscript(page);
-  await page.waitForTimeout(250);
-  r.expect(
-    requests.length === beforeFilter,
-    size + ': a narrowed tools filter suppresses automatic paging',
-  );
-  await page.locator('[data-load-earlier]').evaluate((b) => b.click());
-  await page.waitForFunction(() =>
-    document.querySelector('.turns')?.textContent.includes('Short page 11'),
-  );
-  r.expect(
-    requests.length === beforeFilter + 1,
-    size + ': the pager button works with narrowed filters',
-  );
-  r.expect(
-    page.errors.length === 0,
-    size + ': chained paging page errors: ' + page.errors.join(' | '),
-  );
-  await page.context().close();
-  return { requests };
-}
-
-async function stalePagingCheck(browser, size, D, r) {
-  const page = await served(browser, { extras: true, size }),
-    turn = D.turns.find((t) => t.sid === 'backlog').id;
-  await page.route('**/api/model', (route) =>
-    route.fulfill({
-      json: {
-        ...D.model,
-        sessions: { ...D.model.sessions, backlog: { ...D.model.sessions.backlog, errors: 1 } },
-      },
-    }),
-  );
-  let release,
-    started,
-    requests = 0;
-  const held = new Promise((resolve) => {
-    started = resolve;
-  });
-  await page.route('**/api/tx?**', async (route) => {
-    const url = new URL(route.request().url());
-    if (url.searchParams.get('sid') !== 'backlog') return route.fallback();
-    if (url.searchParams.has('errors'))
-      return route.fulfill({ json: { errors: 1, slots: [1], version: 'paging-check' } });
-    const before = url.searchParams.has('before');
-    let stale = false;
-    if (before) {
-      requests++;
-      stale = requests === 1;
-      if (stale)
-        await new Promise((resolve) => {
-          release = resolve;
-          started();
-        });
-    }
-    const entries = Array.from({ length: 10 }, (_, i) => {
-      const slot = i + (before ? 0 : 10);
-      return slot === 1 && !stale
-        ? {
-            k: 'tool',
-            slot,
-            name: 'Read',
-            arg: 'boundary failure',
-            in: 'read missing',
-            out: 'Missing file',
-            ok: false,
-            secs: 1,
-          }
-        : { k: 'a', slot, text: (stale ? 'Stale response ' : 'Current range ') + slot };
-    });
-    entries[0].turn = turn;
-    return route.fulfill({
-      json: {
-        sid: 'backlog',
-        from: before ? 0 : 10,
-        to: before ? 10 : 20,
-        total: 20,
-        calls: 1,
-        errors: 1,
-        entries,
-      },
-    });
-  });
-  await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/backlog'), { waitUntil: 'load' });
-  await page.waitForSelector('[data-load-earlier]');
-  await page.mouse.move(size === 'phone' ? 350 : 1200, 300);
-  await page.mouse.wheel(0, -1);
-  await scrollTranscript(page);
-  await held;
-  // Errors mode extends this same range from 10 to 0 while the first before=10 request is still waiting.
-  await page.locator('#topbar .lab-errs').evaluate((b) => b.click());
-  await page.waitForSelector('.step.err-current');
-  const acceptedEntries = await entryCount(page);
-  r.expect(
-    requests === 2,
-    size + ': the error jump requested its page while automatic paging was held',
-  );
-  const response = page.waitForResponse((response) =>
-    new URL(response.url()).searchParams.has('before'),
-  );
-  release();
-  await response;
-  await page.waitForTimeout(250);
-  const discarded = await page.evaluate(
-    () => !document.querySelector('.turns').textContent.includes('Stale response'),
-  );
-  r.expect(
-    discarded && (await entryCount(page)) === acceptedEntries,
-    size + ': a late before response is discarded after the boundary moved',
-  );
-  r.expect(requests === 2, size + ': the error jump does not arm another automatic request');
-  r.expect(
-    page.errors.length === 0,
-    size + ': stale paging page errors: ' + page.errors.join(' | '),
-  );
-  await page.context().close();
-  return { requests, acceptedEntries, discarded };
-}
-
 export default async function (browser) {
   const r = reporter('extras');
   const R = r.results;
@@ -649,7 +61,7 @@ export default async function (browser) {
     let untitled;
     let commandOverride = null;
     const childRequestsSettled = trackChildRequests(page);
-    await page.route('**/api/tx**', async (route) => {
+    await page.route('**/api/session-transcript?**', async (route) => {
       const url = new URL(route.request().url());
       const response = await route.fetch();
       if (url.searchParams.get('sid') !== 'harbor') return route.fulfill({ response });
@@ -816,7 +228,7 @@ export default async function (browser) {
     await page.click('#find-btn');
     await page.fill('#find', 'DescriptionOnlySearchWord');
     await page.waitForFunction(
-      () => document.querySelector('#topbar .fcount')?.textContent === '1 match',
+      () => document.querySelector('#topbar .fcount')?.textContent === '1 loaded match',
     );
     const found = await page.evaluate(() => ({
       count: document.querySelectorAll('.turns .step').length,
@@ -861,7 +273,7 @@ export default async function (browser) {
     const captureTitleShot = async ({ size, dark, filename, expanded = false }) => {
       const shot = await served(browser, { extras: true, path: '/s/claude/harbor', size, dark });
       const childRequestsSettled = trackChildRequests(shot);
-      await shot.route('**/api/tx**', async (route) => {
+      await shot.route('**/api/session-transcript?**', async (route) => {
         const url = new URL(route.request().url());
         const response = await route.fetch();
         if (url.searchParams.get('sid') !== 'harbor') return route.fulfill({ response });
@@ -885,16 +297,15 @@ export default async function (browser) {
         shotTitle,
       );
       await childRequestsSettled();
+      await settled(shot);
       await shot.evaluate(() =>
         document
           .querySelectorAll('.tsum[aria-expanded="false"]')
           .forEach((button) => button.click()),
       );
       const titleLabel = shot.locator('.step .sa.st');
-      await titleLabel.scrollIntoViewIfNeeded();
       if (expanded) {
         await titleLabel.evaluate((title) => title.click());
-        await titleLabel.scrollIntoViewIfNeeded();
         await shot.waitForFunction(
           () =>
             document
@@ -904,6 +315,31 @@ export default async function (browser) {
               ?.getAttribute('aria-expanded') === 'true',
         );
       }
+      // Genuine input ends the opening scroll hold without activating a control.
+      const wheelPoint = await shot.evaluate(() => {
+        const bar = document.querySelector('#topbar'),
+          rect = bar.getBoundingClientRect(),
+          x = Math.min(rect.right - 1, innerWidth - 1),
+          y = Math.max(rect.top + 1, 1),
+          target = document.elementFromPoint(x, y);
+        if (
+          !bar.contains(target) ||
+          target.closest('button, a, input, select, textarea, [role="button"], [contenteditable]')
+        )
+          throw new Error('Step-title capture needs inert topbar padding for wheel input');
+        return { x, y };
+      });
+      await shot.mouse.move(wheelPoint.x, wheelPoint.y);
+      await shot.mouse.wheel(0, 1);
+      const layoutFrames = () =>
+        shot.evaluate(
+          () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+        );
+      await layoutFrames();
+      await titleLabel.evaluate((title) =>
+        title.closest('.step').querySelector(':scope > button').scrollIntoView({ block: 'center' }),
+      );
+      await layoutFrames();
       const visibleRows = await shot.evaluate((value) => {
         const label = [...document.querySelectorAll('.step .sa.st')].find(
             (node) => node.textContent === value,
@@ -927,6 +363,19 @@ export default async function (browser) {
             rect.right <= innerWidth
           );
         };
+        const buttonRect = (node) => {
+          const rect = node?.querySelector(':scope > button')?.getBoundingClientRect();
+          return rect
+            ? {
+                top: rect.top,
+                bottom: rect.bottom,
+                left: rect.left,
+                right: rect.right,
+                width: rect.width,
+                height: rect.height,
+              }
+            : null;
+        };
         return {
           title: label?.textContent ?? null,
           finished: !!step && !step.classList.contains('live'),
@@ -935,6 +384,10 @@ export default async function (browser) {
           neighbor: neighbor?.querySelector('.sa')?.textContent ?? null,
           neighborVerb: neighbor?.querySelector('.sv')?.textContent ?? null,
           bothVisible: onScreen(step) && onScreen(neighbor),
+          selectedButtonRect: buttonRect(step),
+          neighborButtonRect: buttonRect(neighbor),
+          viewport: { width: innerWidth, height: innerHeight },
+          scrollY,
         };
       }, shotTitle);
       r.expect(
@@ -981,15 +434,15 @@ export default async function (browser) {
         };
       });
     const servedAccount = await desktop.evaluate(
-      async () => (await (await fetch('/api/model')).json()).account,
+      async () => (await (await fetch('/api/viewer/chrome')).json()).account,
     );
     const servedNav = await desktop.evaluate(
-      async () => (await (await fetch('/api/model')).json()).nav,
+      async () => (await (await fetch('/api/viewer/chrome')).json()).navigation,
     );
     r.expect(
       servedAccount?.name === name &&
         servedAccount.links?.map((link) => link.method).join(',') === 'get,get,post' &&
-        servedNav?.machines === '/account/workspaces',
+        servedNav?.paths?.machines === '/account/workspaces',
       'the embedding fixture serves account methods and nav model values',
     );
     r.expect(
@@ -1168,14 +621,15 @@ export default async function (browser) {
     await desktop.goto(ENV.accountBase + '/machines/laptop?t=' + ENV.accountToken, {
       waitUntil: 'load',
     });
-    await desktop.waitForFunction(
-      () => document.querySelector('#topbar .crumb')?.textContent === 'Machines',
+    await desktop.waitForURL(
+      (url) => url.pathname === '/machines/local' && url.searchParams.get('machine') === 'local',
     );
-    await desktop.locator('#topbar .crumb').click();
-    await desktop.waitForURL((url) => url.pathname === '/account/workspaces');
+    await desktop.locator('#page .nrow[data-id]').first().waitFor();
     r.expect(
-      new URL(desktop.url()).pathname === '/account/workspaces',
-      'the Machines detail crumb follows the override',
+      (await desktop.locator('#topbar .t').textContent()) === 'laptop' &&
+        (await desktop.getByRole('button', { name: 'Back to Machines', exact: true }).count()) ===
+          1,
+      'the machine bookmark normalizes to its source-qualified native detail page',
     );
     r.expect(
       desktop.errors.length === 0,
@@ -1236,198 +690,16 @@ export default async function (browser) {
     await phone.context().close();
   }
 
-  // ---- Paging -------------------------------------------------------------------------------------------------------
-  R.automaticPaging = {};
-  for (const size of ['phone', 'desktop'])
-    for (const dark of [false, true])
-      R.automaticPaging[size + (dark ? '-dark' : '-light')] = await automaticPaging(
-        browser,
-        size,
-        D,
-        r,
-        dark,
-      );
-  R.pagingBoundaries = {};
-  R.pagingChains = {};
-  R.stalePaging = {};
-  for (const size of ['phone', 'desktop']) {
-    R.pagingBoundaries[size] = await pagingBoundaryCheck(browser, size, D, r);
-    R.pagingChains[size] = await pagingChainCheck(browser, size, D, r);
-    R.stalePaging[size] = await stalePagingCheck(browser, size, D, r);
-  }
-  {
-    const page = await served(browser, { extras: true, path: '/s/claude/backlog' });
-    // Keep the original fallback-control assertions deterministic in a browser without IntersectionObserver.
-    await page.addInitScript(() => {
-      delete window.IntersectionObserver;
-    });
-    await page.reload({ waitUntil: 'load' });
-    await page.waitForFunction(() => !!document.querySelector('.turns'));
-    const turns = D.turns.filter((t) => t.sid === 'backlog');
-    const count = () =>
-      page.evaluate(() => ({
-        turns: document.querySelectorAll('.turns > .turn').length,
-        started: [...document.querySelectorAll('.turns > .divider')].some((d) =>
-          d.textContent.startsWith('Started'),
-        ),
-      }));
-    const P = { open: { ...(await count()), pager: await pager(page) }, clicks: [] };
-    r.expect(turns.length === 10, 'backlog has 10 turns in the model, not ' + turns.length);
-    r.expect(
-      P.open.pager.length === 1 && P.open.pager[0].text === 'Load earlier' && P.open.pager[0].first,
-      'the last page opens with Load earlier at the top: ' + JSON.stringify(P.open.pager),
-    );
-    r.expect(!P.open.started, "no Started divider on a page that doesn't start the transcript");
-    r.expect(
-      P.open.turns > 0 && P.open.turns < 10,
-      'the last page holds some of the turns: ' + P.open.turns,
-    );
-    for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === 'Load earlier'); k++) {
-      // Bring the button into view first (the click would scroll to it), then note where the anchor is. The anchor is the
-      // first turn in view after the first: the first may continue a turn whose start is on the page being loaded, and a turn scrolled out of sight has
-      // no say in what is on screen.
-      await page.locator('.turns > .list > button.more').scrollIntoViewIfNeeded();
-      await page.locator('.turns > .list > button.more').click({ trial: true });
-      await page.waitForTimeout(80);
-      const anchor = await page.evaluate(() => {
-        const bar = document.querySelector('#topbar').getBoundingClientRect().bottom,
-          t = [...document.querySelectorAll('.turns > .turn')]
-            .slice(1)
-            .find((x) => x.getBoundingClientRect().bottom > bar + 1);
-        return { id: t.dataset.turn, top: t.getBoundingClientRect().top };
-      });
-      const before = await count();
-      await page.click('.turns > .list > button.more');
-      await page.waitForFunction(
-        (n) =>
-          document.querySelectorAll('.turns > .turn').length > n ||
-          ![...document.querySelectorAll('.turns > .list > button.more')].some(
-            (b) => b.textContent === 'Load earlier',
-          ),
-        before.turns,
-      );
-      await page.waitForFunction(
-        (a) =>
-          Math.abs(
-            (document
-              .querySelector('.turn[data-turn="' + CSS.escape(a.id) + '"]')
-              ?.getBoundingClientRect().top ?? Infinity) - a.top,
-          ) <= 2,
-        anchor,
-      );
-      const after = await page.evaluate(
-        (id) =>
-          document
-            .querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')
-            ?.getBoundingClientRect().top ?? null,
-        anchor.id,
-      );
-      // Where the anchor is at later moments, so a drift that comes after the redraw shows in the failure message.
-      const later = [];
-      for (const ms of [150, 500, 1200]) {
-        await page.waitForTimeout(ms);
-        later.push(
-          (await page.evaluate(
-            (id) =>
-              Math.round(
-                (document
-                  .querySelector('.turn[data-turn="' + CSS.escape(id) + '"]')
-                  ?.getBoundingClientRect().top ?? NaN) * 10,
-              ) / 10,
-            anchor.id,
-          )) -
-            Math.round(anchor.top * 10) / 10,
-        );
-      }
-      P.clicks.push({
-        before: before.turns,
-        after: (await count()).turns,
-        anchorMoved: after == null ? null : Math.round(after - anchor.top),
-        later,
-        anchor: { id: anchor.id, top: Math.round(anchor.top) },
-      });
-    }
-    P.done = { ...(await count()), pager: await pager(page) };
-    r.expect(
-      P.clicks.length > 0 && P.clicks.every((c) => c.after >= c.before),
-      'Load earlier adds turns: ' + JSON.stringify(P.clicks),
-    );
-    r.expect(
-      P.clicks.every((c) => c.anchorMoved !== null && Math.abs(c.anchorMoved) <= 2),
-      'what was on screen stays put after Load earlier: ' + JSON.stringify(P.clicks),
-    );
-    r.expect(
-      P.done.turns === 10 && P.done.started && P.done.pager.length === 0,
-      'the first page starts with the Started divider and holds all 10 turns: ' +
-        JSON.stringify(P.done),
-    );
-    P.gaps = await page.evaluate(
-      () =>
-        [...document.querySelectorAll('.turns > .divider')].filter((d) =>
-          d.textContent.startsWith('Some entries not included'),
-        ).length,
-    );
-    r.expect(P.gaps === 1, 'the unreadable line shows as one gap divider between turns: ' + P.gaps);
-    await page.screenshot({ path: path.join(ENV.out, 'extras-backlog-start.png') });
-    // A deep link to an older turn.
-    const older = turns[1];
-    await page.goto(
-      compatibilityUrl(ENV.extraBase + '/s/claude/backlog?turn=' + encodeURIComponent(older.id)),
-      {
-        waitUntil: 'load',
-      },
-    );
-    await page.waitForFunction(
-      (id) => !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'),
-      older.id,
-    );
-    await page.waitForTimeout(300);
-    P.deep = {
-      inView: await inView(page, '.turn[data-turn="' + older.id.replace(/"/g, '\\"') + '"]'),
-      pager: await pager(page),
-      url: await page.evaluate(() => location.pathname + location.search),
-    };
-    r.expect(P.deep.inView === true, 'the deep-linked turn lands in view');
-    r.expect(
-      P.deep.pager.some((b) => b.text === 'Load earlier' && b.first) &&
-        P.deep.pager.some((b) => b.text === 'Load later' && b.last),
-      'a middle page has Load earlier above and Load later below: ' + JSON.stringify(P.deep.pager),
-    );
-    r.expect(
-      P.deep.url === '/s/claude/backlog?turn=' + encodeURIComponent(older.id) + '&compat=1',
-      'the URL keeps the turn: ' + P.deep.url,
-    );
-    for (let k = 0; k < 5 && (await pager(page)).some((b) => b.text === 'Load later'); k++) {
-      const moreLater = page.locator('.turns > .list:last-child > button.more');
-      await moreLater.scrollIntoViewIfNeeded();
-      await moreLater.evaluate((button) => button.click());
-      await page.waitForTimeout(250);
-    }
-    P.later = await page.evaluate(
-      (id) => ({
-        last: !!document.querySelector('.turn[data-turn="' + CSS.escape(id) + '"]'),
-        text: document
-          .querySelector('.turns')
-          .textContent.includes('Backlog triaged: 460 issues read.'),
-        pager: [...document.querySelectorAll('.turns > .list > button.more')].map(
-          (b) => b.textContent,
-        ),
-      }),
-      turns.at(-1).id,
-    );
-    r.expect(
-      P.later.last && P.later.text && !P.later.pager.includes('Load later'),
-      'Load later reaches the last turn: ' + JSON.stringify(P.later),
-    );
-    R.paging = P;
-    r.expect(page.errors.length === 0, 'paging: page errors ' + page.errors.join(' | '));
-    await page.context().close();
-  }
+  // ---- Source-scoped native paging and generation rejection ---------------------
+  await catalogPagingCheck(browser);
 
   // ---- Steps: no exit status, a long command, View all ------------------------------------------------------------------
   {
     const page = await served(browser, { extras: true, path: '/s/codex/deps' });
-    await page.waitForFunction(() => !!document.querySelector('.turns'));
+    await page
+      .locator('[aria-label="Transcript"] [data-entry-key]')
+      .first()
+      .waitFor({ state: 'attached' });
     await page.evaluate(() =>
       document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()),
     );
@@ -1483,8 +755,11 @@ export default async function (browser) {
     );
 
     const childRequestsSettled = trackChildRequests(page);
-    await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/harbor'), { waitUntil: 'load' });
-    await page.waitForFunction(() => !!document.querySelector('.turns'));
+    await page.goto(ENV.extraBase + '/s/claude/harbor', { waitUntil: 'load' });
+    await page
+      .locator('[aria-label="Transcript"] [data-entry-key]')
+      .first()
+      .waitFor({ state: 'attached' });
     await childRequestsSettled();
     await page.evaluate(() =>
       document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click()),
@@ -1557,11 +832,11 @@ export default async function (browser) {
     });
     const preview = previewInfo.len;
     r.expect(preview > 0 && preview <= 1536 + 3, "the preview is the server's cut: " + preview);
-    await page.route('**/api/entry**', (x) => x.abort());
+    await page.route('**/api/session-entry?**', (x) => x.abort());
     const failed = await openAll();
     await page.click('dialog.panel.full .panel-h .ibtn');
     await page.waitForTimeout(250);
-    await page.unroute('**/api/entry**');
+    await page.unroute('**/api/session-entry?**');
     const ok = await openAll();
     await page.click('dialog.panel.full .panel-h .ibtn');
     await page.waitForTimeout(250);
@@ -1579,6 +854,44 @@ export default async function (browser) {
       ok.notes.length === 0 && ok.out > preview,
       'a working fetch shows the whole text, longer than the preview: ' + JSON.stringify(ok),
     );
+    // The transcript and FullTool panel share the same qualified field request.
+    // Opening the panel while that request is in flight must join its completion.
+    await page.reload();
+    await settled(page);
+    await childRequestsSettled();
+    await page.evaluate(() =>
+      document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click()),
+    );
+    let releaseField, fieldStarted;
+    const heldField = new Promise((resolve) => (releaseField = resolve)),
+      startedField = new Promise((resolve) => (fieldStarted = resolve));
+    let fieldReads = 0;
+    await page.route('**/api/session-entry?**', async (route) => {
+      if (new URL(route.request().url()).searchParams.has('field_chunk')) {
+        fieldReads++;
+        fieldStarted();
+        await heldField;
+      }
+      await route.continue();
+    });
+    await page.getByRole('button', { name: 'Load recorded text', exact: true }).first().click();
+    await startedField;
+    await openAll();
+    releaseField();
+    await page.waitForFunction(
+      (preview) =>
+        [...document.querySelectorAll('dialog.panel.full pre')].at(-1)?.textContent.length >
+        preview,
+      preview,
+    );
+    await page.locator('dialog.panel.full .vnote').waitFor({ state: 'detached' });
+    r.expect(fieldReads === 1, 'View all joins the in-flight native field read: ' + fieldReads);
+    r.expect(
+      (await page.locator('dialog.panel.full .vnote').count()) === 0,
+      'View all redraws when the shared field request completes',
+    );
+    await page.click('dialog.panel.full .panel-h .ibtn');
+    await page.unroute('**/api/session-entry?**');
     r.expect(page.errors.length === 0, 'steps: page errors ' + page.errors.join(' | '));
     await page.context().close();
   }
@@ -1586,10 +899,23 @@ export default async function (browser) {
   // ---- Code-mode exec: unwrapped operations and its script control -----------------------------------------------
   {
     const page = await served(browser, { extras: true, path: '/s/codex/code-mode' });
-    await page.waitForFunction(() => !!document.querySelector('.turns'));
+    await page
+      .locator('[aria-label="Transcript"] [data-entry-key]')
+      .first()
+      .waitFor({ state: 'attached' });
     const data = await page.evaluate(async () => {
-      const token = new URLSearchParams(location.search).get('t');
-      const response = await fetch('/api/tx?sid=code-mode&t=' + encodeURIComponent(token));
+      const source =
+        new URLSearchParams(location.search).get('machine') ??
+        (await (await fetch('/api/session-capabilities')).json()).source_key;
+      const response = await fetch(
+        '/api/session-transcript?' +
+          new URLSearchParams({
+            sid: 'code-mode',
+            machine: source,
+            scope: 'retained_history',
+            limit: '60',
+          }),
+      );
       const totals = await response.json();
       document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((button) => button.click());
       const step = [...document.querySelectorAll('.step')].find(
@@ -1599,8 +925,8 @@ export default async function (browser) {
       if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
       const detail = step?.querySelector(':scope > .out');
       return {
-        calls: totals.calls,
-        errors: totals.errors,
+        calls: totals.session.details.calls,
+        errors: totals.session.details.errors,
         steps: [...document.querySelectorAll('.step')].map((step) => ({
           arg: step.querySelector('.sa')?.textContent ?? '',
           err: step.classList.contains('err'),
@@ -1666,10 +992,23 @@ export default async function (browser) {
   // ---- Yielded Codex command and poll input ---------------------------------------------------------------------
   {
     const page = await served(browser, { extras: true, path: '/s/codex/yielded-ui' });
-    await page.waitForFunction(() => !!document.querySelector('.turns'));
+    await page
+      .locator('[aria-label="Transcript"] [data-entry-key]')
+      .first()
+      .waitFor({ state: 'attached' });
     const data = await page.evaluate(async () => {
-      const token = new URLSearchParams(location.search).get('t');
-      const response = await fetch('/api/tx?sid=yielded-ui&t=' + encodeURIComponent(token));
+      const source =
+        new URLSearchParams(location.search).get('machine') ??
+        (await (await fetch('/api/session-capabilities')).json()).source_key;
+      const response = await fetch(
+        '/api/session-transcript?' +
+          new URLSearchParams({
+            sid: 'yielded-ui',
+            machine: source,
+            scope: 'retained_history',
+            limit: '60',
+          }),
+      );
       const tx = await response.json(),
         entries = tx.entries.filter((entry) => entry.k === 'tool');
       const commandEntry = entries.find((entry) => entry.name === 'exec_command'),
@@ -1734,7 +1073,10 @@ export default async function (browser) {
     ]) {
       const tag = size + (dark ? '-dark' : '-light');
       const page = await served(browser, { extras: true, size, dark, path: '/s/codex/codex-cut' });
-      await page.waitForFunction(() => !!document.querySelector('.turns'));
+      await page
+        .locator('[aria-label="Transcript"] [data-entry-key]')
+        .first()
+        .waitFor({ state: 'attached' });
       await page.evaluate(() => {
         for (let i = 0; i < 3; i++)
           document.querySelectorAll('.tsum[aria-expanded="false"]').forEach((b) => b.click());
@@ -1846,24 +1188,50 @@ export default async function (browser) {
   {
     const page = await served(browser, { extras: true, path: '/s/claude/result-card' });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
+    // Wait for the result event itself. Its preview can repeat the independently
+    // rendered closing reply; the assertions below qualify the event's count.
+    await page
+      .locator('.turns .event')
+      .getByText('Unique result text for the transcript check.', { exact: true })
+      .waitFor();
     // The overhaul draws a result as an event like any other message to you: who sent it, the text, and the time.
     const result = await page.locator('.turns').evaluate((turns) => {
-      const phrase = 'Unique result text for the transcript check.';
-      const events = [...turns.querySelectorAll('.event')].filter((x) =>
-        x.querySelector('.ev-text')?.textContent.includes(phrase),
+      // Read retained content through the existing geometry adapter. An auto
+      // content-visibility subtree can skip innerText until its next paint.
+      const measured = [...turns.querySelectorAll('.turn')].filter(
+        (turn) => !turn.classList.contains('semon-measuring-turn'),
       );
-      return {
-        phraseCount: turns.innerText.split(phrase).length - 1,
-        events: events.length,
-        eventText: events[0]?.innerText ?? '',
-        hasVerb: /sent you a result/.test(events[0]?.querySelector('.ev-head')?.textContent ?? ''),
-        oldMarkers: turns.querySelectorAll('.result-marker').length,
-      };
+      measured.forEach((turn) => turn.classList.add('semon-measuring-turn'));
+      try {
+        const phrase = 'Unique result text for the transcript check.';
+        const events = [...turns.querySelectorAll('.event')].filter((x) =>
+          x.querySelector('.ev-text')?.textContent.includes(phrase),
+        );
+        return {
+          phraseCount: turns.innerText.split(phrase).length - 1,
+          closingReplies: [...turns.querySelectorAll('.msg.assistant')].filter(
+            (message) => message.textContent.trim() === phrase && !message.hidden,
+          ).length,
+          events: events.length,
+          eventText: events[0]?.innerText ?? '',
+          hasVerb: /sent you a result/.test(
+            events[0]?.querySelector('.ev-head')?.textContent ?? '',
+          ),
+          oldMarkers: turns.querySelectorAll('.result-marker').length,
+        };
+      } finally {
+        measured.forEach((turn) => turn.classList.remove('semon-measuring-turn'));
+      }
     });
     R.resultMarker = result;
     r.expect(
       result.phraseCount >= 1 && result.events === 1 && result.hasVerb && result.oldMarkers === 0,
       'the result is one event that says it sent a result, with its text: ' +
+        JSON.stringify(result),
+    );
+    r.expect(
+      result.closingReplies === 1,
+      'the recorded closing reply remains one independently visible message: ' +
         JSON.stringify(result),
     );
     const resultId = D.H.find((h) => h.from === 'result-card' && h.ask === 'result')?.id ?? '';
@@ -1898,13 +1266,17 @@ export default async function (browser) {
     );
     r.expect(!!resultHandoff, 'the synthetic human-started turn has a result handoff');
     const page = await served(browser, { extras: true, path: '/' });
-    const selector = '.sec-h + .list .ib[data-h="' + (resultHandoff?.id ?? '') + '"]';
+    const capability = await (
+      await page.request.get(ENV.extraBase + '/api/session-capabilities')
+    ).json();
+    const resultKey = JSON.stringify([capability.source_key, resultHandoff?.id]);
+    const selector = '.sec-h + .list .ib[data-h=' + JSON.stringify(resultKey) + ']';
     await page.waitForFunction(
       (id) =>
         [...document.querySelectorAll('.sec-h')].some(
           (head) => head.firstChild?.textContent === 'Needs you',
         ) && !!document.querySelector('.sec-h + .list .ib[data-h="' + CSS.escape(id) + '"]'),
-      resultHandoff?.id ?? '',
+      resultKey,
     );
     const before = await page.locator(selector).evaluate((card) => ({
       brief: card.querySelector('.q')?.innerText ?? '',
@@ -1920,10 +1292,12 @@ export default async function (browser) {
       'Needs you shows the full result card text: ' + JSON.stringify(before),
     );
     r.expect(
-      before.resultIds.includes(resultHandoff?.id),
+      before.resultIds.includes(resultKey),
       'the unread result is grouped with Needs you: ' + JSON.stringify(before),
     );
-    const waitingKinds = before.resultIds.map((id) => D.H.find((h) => h.id === id)?.ask);
+    const waitingKinds = before.resultIds.map(
+      (id) => D.H.find((h) => h.id === JSON.parse(id)[1])?.ask,
+    );
     r.expect(
       waitingKinds.every((ask) => ask === 'question' || ask === 'decision' || ask === 'result') &&
         waitingKinds.includes('result'),
@@ -1934,7 +1308,7 @@ export default async function (browser) {
       'the Home badge counts all open inbox items: ' + JSON.stringify(before),
     );
 
-    await page.goto(compatibilityUrl(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken), {
+    await page.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
     await page.waitForFunction(() => !!document.querySelector('.turns .event'));
@@ -1942,10 +1316,10 @@ export default async function (browser) {
       JSON.parse(localStorage.getItem('semon.seen') ?? '[]'),
     );
     r.expect(
-      stored.includes(resultHandoff?.id),
+      stored.includes(resultKey),
       'opening the session stores its result id as seen: ' + JSON.stringify(stored),
     );
-    await page.goto(compatibilityUrl(ENV.extraBase + '/?t=' + ENV.extraToken), {
+    await page.goto(ENV.extraBase + '/?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
     await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
@@ -1977,12 +1351,9 @@ export default async function (browser) {
     await blocked.waitForFunction(
       () => document.querySelector('#topbar .t')?.textContent === 'Home',
     );
-    await blocked.goto(
-      compatibilityUrl(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken),
-      {
-        waitUntil: 'load',
-      },
-    );
+    await blocked.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
+      waitUntil: 'load',
+    });
     await blocked.waitForFunction(() => !!document.querySelector('.turns .event'));
     r.expect(
       blocked.errors.length === 0,
@@ -2013,9 +1384,22 @@ export default async function (browser) {
               ) &&
               !(
                 x.matches('button.attach > img.attach-img, dialog.image-viewer img.attach-full') &&
-                /^\/api\/attachment\?sid=[^&]*&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(
-                  x.getAttribute('src') ?? '',
-                ) &&
+                /^\/api\/session-entry\?/.test(x.getAttribute('src') ?? '') &&
+                (() => {
+                  const url = new URL(x.getAttribute('src'), location.href),
+                    args = url.searchParams;
+                  return (
+                    url.origin === location.origin &&
+                    args.get('part') === 'attachment' &&
+                    args.get('scope') === 'retained_history' &&
+                    !!args.get('machine') &&
+                    !!args.get('sid') &&
+                    /^\d+$/.test(args.get('after') ?? '') &&
+                    args.get('limit') === '1' &&
+                    /^[a-f0-9]{64}$/.test(args.get('generation') ?? '') &&
+                    /^\d+$/.test(args.get('image') ?? '')
+                  );
+                })() &&
                 [...x.attributes].every((a) =>
                   ['class', 'alt', 'src', 'width', 'height', 'loading', 'decoding'].includes(
                     a.name,
@@ -2059,20 +1443,21 @@ export default async function (browser) {
         await goto(page, { v }, D);
         await scan(page, size + ' ' + v);
       }
-      const sids = [...Object.keys(D.SESS), 'unsent:' + XSS];
+      const sids = [...D.nativeKeys, 'unsent:' + XSS];
       for (const id of sids) {
         await goto(page, { v: 'session', id }, D);
         await page.waitForTimeout(100);
         await openEverything(page);
         await page.waitForTimeout(80);
         await scan(page, size + ' session ' + id.slice(0, 20));
+        const owner = decodeURIComponent(new URL(page.url()).pathname.split('/')[3]);
         const traces = await page.evaluate(() =>
           [...document.querySelectorAll('.turn-end .link')].map(
             (b) => b.closest('.turn').dataset.turn,
           ),
         );
         for (const t of traces) {
-          await goto(page, { v: 'trace', sid: id, turn: t }, D);
+          await goto(page, { v: 'trace', sid: owner, turn: t }, D);
           await openEverything(page);
           await scan(page, size + ' trace ' + t.slice(0, 20));
         }
@@ -2100,7 +1485,10 @@ export default async function (browser) {
         extras: true,
         path: '/s/' + harness + '/' + encodeURIComponent(id),
       });
-      await page.waitForFunction(() => !!document.querySelector('.turns'));
+      await page
+        .locator('[aria-label="Transcript"] [data-entry-key]')
+        .first()
+        .waitFor({ state: 'attached' });
       const title = await page.evaluate(
         () => document.querySelector('#topbar .t')?.textContent ?? null,
       );

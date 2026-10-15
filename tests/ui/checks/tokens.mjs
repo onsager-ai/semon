@@ -117,25 +117,17 @@ export default async function tokensCheck(browser) {
       rec = (results[tag] = {}),
       page = await served(browser, { size, dark });
     if (introHandoff) {
-      await page.route('**/api/model*', async (route) => {
+      await page.route('**/api/session-home?**', async (route) => {
         const response = await route.fetch();
-        let model;
-        try {
-          model = await response.json();
-        } catch {
-          return route.fulfill({ response });
-        }
-        const h = model.handoffs?.find((item) => item.id === introHandoff.id);
-        if (h) {
+        if (response.status() !== 200) return route.fulfill({ response });
+        const detail = await response.json(),
+          event = detail.events?.[introHandoff.id];
+        if (event && typeof event.brief === 'string') {
           const continuation =
             'Keep the handoff scoped to this request, preserve its context, and report what changed before returning the result.';
-          h.brief = [h.brief, ...Array(8).fill(continuation)].filter(Boolean).join('\n\n');
+          event.brief = [event.brief, ...Array(8).fill(continuation)].filter(Boolean).join('\n\n');
         }
-        return route.fulfill({
-          status: response.status(),
-          contentType: 'application/json',
-          body: JSON.stringify(model),
-        });
+        return route.fulfill({ response, json: detail });
       });
       await page.reload({ waitUntil: 'load' });
       await settled(page);

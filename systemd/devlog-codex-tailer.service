@@ -1,6 +1,0 @@
-[Unit]
-Description=Capture new Codex session records into local Semon storage
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/semon-codex

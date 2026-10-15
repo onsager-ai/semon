@@ -14,10 +14,16 @@ export interface CatalogListItem {
   branch: string | null;
   model: string;
   freshness: { state: string };
+  presentation?: import('./screens').SessionRow;
 }
-import { screenText } from './screens';
+import { screenText, SessionRowView, fitSessionRows } from './screens';
 export interface CatalogListSnapshot {
   items: readonly CatalogListItem[];
+  groups?: readonly {
+    root: CatalogListItem;
+    children: readonly CatalogListItem[];
+    expanded: boolean;
+  }[];
   sourceLabel: string;
   updating: boolean;
   observation?: string;
@@ -25,12 +31,14 @@ export interface CatalogListSnapshot {
   note: string;
   harness: string;
   repo: string;
+  model?: string;
   query?: string;
   metadataSearch?: boolean;
   searchPartial?: boolean;
   searchIndexIncomplete?: boolean;
   more: boolean;
-  compatibilityHref: string;
+  reviews?: boolean;
+  hasReviews?: boolean;
   candidates?: readonly CatalogSourceCandidate[];
   candidatesMore?: boolean;
   candidateUpdating?: boolean;
@@ -38,27 +46,31 @@ export interface CatalogListSnapshot {
 }
 export interface CatalogListHost {
   session(item: CatalogListItem): void;
-  filters(values: { harness: string; repo: string; q: string }): void;
+  filters(values: { harness: string; repo: string; model: string; q: string }): void;
+  searchDraft?(query: string): void;
   clearFilters(): void;
   more(): void;
+  children?(key: string, expanded: boolean): void;
   retry(): void;
+  reviews?(): void;
   candidate?(candidate: CatalogSourceCandidate): void;
   candidateMore?(): void;
   candidateRetry?(): void;
 }
-/** Cached metadata reports its own scope/freshness and carries no runtime totals or state. */
+/** Cached metadata reports its scope, freshness and recorded status without live control. */
 export function renderCatalogList(
   root: HTMLElement,
   snapshot: CatalogListSnapshot,
   host: CatalogListHost,
 ) {
-  const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo);
+  const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo || snapshot.model);
   function commit(form: HTMLFormElement) {
     const values = new FormData(form);
     host.filters({
       q: String(values.get('q') ?? '').trim(),
+      model: String(values.get('model') ?? '').trim(),
       harness: String(values.get('harness') ?? '').trim(),
-      repo: String(values.get('repo') ?? '').trim(),
+      repo: values.get('no_repo') === 'on' ? '__none__' : String(values.get('repo') ?? '').trim(),
     });
   }
   render(
@@ -82,8 +94,10 @@ export function renderCatalogList(
             <input
               name="q"
               aria-label="Search session details"
+              id="sq"
               placeholder="Session details…"
               value={snapshot.query ?? ''}
+              onInput={(event) => host.searchDraft?.(event.currentTarget.value)}
               onChange={(event) => {
                 if (event.currentTarget.form) commit(event.currentTarget.form);
               }}
@@ -106,7 +120,29 @@ export function renderCatalogList(
           <input
             name="repo"
             aria-label="Repository"
-            value={snapshot.repo}
+            value={snapshot.repo === '__none__' ? '' : snapshot.repo}
+            onChange={(event) => {
+              if (event.currentTarget.form) commit(event.currentTarget.form);
+            }}
+          />
+        </label>
+        <label class="search" key="no_repo">
+          <input
+            name="no_repo"
+            type="checkbox"
+            checked={snapshot.repo === '__none__'}
+            onChange={(event) => {
+              if (event.currentTarget.form) commit(event.currentTarget.form);
+            }}
+          />
+          <span>No repository</span>
+        </label>
+        <label class="search" key="model">
+          <span>Model</span>
+          <input
+            name="model"
+            aria-label="Model"
+            value={snapshot.model ?? ''}
             onChange={(event) => {
               if (event.currentTarget.form) commit(event.currentTarget.form);
             }}
@@ -198,6 +234,17 @@ export function renderCatalogList(
           )}
         </section>
       )}
+      {snapshot.hasReviews && (
+        <button
+          class="link"
+          type="button"
+          data-show-approval-reviews=""
+          aria-pressed={snapshot.reviews ?? false}
+          onClick={() => host.reviews?.()}
+        >
+          Show approval reviews
+        </button>
+      )}
       <div class="catalog-result-header">
         <span>
           {snapshot.items.length}{' '}
@@ -219,32 +266,54 @@ export function renderCatalogList(
         </details>
       </div>
       <div class="session-list" aria-label="Recorded sessions">
-        {snapshot.items.map((item) => (
-          <button
-            key={item.key}
-            class="nrow"
-            type="button"
-            data-session-row="list"
-            data-id={item.key}
-            onClick={() => host.session(item)}
-          >
-            <span class="session-row-main srow-main">
-              <span class="nm">{screenText(item.name)}</span>
-              <span class="ag">{item.freshness.state}</span>
-            </span>
-            <span class="session-row-meta srow-meta for">
-              {screenText(
-                [item.repo, item.branch, item.harness, item.model].filter(Boolean).join(' · '),
+        {(
+          snapshot.groups ?? snapshot.items.map((root) => ({ root, children: [], expanded: false }))
+        ).map((group) => {
+          const shown =
+            group.expanded || filtered ? group.children.length : Math.min(5, group.children.length);
+          const row = (item: CatalogListItem, child = false) => (
+            <SessionRowView
+              key={item.key}
+              child={child}
+              row={
+                item.presentation ?? {
+                  id: item.key,
+                  name: item.name,
+                  state: 'off',
+                  stateLabel: 'Recorded history',
+                  age: item.freshness.state,
+                  model: item.model,
+                  modelTip: item.model,
+                  fields: [],
+                }
+              }
+              host={{ session: () => host.session(item) }}
+            />
+          );
+          return (
+            <div class={group.children.length ? 'kids-wrap' : ''} key={group.root.key}>
+              {row(group.root)}
+              {!!group.children.length && (
+                <div class="kids">
+                  {group.children.slice(0, shown).map((item) => row(item, true))}
+                  {!filtered && group.children.length > 5 && (
+                    <button
+                      class="tree-more"
+                      type="button"
+                      aria-expanded={group.expanded}
+                      onClick={() => host.children?.(group.root.key, !group.expanded)}
+                    >
+                      {group.expanded
+                        ? 'Show fewer'
+                        : 'Show ' + (group.children.length - shown) + ' more'}
+                    </button>
+                  )}
+                </div>
               )}
-            </span>
-          </button>
-        ))}
+            </div>
+          );
+        })}
       </div>
-      <p class="catalog-note">
-        <a class="link" href={snapshot.compatibilityHref}>
-          Open compatibility view (loads workspace history)
-        </a>
-      </p>
       {!snapshot.updating &&
         !snapshot.items.length &&
         !snapshot.note &&
@@ -274,4 +343,5 @@ export function renderCatalogList(
     </>,
     root,
   );
+  fitSessionRows(root);
 }

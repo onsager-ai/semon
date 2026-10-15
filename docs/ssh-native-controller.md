@@ -44,7 +44,10 @@ An independent Linux subreaper supervisor owns a maximum five-minute lifetime.
 Both controller and supervisor use monotonic bounds; a stalled IPC peer cannot
 extend the lease. The supervisor adopts the exclusively started native descendants
 after controller loss and signals only processes matching its descendant/start
-identity. Writer exclusion is published only after that process tree is reaped.
+identity. Descendant discovery reads the Linux task child lists in that tree,
+including children spawned by other threads and adopted or detached descendants;
+it does not scan unrelated VM processes or assume a maximum tree depth. Writer
+exclusion is published only after that process tree is reaped.
 A native end acknowledgement begins shutdown; it does not skip that proof.
 Expiry alone, a revoked grant, mirrored history or an unreachable host never proves
 exclusion. Embeddings retain shutdown obligations until qualified evidence arrives.

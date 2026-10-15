@@ -1,6 +1,7 @@
-//! The session model behind `/api/model` and `--model-json` (#40 M1): the
-//! mockup's `SESS` and `H` globals, the turn index and busy intervals, built
-//! from the per-file event index.
+//! Shared native session semantic derivation over the generation-bound Event Index.
+//! Catalog publications and focused Query reads share identity, relationships,
+//! transcript slots and runtime facts. The complete serialization oracle is
+//! compiled only for semantic equivalence tests, never the product Viewer.
 //!
 //! Semon never guesses a link. Every join below is on a logged id: a
 //! `toolUseId`, a `msg_id`, a `session_id`, a `continued-in` or
@@ -12,8 +13,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -24,26 +24,41 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod copy_stage;
+pub(crate) mod description_stage;
+pub(crate) mod identity_stage;
+pub(crate) mod indexed_native;
+pub(crate) mod native_producer;
+pub(crate) mod native_stage;
+pub(crate) mod range_stage;
+pub(crate) mod relation_stage;
 pub(crate) mod summary;
+pub(crate) mod turn_stage;
+use native_stage::{Entry, EntryKind};
 use serde_json::Value;
 
+#[cfg(test)]
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+
 use crate::{
-    Marker, Options, attachments, codex_meta, events,
+    Marker, Options, attachments, events,
     events::{
         ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
-    field, file_list, handoff, read_first_marker,
+    field, file_list, handoff,
 };
 
 /// Version of the `/api/model` JSON shape. Embedders and clients compare it;
 /// bump it only for a breaking change to that shape.
+#[cfg(test)]
 pub const MODEL_API: u32 = 1;
 
 /// Briefs and results are capped as in the mockup data.
 pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
 /// A tool call without a result counts as running for this long.
+#[cfg(test)]
 const LIVE_MS: i64 = 30 * 60 * 1000;
 /// A single source line read back for text is bounded by this.
 pub(crate) const MAX_LINE: u64 = 64 * 1024 * 1024;
@@ -290,6 +305,7 @@ pub(crate) struct Turn {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg(test)]
 pub(crate) struct Machine {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -299,10 +315,8 @@ pub(crate) struct Machine {
     pub(crate) last: Option<i64>,
 }
 
-/// What the agent read surface (`semon query`, `semon mcp`) says about a
-/// session beyond `/api/model`'s shape: facts the builder already holds but
-/// the viewer doesn't serve. Metadata only, never served by `/api/model`, so
-/// the model's JSON and version don't change with it.
+/// Native Query facts beyond the Viewer session metadata, derived from
+/// qualified native evidence and current process observations.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SessionFacts {
     /// `session`, `subagent`, `codex-run` or `stub`.
@@ -335,6 +349,7 @@ pub(crate) struct SessionFacts {
 }
 
 #[derive(Serialize)]
+#[cfg(test)]
 struct Rest<'a> {
     pricing: &'a crate::pricing::Pricing,
     handoffs: &'a [Handoff],
@@ -350,6 +365,7 @@ struct Rest<'a> {
 /// A built model. Everything but the sessions' running-tool age is
 /// serialized once; `version` hashes the build and every source file's
 /// length, so it changes when, and only when, the logs do.
+#[cfg(test)]
 pub(crate) struct Built {
     pub(crate) version: String,
     /// Milliseconds spent in each model build phase, in order.
@@ -359,7 +375,6 @@ pub(crate) struct Built {
     pub(crate) sessions: BTreeMap<String, Session>,
     /// `"handoffs":…,"turns":…,"busy":…,"tx":…}`
     rest: String,
-    pub(crate) pids: Vec<u32>,
     /// `$HOME` of the machine the logs come from, for shortening paths.
     pub(crate) home: Option<String>,
     /// This machine's id, as sessions name it.
@@ -367,11 +382,10 @@ pub(crate) struct Built {
     /// Each session's transcript index, for `/api/tx`: metadata and offsets
     /// only, the text is read back per page.
     pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
-    /// Each session's facts for the agent read surface, by session key.
+    /// Native facts observed by incremental-index equivalence tests.
+    /// Production query readers retain these in QueryData, not Built.
+    #[cfg(test)]
     pub(crate) facts: BTreeMap<String, SessionFacts>,
-    /// Where the model window started (epoch ms), whether applied at scan
-    /// time or by trimming output. `None` only for an unbounded model.
-    pub(crate) window_start: Option<i64>,
     /// What `/api/analytics` reads of each session active in the last
     /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
     /// its window. Never served by `/api/model`: its JSON and version don't
@@ -386,6 +400,65 @@ pub(crate) struct Built {
     pub(crate) texts: BTreeMap<String, Vec<(usize, u64, u32)>>,
 }
 
+/// Native query evidence and source offsets, without compatibility transport,
+/// growth marks or workspace analytics. The producer applies the same native
+/// relationships and window rules as the legacy model.
+pub(crate) struct QueryData {
+    pub(crate) sessions: BTreeMap<String, Session>,
+    pub(crate) handoffs: Vec<Handoff>,
+    /// Human prompt bodies are read only by the requesting session/search.
+    /// These offsets carry no host authority and belong to `sources` below.
+    pub(crate) ask_briefs: BTreeMap<String, PromptBrief>,
+    pub(crate) turns: Vec<Turn>,
+    pub(crate) facts: BTreeMap<String, SessionFacts>,
+    pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
+    pub(crate) home: Option<String>,
+    pub(crate) machine_id: String,
+    pub(crate) pids: Vec<u32>,
+    pub(crate) window_start: Option<i64>,
+    pub(crate) sources: crate::query_source::Sources,
+}
+
+impl QueryData {
+    /// Preserve union machine labels and configured windows without reading a
+    /// machine's native evidence. Selected queries supply evidence for one part.
+    pub(crate) fn identity(options: &Options, now: i64) -> Self {
+        let facts = MachineFacts::of(options);
+        Self {
+            sessions: BTreeMap::new(),
+            handoffs: Vec::new(),
+            ask_briefs: BTreeMap::new(),
+            turns: Vec::new(),
+            facts: BTreeMap::new(),
+            tx: BTreeMap::new(),
+            home: facts.home(),
+            machine_id: facts.hostname(options),
+            pids: Vec::new(),
+            window_start: (!options.all).then(|| {
+                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+            }),
+            sources: crate::query_source::Sources::default(),
+        }
+    }
+}
+
+pub(crate) struct PromptBrief {
+    path: PathBuf,
+    offset: u64,
+}
+
+impl PromptBrief {
+    pub(crate) fn read(&self, records: &crate::query_source::Records<'_>) -> io::Result<String> {
+        Ok(records
+            .derive(&self.path, self.offset)?
+            .as_ref()
+            .and_then(prompt_text)
+            .map(|text| cap(&cap(&text, TEXT_MAX), MSG_MAX))
+            .unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
 impl Built {
     /// The model as served at `now`: a running tool's `activity[2]` is its
     /// age in seconds, and a tool without a result for [`LIVE_MS`] is no
@@ -494,31 +567,12 @@ pub(crate) fn is_ask(id: &str) -> bool {
         .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-/// Writes the model for `options` as JSON. Each file's change to the event
-/// index is committed as it is read.
-pub fn model_json(options: &Options) -> io::Result<String> {
-    model_json_at(options, now_ms())
-}
-
-/// [`model_json`] at a fixed `now` (epoch ms), for fixtures.
-#[doc(hidden)]
-pub fn model_json_at(options: &Options, now: i64) -> io::Result<String> {
-    let mut cache = EventCache::open(&options.cache);
-    let mut dirty = false;
-    if options.facts.is_none() {
-        cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
-    }
-    let mut texts = Texts::default();
-    let built = build(options, &mut cache, &mut dirty, &mut texts, now)?;
-    Ok(built.json(now))
-}
-
 // ---- Text read back by offset, held in memory only ---------------------------------------
 
 /// What the in-memory text cache may hold, in bytes.
 const TEXT_BUDGET: usize = 32 * 1024 * 1024;
 /// Every text read back is capped to this before it is kept.
-const TEXT_MAX: usize = 64 * 1024;
+pub(crate) const TEXT_MAX: usize = 64 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TextKey {
@@ -548,28 +602,42 @@ pub(crate) struct Texts {
     descriptions: HashMap<String, (DescriptionInputs, Description)>,
     prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
-    markers: HashMap<PathBuf, (Stamp, Option<Marker>)>,
-    /// Each Codex file's `session_meta` and each subagent's `.meta.json`, by
-    /// the file's stamp: a rebuild after one file grew re-reads neither for
-    /// the files that didn't change.
-    metas: HashMap<PathBuf, (Stamp, Option<Value>)>,
+}
+
+impl Texts {
+    /// Native Catalog persists descriptions and slot recipes. Completed
+    /// publication needs no resident derivation or attachment payload for every
+    /// discovered session; unchanged inputs bypass derivation via the snapshot.
+    pub(crate) fn release_published_derivations(&mut self) {
+        self.derived_sessions = HashMap::new();
+        self.descriptions = HashMap::new();
+        self.prompt_caches = HashMap::new();
+    }
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Metadata files read by [`Texts::meta`] on this thread: a rebuild reads
-    /// only the changed ones.
-    pub(crate) static META_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Full compatibility model preparation, excluding native catalog observation.
+    pub(crate) static COMPAT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Direct source body reads, excluding native discovery/index parsing.
+    pub(crate) static DIRECT_SOURCE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     static SESSION_DERIVATIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     /// Runs once right after the scan read the files: a test appends there,
     /// as a writer would while a build runs.
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Races after native query derivation, before projection publication.
+    pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Races after model derivation, before its projection is published.
+    static AFTER_MODEL_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
+    #[cfg(test)]
+    DIRECT_SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
     let mut file = crate::sealed::LogFile::open(path).ok()?;
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut reader = BufReader::new(file).take(MAX_LINE);
@@ -580,10 +648,7 @@ pub(crate) fn read_line(path: &Path, offset: u64) -> Option<Value> {
 
 impl Texts {
     fn invalidate(&mut self, path: &Path) {
-        if self.generations.remove(path).is_some() {
-            self.metas.remove(path);
-            self.markers.remove(path);
-        }
+        self.generations.remove(path);
     }
 
     fn generation(&mut self, path: &Path, stamp: Stamp) -> u64 {
@@ -606,12 +671,17 @@ impl Texts {
 
     fn read(
         &mut self,
+        evidence: (
+            &crate::query_source::Records<'_>,
+            Option<&crate::overview_repair::NativeRecords>,
+        ),
         file: &SourceFile,
         offset: u64,
         block: u32,
         what: &str,
         extract: impl FnOnce(&Value, usize) -> Option<String>,
     ) -> Option<String> {
+        let (records, history_records) = evidence;
         let key = TextKey {
             path: file.path.clone(),
             generation: self.generation(&file.path, file.stamp),
@@ -624,7 +694,11 @@ impl Texts {
             *used = self.tick;
             return value.clone();
         }
-        let value = read_line(&file.path, offset)
+        let value = history_records
+            .map_or_else(
+                || records.derive(&file.path, offset).ok().flatten(),
+                |history| history.record(&file.path, offset),
+            )
             .and_then(|record| extract(&record, block as usize))
             .map(|text| {
                 // `json:` values are built capped, and must stay whole.
@@ -675,48 +749,6 @@ impl Texts {
         }
         self.repos.insert(cwd.to_owned(), repo.clone());
         repo
-    }
-
-    /// A Codex run's marker, re-read only when the file changed.
-    fn marker(&mut self, path: &Path, stamp: Stamp) -> Option<Marker> {
-        if let Some((seen, marker)) = self.markers.get(path)
-            && *seen == stamp
-        {
-            return marker.clone();
-        }
-        let marker = read_first_marker(path).ok().flatten();
-        self.markers
-            .insert(path.to_owned(), (stamp, marker.clone()));
-        marker
-    }
-
-    /// A file's metadata, read by `read` only when its stamp changed. A Codex
-    /// file that only grew keeps its first line, so a `session_meta` already
-    /// read is kept (the event cache's rule); one not yet complete is read
-    /// again. A read error isn't kept, so the file is tried again next time.
-    fn meta(
-        &mut self,
-        path: &Path,
-        grows: bool,
-        read: impl FnOnce(&Path) -> io::Result<Option<Value>>,
-    ) -> io::Result<Option<Value>> {
-        let stamp = stamp_of(path);
-        if let Some((seen, meta)) = self.metas.get_mut(path)
-            && (*seen == stamp
-                || (grows
-                    && meta.is_some()
-                    && seen.dev == stamp.dev
-                    && seen.ino == stamp.ino
-                    && stamp.size > seen.size))
-        {
-            *seen = stamp;
-            return Ok(meta.clone());
-        }
-        #[cfg(test)]
-        META_READS.with(|reads| reads.set(reads.get() + 1));
-        let meta = read(path)?;
-        self.metas.insert(path.to_owned(), (stamp, meta.clone()));
-        Ok(meta)
     }
 }
 
@@ -1000,11 +1032,17 @@ fn pretty_model(model: &str) -> Option<String> {
 const PARENT_ADDRESS: &str = "main";
 
 /// A relay recipient or sender name without the harness's ` [..]` suffix.
-fn plain_name(name: &str) -> String {
+pub(crate) fn plain_name(name: &str) -> String {
     name.split_once(" [")
         .map_or(name, |(head, _)| head)
         .trim()
         .to_owned()
+}
+
+/// Shared copy-resume identity; bridge peers deliberately do not deduplicate.
+pub(crate) fn native_copy_identity(event: &Event) -> Option<String> {
+    crate::events::native_event::copy_identity(event.k, event.u.as_ref(), event.id.as_ref())
+        .cloned()
 }
 
 /// This machine's hostname, as `/proc` (or `/etc/hostname`) gives it.
@@ -1019,7 +1057,7 @@ pub(crate) fn local_hostname(options: &Options) -> String {
 
 // ---- Scan: every file's metadata summary --------------------------------------------------
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct AgentMeta {
     parent: String,
     tool_use_id: Option<String>,
@@ -1029,8 +1067,9 @@ struct AgentMeta {
     branch: Option<String>,
 }
 
-#[derive(Default, Debug)]
-struct CodexMeta {
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexMeta {
     history: Option<CodexHistory>,
     parent_thread: Option<String>,
     nickname: Option<String>,
@@ -1041,7 +1080,30 @@ struct CodexMeta {
     guardian_review: bool,
 }
 
-#[derive(Debug)]
+impl CodexMeta {
+    pub(crate) fn from_meta(meta: &Value) -> Self {
+        Self {
+            history: CodexHistory::from_meta(meta),
+            parent_thread: field(meta, "parent_thread_id").map(str::to_owned),
+            nickname: field(meta, "agent_nickname").map(str::to_owned),
+            path: field(meta, "agent_path").map(str::to_owned),
+            subagent: field(meta, "thread_source") == Some("subagent"),
+            cwd: field(meta, "cwd").map(str::to_owned),
+            branch: meta
+                .get("git")
+                .and_then(|git| field(git, "branch"))
+                .map(str::to_owned),
+            guardian_review: field(meta, "thread_source") == Some("guardian_review")
+                || meta
+                    .get("source")
+                    .and_then(|source| source.get("subagent"))
+                    .and_then(|subagent| field(subagent, "other"))
+                    == Some("guardian"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum Role {
     Top { slug: String },
     Agent(AgentMeta),
@@ -1076,9 +1138,10 @@ impl SourceFile {
     }
 }
 
+#[derive(Serialize)]
 pub(crate) struct PidFile {
     pub(crate) pid: u32,
-    session: String,
+    pub(crate) session: String,
     pub(crate) alive: bool,
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
@@ -1103,6 +1166,27 @@ struct Stamp {
     size: u64,
     modified_ns: u128,
     changed_ns: Option<i128>,
+}
+
+fn indexed_stamp(cache: &EventCache, path: &Path, before: Stamp) -> Stamp {
+    if cache.is_scoped()
+        && let Some(stat) = cache.indexed_stat(path)
+        && (stat.dev, stat.ino, stat.modified_ns, stat.changed_ns)
+            == (
+                before.dev,
+                before.ino,
+                before.modified_ns,
+                before.changed_ns,
+            )
+        && stat.size <= before.size
+    {
+        Stamp {
+            size: stat.size,
+            ..before
+        }
+    } else {
+        before
+    }
 }
 
 fn stamp_of(path: &Path) -> Stamp {
@@ -1214,6 +1298,23 @@ pub(crate) fn scan_cutoff(options: &Options, now: i64) -> Option<i64> {
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)))
 }
 
+pub(crate) fn catalog_source_in_window(
+    source: &summary::CatalogSource,
+    cutoff: Option<i64>,
+) -> bool {
+    source_modified_in_window(Some(source.modified_ns), cutoff)
+}
+
+/// A missing native source clock does not omit the source from a scan.
+/// This is a source modification clock, independent of event/activity seeds.
+pub(crate) fn source_modified_in_window(modified_ns: Option<u128>, cutoff: Option<i64>) -> bool {
+    cutoff.is_none_or(|cutoff| {
+        modified_ns.is_none_or(|modified_ns| {
+            modified_ns / 1_000_000 >= u128::try_from(cutoff).unwrap_or(0)
+        })
+    })
+}
+
 /// A file's modification time (epoch ms).
 fn modified_ms(path: &Path) -> Option<i64> {
     let time = fs::metadata(path).ok()?.modified().ok()?;
@@ -1253,7 +1354,12 @@ fn scan(
     let mut seen = BTreeSet::new();
     let mut skipped = BTreeSet::new();
     let outside = |path: &Path| {
-        cutoff.is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
+        cutoff.is_some_and(|cutoff| {
+            !source_modified_in_window(
+                modified_ms(path).map(|modified| u128::try_from(modified).unwrap_or(0) * 1_000_000),
+                Some(cutoff),
+            )
+        })
     };
     let mut paths = Vec::new();
     if let Some(selected) = selected {
@@ -1280,7 +1386,7 @@ fn scan(
             continue;
         };
         let parent = path.parent();
-        let role = if parent.and_then(Path::parent) == Some(projects.as_path()) {
+        let mut role = if parent.and_then(Path::parent) == Some(projects.as_path()) {
             Role::Top {
                 slug: parent
                     .and_then(Path::file_name)
@@ -1292,29 +1398,13 @@ fn scan(
             .is_some_and(|name| name == "subagents")
             && stem.starts_with("agent-")
         {
-            let meta = texts
-                .meta(&path.with_extension("meta.json"), false, |meta| {
-                    Ok(crate::read_regular(meta)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                        .filter(Value::is_object))
-                })
-                .ok()
-                .flatten()
-                .unwrap_or(Value::Null);
             Role::Agent(AgentMeta {
                 parent: parent
                     .and_then(Path::parent)
                     .and_then(Path::file_name)
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                tool_use_id: field(&meta, "toolUseId").map(str::to_owned),
-                label: field(&meta, "description")
-                    .or_else(|| field(&meta, "agentType"))
-                    .map(str::to_owned),
-                model: field(&meta, "model").map(str::to_owned),
-                cwd: field(&meta, "worktreePath").map(str::to_owned),
-                branch: field(&meta, "worktreeBranch").map(str::to_owned),
+                ..AgentMeta::default()
             })
         } else {
             continue;
@@ -1329,6 +1419,19 @@ fn scan(
         let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
             continue;
         };
+        let stamp = indexed_stamp(cache, &path, stamp);
+        if let Role::Agent(agent) = &mut role {
+            let metadata = summary
+                .claude_sidecar
+                .as_ref()
+                .map(|sidecar| sidecar.metadata.clone())
+                .unwrap_or_default();
+            agent.tool_use_id = metadata.tool_use_id;
+            agent.label = metadata.label;
+            agent.model = metadata.model;
+            agent.cwd = metadata.cwd;
+            agent.branch = metadata.branch;
+        }
         if cache.replaced(&path) {
             texts.invalidate(&path);
         }
@@ -1342,7 +1445,7 @@ fn scan(
             id: id.to_owned(),
             first: summary.first,
             last: summary.last,
-            marker: texts.marker(&path, stamp),
+            marker: None,
             path,
             role,
             summary,
@@ -1367,54 +1470,30 @@ fn scan(
             seen.insert(path.to_string_lossy().into_owned());
             continue;
         }
-        let Ok(meta) = texts.meta(&path, true, codex_meta) else {
-            continue;
-        };
-        let Some(id) = meta
-            .as_ref()
-            .and_then(|meta| field(meta, "id"))
-            .map(str::to_owned)
-            .or_else(|| crate::codex_id_from_filename(&path))
-        else {
-            continue;
-        };
         let stamp = stamp_of(&path);
         let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
             continue;
         };
-        let meta = if cache.replaced(&path) {
-            texts.invalidate(&path);
-            texts.meta(&path, true, codex_meta)?.unwrap_or(Value::Null)
-        } else {
-            meta.unwrap_or(Value::Null)
+        let stamp = indexed_stamp(cache, &path, stamp);
+        let Some(header) = summary.codex_header.as_ref() else {
+            return Err(io::Error::other("native Codex header was not observed"));
         };
+        let Some(id) = header.native_id(&path) else {
+            continue;
+        };
+        if cache.replaced(&path) {
+            texts.invalidate(&path);
+        }
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
             revision: cache.revision(&path).expect("scanned file has a ledger"),
-            marker: texts.marker(&path, stamp),
+            marker: None,
             stamp,
             id,
             first: summary.first,
             last: summary.last,
-            role: Role::Codex(CodexMeta {
-                history: CodexHistory::from_meta(&meta),
-                parent_thread: field(&meta, "parent_thread_id").map(str::to_owned),
-                nickname: field(&meta, "agent_nickname").map(str::to_owned),
-                path: field(&meta, "agent_path").map(str::to_owned),
-                subagent: field(&meta, "thread_source") == Some("subagent"),
-                cwd: field(&meta, "cwd").map(str::to_owned),
-                branch: meta
-                    .get("git")
-                    .and_then(|git| field(git, "branch"))
-                    .map(str::to_owned),
-                guardian_review: field(&meta, "thread_source") == Some("guardian_review")
-                    || meta
-                        .get("source")
-                        .and_then(|source| source.get("subagent"))
-                        .and_then(|subagent| field(subagent, "other"))
-                        == Some("guardian"),
-            }),
+            role: Role::Codex(header.metadata.clone()),
             path,
             summary,
         });
@@ -1444,6 +1523,7 @@ fn scan(
         };
         let stamp = stamp_of(&path);
         let summary = events::scan_file(&path, "copilot", cache, dirty)?;
+        let stamp = indexed_stamp(cache, &path, stamp);
         if cache.replaced(&path) {
             texts.invalidate(&path);
         }
@@ -1461,23 +1541,59 @@ fn scan(
             summary,
         });
     }
-    if selected.is_none() {
+    cache.flush_cold_writes()?;
+    if let Some(selected) = selected {
+        cache.retire_scoped_sources(options, selected, &seen, machine)?;
+    } else {
         cache.retain(&seen, dirty);
     }
     cache.end_scan();
     texts
         .prompt_caches
         .retain(|path, _| seen.contains(path.to_string_lossy().as_ref()));
-    // Metadata of files that are gone is dropped with them.
-    texts.metas.retain(|path, _| {
-        let file = if path.extension().is_some_and(|ext| ext == "json") {
-            path.with_extension("").with_extension("jsonl")
-        } else {
-            path.clone()
-        };
-        seen.contains(file.to_string_lossy().as_ref())
-    });
     Ok((files, skipped, cache.index_clone_duration()))
+}
+
+fn verify_sidecars(files: &[SourceFile]) -> io::Result<()> {
+    if files.iter().any(|file| {
+        file.summary
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(&file.path))
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Claude sidecar changed during native preparation",
+        ));
+    }
+    Ok(())
+}
+
+/// A catalog's recorded native role must still match independently indexed
+/// sidecar evidence. Another producer may refresh that evidence before it
+/// republishes the catalog, leaving the log's own generation unchanged.
+pub(crate) fn current_query_role(
+    source: &summary::CatalogSource,
+    sidecar: Option<&crate::native_sidecar::ClaudeSidecar>,
+) -> bool {
+    let Some(role) = source
+        .native_role
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<Role>(value.clone()).ok())
+    else {
+        return false;
+    };
+    let Role::Agent(agent) = role else {
+        return true;
+    };
+    let metadata = sidecar
+        .map(|sidecar| sidecar.metadata.clone())
+        .unwrap_or_default();
+    agent.tool_use_id == metadata.tool_use_id
+        && agent.label == metadata.label
+        && agent.model == metadata.model
+        && agent.cwd == metadata.cwd
+        && agent.branch == metadata.branch
 }
 
 // ---- Lineages: exact links only (M0, D4, D5) ---------------------------------------------
@@ -1489,22 +1605,15 @@ struct Unions {
 
 impl Unions {
     fn find(&mut self, key: &str) -> String {
-        let mut root = key.to_owned();
-        while let Some(next) = self.parent.get(&root) {
-            if *next == root {
-                break;
+        let mut cursor = identity_stage::UnionCursor::new(key);
+        loop {
+            if let Some(root) = cursor
+                .step(&mut self.parent)
+                .expect("infallible native unions")
+            {
+                return root;
             }
-            root = next.clone();
         }
-        let mut current = key.to_owned();
-        while let Some(next) = self.parent.get(&current).cloned() {
-            if next == root {
-                break;
-            }
-            self.parent.insert(current, root.clone());
-            current = next;
-        }
-        root
     }
 
     fn union(&mut self, a: &str, b: &str) {
@@ -1527,14 +1636,13 @@ fn lineages(files: &[SourceFile]) -> Vec<Vec<usize>> {
         let Role::Top { .. } = file.role else {
             continue;
         };
-        for other in &file.summary.links.session_ids {
-            unions.union(&file.id, other);
-        }
-        for other in &file.summary.links.continued_in {
-            unions.union(&file.id, other);
-        }
-        for bridge in &file.summary.links.bridges {
-            unions.union(&file.id, &format!("bridge:{bridge}"));
+        for atom in identity_stage::star_atoms(
+            &file.id,
+            file.summary.links.session_ids.iter(),
+            file.summary.links.continued_in.iter(),
+            file.summary.links.bridges.iter(),
+        ) {
+            unions.union(&file.id, &atom);
         }
     }
     let mut groups = BTreeMap::<String, Vec<usize>>::new();
@@ -1552,11 +1660,12 @@ fn lineages(files: &[SourceFile]) -> Vec<Vec<usize>> {
         // tie the file that was continued elsewhere comes first.
         group.sort_by_key(|file| {
             let file = &files[*file];
-            (
-                file.first.unwrap_or(i64::MAX),
+            let (first, continued_empty, _) = identity_stage::source_order(
+                file.first,
                 file.summary.links.continued_in.is_empty(),
-                file.id.clone(),
-            )
+                &file.id,
+            );
+            (first, continued_empty, file.id.clone())
         });
     }
     result
@@ -1599,6 +1708,27 @@ struct H {
     out: Handoff,
     from: Option<usize>,
     to: Option<usize>,
+    previews: Option<BTreeMap<&'static str, PreviewRef>>,
+    preview_owners: BTreeMap<String, String>,
+}
+
+struct PreviewRef {
+    at: Ref,
+    reply: bool,
+    kind: &'static str,
+    arg: Option<String>,
+    skip: usize,
+}
+impl PreviewRef {
+    fn new(at: Ref, kind: &'static str) -> Self {
+        Self {
+            at,
+            reply: false,
+            kind,
+            arg: None,
+            skip: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1652,8 +1782,10 @@ struct SessionDerived {
 
 struct Builder<'a> {
     files: &'a [SourceFile],
+    history_records: Option<&'a crate::overview_repair::NativeRecords<'a>>,
     slot_files: Vec<Arc<SlotFile>>,
     texts: &'a mut Texts,
+    records: &'a crate::query_source::Records<'a>,
     now: i64,
     machine: String,
     facts: &'a MachineFacts,
@@ -1665,7 +1797,9 @@ struct Builder<'a> {
     by_key: HashMap<String, usize>,
     by_native: HashMap<(&'static str, String), usize>,
     native_harnesses: HashMap<String, BTreeSet<&'static str>>,
+    staged_keys: BTreeMap<(String, String), String>,
     handoffs: Vec<H>,
+    ask_briefs: BTreeMap<String, PromptBrief>,
     placed: HashMap<Ref, Vec<(usize, Place)>>,
     head: HashMap<usize, usize>,
     after: HashMap<Ref, usize>,
@@ -1683,6 +1817,9 @@ struct Builder<'a> {
     shared_usage: BTreeMap<String, crate::claude_usage::Shared>,
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
+    staged_endpoints: BTreeMap<String, relation_stage::Endpoint>,
+    staged_epoch: Option<i64>,
+    matching_refs: Option<BTreeSet<Ref>>,
 }
 
 fn event(files: &[SourceFile], at: Ref) -> &Event {
@@ -1691,7 +1828,7 @@ fn event(files: &[SourceFile], at: Ref) -> &Event {
 
 impl<'a> Builder<'a> {
     fn new(
-        files: &'a [SourceFile],
+        (files, records): (&'a [SourceFile], &'a crate::query_source::Records<'a>),
         texts: &'a mut Texts,
         now: i64,
         machine: String,
@@ -1728,7 +1865,9 @@ impl<'a> Builder<'a> {
                 })
                 .collect(),
             files,
+            history_records: None,
             texts,
+            records,
             now,
             machine,
             home: facts.home(),
@@ -1745,7 +1884,9 @@ impl<'a> Builder<'a> {
                     .insert(file.harness());
                 ids
             }),
+            staged_keys: BTreeMap::new(),
             handoffs: Vec::new(),
+            ask_briefs: BTreeMap::new(),
             placed: HashMap::new(),
             head: HashMap::new(),
             after: HashMap::new(),
@@ -1757,6 +1898,9 @@ impl<'a> Builder<'a> {
             copied: BTreeSet::new(),
             shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
+            staged_endpoints: BTreeMap::new(),
+            staged_epoch: None,
+            matching_refs: None,
         }
     }
 
@@ -1813,14 +1957,24 @@ impl<'a> Builder<'a> {
         // Native IDs belong to a harness. Keep the established viewer key when
         // unambiguous, and qualify only collisions without changing source IDs.
         let harness = out.harness;
-        if self
+        if self.staged_endpoints.contains_key(&key) {
+            // Durable graph descriptors already carry their canonical key.
+        } else if let Some(qualified) = self.staged_keys.get(&(harness.to_owned(), key.clone())) {
+            key.clone_from(qualified);
+        } else if self
             .native_harnesses
             .get(&key)
             .is_some_and(|harnesses| harnesses.iter().any(|other| *other != harness))
         {
-            key = format!("{harness}:{key}");
-            while self.native_harnesses.contains_key(&key) || self.by_key.contains_key(&key) {
-                key.insert(0, ':');
+            let mut cursor = identity_stage::KeyCursor::new(&key, harness, true);
+            loop {
+                if let Some(qualified) = cursor.step(|candidate| {
+                    self.native_harnesses.contains_key(candidate)
+                        || self.by_key.contains_key(candidate)
+                }) {
+                    key = qualified;
+                    break;
+                }
             }
         }
         for file in &files {
@@ -1875,7 +2029,14 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let event = &file.summary.events[at.1];
-        self.texts.read(file, event.o, event.b, what, extract)
+        self.texts.read(
+            (self.records, self.history_records),
+            file,
+            event.o,
+            event.b,
+            what,
+            extract,
+        )
     }
 
     fn result_text(
@@ -1886,7 +2047,14 @@ impl<'a> Builder<'a> {
     ) -> Option<String> {
         let file = &self.files[at.0];
         let reply = file.summary.events[at.1].r.as_ref()?;
-        self.texts.read(file, reply.o, reply.b, what, extract)
+        self.texts.read(
+            (self.records, self.history_records),
+            file,
+            reply.o,
+            reply.b,
+            what,
+            extract,
+        )
     }
 
     /// A session's events in order.
@@ -1905,9 +2073,10 @@ impl<'a> Builder<'a> {
             for (order, file) in session.files.iter().enumerate() {
                 let events = &self.files[*file].summary.events;
                 // Events before a file's first timestamp take that timestamp.
-                let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
+                let mut time =
+                    native_stage::EventTimeCursor::new(events.iter().find_map(|event| event.t));
                 for (at, event) in events.iter().enumerate() {
-                    time = event.t.unwrap_or(time);
+                    let time = time.push(event.t);
                     if copied.contains(&(*file, at)) {
                         continue;
                     }
@@ -1945,12 +2114,7 @@ impl<'a> Builder<'a> {
             }
         }
         // From the index alone: each event carries its record's uuid.
-        let key = |event: &Event| {
-            event.u.clone().or_else(|| match event.k {
-                Kind::Tool | Kind::Xsm => event.id.clone(),
-                _ => None,
-            })
-        };
+        let key = native_copy_identity;
         let mut copied = BTreeSet::new();
         for (source, target) in pairs {
             let seen: BTreeSet<String> = self.files[source]
@@ -1982,6 +2146,8 @@ impl<'a> Builder<'a> {
             out: handoff,
             from,
             to,
+            previews: None,
+            preview_owners: BTreeMap::new(),
         });
         self.handoffs.len() - 1
     }
@@ -1991,6 +2157,11 @@ impl<'a> Builder<'a> {
     }
 
     fn root(&self, mut session: usize) -> usize {
+        if let Some(root) = self.staged_endpoints.get(&self.sessions[session].key)
+            && let Some(&root) = self.by_key.get(&root.root)
+        {
+            return root;
+        }
         let mut seen = BTreeSet::new();
         while let Some(parent) = self.sessions[session].parent {
             if !seen.insert(session) {
@@ -1999,6 +2170,28 @@ impl<'a> Builder<'a> {
             session = parent;
         }
         session
+    }
+
+    fn graph_root_key(&self, session: usize) -> String {
+        self.staged_endpoints
+            .get(&self.sessions[session].key)
+            .map(|endpoint| endpoint.root.clone())
+            .unwrap_or_else(|| self.sessions[self.root(session)].key.clone())
+    }
+
+    fn graph_root_alive(&self, session: usize) -> bool {
+        self.staged_endpoints
+            .get(&self.sessions[session].key)
+            .map_or_else(
+                || self.sessions[self.root(session)].alive,
+                |endpoint| endpoint.root_alive,
+            )
+    }
+
+    fn match_selected(&self, at: Ref) -> bool {
+        self.matching_refs
+            .as_ref()
+            .is_none_or(|refs| refs.contains(&at))
     }
 
     /// Every session's facts for the agent read surface. `codex_process`
@@ -2014,6 +2207,11 @@ impl<'a> Builder<'a> {
         self.sessions
             .iter()
             .map(|session| {
+                if let Some(endpoint) = self.staged_endpoints.get(&session.key)
+                    && session.files.is_empty()
+                {
+                    return (session.key.clone(), endpoint.facts());
+                }
                 let (kind, pid, alive, recorded_status, run) = match session.kind {
                     SessKind::Lineage => {
                         let live = session.pid_files.iter().find(|(_, alive, _, _)| *alive);
@@ -2331,7 +2529,7 @@ impl<'a> Builder<'a> {
         let harness = last_file.harness();
         let mut tokens = crate::Tokens::default();
         let mut busy = Vec::new();
-        let mut model = None;
+        let mut description = description_stage::DescriptionFacts::default();
         let effort = files.iter().rev().find_map(|file| {
             file.summary
                 .signals
@@ -2344,10 +2542,7 @@ impl<'a> Builder<'a> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_ascii_lowercase);
-        let mut start = i64::MAX;
-        let mut last = 0;
         let mut names = BTreeSet::new();
-        let mut title = None;
         let mut tokens_by_model = BTreeMap::new();
         let mut rate_limits: Option<events::RateLimits> = None;
         // Claude usage is merged by message id across the lineage's files, so
@@ -2387,21 +2582,18 @@ impl<'a> Builder<'a> {
                 }
             }
             busy.extend(file.summary.busy.iter().copied());
-            if let Some(found) = &file.summary.last_model {
-                model = Some(found.clone());
-            }
-            start = start.min(file.first.unwrap_or(i64::MAX));
-            last = last.max(file.last.unwrap_or(0));
+            description.push(description_stage::SourceDescription {
+                first: file.first,
+                last: file.last,
+                model: file.summary.last_model.as_deref(),
+                title: file.summary.title.as_deref(),
+                agent_name: file.summary.agent_name.as_deref(),
+            });
             for name in [&file.summary.title, &file.summary.agent_name]
                 .into_iter()
                 .flatten()
             {
                 names.insert(plain_name(name));
-            }
-            if file.summary.title.is_some() {
-                title.clone_from(&file.summary.title);
-            } else if title.is_none() && file.summary.agent_name.is_some() {
-                title.clone_from(&file.summary.agent_name);
             }
         }
         let shared = self
@@ -2495,8 +2687,12 @@ impl<'a> Builder<'a> {
         if harness == "copilot" {
             cost.unpriced_models = tokens_by_model.keys().cloned().collect();
             if cost.unpriced_models.is_empty() {
-                cost.unpriced_models
-                    .push(model.clone().unwrap_or_else(|| "unknown".into()));
+                cost.unpriced_models.push(
+                    description
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "unknown".into()),
+                );
             }
         }
         let mut reports: Vec<&ReportedRunSnapshot> = if harness == "claude" {
@@ -2548,7 +2744,8 @@ impl<'a> Builder<'a> {
             Role::Codex(meta)
                 if (meta.subagent || meta.parent_thread.is_some()) && !meta.guardian_review =>
             {
-                title
+                description
+                    .title
                     .clone()
                     .or_else(|| {
                         meta.path
@@ -2565,9 +2762,14 @@ impl<'a> Builder<'a> {
                                 .iter()
                                 .find(|event| event.k == Kind::U)?;
                             self.texts
-                                .read(file, event.o, event.b, "user", |record, _| {
-                                    prompt_text(record)
-                                })
+                                .read(
+                                    (self.records, self.history_records),
+                                    file,
+                                    event.o,
+                                    event.b,
+                                    "user",
+                                    |record, _| prompt_text(record),
+                                )
                                 .filter(|text| !text.trim().is_empty())
                         })
                     })
@@ -2579,8 +2781,8 @@ impl<'a> Builder<'a> {
         let session = &mut self.sessions[index];
         session.names.extend(names);
         session.tokens = tokens.clone();
-        session.first = (start != i64::MAX).then_some(start);
-        session.last = (last != 0).then_some(last);
+        session.first = (description.first != i64::MAX).then_some(description.first);
+        session.last = (description.last != 0).then_some(description.last);
         let out = &mut session.out;
         out.codex_history = match &last_file.role {
             Role::Codex(meta) => meta.history.clone(),
@@ -2604,27 +2806,31 @@ impl<'a> Builder<'a> {
             million(tokens.cached_input),
             million(tokens.output),
         ];
-        out.model = model
-            .as_deref()
-            .and_then(pretty_model)
-            .or_else(|| fallback_model.as_deref().and_then(pretty_model))
-            .unwrap_or_else(|| "—".into());
+        out.model = description.model(fallback_model.as_deref());
         out.effort = effort;
-        out.start = if start == i64::MAX { self.now } else { start };
-        out.last = if last == 0 { out.start } else { last };
+        out.start = if description.first == i64::MAX {
+            self.now
+        } else {
+            description.first
+        };
+        out.last = if description.last == 0 {
+            out.start
+        } else {
+            description.last
+        };
         out.busy = events::busy_merge(busy);
         out.role = repo.is_none();
         out.branch = repo.as_ref().and(branch);
         out.repo = repo;
         if out.name.is_empty() {
-            out.name = codex_task_title.unwrap_or_else(|| match session.kind {
-                SessKind::Lineage | SessKind::Copilot => title.unwrap_or(fallback_name),
-                _ => out
-                    .branch
-                    .clone()
-                    .or_else(|| out.repo.clone())
-                    .unwrap_or_else(|| "Codex run".into()),
-            });
+            out.name = description_stage::name(
+                codex_task_title,
+                matches!(session.kind, SessKind::Lineage | SessKind::Copilot),
+                description.title,
+                fallback_name,
+                out.branch.as_deref(),
+                out.repo.as_deref(),
+            );
         }
     }
 
@@ -2699,7 +2905,7 @@ impl<'a> Builder<'a> {
 
     // -- spawns --
 
-    fn claude_spawns(&mut self) {
+    fn claude_spawns(&mut self) -> io::Result<()> {
         let mut notifications = HashMap::<String, Ref>::new();
         // Every `<agent-message>` a subagent's parent received from it: its
         // sends to `main`, and its hand-backs.
@@ -2738,21 +2944,41 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let child = self.of_file[position];
-            let call = meta.tool_use_id.as_deref().and_then(|id| {
-                if let Some(&parent) = self.by_native.get(&("claude", meta.parent.clone()))
-                    && let Some(call) = self.find_in(parent, id)
-                {
-                    return Some(call);
-                }
-                // Nested subagents can share their root's storage directory.
-                // If that ancestor has no matching call, use only a unique
-                // exact Claude call ID. Repeated IDs remain ambiguous.
-                let mut matches = self.tools.iter().filter_map(|((session, call), at)| {
-                    (call == id && self.sessions[*session].out.harness == "claude").then_some(*at)
-                });
-                let first = matches.next()?;
-                matches.next().is_none().then_some(first)
+            let exact_parent = meta.tool_use_id.as_deref().and_then(|id| {
+                self.by_native
+                    .get(&("claude", meta.parent.clone()))
+                    .and_then(|parent| self.find_in(*parent, id))
             });
+            let call = if exact_parent.is_some() {
+                exact_parent
+            } else if let (Some(epoch), Some(id)) = (self.staged_epoch, meta.tool_use_id.as_ref()) {
+                let selected = self.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::ClaudeCall { id: id.clone() },
+                )?;
+                if selected.count == 1 {
+                    let location = selected
+                        .location
+                        .ok_or_else(|| io::Error::other("staged Claude call location missing"))?;
+                    Some(location.local(self)?.ok_or_else(|| {
+                        io::Error::other("staged Claude call source not selected")
+                    })?)
+                } else {
+                    None
+                }
+            } else {
+                meta.tool_use_id.as_deref().and_then(|id| {
+                    // Nested subagents can share their root's storage directory.
+                    // If that ancestor has no matching call, use only a unique
+                    // exact Claude call ID. Repeated IDs remain ambiguous.
+                    let mut matches = self.tools.iter().filter_map(|((session, call), at)| {
+                        (call == id && self.sessions[*session].out.harness == "claude")
+                            .then_some(*at)
+                    });
+                    let first = matches.next()?;
+                    matches.next().is_none().then_some(first)
+                })
+            };
             let spawner = call.map(|at| self.of_file[at.0]).or_else(|| {
                 self.files
                     .iter()
@@ -2783,10 +3009,17 @@ impl<'a> Builder<'a> {
                     input_string(record, block, &["prompt"])
                 })
             });
+            let mut previews = BTreeMap::new();
+            if brief.is_some()
+                && let Some(at) = call
+            {
+                previews.insert("brief", PreviewRef::new(at, "spawn"));
+            }
             if brief.is_none()
                 && let Some(at) = first_prompt
             {
                 brief = self.text(at, "user", |record, _| prompt_text(record));
+                previews.insert("brief", PreviewRef::new(at, "trace_prompt"));
             }
             let at = call
                 .and_then(|at| event(self.files, at).t)
@@ -2805,6 +3038,9 @@ impl<'a> Builder<'a> {
                 });
                 let failed = !matches!(status.as_str(), "completed" | "success" | "done");
                 result = Some((text, event(self.files, found).t, failed));
+                let mut preview = PreviewRef::new(found, "notification");
+                preview.arg = Some(id);
+                previews.insert("result", preview);
             }
             // Both forms of receipt, by either id, in time order (a receipt
             // with no time last).
@@ -2829,6 +3065,7 @@ impl<'a> Builder<'a> {
                 let found = received[index];
                 let text = self.receipt_body(&key, &received, index);
                 result = Some((text, event(self.files, found).t, false));
+                previews.insert("result", self.receipt_preview(&key, &received, index));
             }
             if result.is_none()
                 && let Some(at) = call
@@ -2837,6 +3074,9 @@ impl<'a> Builder<'a> {
             {
                 let text = self.result_text(at, "result", tool_result_text);
                 result = Some((text, reply.t, reply.e));
+                let mut preview = PreviewRef::new(at, "tool_result");
+                preview.reply = true;
+                previews.insert("result", preview);
             }
             if result.is_none()
                 && let Some(at) = child_events.iter().rev().copied().find(|at| {
@@ -2848,9 +3088,9 @@ impl<'a> Builder<'a> {
                     input_string(record, block, &["message"])
                 });
                 result = Some((text, event(self.files, at).t, false));
+                previews.insert("result", PreviewRef::new(at, "handback"));
             }
-            let root = self.root(spawner);
-            let running = self.sessions[root].alive;
+            let running = self.graph_root_alive(spawner);
             let (status, state) = match &result {
                 Some((_, _, true)) => ("err", "err"),
                 Some(_) => ("done", "done"),
@@ -2873,6 +3113,7 @@ impl<'a> Builder<'a> {
                 )
             };
             let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+            self.handoffs[handoff].previews = Some(previews);
             if let Some(at) = call {
                 self.place(at, handoff, Place::Out);
             }
@@ -2883,18 +3124,19 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        Ok(())
     }
 
     /// A Codex run's spawner, the call that launched it when that is
     /// exact, and whether the call is ambiguous.
-    fn codex_spawner(&mut self, position: usize) -> (Option<usize>, Option<Ref>, bool) {
+    fn codex_spawner(&mut self, position: usize) -> io::Result<(Option<usize>, Option<Ref>, bool)> {
         let file = &self.files[position];
         let Role::Codex(meta) = &file.role else {
-            return (None, None, false);
+            return Ok((None, None, false));
         };
         if let Some(parent) = &meta.parent_thread {
             let Some(&spawner) = self.by_native.get(&("codex", parent.clone())) else {
-                return (None, None, false);
+                return Ok((None, None, false));
             };
             let names: Vec<String> = meta
                 .path
@@ -2942,14 +3184,29 @@ impl<'a> Builder<'a> {
                     })
                     .count()
             };
-            return match matching.as_slice() {
+            let global_siblings =
+                if let (Some(epoch), [(.., task)]) = (self.staged_epoch, matching.as_slice()) {
+                    Some(self.cache.semantic_select(
+                        epoch,
+                        &relation_stage::Selector::CodexSibling {
+                            parent: parent.clone(),
+                            task: task.clone(),
+                        },
+                    )?)
+                } else {
+                    None
+                };
+            let count = global_siblings.map(|selection| selection.count);
+            return Ok(match matching.as_slice() {
                 [] => (Some(spawner), None, false),
-                [(at, task)] if siblings(task) == 1 => (Some(spawner), Some(*at), false),
+                [(at, task)] if count.unwrap_or_else(|| siblings(task)) == 1 => {
+                    (Some(spawner), Some(*at), false)
+                }
                 _ => (Some(spawner), None, true),
-            };
+            });
         }
         let Some(marker) = file.marker.clone() else {
-            return (None, None, false);
+            return Ok((None, None, false));
         };
         let mut seen = BTreeSet::from([format!("{}:{}", file.harness(), file.id)]);
         let mut next = Some(format!("{}:{}", marker.harness, marker.parent_id));
@@ -2958,7 +3215,7 @@ impl<'a> Builder<'a> {
                 break;
             };
             if !seen.insert(parent.clone()) {
-                return (None, None, false);
+                return Ok((None, None, false));
             }
             next = self
                 .files
@@ -2968,14 +3225,14 @@ impl<'a> Builder<'a> {
                 .map(|marker| format!("{}:{}", marker.harness, marker.parent_id));
         }
         if next.is_some() {
-            return (None, None, false);
+            return Ok((None, None, false));
         }
         let Some(parent_file) = self
             .files
             .iter()
             .position(|file| file.harness() == marker.harness && file.id == marker.parent_id)
         else {
-            return (None, None, false);
+            return Ok((None, None, false));
         };
         let spawner = self.of_file[parent_file];
         let tool = match (&marker.tool_id, &marker.handoff) {
@@ -2986,10 +3243,10 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let call = tool.and_then(|id| self.find_in(spawner, &id));
-        (Some(spawner), call, false)
+        Ok((Some(spawner), call, false))
     }
 
-    /// Match through the same incremental parent scan used by the tree.
+    /// All producer targets borrow the same indexed source evidence.
     fn handoff_tool(
         &self,
         spawner: usize,
@@ -2997,22 +3254,34 @@ impl<'a> Builder<'a> {
         cwd: Option<&str>,
         start: Option<i64>,
     ) -> Option<String> {
-        let paths: Vec<PathBuf> = self.sessions[spawner]
-            .files
-            .iter()
-            .map(|file| self.files[*file].path.clone())
-            .collect();
-        handoff::find(&paths, prompt, cwd, start).map(|tool| tool.id)
+        let mut matcher = handoff::Matcher::new(prompt, cwd, start);
+        for position in &self.sessions[spawner].files {
+            let file = &self.files[*position];
+            let index = file.summary.handoff_index.as_ref()?;
+            for location in index.calls() {
+                let call = self
+                    .history_records
+                    .map_or_else(
+                        || self.records.launch(&file.path, location),
+                        |history| history.launch(&file.path, location),
+                    )
+                    .ok()?;
+                if let Some(tool) = matcher.consider(&call) {
+                    return Some(tool.id);
+                }
+            }
+        }
+        matcher.finish().map(|tool| tool.id)
     }
 
-    fn codex_spawns(&mut self) {
+    fn codex_spawns(&mut self) -> io::Result<()> {
         let mut spawns = Vec::new();
         let mut runs: Vec<usize> = (0..self.files.len())
             .filter(|position| matches!(self.files[*position].role, Role::Codex(_)))
             .collect();
         runs.sort_by_key(|position| (self.files[*position].first, *position));
         for position in runs {
-            let (spawner, call, ambiguous) = self.codex_spawner(position);
+            let (spawner, call, ambiguous) = self.codex_spawner(position)?;
             spawns.push((self.of_file[position], spawner, call, ambiguous));
         }
         for (child, spawner, _, _) in &spawns {
@@ -3041,6 +3310,10 @@ impl<'a> Builder<'a> {
                 .find(|at| event(self.files, *at).k == Kind::U);
             let brief =
                 first_prompt.and_then(|at| self.text(at, "user", |record, _| prompt_text(record)));
+            let mut previews = BTreeMap::new();
+            if let Some(at) = first_prompt {
+                previews.insert("brief", PreviewRef::new(at, "trace_prompt"));
+            }
             let key = self.sessions[child].key.clone();
             let mut result = None;
             if let Role::Codex(meta) = &self.files[self.sessions[child].files[0]].role
@@ -3061,6 +3334,7 @@ impl<'a> Builder<'a> {
                             received_body(record, "agent-message", None, 0)
                         });
                         result = Some((text, event(self.files, at).t));
+                        previews.insert("result", PreviewRef::new(at, "received_agent"));
                     }
                 }
             }
@@ -3074,6 +3348,7 @@ impl<'a> Builder<'a> {
             {
                 let text = self.text(at, "a", assistant_text);
                 result = Some((text, Some(self.sessions[child].out.last)));
+                previews.insert("result", PreviewRef::new(at, "assistant"));
             }
             let handoff = Handoff {
                 done: result.as_ref().and_then(|result| result.1),
@@ -3090,6 +3365,7 @@ impl<'a> Builder<'a> {
                 )
             };
             let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+            self.handoffs[handoff].previews = Some(previews);
             if let Some(at) = call {
                 self.place(at, handoff, Place::Out);
             }
@@ -3100,11 +3376,12 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        Ok(())
     }
 
     // -- relays --
 
-    fn relays(&mut self) {
+    fn relays(&mut self) -> io::Result<()> {
         let mut received = HashMap::<String, Vec<Ref>>::new();
         let mut unkeyed = Vec::new();
         for (position, file) in self.files.iter().enumerate() {
@@ -3115,7 +3392,7 @@ impl<'a> Builder<'a> {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
-                if event.k != Kind::Xsm {
+                if event.k != Kind::Xsm || !self.match_selected((position, at)) {
                     continue;
                 }
                 match &event.id {
@@ -3135,6 +3412,7 @@ impl<'a> Builder<'a> {
                 }
                 if event.k == Kind::Tool
                     && event.n.as_deref() == Some("SendMessage")
+                    && self.match_selected((position, at))
                     && let Some(reply) = &event.r
                     && reply.f & PIN == 0
                 {
@@ -3199,10 +3477,23 @@ impl<'a> Builder<'a> {
                 (Some(self.stub(&format!("name:{name}"), &name)), None)
             } else {
                 let name = plain_name(&self.send_target(at));
-                let unique = names
-                    .get(&name)
-                    .filter(|found| found.len() == 1)
-                    .and_then(|found| found.first().copied());
+                let unique = if let Some(epoch) = self.staged_epoch {
+                    let selected = self.cache.semantic_select(
+                        epoch,
+                        &relation_stage::Selector::ClaudeName { name: name.clone() },
+                    )?;
+                    if let (1, Some(endpoint)) = (selected.count, selected.endpoint) {
+                        relation_stage::Context::install_endpoint(&endpoint, self)?;
+                        Some(self.by_key[&endpoint.row.key])
+                    } else {
+                        None
+                    }
+                } else {
+                    names
+                        .get(&name)
+                        .filter(|found| found.len() == 1)
+                        .and_then(|found| found.first().copied())
+                };
                 if unique.is_none() {
                     unmatched = true;
                 }
@@ -3260,7 +3551,13 @@ impl<'a> Builder<'a> {
                 .sock
                 .as_deref()
                 .and_then(|from| self.by_native.get(&("claude", from.to_owned())).copied())
-                .filter(|from| self.sessions[*from].kind == SessKind::Agent);
+                .filter(|from| {
+                    self.sessions[*from].kind == SessKind::Agent
+                        || self
+                            .staged_endpoints
+                            .get(&self.sessions[*from].key)
+                            .is_some_and(|endpoint| endpoint.facts_kind == "subagent")
+                });
             let from = from.unwrap_or_else(|| {
                 let identity = match (peer.pid, &peer.start, &peer.sock) {
                     (Some(pid), start, _) => {
@@ -3275,7 +3572,8 @@ impl<'a> Builder<'a> {
                 received_body(record, "cross-session-message", None, 0)
             });
             let handoff = Handoff {
-                unmatched: self.sessions[from].kind == SessKind::Stub,
+                unmatched: self.sessions[from].kind == SessKind::Stub
+                    && !self.staged_endpoints.contains_key(&self.sessions[from].key),
                 ..Handoff::new(
                     stable_id("r", &source),
                     "relay",
@@ -3290,7 +3588,12 @@ impl<'a> Builder<'a> {
             };
             let handoff = self.add_handoff(handoff, Some(from), Some(to));
             self.place(at, handoff, Place::In);
+            self.handoffs[handoff].previews = Some(BTreeMap::from([(
+                "brief",
+                PreviewRef::new(at, "received_cross"),
+            )]));
         }
+        Ok(())
     }
 
     /// A subagent's send addressed to [`PARENT_ADDRESS`] goes to the
@@ -3432,6 +3735,24 @@ impl<'a> Builder<'a> {
         })
     }
 
+    fn receipt_preview(&self, from: &str, received: &[Ref], index: usize) -> PreviewRef {
+        let at = received[index];
+        let offset = event(self.files, at).o;
+        let skip = received
+            .iter()
+            .filter(|other| {
+                other.0 == at.0 && other.1 < at.1 && event(self.files, **other).o == offset
+            })
+            .count();
+        PreviewRef {
+            at,
+            reply: false,
+            kind: "received_agent",
+            arg: Some(from.to_owned()),
+            skip,
+        }
+    }
+
     fn send_target(&mut self, at: Ref) -> String {
         self.text(at, "to", |record, block| {
             input_string(record, block, &["to", "recipient"])
@@ -3439,7 +3760,7 @@ impl<'a> Builder<'a> {
         .unwrap_or_default()
     }
 
-    fn codex_relays(&mut self) {
+    fn codex_relays(&mut self) -> io::Result<()> {
         let mut sends = Vec::new();
         for (position, file) in self.files.iter().enumerate() {
             if file.harness() != "codex" {
@@ -3475,18 +3796,34 @@ impl<'a> Builder<'a> {
             let message = self.text(at, "message", |record, block| {
                 input_string(record, block, &["message"])
             });
-            let matches: Vec<usize> = (0..self.sessions.len())
+            let matches: Vec<usize> = if let Some(epoch) = self.staged_epoch {
+                let selected = self.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::CodexRelay {
+                        root: self.graph_root_key(from),
+                        target: target.clone(),
+                    },
+                )?;
+                if let (1, Some(endpoint)) = (selected.count, selected.endpoint) {
+                    relation_stage::Context::install_endpoint(&endpoint, self)?;
+                    vec![self.by_key[&endpoint.row.key]]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                (0..self.sessions.len())
                 .filter(|index| {
                     let session = &self.sessions[*index];
-                    session.kind == SessKind::Codex
+                    (session.kind == SessKind::Codex || self.staged_endpoints.get(&session.key).is_some_and(|endpoint| endpoint.facts_kind == "codex-run"))
                         && self.root(*index) == tree
-                        && matches!(
-                            &self.files[session.files[0]].role,
+                        && (self.staged_endpoints.get(&session.key).is_some_and(|endpoint| endpoint.paths.iter().any(|path| path == &target) || endpoint.nickname.as_deref() == Some(target.as_str())) || session.files.first().is_some_and(|file| matches!(
+                            &self.files[*file].role,
                             Role::Codex(meta) if meta.path.as_deref() == Some(target.as_str())
                                 || meta.nickname.as_deref() == Some(target.as_str())
-                        )
+                        )))
                 })
-                .collect();
+                .collect()
+            };
             let reply = event(self.files, at).r.clone();
             let failed = reply.as_ref().is_some_and(|reply| reply.e);
             let (to, unmatched) = match matches.as_slice() {
@@ -3513,6 +3850,7 @@ impl<'a> Builder<'a> {
             let handoff = self.add_handoff(handoff, Some(from), Some(to));
             self.place(at, handoff, Place::Out);
         }
+        Ok(())
     }
 
     fn observed_parents(
@@ -3631,7 +3969,7 @@ impl<'a> Builder<'a> {
 
     // -- your messages and messages to you --
 
-    fn asks(&mut self) {
+    fn asks(&mut self, target: BuildTarget) {
         for index in 0..self.sessions.len() {
             if self.sessions[index].kind != SessKind::Lineage {
                 continue;
@@ -3640,11 +3978,26 @@ impl<'a> Builder<'a> {
                 if event(self.files, at).k != Kind::Ask {
                     continue;
                 }
-                let text = self.text(at, "user", |record, _| prompt_text(record));
+                // The Catalog and slot recipes contain only the relationship.
+                // Query reads its brief from the same captured generation when
+                // a selected session or searched slot actually requests it.
+                let text = (target.reference_model())
+                    .then(|| self.text(at, "user", |record, _| prompt_text(record)))
+                    .flatten();
                 let file = &self.files[at.0];
                 let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
+                let id = stable_id(ASK_PREFIX, &source);
+                if target == BuildTarget::Query {
+                    self.ask_briefs.insert(
+                        id.clone(),
+                        PromptBrief {
+                            path: file.path.clone(),
+                            offset: event(self.files, at).o,
+                        },
+                    );
+                }
                 let handoff = Handoff::new(
-                    stable_id(ASK_PREFIX, &source),
+                    id,
                     "ask",
                     ("you".into(), self.sessions[index].key.clone()),
                     event(self.files, at)
@@ -3654,6 +4007,10 @@ impl<'a> Builder<'a> {
                     text.as_deref().unwrap_or(""),
                 );
                 let handoff = self.add_handoff(handoff, None, Some(index));
+                self.handoffs[handoff].previews = Some(BTreeMap::from([(
+                    "brief",
+                    PreviewRef::new(at, "trace_prompt"),
+                )]));
                 self.place(at, handoff, Place::In);
             }
         }
@@ -3769,8 +4126,7 @@ impl<'a> Builder<'a> {
                         }
                     }
                     None => {
-                        let root = self.root(index);
-                        if self.sessions[root].alive {
+                        if self.graph_root_alive(index) {
                             handoff.status = "wait";
                         }
                     }
@@ -4005,7 +4361,7 @@ impl<'a> Builder<'a> {
         self.sessions[index].out.activity = Some((name, arg, 0, time));
     }
 
-    fn wait_edges(&mut self, transcripts: &BTreeMap<String, Arc<Transcript>>) {
+    fn wait_edges(&mut self, transcripts: &BTreeMap<String, Arc<Transcript>>) -> io::Result<()> {
         const MAX_WAITS: usize = 4096;
         for index in 0..self.sessions.len() {
             if self.sessions[index].kind == SessKind::Stub {
@@ -4058,6 +4414,20 @@ impl<'a> Builder<'a> {
                     .unwrap_or_default();
                 let mut targets = BTreeSet::new();
                 for target in input {
+                    if let Some(epoch) = self.staged_epoch {
+                        let selected = self.cache.semantic_select(
+                            epoch,
+                            &relation_stage::Selector::CodexWait {
+                                root: self.graph_root_key(index),
+                                target,
+                                exclude: self.sessions[index].key.clone(),
+                            },
+                        )?;
+                        if let (1, Some(endpoint)) = (selected.count, selected.endpoint) {
+                            targets.insert(endpoint.row.key);
+                        }
+                        continue;
+                    }
                     let candidates: Vec<usize> = (0..self.sessions.len())
                         .filter(|candidate| {
                             if *candidate == index || self.root(*candidate) != self.root(index) {
@@ -4065,6 +4435,12 @@ impl<'a> Builder<'a> {
                             }
                             let session = &self.sessions[*candidate];
                             session.key == target
+                                || self
+                                    .staged_endpoints
+                                    .get(&session.key)
+                                    .is_some_and(|endpoint| {
+                                        endpoint.paths.iter().any(|path| path == &target)
+                                    })
                                 || session.files.iter().any(|file| {
                                     matches!(&self.files[*file].role,
                             Role::Codex(meta) if meta.path.as_deref()==Some(target.as_str()))
@@ -4107,9 +4483,175 @@ impl<'a> Builder<'a> {
             waits.shrink_to_fit();
             self.sessions[index].out.wait_edges = waits;
         }
+        Ok(())
     }
 
     // -- turns --
+
+    /// Content-free recipes for the Home previews. Text stays in native logs.
+    fn overview_content(
+        &self,
+        key: &str,
+        turns: &[&Turn],
+        tx: &Transcript,
+        saved: Option<&crate::slot_projection::Projection>,
+    ) -> Value {
+        let decorate = |mut recipe: Value| {
+            let kind = recipe["kind"].as_str().unwrap_or("");
+            if let Some(field) = saved
+                .into_iter()
+                .flat_map(|saved| &saved.slots)
+                .find_map(|slot| {
+                    let field = slot.field.as_ref()?;
+                    (slot.file.as_ref()?.path.to_str() == recipe["path"].as_str()
+                        && Some(field.record_offset) == recipe["offset"].as_u64()
+                        && Some(u64::from(field.block)) == recipe["block"].as_u64()
+                        && matches!(
+                            (kind, field.kind),
+                            (
+                                "assistant" | "prompt" | "trace_prompt",
+                                crate::native_field::NativeFieldKind::Text
+                            ) | (
+                                "tool_result",
+                                crate::native_field::NativeFieldKind::ClaudeResult
+                                    | crate::native_field::NativeFieldKind::CodexResult
+                                    | crate::native_field::NativeFieldKind::CodexResultObject
+                            )
+                        ))
+                    .then_some(field)
+                })
+            {
+                recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
+            }
+            recipe
+        };
+        let recipe = |at: Ref, kind: &str| {
+            let file = &self.files[at.0];
+            let found = event(self.files, at);
+            let Some(path) = file.path.to_str() else {
+                return Value::Null;
+            };
+            decorate(
+                serde_json::json!({"path":path,"offset":found.o,"block":found.b,"kind":kind,"tool":found.n,"cwd":file.summary.cwd}),
+            )
+        };
+        let placed = |id: &str, place: Place| {
+            self.placed.iter().find_map(|(at, entries)| {
+                entries
+                    .iter()
+                    .any(|(h, p)| self.handoffs[*h].out.id == id && *p == place)
+                    .then_some(*at)
+            })
+        };
+        let origin = |turn: &Turn| {
+            turn.start.as_deref().and_then(|start| placed(start, Place::In)).map(|at| recipe(at, "prompt"))
+                .or_else(|| tx.slots.iter().find(|slot| slot.turn.as_deref()==Some(&turn.id) && matches!(slot.kind, SlotKind::U)).and_then(|slot| slot.file.as_ref().and_then(|file| file.path.to_str().map(|path|decorate(serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"prompt"}))))))
+        };
+        let mut events = serde_json::Map::new();
+        for h in self.handoffs.iter().filter(|h| {
+            h.out.from == key
+                || h.out.to.as_deref() == Some(key)
+                || h.previews.as_ref().is_some_and(|previews| {
+                    previews
+                        .values()
+                        .any(|preview| self.sessions[self.of_file[preview.at.0]].key == key)
+                })
+        }) {
+            let mut fields = serde_json::json!({});
+            if let Some(previews) = &h.previews {
+                for (field, preview) in previews {
+                    if self.sessions[self.of_file[preview.at.0]].key != key {
+                        continue;
+                    }
+                    let mut value = recipe(preview.at, preview.kind);
+                    if value.is_null() {
+                        continue;
+                    }
+                    if preview.reply
+                        && let Some(reply) = event(self.files, preview.at).r.as_ref()
+                    {
+                        value["offset"] = serde_json::json!(reply.o);
+                        value["block"] = serde_json::json!(reply.b);
+                    }
+                    value["arg"] = serde_json::json!(preview.arg);
+                    value["skip"] = serde_json::json!(preview.skip);
+                    fields[*field] = decorate(value);
+                }
+            } else if h.out.from == key {
+                let brief_at = placed(&h.out.id, Place::Out).or_else(|| {
+                    (h.out.ask == Some("result"))
+                        .then(|| {
+                            self.files
+                                .iter()
+                                .enumerate()
+                                .flat_map(|(f, file)| {
+                                    file.summary
+                                        .events
+                                        .iter()
+                                        .enumerate()
+                                        .map(move |(e, event)| (f, e, event, file))
+                                })
+                                .find_map(|(f, e, event, file)| {
+                                    (event.k == Kind::A
+                                        && stable_id(
+                                            "q",
+                                            &format!(
+                                                "toyou:result:{}:{}:{}",
+                                                file.id, event.o, event.b
+                                            ),
+                                        ) == h.out.id)
+                                        .then_some((f, e))
+                                })
+                        })
+                        .flatten()
+                });
+                let Some(at) = brief_at else {
+                    continue;
+                };
+                let kind = if h.out.ask == Some("question") {
+                    "question"
+                } else if h.out.kind == "spawn" {
+                    "spawn"
+                } else if h.out.kind == "relay" {
+                    "relay"
+                } else {
+                    "assistant"
+                };
+                fields = serde_json::json!({"brief":recipe(at, kind)});
+                if let Some(reply) = event(self.files, at).r.as_ref() {
+                    let field = if h.out.ask == Some("question") {
+                        "answer"
+                    } else {
+                        "result"
+                    };
+                    let mut answer = recipe(
+                        at,
+                        if field == "answer" {
+                            "answer"
+                        } else {
+                            "tool_result"
+                        },
+                    );
+                    answer["offset"] = serde_json::json!(reply.o);
+                    answer["block"] = serde_json::json!(reply.b);
+                    answer["structured"] = serde_json::json!(reply.f & ANSWERED != 0);
+                    fields[field] = decorate(answer);
+                }
+            }
+            if let Some(turn) = turns
+                .iter()
+                .find(|turn| turn.sid == key && turn.sent.contains(&h.out.id))
+            {
+                fields["origin"] = origin(turn).unwrap_or(Value::Null);
+            }
+            events.insert(h.out.id.clone(), fields);
+        }
+        let current = turns.iter().rev().copied().find(|turn| turn.sid == key);
+        let activity=self.by_key.get(key).map(|index| &self.sessions[*index]).and_then(|session|session.out.activity.as_ref()).and_then(|(name,_,_,at)| {
+            tx.slots.iter().rev().find(|slot|slot.call_name()==Some(name.as_str()) && slot.t==Some(*at)).and_then(|slot|slot.file.as_ref().and_then(|file|file.path.to_str().map(|path|serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"activity","tool":name,"cwd":file.cwd}))))
+        });
+        serde_json::json!({"events":events,"detail":current.and_then(origin),"activity":activity})
+    }
 
     #[cfg(test)]
     fn texts_by_turn(&self) -> BTreeMap<String, Vec<(usize, u64, u32)>> {
@@ -4204,7 +4746,7 @@ impl<'a> Builder<'a> {
             background_liveness,
             baseline: serde_json::to_string(&session.out).expect("session serializes"),
             links,
-            root_alive: self.sessions[self.root(index)].alive,
+            root_alive: self.graph_root_alive(index),
             liveness: (session.alive, session.busy, session.waiting),
             clock: session.first.is_none().then_some(self.now),
         }
@@ -4351,13 +4893,15 @@ impl<'a> Builder<'a> {
             extras.insert(*file, annotations.into());
         }
         let mut slots = Vec::with_capacity(entries.len());
-        let mut owner: Option<usize> = None;
+        let mut owner_cursor = native_stage::OwnerCursor::default();
+        let mut annotation_reach = BTreeMap::<usize, native_stage::AnnotationReach>::new();
+        let mut signal_cursor = native_stage::SignalCursor::default();
         let mut started = BTreeSet::new();
         let turn_id = |turn: Option<usize>| turn.map(|turn| turns[turn].id.clone());
-        let extra_slot = |annotation: Annotation,
-                          file: usize,
-                          owner: Option<usize>,
-                          started: &mut BTreeSet<usize>| {
+        let mut extra_slot = |annotation: Annotation,
+                              file: usize,
+                              owner: Option<usize>,
+                              started: &mut BTreeSet<usize>| {
             if let Annotation::Signal(signal) = annotation {
                 let tool = matches!(
                     signal.k,
@@ -4371,16 +4915,10 @@ impl<'a> Builder<'a> {
                         .map(tool_label)
                 })
                 .flatten();
+                let mut signal_data = native_stage::signal_kind(signal, tool);
+                signal_cursor.apply(&mut signal_data);
                 let mut slot = Slot::new(
-                    SlotKind::Signal(SignalData {
-                        kind: signal.k,
-                        tag: signal.n.clone(),
-                        previous: None,
-                        value: (signal.k == events::SignalKind::Compact)
-                            .then_some(signal.v)
-                            .flatten(),
-                        tool,
-                    }),
+                    SlotKind::Signal(signal_data),
                     Some(Arc::clone(&self.slot_files[file])),
                     signal.o,
                     0,
@@ -4392,27 +4930,12 @@ impl<'a> Builder<'a> {
             let Annotation::Extra(event) = annotation else {
                 unreachable!()
             };
-            let kind = match event.k {
-                Kind::Harness => SlotKind::Harness(event.n.clone().unwrap_or_default()),
-                Kind::Operation => {
-                    let ok = event
-                        .r
-                        .as_ref()
-                        .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e));
-                    let script_offset = event
-                        .parent
-                        .and_then(|parent| self.files[file].summary.events.get(parent))
-                        .filter(|parent| parent.k == Kind::Tool && parent.code_mode)
-                        .map(|parent| parent.o);
-                    SlotKind::Operation {
-                        kind: event.n.clone().unwrap_or_default(),
-                        ok,
-                        script_offset,
-                    }
-                }
-                Kind::Think => SlotKind::Think,
-                _ => return None,
-            };
+            let kind = native_stage::extra_kind(
+                event,
+                event
+                    .parent
+                    .and_then(|parent| self.files[file].summary.events.get(parent)),
+            )?;
             let mut slot = Slot::new(
                 kind,
                 Some(Arc::clone(&self.slot_files[file])),
@@ -4430,18 +4953,20 @@ impl<'a> Builder<'a> {
         };
         for (position, entry) in entries.iter().enumerate() {
             if let Some(queue) = extras.get_mut(&entry.file) {
-                let at = entry.pos;
-                while queue.front().is_some_and(|extra| extra.pos() < at) {
+                let reach = annotation_reach.entry(entry.file).or_default();
+                reach.push(entry.pos);
+                while queue.front().is_some_and(|extra| reach.before(extra.pos())) {
                     let extra = queue.pop_front().expect("front");
                     slots.extend(extra_slot(
                         extra,
                         entry.file,
-                        owner.or(owners[position]),
+                        owner_cursor.before(owners[position]),
                         &mut started,
                     ));
                 }
             }
-            owner = owners[position];
+            let owner = owners[position];
+            owner_cursor.set(owner);
             if matches!(entry.kind, EntryKind::Operation(_)) {
                 let operation = extras.get_mut(&entry.file).and_then(|queue| {
                     let position = queue
@@ -4456,11 +4981,10 @@ impl<'a> Builder<'a> {
             }
             // A code-mode call is drawn as its operations, unless it failed
             // or never finished: then it is also that step, after them.
-            if matches!(
+            if !native_stage::ordinary_slot(
                 entry.kind,
-                EntryKind::Tool(ToolState::Ok | ToolState::Unknown)
-            ) && entry.at.is_some_and(|at| operation_parents.contains(&at))
-            {
+                entry.at.is_some_and(|at| operation_parents.contains(&at)),
+            ) {
                 continue;
             }
             let block = entry.at.map_or(0, |at| event(self.files, at).b);
@@ -4484,61 +5008,24 @@ impl<'a> Builder<'a> {
                     let found = entry.at.map(|at| event(self.files, at));
                     let running = matches!(session.out.state, "work" | "wait")
                         && owner.is_some_and(|turn| turn + 1 == turns.len() && turns[turn].last);
-                    let shown = match state {
-                        ToolState::Ok => Shown::Ok,
-                        ToolState::Err => Shown::Err,
-                        ToolState::Unknown => Shown::Unknown,
-                        ToolState::Pending if session.out.harness == "copilot" => Shown::Unknown,
-                        ToolState::Pending if running => Shown::Live,
-                        ToolState::Pending => Shown::Unfinished,
-                    };
                     let started = found
                         .and_then(|found| found.poll)
                         .and_then(|start| self.files[entry.file].summary.events.get(start))
                         .filter(|start| start.y.is_some());
-                    let yielded = found.and_then(|found| found.y.as_deref());
-                    match (found, yielded, started, entry.at) {
-                        (Some(found), Some(yielded), _, _) => SlotKind::Yielded {
-                            // Running while its session works and its
-                            // session id is open, whichever turn started
-                            // it: its polls may come in a later turn.
-                            shown: match (state, entry.at) {
-                                (ToolState::Pending, Some(at)) if self.live_yield(index, at) => {
-                                    Shown::Live
-                                }
-                                (ToolState::Pending, _) => Shown::Unfinished,
-                                _ => shown,
-                            },
-                            first: found.r.as_ref().map(|reply| reply.o),
-                            polls: yielded.polls.clone(),
-                            cut: yielded.cut,
-                            done: yielded.done.clone(),
+                    native_stage::tool_kind(
+                        native_stage::ToolInput {
+                            state,
+                            running,
+                            harness: session.out.harness,
+                            found,
+                            started,
+                            has_operations: entry
+                                .at
+                                .is_some_and(|at| operation_parents.contains(&at)),
                         },
-                        (Some(found), None, Some(started), Some(at))
-                            if !operation_parents.contains(&at) =>
-                        {
-                            SlotKind::Sent {
-                                shown,
-                                reply: found.r.clone(),
-                                start: started.o,
-                                done: started
-                                    .y
-                                    .as_ref()
-                                    .and_then(|yielded| yielded.done.as_ref())
-                                    .map(|done| done.o),
-                            }
-                        }
-                        _ => SlotKind::Tool {
-                            shown,
-                            name: found
-                                .and_then(|found| found.n.clone())
-                                .unwrap_or_else(|| "tool".into()),
-                            reply: found.and_then(|found| found.r.clone()),
-                            item: found.and_then(|found| found.item),
-                            // Only a launch that returned: one denied or blocked
-                            // (an error result) started nothing, and one with
-                            // no result yet is running or unfinished as any call.
-                            bg: entry
+                        || entry.at.is_some_and(|at| self.live_yield(index, at)),
+                        || {
+                            entry
                                 .at
                                 .filter(|_| state == ToolState::Ok)
                                 .and_then(|at| self.backgrounds.get(&at))
@@ -4563,9 +5050,9 @@ impl<'a> Builder<'a> {
                                             failed: found.script & events::BACKGROUND_FAILED != 0,
                                         }
                                     }),
-                                }),
+                                })
                         },
-                    }
+                    )
                 }
                 EntryKind::Operation(_) => unreachable!("operation slots are read from extras"),
             };
@@ -4580,6 +5067,7 @@ impl<'a> Builder<'a> {
             slot.first = owner.is_some_and(|turn| started.insert(turn));
             slots.push(slot);
         }
+        let owner = owner_cursor.current();
         // Markers after the last entry, from every file, in time order.
         let mut rest: Vec<(usize, Annotation)> = extras
             .into_iter()
@@ -4610,22 +5098,6 @@ impl<'a> Builder<'a> {
             slot.turn = turn_id(owner);
             slots.push(slot);
         }
-        let mut previous = BTreeMap::new();
-        for slot in &mut slots {
-            if let SlotKind::Signal(signal) = &mut slot.kind
-                && matches!(
-                    signal.kind,
-                    events::SignalKind::Model
-                        | events::SignalKind::Effort
-                        | events::SignalKind::Approval
-                        | events::SignalKind::Sandbox
-                        | events::SignalKind::Permission
-                )
-                && let Some(tag) = &signal.tag
-            {
-                signal.previous = previous.insert(signal.kind, tag.clone());
-            }
-        }
         Transcript::from_slots(slots)
     }
 
@@ -4641,14 +5113,9 @@ impl<'a> Builder<'a> {
         let mut event_times: HashMap<usize, Vec<i64>> = HashMap::new();
         for file in session_files {
             let events = &self.files[*file].summary.events;
-            let mut time = events.iter().find_map(|event| event.t).unwrap_or(i64::MIN);
-            let times = events
-                .iter()
-                .map(|found| {
-                    time = found.t.unwrap_or(time);
-                    time
-                })
-                .collect();
+            let mut time =
+                native_stage::EventTimeCursor::new(events.iter().find_map(|event| event.t));
+            let times = events.iter().map(|found| time.push(found.t)).collect();
             event_times.insert(*file, times);
         }
         // The time of the last event at or before `offset` in `file`: events
@@ -4670,11 +5137,11 @@ impl<'a> Builder<'a> {
         // Several files merge by time; within a file, line and block order.
         // Phase 2 puts a handoff after the event it follows.
         let key = |time: i64, file: usize, pos: (u64, u32), phase: u8| {
-            (
-                if several { time } else { 0 },
+            native_stage::key(
+                several,
+                time,
                 *file_order.get(&file).unwrap_or(&usize::MAX),
-                pos.0,
-                pos.1,
+                pos,
                 phase,
             )
         };
@@ -4707,17 +5174,9 @@ impl<'a> Builder<'a> {
                 .first()
                 .map(|at| (at.0, event(self.files, *at).o))
                 .unwrap_or((self.sessions[index].files[0], 0));
-            keyed.push((
-                (i64::MIN, 0, 0, 0, 0),
-                Entry {
-                    kind: EntryKind::H(*handoff),
-                    file,
-                    offset,
-                    pos: (offset, 0),
-                    t: None,
-                    at: None,
-                },
-            ));
+            let (order, entry) = native_producer::Candidate::head(0, offset, *handoff, [0; 32])
+                .qualify(file, 0, several, None);
+            keyed.push((order.key, entry));
         }
         for at in refs {
             let found = event(self.files, at);
@@ -4728,25 +5187,11 @@ impl<'a> Builder<'a> {
                     .map(|(handoff, _)| EntryKind::H(*handoff))
                     .collect()
             } else {
-                match found.k {
-                    Kind::U => Some(EntryKind::U),
-                    Kind::A => Some(EntryKind::A),
-                    Kind::Gap => Some(EntryKind::Gap),
-                    Kind::Tn if self.bg_ends.contains_key(&at) => Some(EntryKind::BgEnd),
-                    // A poll of a yielded command folds into the step the
-                    // script that started it is, unless it sent input.
-                    Kind::Tool
-                        if found.poll.is_some()
-                            && found.script & events::SENDS == 0
-                            && !last_operation.contains_key(&at) =>
-                    {
-                        None
-                    }
-                    Kind::Tool if found.n.as_deref() != Some("SubagentHandback") => {
-                        Some(EntryKind::Tool(tool_state(found)))
-                    }
-                    _ => None,
-                }
+                native_stage::event_kind(
+                    found,
+                    self.bg_ends.contains_key(&at),
+                    last_operation.contains_key(&at),
+                )
                 .into_iter()
                 .collect()
             };
@@ -4754,42 +5199,23 @@ impl<'a> Builder<'a> {
                 // A code-mode call drawn as its operations that failed, or
                 // that never finished, is still a step: after them, where its
                 // failure arrived or after the last of them.
-                let (time, pos, phase) = match (&kind, &found.r, last_operation.get(&at)) {
-                    (EntryKind::Tool(ToolState::Err), Some(reply), Some(_)) => (
-                        reply.t.unwrap_or_else(|| time_at(at.0, reply.o)),
-                        (reply.o, reply.b),
-                        1,
-                    ),
-                    (EntryKind::Tool(ToolState::Pending), None, Some((time, pos))) => {
-                        (*time, *pos, 2)
-                    }
-                    _ => (time, (found.o, found.b), 1),
-                };
-                keyed.push((
-                    key(time, at.0, pos, phase),
-                    Entry {
-                        kind,
-                        file: at.0,
-                        offset: found.o,
-                        pos,
-                        t: found.t,
-                        at: Some(at),
-                    },
-                ));
+                let (time, phase, entry) = native_stage::event_entry(
+                    kind,
+                    at.0,
+                    at.1,
+                    found,
+                    last_operation.get(&at).copied(),
+                    time,
+                    |offset| time_at(at.0, offset),
+                );
+                keyed.push((key(time, at.0, entry.pos, phase), entry));
             }
             if let Some(handoff) = self.after.get(&at) {
                 // The event's own place, so the handoff follows it even when
                 // it is a later block of its line.
                 keyed.push((
                     key(time, at.0, (found.o, found.b), 2),
-                    Entry {
-                        kind: EntryKind::H(*handoff),
-                        file: at.0,
-                        offset: found.o,
-                        pos: (found.o, found.b),
-                        t: found.t,
-                        at: None,
-                    },
+                    native_stage::after_entry(*handoff, at.0, found),
                 ));
             }
         }
@@ -4798,23 +5224,10 @@ impl<'a> Builder<'a> {
                 if extra.k != Kind::Operation {
                     continue;
                 }
-                let state = match extra.r.as_ref() {
-                    Some(reply) if reply.e => ToolState::Err,
-                    Some(reply) if reply.f & UNKNOWN != 0 => ToolState::Unknown,
-                    Some(_) => ToolState::Ok,
-                    None => ToolState::Pending,
-                };
                 let time = extra.t.unwrap_or_else(|| time_at(*file, extra.o));
                 keyed.push((
                     key(time, *file, (extra.o, extra.b), 1),
-                    Entry {
-                        kind: EntryKind::Operation(state),
-                        file: *file,
-                        offset: extra.o,
-                        pos: (extra.o, extra.b),
-                        t: extra.t,
-                        at: None,
-                    },
+                    native_stage::operation_entry(*file, extra),
                 ));
             }
         }
@@ -4830,23 +5243,38 @@ impl<'a> Builder<'a> {
     fn groups(&self, index: usize, entries: &[Entry]) -> Vec<Group> {
         let mut started = BTreeSet::new();
         let mut open: Vec<Group> = Vec::new();
-        let mut current: Option<usize> = None;
+        let mut cursor = turn_stage::GroupCursor::default();
         for (position, entry) in entries.iter().enumerate() {
-            if matches!(entry.kind, EntryKind::Gap) {
-                current = None;
-                continue;
-            }
             let incoming = match entry.kind {
                 EntryKind::H(handoff) => {
                     let found = &self.handoffs[handoff];
-                    found.to == Some(index)
-                        && matches!(found.out.kind, "ask" | "relay" | "spawn")
-                        && !started.contains(&handoff)
+                    turn_stage::incoming_handoff(
+                        found.out.kind,
+                        found.to == Some(index),
+                        started.contains(&handoff),
+                    )
                 }
                 EntryKind::U => true,
                 _ => false,
             };
-            if incoming || current.is_none() {
+            let Some((group, starts)) = cursor.push_mark(turn_stage::GroupMark {
+                order: range_stage::Order {
+                    key: (
+                        0,
+                        0,
+                        u64::try_from(position).expect("native entry position fits"),
+                        0,
+                        0,
+                    ),
+                    ordinal: 0,
+                    identity: [0; 32],
+                },
+                entry: entry.clone(),
+                incoming,
+            }) else {
+                continue;
+            };
+            if starts {
                 let start = match entry.kind {
                     EntryKind::H(handoff) if incoming => {
                         started.insert(handoff);
@@ -4864,9 +5292,8 @@ impl<'a> Builder<'a> {
                         .or(entry.t),
                     entries: Vec::new(),
                 });
-                current = Some(open.len() - 1);
             }
-            open[current.expect("open turn")].entries.push(position);
+            open[group].entries.push(position);
         }
         open
     }
@@ -4901,7 +5328,7 @@ impl<'a> Builder<'a> {
                     _ => None,
                 })
                 .collect();
-            let Some(mut end) = self.end(
+            let Some(end) = self.end(
                 index,
                 &turn.entries,
                 entries,
@@ -4912,25 +5339,6 @@ impl<'a> Builder<'a> {
             ) else {
                 continue;
             };
-            if !matches!(end.st, "work" | "wait")
-                && !matches!(end.why, "unfinished_step" | "no_reply")
-            {
-                end.at = turn
-                    .entries
-                    .iter()
-                    .filter_map(|position| {
-                        let entry = &entries[*position];
-                        let at = entry.at?;
-                        let found = event(self.files, at);
-                        match entry.kind {
-                            EntryKind::A => found.t,
-                            EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
-                            EntryKind::Operation(_) => found.t,
-                            _ => None,
-                        }
-                    })
-                    .max();
-            }
             for position in &turn.entries {
                 owners[*position] = Some(turns.len());
             }
@@ -4943,10 +5351,13 @@ impl<'a> Builder<'a> {
                 prompts.push((turns.len(), at));
             }
             turns.push(Turn {
-                id: match turn.start {
-                    Some(handoff) => self.handoffs[handoff].out.id.clone(),
-                    None => format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset),
-                },
+                id: turn_stage::turn_id(
+                    sid,
+                    &self.files[turn.file].id,
+                    turn.offset,
+                    turn.start
+                        .map(|handoff| self.handoffs[handoff].out.id.as_str()),
+                ),
                 sid: sid.clone(),
                 start: turn
                     .start
@@ -4980,135 +5391,64 @@ impl<'a> Builder<'a> {
         sent: &[usize],
         last: bool,
     ) -> Option<End> {
-        let content: Vec<&Entry> = members
-            .iter()
-            .map(|position| &entries[*position])
-            .filter(|entry| match entry.kind {
-                EntryKind::A | EntryKind::Tool(_) | EntryKind::Operation(_) => true,
-                EntryKind::H(handoff) => sent.contains(&handoff),
-                _ => false,
-            })
-            .collect();
-        let has_h = members
-            .iter()
-            .any(|position| matches!(entries[*position].kind, EntryKind::H(_)));
-        if start.is_none() && !u && content.is_empty() && !has_h {
-            return None;
+        let mut facts = indexed_native::OrderedFacts::default();
+        for position in members {
+            let entry = &entries[*position];
+            let incoming = Some(position) == members.first() && (u || start.is_some());
+            let outgoing = match entry.kind {
+                EntryKind::H(handoff) if sent.contains(&handoff) => {
+                    let handoff = &self.handoffs[handoff].out;
+                    Some(turn_stage::HandoffEnd {
+                        id: &handoff.id,
+                        kind: handoff.kind,
+                        status: handoff.status,
+                    })
+                }
+                _ => None,
+            };
+            facts
+                .observe(
+                    range_stage::Leaf {
+                        order: range_stage::Order {
+                            key: (
+                                0,
+                                0,
+                                u64::try_from(*position).expect("native entry position fits"),
+                                0,
+                                0,
+                            ),
+                            ordinal: 0,
+                            identity: [0; 32],
+                        },
+                        entry,
+                        found: entry.at.map(|at| event(self.files, at)),
+                        outgoing,
+                        boundary: false,
+                        count: 0,
+                    },
+                    incoming,
+                )
+                .expect("native member count fits");
         }
-        if last && self.sessions[index].out.waiting_for.is_some() {
-            return Some(End {
-                at: None,
-                st: "wait",
-                why: if self.sessions[index].out.waiting_for.as_deref() == Some("permission prompt")
-                {
-                    "permission"
-                } else {
-                    "input"
-                },
-                h: None,
-            });
-        }
-        if last && self.sessions[index].out.state == "work" {
-            return Some(End {
-                at: None,
-                st: "work",
-                why: "working",
-                h: None,
-            });
-        }
-        if let Some(handoff) = sent
-            .iter()
-            .rev()
-            .find(|handoff| self.handoffs[**handoff].out.kind == "toyou")
-        {
-            let found = &self.handoffs[*handoff].out;
-            return Some(End {
-                at: None,
-                st: if found.status == "wait" {
-                    "wait"
-                } else {
-                    "done"
-                },
-                why: "toyou",
-                h: Some(found.id.clone()),
-            });
-        }
-        let start = start.map(|handoff| &self.handoffs[handoff].out);
-        if start.is_some_and(|start| start.status == "err") {
-            return Some(End {
-                at: None,
-                st: "err",
-                why: "failed",
-                h: None,
-            });
-        }
-        let last_content = content.last();
-        match last_content.map(|entry| entry.kind) {
-            Some(EntryKind::Operation(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::Tool(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            // Reached only outside the running last turn of a working
-            // session, or for a yielded command still running there.
-            Some(EntryKind::Tool(ToolState::Pending))
-                if !last_content
-                    .and_then(|entry| entry.at)
-                    .is_some_and(|at| self.live_yield(index, at)) =>
-            {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "unfinished_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::H(handoff)) if self.handoffs[handoff].out.status == "err" => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "handoff_failed",
-                    h: Some(self.handoffs[handoff].out.id.clone()),
-                });
-            }
-            _ => {}
-        }
-        if start.is_some_and(|start| start.kind == "spawn" && start.status == "done") {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "returned",
-                h: None,
-            });
-        }
-        if content
-            .iter()
-            .any(|entry| matches!(entry.kind, EntryKind::A))
-        {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "replied",
-                h: None,
-            });
-        }
-        Some(End {
-            at: None,
-            st: "idle",
-            why: "no_reply",
-            h: None,
-        })
+        facts.native.end.finish(
+            start.map(|handoff| {
+                let start = &self.handoffs[handoff].out;
+                (
+                    start.status == "err",
+                    start.kind == "spawn" && start.status == "done",
+                )
+            }),
+            u,
+            last,
+            self.sessions[index].out.waiting_for.as_deref(),
+            self.sessions[index].out.state,
+            || {
+                facts
+                    .native
+                    .last_content_at()
+                    .is_some_and(|at| self.live_yield(index, at))
+            },
+        )
     }
 }
 
@@ -5147,7 +5487,7 @@ fn tool_state(found: &Event) -> ToolState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ToolState {
     Ok,
     Err,
@@ -5156,17 +5496,6 @@ pub(crate) enum ToolState {
     /// No result yet. Only the last turn of a working session can still be
     /// running it; anywhere else it is a step that never finished.
     Pending,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryKind {
-    H(usize),
-    U,
-    A,
-    Tool(ToolState),
-    Operation(ToolState),
-    BgEnd,
-    Gap,
 }
 
 /// How a tool call is drawn: a pending call is live only in the last turn
@@ -5331,7 +5660,7 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-    fn new(
+    pub(crate) fn new(
         kind: SlotKind,
         file: Option<Arc<SlotFile>>,
         offset: u64,
@@ -5467,18 +5796,6 @@ impl Transcript {
     }
 }
 
-struct Entry {
-    kind: EntryKind,
-    file: usize,
-    offset: u64,
-    /// Where it sits in its file (line offset, block): its event's place, the
-    /// event a handoff follows, or where a failed code-mode call's failure
-    /// arrived.
-    pos: (u64, u32),
-    t: Option<i64>,
-    at: Option<Ref>,
-}
-
 /// One turn's entries, before its end is known.
 struct Group {
     start: Option<usize>,
@@ -5535,6 +5852,98 @@ fn compact_questions(input: &Value) -> Value {
         })
         .unwrap_or_default();
     serde_json::json!({ "questions": questions })
+}
+
+/// Reuse native question/answer semantics for bounded Home recipe reads.
+pub(crate) fn overview_text(recipe: &Value, record: &Value, question: Option<&Value>) -> Value {
+    let block = recipe["block"].as_u64().unwrap_or(0) as usize;
+    let questions = |record: &Value, block| {
+        tool_input(record, block)
+            .map(|input| questions_of(&compact_questions(&input)))
+            .unwrap_or_default()
+    };
+    match recipe["kind"].as_str() {
+        Some("question") => serde_json::json!(cap(
+            &questions(record, block)
+                .iter()
+                .map(|q| q.question.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            MSG_MAX
+        )),
+        Some("answer" | "answers") => {
+            let questions = question
+                .map(|record| {
+                    questions(
+                        record,
+                        recipe["question_block"].as_u64().unwrap_or(0) as usize,
+                    )
+                })
+                .unwrap_or_default();
+            let raw = compact_answers(record, block);
+            let answers = if recipe["structured"] == true {
+                structured_answers(&questions, &raw["tur"])
+            } else {
+                text_answers(&questions, field(&raw, "text").unwrap_or(""))
+            };
+            if recipe["kind"] == "answers" {
+                return serde_json::json!(answers);
+            }
+            serde_json::json!(
+                answers
+                    .iter()
+                    .take(100)
+                    .map(|answer| cap(&answer.values.join(", "), MSG_MAX))
+                    .collect::<Vec<_>>()
+            )
+        }
+        Some("assistant") => {
+            serde_json::json!(assistant_text(record, block).map(|text| cap(&text, MSG_MAX)))
+        }
+        Some("spawn") => serde_json::json!(
+            input_string(record, block, &["prompt", "message", "instructions"])
+                .map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("relay") => serde_json::json!(
+            input_string(record, block, &["message", "content"]).map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("tool_result") => {
+            serde_json::json!(tool_result_text(record, block).map(|text| cap(&text, MSG_MAX)))
+        }
+        Some("trace_prompt") => {
+            serde_json::json!(prompt_text(record).map(|text| cap(&text, MSG_MAX)))
+        }
+        Some("notification") => serde_json::json!(
+            notification_result(record, recipe["arg"].as_str().unwrap_or(""))
+                .map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("received_agent") => serde_json::json!(
+            received_body(
+                record,
+                "agent-message",
+                recipe["arg"].as_str(),
+                recipe["skip"].as_u64().unwrap_or(0) as usize
+            )
+            .map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("received_cross") => serde_json::json!(
+            received_body(record, "cross-session-message", None, 0).map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("handback") => serde_json::json!(
+            input_string(record, block, &["message"]).map(|text| cap(&text, MSG_MAX))
+        ),
+        Some("prompt") => serde_json::json!(prompt_text(record).map(|text| cap(&text, 500))),
+        Some("activity") => serde_json::json!(tool_input(record, block).map(|input| cap(
+            &arg_summary(
+                recipe["tool"].as_str().unwrap_or("tool"),
+                &input,
+                recipe["cwd"].as_str(),
+                None
+            ),
+            500
+        ))),
+        _ => Value::Null,
+    }
 }
 
 /// A question's result, reduced to capped answers, previews and text.
@@ -5843,6 +6252,15 @@ pub(crate) fn arg_summary(
 /// both ends, so every file is indexed whatever the window, and the window
 /// only trims what is returned. With [`Options::scan_window`], files last
 /// modified before the window aren't read at all.
+/// Semantic fixture oracle only; never a Viewer owner, cache or read fallback.
+#[cfg(test)]
+pub(crate) fn reference_json(options: &Options, now: i64) -> serde_json::Value {
+    let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+    let built = build(options, &mut cache, &mut false, &mut Texts::default(), now).unwrap();
+    serde_json::from_str(&built.json(now)).unwrap()
+}
+
+#[cfg(test)]
 pub(crate) fn build(
     options: &Options,
     cache: &mut EventCache,
@@ -5856,6 +6274,7 @@ pub(crate) fn build(
 /// Native projection over an explicit, authorized source closure. Request-local
 /// caches have no writable store. Discovery and publication remain separate;
 /// callers must not claim missing relationship context as a complete graph.
+#[cfg(test)]
 pub(crate) fn build_sources(
     options: &Options,
     cache: &mut EventCache,
@@ -5864,7 +6283,117 @@ pub(crate) fn build_sources(
     now: i64,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<Built> {
-    build_sources_inner(options, cache, dirty, texts, now, selected, None)
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        BuildSelection::Current(selected),
+        BuildTarget::Model,
+    )? {
+        BuildOutput::Model(built) => Ok(*built),
+        _ => Err(io::Error::other("native producer did not build model")),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildTarget {
+    #[cfg(test)]
+    Model,
+    Query,
+    Catalog,
+    Sources,
+}
+
+impl BuildTarget {
+    fn reference_model(self) -> bool {
+        #[cfg(test)]
+        {
+            matches!(self, Self::Model)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = self;
+            false
+        }
+    }
+}
+
+enum BuildOutput {
+    #[cfg(test)]
+    Model(Box<Built>),
+    Query(Box<QueryData>),
+    Catalog(BTreeSet<u32>, Option<String>),
+    Sources(Box<PreparedSources>),
+}
+
+/// Build native query evidence using the existing incremental source index.
+/// Scan-window callers still discover and join every eligible native source;
+/// selected-session dependency closure is a separate retirement stage.
+pub(crate) fn build_query(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<QueryData> {
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        BuildSelection::Current(None),
+        BuildTarget::Query,
+    )? {
+        BuildOutput::Query(data) => Ok(*data),
+        _ => Err(io::Error::other(
+            "native producer did not build query evidence",
+        )),
+    }
+}
+
+/// Reconcile native metadata and transcript slots without preparing legacy
+/// model analytics or transport. Complete observation still discovers all sources.
+#[cfg(test)]
+pub(crate) fn observe_catalog(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<BTreeSet<u32>> {
+    observe_catalog_fenced(options, cache, dirty, texts, now).map(|(pids, _)| pids)
+}
+
+/// The generation belongs to this observation's transaction, even if a peer
+/// advances the shared Catalog before the caller acknowledges its own work.
+pub(crate) fn observe_catalog_fenced(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    now: i64,
+) -> io::Result<(BTreeSet<u32>, Option<String>)> {
+    if options.scan_window {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "complete catalog observation cannot use a scan window",
+        ));
+    }
+    match build_sources_inner(
+        options,
+        cache,
+        dirty,
+        texts,
+        now,
+        BuildSelection::Current(None),
+        BuildTarget::Catalog,
+    )? {
+        BuildOutput::Catalog(pids, generation) => Ok((pids, generation)),
+        _ => Err(io::Error::other("native producer did not observe catalog")),
+    }
 }
 
 /// Native producer output captured before compatibility-window trimming.
@@ -5874,12 +6403,58 @@ pub(crate) struct PreparedSources {
     pub(crate) claims: Vec<(String, Option<i64>)>,
     pub(crate) rows: Vec<summary::CatalogRow>,
     pub(crate) transcripts: Vec<crate::slot_projection::Projection>,
+    pub(crate) pids: BTreeSet<u32>,
+    pub(crate) lineage_dependencies: Vec<(String, String)>,
+    /// Exact native message discovery hints; overflow requires durable staging.
+    pub(crate) message_dependencies: Option<Vec<String>>,
+    pub(crate) relationships: relation_stage::Context,
+    pub(crate) native_points: relation_stage::PointPublication,
+    pub(crate) indexed_sources: Vec<(String, summary::CatalogSource)>,
+    pub(crate) indexed_native_parents: Vec<(String, String, String)>,
+    pub(crate) withdrawals: Vec<relation_stage::Withdrawal>,
 }
 
-pub(crate) fn prepare_sources(
+impl PreparedSources {
+    /// Header/path parent references exist before a selected cohort can resolve
+    /// them. Keep them as native identities rather than dropping an absent end.
+    pub(crate) fn native_parents(&self) -> Vec<(String, String)> {
+        self.relationships
+            .endpoints
+            .values()
+            .flat_map(|endpoint| endpoint.native_parents.iter().cloned())
+            .chain(
+                self.indexed_native_parents
+                    .iter()
+                    .map(|(_, harness, native)| (harness.clone(), native.clone())),
+            )
+            .chain(
+                self.rows
+                    .iter()
+                    .flat_map(|row| &row.sources)
+                    .filter_map(|source| {
+                        let role: Role =
+                            serde_json::from_value(source.native_role.clone()?).ok()?;
+                        match role {
+                            Role::Agent(meta) => Some(("claude".to_owned(), meta.parent)),
+                            Role::Codex(meta) if !meta.guardian_review => {
+                                meta.parent_thread.map(|id| ("codex".to_owned(), id))
+                            }
+                            _ => None,
+                        }
+                    }),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Primitive source observations precede owner identity closure. No partial
+/// lineage, relation history or query projection is accepted in this phase.
+pub(crate) fn prepare_semantic_index_sources(
     options: &Options,
     cache: &mut EventCache,
-    inputs: &[crate::inputs::Input],
+    inputs: &[crate::Input],
     now: i64,
 ) -> io::Result<PreparedSources> {
     if inputs.len() > 64
@@ -5895,17 +6470,485 @@ pub(crate) fn prepare_sources(
             "native producer source batch must contain at most 64 distinct sources",
         ));
     }
-    let mut prepared = None;
-    build_sources_inner(
+    let _facts_lock = options
+        .facts
+        .as_ref()
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
+        .transpose()?;
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let _source_locks = paths
+        .iter()
+        .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
+        .collect::<io::Result<Vec<_>>>()?;
+    let base_generation = cache.session_catalog_generation();
+    let facts = MachineFacts::of(options);
+    let runtime = crate::native_evidence::query_runtime_generation(options)?;
+    let mut withdrawals = Vec::new();
+    if let Some(facts_path) = &options.facts
+        && inputs.iter().any(|input| {
+            input.root == crate::InputRoot::Codex
+                && !facts.codex_rollout_is_current(options, &input.full_path(options))
+        })
+    {
+        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
+        let facts_identity =
+            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
+        authority.validate()?;
+        for input in inputs
+            .iter()
+            .filter(|input| input.root == crate::InputRoot::Codex)
+        {
+            if authority.codex_current(&input.path)? != Some(false) {
+                continue;
+            }
+            let path = input.full_path(options);
+            let stat = match crate::events::Stat::of(&path) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            withdrawals.push(relation_stage::Withdrawal {
+                path: path.to_string_lossy().into_owned(),
+                relative: input.path.clone(),
+                stat,
+                facts_path: facts_path.clone(),
+                facts_identity: facts_identity.clone(),
+                runtime: runtime.clone(),
+            });
+        }
+        authority.validate()?;
+    }
+    let (mut files, _, _) = scan(
+        options,
+        cache,
+        &mut false,
+        &mut Texts::default(),
+        scan_cutoff(options, now),
+        &facts,
+        Some(inputs),
+    )?;
+    verify_sidecars(&files)?;
+    let claims = cache.catalog_claims(&paths)?;
+    let proofs = crate::query_source::Sources::capture(
+        options,
+        files
+            .iter()
+            .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
+    )?;
+    let records = proofs.reader();
+    records.verify_all()?;
+    for file in &mut files {
+        if file.summary.handoff_index.is_none() {
+            return Err(io::Error::other("native launch calls were not indexed"));
+        }
+        if file.harness() != "copilot" {
+            let marker = file
+                .summary
+                .marker_index
+                .as_ref()
+                .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+            file.marker = records.marker(&file.path, marker)?;
+        }
+    }
+    let indexed_sources = files
+        .iter()
+        .map(|file| (file.harness().to_owned(), summary::source(file)))
+        .collect();
+    let indexed_native_parents = files
+        .iter()
+        .filter_map(|file| {
+            (match &file.role {
+                Role::Agent(meta) => Some(("claude".to_owned(), meta.parent.clone())),
+                Role::Codex(meta) if !meta.guardian_review => meta
+                    .parent_thread
+                    .as_ref()
+                    .map(|parent| ("codex".to_owned(), parent.clone()))
+                    .or_else(|| {
+                        file.marker
+                            .as_ref()
+                            .map(|marker| (marker.harness.clone(), marker.parent_id.clone()))
+                    }),
+                _ => None,
+            })
+            .map(|(harness, native)| (file.path.to_string_lossy().into_owned(), harness, native))
+        })
+        .collect();
+    let lineage_dependencies = files
+        .iter()
+        .flat_map(|file| {
+            file.summary
+                .links
+                .session_ids
+                .iter()
+                .chain(&file.summary.links.continued_in)
+                .map(|id| (file.harness().to_owned(), id.clone()))
+                .chain(
+                    file.summary
+                        .links
+                        .bridges
+                        .iter()
+                        .map(|id| (format!("bridge:{}", file.harness()), id.clone())),
+                )
+        })
+        .collect();
+    records.finish()?;
+    verify_sidecars(&files)?;
+    for withdrawal in &withdrawals {
+        if !withdrawal.current()? {
+            return Err(io::Error::other(
+                "native source admission withdrawal changed",
+            ));
+        }
+    }
+    if !withdrawals.is_empty()
+        && crate::native_evidence::query_runtime_generation(options)? != runtime
+    {
+        return Err(io::Error::other("native source admission runtime changed"));
+    }
+    Ok(PreparedSources {
+        base_generation,
+        claims,
+        indexed_sources,
+        indexed_native_parents,
+        withdrawals,
+        lineage_dependencies,
+        message_dependencies: Some(Vec::new()),
+        rows: Vec::new(),
+        transcripts: Vec::new(),
+        pids: BTreeSet::new(),
+        relationships: relation_stage::Context::default(),
+        native_points: relation_stage::PointPublication::default(),
+    })
+}
+
+pub(crate) fn prepare_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    now: i64,
+) -> io::Result<PreparedSources> {
+    prepare_sources_selected(
+        options,
+        cache,
+        inputs,
+        now,
+        BuildSelection::Current(Some(inputs)),
+    )
+}
+
+pub(crate) fn prepare_semantic_identity_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    relationships: &relation_stage::Context,
+    now: i64,
+) -> io::Result<PreparedSources> {
+    prepare_sources_selected(
+        options,
+        cache,
+        inputs,
+        now,
+        BuildSelection::Identity {
+            inputs,
+            relationships,
+        },
+    )
+}
+
+pub(crate) fn prepare_staged_sources(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    relationships: &relation_stage::Context,
+    matching: bool,
+    now: i64,
+) -> io::Result<PreparedSources> {
+    let selection = if matching {
+        BuildSelection::Matching {
+            inputs,
+            relationships,
+        }
+    } else {
+        BuildSelection::Staged {
+            inputs,
+            relationships,
+        }
+    };
+    prepare_sources_selected(options, cache, inputs, now, selection)
+}
+
+fn prepare_sources_selected(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::inputs::Input],
+    now: i64,
+    selection: BuildSelection<'_>,
+) -> io::Result<PreparedSources> {
+    if inputs.len() > 64
+        || inputs
+            .iter()
+            .map(|input| input.full_path(options))
+            .collect::<BTreeSet<_>>()
+            .len()
+            != inputs.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native producer source batch must contain at most 64 distinct sources",
+        ));
+    }
+    #[cfg(test)]
+    crate::events::CATALOG_DERIVED_SOURCES
+        .with(|count| count.set(count.get() + inputs.len() as u64));
+    match build_sources_inner(
         options,
         cache,
         &mut false,
         &mut Texts::default(),
         now,
-        Some(inputs),
-        Some(&mut prepared),
-    )?;
-    prepared.ok_or_else(|| io::Error::other("native producer did not capture projection"))
+        selection,
+        BuildTarget::Sources,
+    )? {
+        BuildOutput::Sources(prepared) => Ok(*prepared),
+        _ => Err(io::Error::other(
+            "native producer did not capture projection",
+        )),
+    }
+}
+
+enum BuildSelection<'a> {
+    Identity {
+        inputs: &'a [crate::inputs::Input],
+        relationships: &'a relation_stage::Context,
+    },
+    Current(Option<&'a [crate::inputs::Input]>),
+    Staged {
+        inputs: &'a [crate::inputs::Input],
+        relationships: &'a relation_stage::Context,
+    },
+    Matching {
+        inputs: &'a [crate::inputs::Input],
+        relationships: &'a relation_stage::Context,
+    },
+    History {
+        files: Vec<SourceFile>,
+        skipped: BTreeSet<String>,
+        records: &'a crate::overview_repair::NativeRecords<'a>,
+    },
+}
+
+/// Reuses the native producer over qualified original generations. It cannot
+/// scan a workspace, infer current control ownership or publish catalog rows.
+pub(crate) fn prepare_history(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    records: &crate::overview_repair::NativeRecords,
+    now: i64,
+) -> io::Result<PreparedSources> {
+    match prepare_history_inner(options, rows, records, now, BuildTarget::Sources)? {
+        BuildOutput::Sources(prepared) => Ok(*prepared),
+        _ => Err(io::Error::other(
+            "Qualified producer did not capture metadata",
+        )),
+    }
+}
+
+/// Query the same qualified original generations as native presentation reads.
+/// The source proofs remain credential-free; callers own subsequent byte reads.
+pub(crate) fn query_history(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    records: &crate::overview_repair::NativeRecords,
+    now: i64,
+) -> io::Result<QueryData> {
+    match prepare_history_inner(options, rows, records, now, BuildTarget::Query)? {
+        BuildOutput::Query(data) => Ok(*data),
+        _ => Err(io::Error::other(
+            "Qualified producer did not derive query evidence",
+        )),
+    }
+}
+
+fn prepare_history_inner(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    records: &crate::overview_repair::NativeRecords,
+    now: i64,
+    target: BuildTarget,
+) -> io::Result<BuildOutput> {
+    let mut files = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut skipped = BTreeSet::new();
+    let cutoff = scan_cutoff(options, now);
+    let projects = options.claude_home.join("projects");
+    for row in rows {
+        for source in &row.sources {
+            if !seen.insert(source.path.clone()) {
+                continue;
+            }
+            if !catalog_source_in_window(source, cutoff) {
+                // Match current scanning: exclude the whole file, while
+                // retaining omitted Claude top-level identities for lineage
+                // and turns_truncated derivation. Never read excluded bodies.
+                if row.harness == "claude"
+                    && source.path.parent().and_then(Path::parent) == Some(projects.as_path())
+                    && let Some(stem) = source.path.file_stem().and_then(|stem| stem.to_str())
+                {
+                    skipped.insert(stem.to_owned());
+                }
+                continue;
+            }
+            let mut header = Value::Null;
+            let summary = if let Some(summary) = records.index(&source.path) {
+                if source.native_role.is_none() && row.harness == "codex" {
+                    header =
+                        records.record(&source.path, 0).unwrap_or(Value::Null)["payload"].clone();
+                }
+                summary
+            } else {
+                let bytes = records
+                    .bytes(&source.path)
+                    .ok_or_else(|| io::Error::other("Missing qualified producer source"))?;
+                let mut summary = FileIndex::default();
+                let mut offset = 0u64;
+
+                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                    if line.len() > 32 * 1024 * 1024 || line.last() != Some(&b'\n') {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Qualified producer record exceeds its bound",
+                        ));
+                    }
+                    match crate::tx::parse_native_record(line) {
+                        Some(value) => {
+                            if value["type"] == "session_meta" {
+                                header = value["payload"].clone();
+                            }
+                            match row.harness.as_str() {
+                                "claude" => events::claude(&mut summary, &value, offset),
+                                "codex" => events::codex(&mut summary, &value, offset),
+                                "copilot" => events::copilot(&mut summary, &value, offset),
+                                _ => {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Unknown native producer",
+                                    ));
+                                }
+                            }
+                        }
+                        None => events::gap(&mut summary, offset),
+                    }
+                    offset += line.len() as u64;
+                }
+                if offset != source.offset {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Qualified producer boundary changed",
+                    ));
+                }
+                let proofs = crate::source_chunks::capture(
+                    &mut std::io::Cursor::new(bytes),
+                    source.offset,
+                    0,
+                )?;
+                if proofs.prefix != source.prefix_sha256 || proofs.tail != source.tail_sha256 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Qualified source proof changed",
+                    ));
+                }
+                summary.source_chunks = Some(Arc::new(proofs.chunks));
+                Arc::new(summary)
+            };
+            let role = if let Some(value) = &source.native_role {
+                serde_json::from_value(value.clone()).map_err(io::Error::other)?
+            } else {
+                match row.harness.as_str() {
+                    "claude" if row.kind == "subagent" => Role::Agent(AgentMeta {
+                        parent: source
+                            .path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        label: Some(row.name.clone()),
+                        ..AgentMeta::default()
+                    }),
+                    "claude" => Role::Top {
+                        slug: source
+                            .path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                    },
+                    "codex" => Role::Codex(CodexMeta {
+                        history: CodexHistory::from_meta(&header),
+                        parent_thread: field(&header, "parent_thread_id").map(str::to_owned),
+                        nickname: field(&header, "agent_nickname").map(str::to_owned),
+                        path: field(&header, "agent_path").map(str::to_owned),
+                        subagent: field(&header, "thread_source") == Some("subagent"),
+                        cwd: field(&header, "cwd").map(str::to_owned),
+                        branch: header
+                            .get("git")
+                            .and_then(|git| field(git, "branch"))
+                            .map(str::to_owned),
+                        guardian_review: field(&header, "thread_source") == Some("guardian_review"),
+                    }),
+                    "copilot" => Role::Copilot,
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Unknown native role",
+                        ));
+                    }
+                }
+            };
+            files.push(SourceFile {
+                revision: (
+                    source.dev,
+                    source.ino,
+                    source.offset,
+                    source.prefix_sha256,
+                    source.tail_sha256,
+                    source.changed_ns,
+                ),
+                path: source.path.clone(),
+                stamp: Stamp {
+                    dev: source.dev,
+                    ino: source.ino,
+                    size: source.size,
+                    modified_ns: source.modified_ns,
+                    changed_ns: source.changed_ns,
+                },
+                id: source.native_id.clone(),
+                first: summary.first,
+                last: summary.last,
+                summary,
+                role,
+                marker: records.marker(&source.path),
+            });
+        }
+    }
+    build_sources_inner(
+        options,
+        &mut EventCache::default(),
+        &mut false,
+        &mut Texts::default(),
+        now,
+        BuildSelection::History {
+            files,
+            skipped,
+            records,
+        },
+        target,
+    )
 }
 
 fn build_sources_inner(
@@ -5914,10 +6957,66 @@ fn build_sources_inner(
     dirty: &mut bool,
     texts: &mut Texts,
     now: i64,
-    selected: Option<&[crate::inputs::Input]>,
-    mut prepared: Option<&mut Option<PreparedSources>>,
-) -> io::Result<Built> {
-    let catalog_base = cache.session_catalog_generation();
+    selection: BuildSelection<'_>,
+    target: BuildTarget,
+) -> io::Result<BuildOutput> {
+    let native_timing = matches!(target, BuildTarget::Catalog | BuildTarget::Sources)
+        && crate::native_timing::enabled();
+    let mut measurements = crate::native_timing::Measurements::new(native_timing);
+    let total_started = measurements.start();
+    macro_rules! measured {
+        ($name:literal, $units:expr, $body:expr) => {{
+            let started = measurements.start();
+            let value = $body;
+            measurements.record($name, started, $units);
+            value
+        }};
+    }
+    let started = measurements.start();
+    let _facts_lock = options
+        .facts
+        .as_ref()
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
+        .transpose()?;
+    measurements.record("facts_lock", started, 1);
+    let started = measurements.start();
+    let _source_locks = match &selection {
+        BuildSelection::Current(Some(inputs))
+        | BuildSelection::Identity { inputs, .. }
+        | BuildSelection::Staged { inputs, .. }
+        | BuildSelection::Matching { inputs, .. } => inputs
+            .iter()
+            .map(|input| {
+                crate::source_change::SourceLock::acquire(
+                    options,
+                    input.full_path(options).to_string_lossy().as_ref(),
+                    false,
+                )
+            })
+            .collect::<io::Result<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+    measurements.record("source_locks", started, _source_locks.len());
+    let query_runtime = measured!(
+        "runtime_fingerprint",
+        1,
+        crate::native_evidence::query_runtime_generation(options)?
+    );
+    let runtime_observations = measured!(
+        "runtime_observations",
+        1,
+        if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+            crate::native_evidence::RuntimeObservations::for_publication_measured(
+                options,
+                &query_runtime,
+                &mut measurements,
+            )
+        } else {
+            crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
+                .into_scoped()
+        }
+    );
+    let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
@@ -5927,16 +7026,62 @@ fn build_sources_inner(
                 $name,
                 u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             ));
+            measurements.record($name, native_timing.then_some(started), 1);
             value
         }};
     }
 
-    let facts = MachineFacts::of(options);
+    let facts = measured!("machine_facts", 1, MachineFacts::of(options));
     let window_start = scan_cutoff(options, now);
-    let (files, skipped, index_clone) = timed!(
-        "scan",
-        scan(options, cache, dirty, texts, window_start, &facts, selected)?
-    );
+    let staged_relationships = match &selection {
+        BuildSelection::Staged { relationships, .. } => Some(*relationships),
+        _ => None,
+    };
+    let matching_relationships = match &selection {
+        BuildSelection::Matching { relationships, .. } => Some(*relationships),
+        _ => None,
+    };
+    let identity_epoch = match &selection {
+        BuildSelection::Identity { relationships, .. } => relationships.epoch,
+        _ => None,
+    };
+    let (selected, history_records, mut files, skipped, index_clone) = match selection {
+        BuildSelection::Current(selected) => {
+            let (files, skipped, duration) = timed!(
+                "scan",
+                scan(options, cache, dirty, texts, window_start, &facts, selected)?
+            );
+            (selected, None, files, skipped, duration)
+        }
+        BuildSelection::Identity { inputs, .. }
+        | BuildSelection::Staged { inputs, .. }
+        | BuildSelection::Matching { inputs, .. } => {
+            let (files, skipped, duration) = timed!(
+                "scan",
+                scan(
+                    options,
+                    cache,
+                    dirty,
+                    texts,
+                    window_start,
+                    &facts,
+                    Some(inputs)
+                )?
+            );
+            (Some(inputs), None, files, skipped, duration)
+        }
+        BuildSelection::History {
+            files,
+            skipped,
+            records,
+        } => (
+            Some([].as_slice()),
+            Some(records),
+            files,
+            skipped,
+            std::time::Duration::ZERO,
+        ),
+    };
     timings.push((
         "index_clone",
         u32::try_from(index_clone.as_millis()).unwrap_or(u32::MAX),
@@ -5949,21 +7094,36 @@ fn build_sources_inner(
             hook();
         }
     }
-    let claims = if prepared.is_some() {
+    if !target.reference_model() && history_records.is_none() {
+        measured!("sidecars_before", files.len(), verify_sidecars(&files)?);
+    }
+    let started = measurements.start();
+    let claims = if target == BuildTarget::Sources && history_records.is_none() {
         cache.catalog_claims(
-            &files
-                .iter()
-                .map(|file| file.path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
+            &selected
+                .map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| {
+                    files
+                        .iter()
+                        .map(|file| file.path.to_string_lossy().into_owned())
+                        .collect()
+                }),
         )?
     } else {
         Vec::new()
     };
+    measurements.record("catalog_claims", started, claims.len());
     let pids;
     let lock_pids;
     let held;
     let machine;
     let home;
+    #[cfg(test)]
     let offline_since;
     let groups;
     timed!("facts", {
@@ -5975,25 +7135,66 @@ fn build_sources_inner(
             .collect::<BTreeSet<String>>();
         machine = facts.hostname(options);
         home = facts.home();
-        offline_since = facts.offline_since();
+        #[cfg(test)]
+        {
+            offline_since = facts.offline_since();
+        }
         groups = lineages(&files);
     });
     if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
-        let ids = files
+        let ids: BTreeSet<_> = files
             .iter()
             .flat_map(|file| {
                 std::iter::once(file.id.clone())
                     .chain(file.summary.links.session_ids.iter().cloned())
             })
             .collect();
-        cache.select_reported_runs(&ids)?;
+        measured!(
+            "reported_runs_select",
+            ids.len(),
+            cache.select_reported_runs(&ids)?
+        );
     }
+    let started = measurements.start();
     let reported_runs: Vec<ReportedRunSnapshot> = match &facts {
         MachineFacts::Local => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
+    measurements.record("reported_runs_collect", started, reported_runs.len());
+    let sources = files
+        .iter()
+        .map(|file| (summary::source(file), file.summary.source_chunks.clone()));
+    let source_proofs = measured!(
+        "source_capture",
+        files.len(),
+        if target.reference_model() {
+            crate::query_source::Sources::capture_native(options, sources)?
+        } else {
+            crate::query_source::Sources::capture(options, sources)?
+        }
+    );
+    let source_records = source_proofs.reader();
+    if history_records.is_none() {
+        measured!("source_verify", files.len(), source_records.verify_all()?);
+        let started = measurements.start();
+        for file in &mut files {
+            if file.summary.handoff_index.is_none() {
+                return Err(io::Error::other("native launch calls were not indexed"));
+            }
+            if file.harness() != "copilot" {
+                let index = file
+                    .summary
+                    .marker_index
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("native parent marker was not indexed"))?;
+                file.marker = source_records.marker(&file.path, index)?;
+            }
+        }
+        measurements.record("source_markers", started, files.len());
+    }
+    let started = measurements.start();
     let mut builder = Builder::new(
-        &files,
+        (&files, &source_records),
         texts,
         now,
         machine.clone(),
@@ -6001,7 +7202,32 @@ fn build_sources_inner(
         &reported_runs,
         cache,
     );
+    measurements.record("builder_setup", started, files.len());
+    builder.history_records = history_records;
+    if let Some(epoch) = identity_epoch.or_else(|| {
+        staged_relationships
+            .or(matching_relationships)
+            .and_then(|context| context.epoch)
+    }) {
+        for file in &files {
+            let native = (file.harness().to_owned(), file.id.clone());
+            if !builder.staged_keys.contains_key(&native) {
+                let selected = builder.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::NativeKey {
+                        harness: native.0.clone(),
+                        native: native.1.clone(),
+                    },
+                )?;
+                let key = selected
+                    .key
+                    .ok_or_else(|| io::Error::other("staged native identity not qualified"))?;
+                builder.staged_keys.insert(native, key);
+            }
+        }
+    }
     timed!("sessions", builder.sessions(groups, &pids, &held));
+    let started = measurements.start();
     for name in facts.native_names(options) {
         if name.valid()
             && let Some(&index) = builder.by_native.get(&("codex", name.native_id.clone()))
@@ -6011,30 +7237,50 @@ fn build_sources_inner(
             session.names.insert(plain_name(&name.name));
         }
     }
+    measurements.record("native_names", started, 1);
     timed!("index_tools", builder.index_tools());
     timed!("background_commands", builder.background_commands());
-    timed!("claude_spawns", builder.claude_spawns());
-    timed!("codex_spawns", builder.codex_spawns());
-    timed!(
-        "observed_parents",
-        builder.observed_parents(options, &pids, &lock_pids.clone().unwrap_or_default())
-    );
-    timed!("relays", builder.relays());
-    timed!("codex_relays", builder.codex_relays());
-    timed!("asks", builder.asks());
+    builder.staged_epoch = staged_relationships
+        .or(matching_relationships)
+        .and_then(|relationships| relationships.epoch);
+    if let Some(relationships) = matching_relationships {
+        relationships.install_endpoints(&mut builder)?;
+        if let Some(locations) = &relationships.matching_locations {
+            let mut selected = BTreeSet::new();
+            for location in locations {
+                if let Some(at) = location.local(&builder)? {
+                    selected.insert(at);
+                }
+            }
+            builder.matching_refs = Some(selected);
+        }
+    }
+    if let Some(relationships) = staged_relationships {
+        timed!("staged_relationships", relationships.install(&mut builder)?);
+    } else {
+        timed!("claude_spawns", builder.claude_spawns()?);
+        timed!("codex_spawns", builder.codex_spawns()?);
+        timed!(
+            "observed_parents",
+            builder.observed_parents(options, &pids, &lock_pids.clone().unwrap_or_default())
+        );
+        timed!("relays", builder.relays()?);
+        timed!("codex_relays", builder.codex_relays()?);
+    }
+    timed!("asks", builder.asks(target));
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
-    #[cfg(test)]
-    let texts = builder.texts_by_turn();
     let (mut turns, mut tx) = timed!("turns", builder.turns());
-    timed!("wait_edges", builder.wait_edges(&tx));
+    timed!("wait_edges", builder.wait_edges(&tx)?);
 
     // Stubs span the handoffs that name them.
     timed!("stubs", {
         for handoff in &builder.handoffs {
             for end in [handoff.from, handoff.to].into_iter().flatten() {
                 let session = &mut builder.sessions[end];
-                if session.kind == SessKind::Stub {
+                if session.kind == SessKind::Stub
+                    && !builder.staged_endpoints.contains_key(&session.key)
+                {
                     let at = handoff.out.at;
                     session.out.start = if session.out.start == 0 {
                         at
@@ -6046,16 +7292,29 @@ fn build_sources_inner(
             }
         }
     });
-    let run_of = |pid, start| facts.run(options, pid, start);
-    let session_facts = timed!(
-        "session_facts",
+    let post_started = std::time::Instant::now();
+    let started = measurements.start();
+    let mut handoffs: Vec<Handoff> = builder
+        .handoffs
+        .iter()
+        .map(|handoff| handoff.out.clone())
+        .collect();
+    // A scan-window build is intentionally incomplete: it cannot replace a
+    // source-complete catalog. Publication itself is delayed until success.
+    let mut catalog = ((!options.scan_window && selected.is_none())
+        || matches!(target, BuildTarget::Catalog | BuildTarget::Sources))
+    .then(|| summary::catalog(&builder, &handoffs));
+    measurements.record(
+        "projection_catalog",
+        started,
+        catalog.as_ref().map_or(0, Vec::len),
+    );
+    let derive_query_facts = || {
         builder.session_facts(
             &skipped,
             |id| match lock_pids.as_ref() {
                 Some(locks) => match locks.get(id) {
                     Some(pid) => (Some(*pid), Some(true)),
-                    // A lock file no process holds: its writer is gone. Without a
-                    // lock file there is no process record.
                     None => (
                         None,
                         facts
@@ -6066,16 +7325,364 @@ fn build_sources_inner(
                 },
                 None => (None, None),
             },
-            run_of,
+            |pid, start| facts.run(options, pid, start),
         )
+    };
+    let mut published_facts = measured!(
+        "projection_facts",
+        1,
+        catalog.as_ref().map(|_| derive_query_facts())
     );
-
-    let post_started = std::time::Instant::now();
-    let mut handoffs: Vec<Handoff> = builder
-        .handoffs
-        .iter()
-        .map(|handoff| handoff.out.clone())
-        .collect();
+    let started = measurements.start();
+    let mut query_summaries = published_facts.as_ref().map(|facts| {
+        crate::query::catalog_summaries(
+            builder
+                .sessions
+                .iter()
+                .map(|session| (session.key.as_str(), &session.out)),
+            &handoffs,
+            facts,
+            &tx,
+            now,
+        )
+    });
+    if let (Some(relationships), Some(summaries)) = (staged_relationships, query_summaries.as_mut())
+    {
+        for (key, children) in &relationships.children {
+            if let Some(summary) = summaries.get_mut(key) {
+                summary["summary"]["children"] = serde_json::json!(children);
+            }
+        }
+    }
+    measurements.record("projection_query_summaries", started, 1);
+    let started = measurements.start();
+    let slot_projections = catalog.as_ref().map(|rows| {
+        crate::slot_projection::capture(
+            &tx,
+            rows,
+            Some(&source_records),
+            history_records,
+            (!target.reference_model() && history_records.is_none())
+                .then_some((&*builder.cache, catalog_base.as_deref())),
+        )
+    });
+    measurements.record(
+        "projection_slots",
+        started,
+        slot_projections.as_ref().map_or(0, Vec::len),
+    );
+    if let Some(rows) = &mut catalog {
+        let started = measurements.start();
+        // Preserve producer order while looking up only this owner's native
+        // turns and edges. Repeated workspace scans made publication quadratic.
+        let mut turns_by_session: BTreeMap<&str, Vec<&Turn>> = BTreeMap::new();
+        let mut holding_turns = BTreeMap::new();
+        for turn in &turns {
+            turns_by_session.entry(&turn.sid).or_default().push(turn);
+            for edge in &turn.sent {
+                holding_turns.entry(edge.as_str()).or_insert(turn);
+            }
+        }
+        let mut edges_by_session: BTreeMap<&str, Vec<&Handoff>> = BTreeMap::new();
+        for edge in &handoffs {
+            edges_by_session.entry(&edge.from).or_default().push(edge);
+            if let Some(to) = edge.to.as_deref().filter(|to| *to != edge.from) {
+                edges_by_session.entry(to).or_default().push(edge);
+            }
+        }
+        let projections_by_key: BTreeMap<_, _> = slot_projections
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|projection| (projection.key.as_str(), projection))
+            .collect();
+        let mut family_costs =
+            crate::causal_trace::family_costs(builder.sessions.iter().map(|session| {
+                (
+                    session.key.as_str(),
+                    session.parent.map(|at| builder.sessions[at].key.as_str()),
+                    session.out.cost.usd,
+                )
+            }));
+        if let Some(relationships) = staged_relationships {
+            for (key, cost) in &relationships.family_costs {
+                if let Some(stored) = family_costs.get_mut(key.as_str()) {
+                    *stored = *cost;
+                }
+            }
+        }
+        let publication_sessions = builder
+            .sessions
+            .iter()
+            .map(|session| (session.key.clone(), session.out.clone()))
+            .collect();
+        let activity =
+            crate::analytics::activity(&publication_sessions, &tx, &turns, &handoffs, now);
+        let preview_owners: BTreeMap<_,_>=builder.handoffs.iter().map(|h| {
+            let owner=|field:&str| match &h.previews {
+                Some(previews)=>previews.get(field).map(|preview|builder.sessions[builder.of_file[preview.at.0]].key.as_str()).or_else(||h.preview_owners.get(field).map(String::as_str)),
+                None=>h.preview_owners.get(field).map(String::as_str).or_else(||(field=="brief" || h.out.result.is_some()).then_some(h.out.from.as_str())),
+            };
+            (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
+        }).collect();
+        measurements.record("projection_context", started, rows.len());
+        for row in rows {
+            let selected_turns = turns_by_session
+                .get(row.key.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let selected_edges = edges_by_session
+                .get(row.key.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            // The local model remains usable for native paths that cannot be
+            // represented by the portable catalog. Never publish a lossy alias.
+            if row
+                .sources
+                .iter()
+                .any(|source| source.path.to_str().is_none())
+            {
+                continue;
+            }
+            if let Some(session) = builder
+                .by_key
+                .get(&row.key)
+                .map(|at| &builder.sessions[*at])
+            {
+                let started = measurements.start();
+                row.trace = Some(
+                    crate::causal_trace::Projection::capture(
+                        &row.key,
+                        &session.out,
+                        selected_turns,
+                        selected_edges,
+                        &preview_owners,
+                        builder
+                            .by_key
+                            .get(&row.key)
+                            .and_then(|index| builder.sessions[*index].files.first())
+                            .and_then(|index| builder.files[*index].summary.cwd.as_deref()),
+                        tx.get(&row.key).map(Arc::as_ref),
+                    )
+                    .with_family_cost(family_costs[&row.key.as_str()]),
+                );
+                measurements.record("projection_trace", started, 1);
+                let started = measurements.start();
+                let summaries = query_summaries.as_ref().expect("Catalog summaries");
+                let mut query_rows =
+                    BTreeMap::from([(row.key.clone(), summaries[&row.key].clone())]);
+                for endpoint in selected_edges
+                    .iter()
+                    .flat_map(|edge| std::iter::once(&edge.from).chain(edge.to.iter()))
+                {
+                    if let Some(summary) = summaries.get(endpoint)
+                        && summary["summary"]["kind"] == "stub"
+                    {
+                        query_rows.insert(endpoint.clone(), summary.clone());
+                    }
+                }
+                for (key, summary) in &query_rows {
+                    if summary["summary"]["kind"] == "stub"
+                        && let Some(transcript) = tx.get(key)
+                        && let Some(trace) = &mut row.trace
+                    {
+                        trace.query_virtual(key, transcript);
+                    }
+                }
+                row.query = Some(
+                    serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"],
+                        "transcript_observation":tx.get(&row.key).map(|transcript|crate::slot_projection::QueryObservation::capture(transcript))}),
+                );
+                measurements.record("projection_query_rows", started, 1);
+                let runtime = measured!(
+                    "projection_runtime_scope",
+                    1,
+                    runtime_observations.scope(row)?
+                );
+                row.query.as_mut().expect("query captured")["runtime"] =
+                    serde_json::Value::String(runtime);
+                let started = measurements.start();
+                row.overview = Some(
+                    crate::overview::Summary::capture(
+                        &row.key,
+                        &session.out,
+                        activity.get(&row.key),
+                        selected_edges,
+                        &holding_turns,
+                        tx.get(&row.key)
+                            .map(|tx| {
+                                builder.overview_content(
+                                    &row.key,
+                                    selected_turns,
+                                    tx,
+                                    projections_by_key.get(row.key.as_str()).copied(),
+                                )
+                            })
+                            .unwrap_or(Value::Null),
+                        row.parent.as_deref(),
+                    )
+                    .with_sources(&row.sources)?,
+                );
+                measurements.record("projection_overview", started, 1);
+            }
+        }
+    }
+    if catalog.is_some()
+        && measured!(
+            "runtime_recheck",
+            1,
+            crate::native_evidence::query_runtime_generation(options)?
+        ) != query_runtime
+    {
+        return Err(io::Error::other(
+            "Native Query runtime observations changed",
+        ));
+    }
+    if !target.reference_model() && history_records.is_none() {
+        measured!("sidecars_after", files.len(), verify_sidecars(&files)?);
+    }
+    if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
+        measured!("source_finish", files.len(), source_records.finish()?);
+    }
+    measurements.record(
+        "projection_total_inclusive",
+        native_timing.then_some(post_started),
+        1,
+    );
+    measurements.record("model_total_inclusive", total_started, 1);
+    if native_timing {
+        let id = crate::native_timing::id(&EventCache::path(&options.cache));
+        let (parse, index_write) = builder.cache.scan_durations();
+        eprintln!(
+            "semon sessions native: producer={id} sources={} preparation={timings:?} projections={} parse_us={} index_write_us={}",
+            files.len(),
+            post_started.elapsed().as_millis(),
+            parse.as_micros(),
+            index_write.as_micros()
+        );
+        builder.cache.emit_scan_measurements(&id);
+        measurements.emit(&id, "model_preparation");
+    }
+    match target {
+        BuildTarget::Sources => {
+            let (relationships, native_points) =
+                relation_stage::Context::capture_publication(&builder, published_facts.as_ref());
+            let mut message_ids = BTreeSet::new();
+            let mut message_bytes = 0usize;
+            let mut message_dependencies = Some(Vec::new());
+            'messages: for (file, source) in files.iter().enumerate() {
+                if source.harness() != "claude" {
+                    continue;
+                }
+                for (at, event) in source.summary.events.iter().enumerate() {
+                    if builder.copied.contains(&(file, at)) {
+                        continue;
+                    }
+                    let id = match event.k {
+                        Kind::Xsm => event.id.as_ref(),
+                        Kind::Tool if event.n.as_deref() == Some("SendMessage") => event
+                            .r
+                            .as_ref()
+                            .filter(|reply| reply.f & PIN == 0)
+                            .and_then(|reply| reply.m.as_ref()),
+                        _ => None,
+                    };
+                    let Some(id) = id else {
+                        continue;
+                    };
+                    if message_ids.contains(id) {
+                        continue;
+                    }
+                    // Six bytes per UTF-8 byte bounds JSON escaping without
+                    // allocating an oversized encoded selector first.
+                    let bytes = id.len().saturating_mul(6).saturating_add(3);
+                    if message_ids.len() == 64 || message_bytes.saturating_add(bytes) > 1024 * 1024
+                    {
+                        message_dependencies = None;
+                        break 'messages;
+                    }
+                    message_bytes += bytes;
+                    message_ids.insert(id.clone());
+                }
+            }
+            if let Some(dependencies) = &mut message_dependencies {
+                dependencies.extend(message_ids);
+            }
+            return Ok(BuildOutput::Sources(Box::new(PreparedSources {
+                base_generation: catalog_base,
+                claims,
+                rows: catalog.unwrap_or_default(),
+                transcripts: slot_projections.unwrap_or_default(),
+                pids: pids.iter().map(|pid| pid.pid).collect(),
+                lineage_dependencies: files
+                    .iter()
+                    .flat_map(|file| {
+                        file.summary
+                            .links
+                            .session_ids
+                            .iter()
+                            .chain(&file.summary.links.continued_in)
+                            .map(|id| (file.harness().to_owned(), id.clone()))
+                            .chain(
+                                file.summary
+                                    .links
+                                    .bridges
+                                    .iter()
+                                    .map(|id| (format!("bridge:{}", file.harness()), id.clone())),
+                            )
+                    })
+                    .collect(),
+                relationships,
+                message_dependencies,
+                native_points,
+                indexed_sources: Vec::new(),
+                indexed_native_parents: Vec::new(),
+                withdrawals: Vec::new(),
+            })));
+        }
+        BuildTarget::Catalog => {
+            let publication_started = std::time::Instant::now();
+            let (_, native_points) =
+                relation_stage::Context::capture_publication(&builder, published_facts.as_ref());
+            let generation = cache.publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    points: Some(&native_points),
+                    rows: catalog.as_deref().unwrap_or_default(),
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            )?;
+            if native_timing {
+                eprintln!(
+                    "semon sessions native: producer={} publish_catalog={}",
+                    crate::native_timing::id(&EventCache::path(&options.cache)),
+                    publication_started.elapsed().as_millis()
+                );
+            }
+            cache.publish_session_descriptions();
+            return Ok(BuildOutput::Catalog(
+                pids.iter().map(|pid| pid.pid).collect(),
+                generation,
+            ));
+        }
+        BuildTarget::Query => {}
+        #[cfg(test)]
+        BuildTarget::Model => {}
+    }
+    #[cfg(test)]
+    if target.reference_model() {
+        COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    }
+    #[cfg(test)]
+    let texts = builder.texts_by_turn();
+    let session_facts = if target == BuildTarget::Query || cfg!(test) {
+        timed!(
+            "session_facts",
+            published_facts.take().unwrap_or_else(derive_query_facts)
+        )
+    } else {
+        BTreeMap::new()
+    };
     let handoff_by_id: HashMap<&str, &Handoff> = builder
         .handoffs
         .iter()
@@ -6086,16 +7693,11 @@ fn build_sources_inner(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
-    // A scan-window build is intentionally incomplete: it cannot replace a
-    // source-complete catalog. Publication itself is delayed until success.
-    let catalog = ((!options.scan_window && selected.is_none()) || prepared.is_some())
-        .then(|| summary::catalog(&builder, &handoffs));
-    let slot_projections = catalog
-        .as_ref()
-        .map(|rows| crate::slot_projection::capture(&tx, rows));
     // Analytics reads a month and the month before it, whatever the model's
     // window: taken from every session before the window trims them.
-    let activity = crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now);
+    #[cfg(test)]
+    let activity = (target.reference_model())
+        .then(|| crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now));
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
     if !options.all && !options.scan_window {
@@ -6190,12 +7792,6 @@ fn build_sources_inner(
             .collect()
     };
     turns.sort_by_key(|turn| order.get(turn.sid.as_str()).copied().unwrap_or(usize::MAX));
-    let all_busy = events::busy_merge(
-        sessions
-            .values()
-            .flat_map(|session| session.busy.iter().copied())
-            .collect(),
-    );
     // A failed send reached no one. The page draws a stub for the addressee
     // as written, `unsent:<target>`; its transcript lists those sends.
     let mut unsent: BTreeMap<String, Vec<&Handoff>> = BTreeMap::new();
@@ -6232,138 +7828,186 @@ fn build_sources_inner(
             session.tool_calls = transcript.tools.clone();
         }
     }
-    let busy = BTreeMap::from([(machine.clone(), all_busy)]);
-    let file_sizes: HashMap<&Path, u64> = files
-        .iter()
-        .map(|file| (file.path.as_path(), file.stamp.size))
-        .collect();
-    let marks: BTreeMap<&str, String> = tx
-        .iter()
-        .map(|(sid, transcript)| {
-            let sources: BTreeSet<&Path> = transcript
-                .slots
-                .iter()
-                .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
-                .collect();
-            let bytes: u64 = sources
-                .iter()
-                .filter_map(|path| file_sizes.get(path).copied())
-                .sum();
-            // A call stops running when its process dies, which writes no
-            // line: the running count moves the mark all the same.
-            let running = transcript
-                .slots
-                .iter()
-                .filter(|slot| {
-                    matches!(
-                        &slot.kind,
-                        SlotKind::Tool {
-                            bg: Some(Background {
-                                live: true,
-                                end: None,
-                                ..
-                            }),
-                            ..
-                        } | SlotKind::Tool {
-                            shown: Shown::Live,
-                            ..
-                        } | SlotKind::Yielded {
-                            shown: Shown::Live,
-                            ..
-                        } | SlotKind::Sent {
-                            shown: Shown::Live,
-                            ..
-                        }
-                    )
-                })
-                .count();
-            (
-                sid.as_str(),
-                format!("{}.{bytes}.{running}", transcript.slots.len()),
-            )
-        })
-        .collect();
-    let machine_id = machine.clone();
-    let machine = Machine {
-        id: machine.clone(),
-        name: machine,
-        up: offline_since.is_none(),
-        last: offline_since,
-    };
-    let machine = serde_json::to_string(&machine)?;
-    let pricing = crate::pricing::table();
-    let rest = serde_json::to_string(&Rest {
-        pricing: &pricing,
-        handoffs: &handoffs,
-        turns: &turns,
-        busy: &busy,
-        tx: &marks,
-    })?;
-    // The version also covers every source file's length, so any appended
-    // line gives a new version, even one whose entry changes nothing else in
-    // the model (the same timestamp as the line before it). Lengths, not
-    // paths or times, keep it the same for the same content.
-    let lengths: Vec<String> = files
-        .iter()
-        .map(|file| file.stamp.size.to_string())
-        .collect();
-    let version = format!(
-        "{:016x}",
-        fnv(&format!(
-            "{machine}{}{rest}|{}",
-            serde_json::to_string(&sessions)?,
-            lengths.join(",")
-        ))
-    );
-    let pids = pids.iter().map(|pid| pid.pid).collect();
-    let mut built = Built {
-        version,
-        machine,
-        sessions,
-        rest: rest[1..].to_owned(),
-        pids,
-        home,
-        machine_id,
-        tx,
-        facts: session_facts,
-        window_start: window_start.or_else(|| {
-            (!options.all).then(|| {
-                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
-            })
-        }),
-        activity,
+    if target == BuildTarget::Query {
+        let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
+        let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
+        ask_briefs.retain(|id, _| kept.contains(id));
         #[cfg(test)]
-        handoffs,
-        #[cfg(test)]
-        turns,
-        #[cfg(test)]
-        texts,
-        timings,
-    };
-    built.timings.push((
-        "post",
-        u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
-    ));
-    if let Some(destination) = prepared.as_mut() {
-        **destination = Some(PreparedSources {
-            base_generation: catalog_base,
-            claims,
-            rows: catalog.unwrap_or_default(),
-            transcripts: slot_projections.unwrap_or_default(),
-        });
-    } else if let Some(catalog) = catalog {
-        cache.publish_session_projection(
-            &crate::slot_projection::Publication {
-                rows: &catalog,
-                transcripts: slot_projections.as_deref(),
-            },
-            catalog_base.as_deref(),
-        );
-    }
-    if selected.is_none() {
+        if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        if history_records.is_none() {
+            verify_sidecars(&files)?;
+            source_records.finish()?;
+        }
+        drop(source_records);
+        if let Some(catalog) = catalog {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    points: None,
+                    rows: &catalog,
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+        }
         cache.publish_session_descriptions();
+        return Ok(BuildOutput::Query(Box::new(QueryData {
+            sources: source_proofs,
+            sessions,
+            handoffs,
+            ask_briefs,
+            turns,
+            facts: session_facts,
+            tx,
+            home,
+            machine_id: machine,
+            pids: pids.iter().map(|pid| pid.pid).collect(),
+            window_start: window_start.or_else(|| {
+                (!options.all).then(|| {
+                    now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+                })
+            }),
+        })));
     }
-    Ok(built)
+    #[cfg(not(test))]
+    unreachable!("native build targets return their evidence above");
+    #[cfg(test)]
+    {
+        let all_busy = events::busy_merge(
+            sessions
+                .values()
+                .flat_map(|session| session.busy.iter().copied())
+                .collect(),
+        );
+        let busy = BTreeMap::from([(machine.clone(), all_busy)]);
+        let file_sizes: HashMap<&Path, u64> = files
+            .iter()
+            .map(|file| (file.path.as_path(), file.stamp.size))
+            .collect();
+        let marks: BTreeMap<&str, String> = tx
+            .iter()
+            .map(|(sid, transcript)| {
+                let sources: BTreeSet<&Path> = transcript
+                    .slots
+                    .iter()
+                    .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
+                    .collect();
+                let bytes: u64 = sources
+                    .iter()
+                    .filter_map(|path| file_sizes.get(path).copied())
+                    .sum();
+                // A call stops running when its process dies, which writes no
+                // line: the running count moves the mark all the same.
+                let running = transcript
+                    .slots
+                    .iter()
+                    .filter(|slot| {
+                        matches!(
+                            &slot.kind,
+                            SlotKind::Tool {
+                                bg: Some(Background {
+                                    live: true,
+                                    end: None,
+                                    ..
+                                }),
+                                ..
+                            } | SlotKind::Tool {
+                                shown: Shown::Live,
+                                ..
+                            } | SlotKind::Yielded {
+                                shown: Shown::Live,
+                                ..
+                            } | SlotKind::Sent {
+                                shown: Shown::Live,
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                (
+                    sid.as_str(),
+                    format!("{}.{bytes}.{running}", transcript.slots.len()),
+                )
+            })
+            .collect();
+        let machine_id = machine.clone();
+        let machine = Machine {
+            id: machine.clone(),
+            name: machine,
+            up: offline_since.is_none(),
+            last: offline_since,
+        };
+        let machine = serde_json::to_string(&machine)?;
+        let pricing = crate::pricing::table();
+        let rest = serde_json::to_string(&Rest {
+            pricing: &pricing,
+            handoffs: &handoffs,
+            turns: &turns,
+            busy: &busy,
+            tx: &marks,
+        })?;
+        // The version also covers every source file's length, so any appended
+        // line gives a new version, even one whose entry changes nothing else in
+        // the model (the same timestamp as the line before it). Lengths, not
+        // paths or times, keep it the same for the same content.
+        let lengths: Vec<String> = files
+            .iter()
+            .map(|file| file.stamp.size.to_string())
+            .collect();
+        let version = format!(
+            "{:016x}",
+            fnv(&format!(
+                "{machine}{}{rest}|{}",
+                serde_json::to_string(&sessions)?,
+                lengths.join(",")
+            ))
+        );
+        let mut built = Built {
+            version,
+            machine,
+            sessions,
+            rest: rest[1..].to_owned(),
+            home,
+            machine_id,
+            tx,
+            #[cfg(test)]
+            facts: session_facts,
+            activity: activity.expect("model analytics prepared"),
+            #[cfg(test)]
+            handoffs,
+            #[cfg(test)]
+            turns,
+            #[cfg(test)]
+            texts,
+            timings,
+        };
+        built.timings.push((
+            "post",
+            u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        ));
+        #[cfg(test)]
+        if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        if history_records.is_none() {
+            source_records.finish()?;
+        }
+        if let Some(catalog) = catalog {
+            cache.publish_session_projection(
+                &crate::slot_projection::Publication {
+                    points: None,
+                    rows: &catalog,
+                    transcripts: slot_projections.as_deref(),
+                },
+                catalog_base.as_deref(),
+            );
+        }
+        if selected.is_none() {
+            cache.publish_session_descriptions();
+        }
+        Ok(BuildOutput::Model(Box::new(built)))
+    }
 }
 
 #[cfg(test)]

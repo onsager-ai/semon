@@ -26,7 +26,7 @@ jobs:
           "$RUNNER_TEMP/probe/bin/pip" install -r tests/spikes/requirements-control.txt
           npm --prefix tests/ui ci --no-audit --no-fund
           npm --prefix tests/ui exec -- playwright install --with-deps chromium
-          cargo build --locked -p semon-store
+          cargo build --locked -p semon-cli
           cargo build --locked -p semon-control --example standalone-qualification
       - name: Real native attachment, product and authority tests
         run: |

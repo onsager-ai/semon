@@ -1,7 +1,7 @@
 // Analytics: range, eight headline figures, stacked column charts, slice drill-in, breakdown filtering, cost measure,
 // phone width and the served Codex allowance. This replaces the retired Timeline check. The figures come from the server
-// (/api/analytics), which reaches past the model's day: on the extras fixture, a session from five days ago (`archive`,
-// absent from /api/model) counts in 7 d and 30 d and not in 24 h. Every range is shot at 390 and 1280, light and dark, into
+// (/api/viewer/analytics), which reaches past the model's day: on the extras fixture, a session from five days ago (`archive`,
+// outside the current observation day) counts in 7 d and 30 d and not in 24 h. Every range is shot at 390 and 1280, light and dark, into
 // out/analytics/. A request that fails (500, 409) keeps the last answer drawn under a message, asks again only every 10 s
 // while it fails, and a 304 or 200 clears it.
 import fs from 'node:fs';
@@ -11,8 +11,13 @@ import { served, data, reporter, overflow, pickFilter, goto, settled, ENV } from
 // The drawn answer's range and filters (data-query on the figures), once it is drawn.
 const drawn = (page, query) =>
   page.waitForFunction(
-    (q) => document.querySelector('.analytics-metrics[data-analytics-ready]')?.dataset.query === q,
+    (q) =>
+      document.querySelector('.analytics-metrics[data-analytics-ready]')?.dataset.query === q &&
+      ![...document.querySelectorAll('#page p.empty')].some((node) =>
+        node.textContent.includes('Some machine history is still being observed'),
+      ),
     query,
+    { timeout: 20000 },
   );
 
 export default async function analyticsCheck(browser) {
@@ -144,15 +149,18 @@ export default async function analyticsCheck(browser) {
           : null,
       };
     });
-    await page.click('dialog.analytics-slice button[aria-label="Close sessions list"]');
+    await page.click('dialog.analytics-slice button[aria-label="Close"]');
 
     const repoRow = page.locator('.analytics-row[data-breakdown="repo"][data-key="harbor"]');
     record.repoRow = await repoRow.count();
     if (record.repoRow) await repoRow.click();
     await page.waitForFunction(() => history.state?.v === 'sessions');
+    await page.waitForSelector('[data-session-row="list"]');
     record.filtered = await page.evaluate(() => ({
-      title: document.querySelector('.page h1')?.textContent,
-      rows: [...document.querySelectorAll('.page .nrow')].map((x) => x.dataset.id).sort(),
+      title: document.querySelector('#topbar .t')?.textContent,
+      rows: [...document.querySelectorAll('[data-session-row="list"]')]
+        .map((x) => x.dataset.id)
+        .sort(),
     }));
     modes.push({ ...record, errors: page.errors });
     await page.context().close();
@@ -201,15 +209,25 @@ export default async function analyticsCheck(browser) {
   );
   r.expect(costTwoDays.errors.length === 0, 'cost: page errors: ' + costTwoDays.errors.join(' | '));
 
-  // A session older than the model's day: `archive`, five days before the extras fixture's now, in its own repo. The model
-  // leaves it out; with the Repo filter on archive, Sessions started is 1 in 7 d and 30 d and 0 in 24 h, and its repo is a
+  // A native session older than the current day: `archive`, five days before the extras fixture's now, in its own repo.
+  // With the Repo filter on archive, Sessions started is 1 in 7 d and 30 d and 0 in 24 h, and its repo is a
   // breakdown row in 7 d and 30 d only.
   const older = { ranges: {} };
   const ox = await served(browser, { extras: true, size: 'desktop', path: '/analytics' });
   await drawn(ox, 'range=7d');
-  older.inModel = await ox.evaluate(async () =>
-    Object.keys((await (await fetch('/api/model')).json()).sessions).includes('archive'),
-  );
+  older.inCurrentDay = await ox.evaluate(async () => {
+    const inventory = await (await fetch('/api/session-sources')).json();
+    const query = new URLSearchParams({
+      machine: inventory.items[0].source_key,
+      scope: 'retained_history',
+      sid: 'archive',
+      limit: '1',
+    });
+    const selected = await (await fetch('/api/sessions?' + query)).json();
+    if (selected.items.length !== 1 || selected.items[0].key !== 'archive')
+      throw Error('The older native archive session must remain discoverable');
+    return selected.items[0].last >= Date.now() - 24 * 60 * 60 * 1000;
+  });
   const archiveRow = '.analytics-row[data-breakdown="repo"][data-key="archive"]';
   older.rowWithoutFilter = await ox.locator(archiveRow).count();
   // The Repo filter is a Select (no <select> element) in the filters' sheet: its options are on the component, and choosing is the Filter button, a click on its button and on the option, then Done.
@@ -255,8 +273,8 @@ export default async function analyticsCheck(browser) {
   older.errors = ox.errors;
   await ox.context().close();
   r.expect(
-    older.inModel === false,
-    "the extras fixture's archive session must be older than the model's day: " +
+    older.inCurrentDay === false,
+    "the extras fixture's archive session must remain native and be older than the current day: " +
       JSON.stringify(older),
   );
   r.expect(
@@ -294,15 +312,15 @@ export default async function analyticsCheck(browser) {
   await drawn(fp, 'range=30d');
   let mode = 'real',
     asks = 0,
-    updates = 0,
-    fakeVersion = 0;
+    updates = 0;
   fp.on('request', (q) => {
-    if (new URL(q.url()).pathname === '/api/analytics') asks++;
+    if (new URL(q.url()).pathname === '/api/viewer/analytics') asks++;
   });
   await fp.route(
-    (u) => u.pathname === '/api/analytics',
+    (u) => u.pathname === '/api/viewer/analytics',
     async (route) => {
-      if (mode === 'real') return route.continue(); // with the page's If-None-Match: the server's 304 for a kept answer
+      if (mode === 'real') return route.continue();
+      if (mode === 'unchanged') return route.fulfill({ status: 304, body: '' });
       if (mode === 'fresh') {
         // a 200 with a new tag, whatever the page holds
         const headers = { ...route.request().headers() };
@@ -346,37 +364,19 @@ export default async function analyticsCheck(browser) {
     )
     .catch(() => {});
   failing.steps.error500 = await shown();
-  // Model updates every poll (each a new version) while it fails: no new ask for 7 s.
-  const modelUrl = (u) => u.pathname === '/api/model';
-  await fp.route(modelUrl, async (route) => {
-    // Without `since` the server answers the whole model (never a 304), which goes out under a new version.
-    const url = new URL(route.request().url());
-    url.searchParams.delete('since');
-    const res = await route.fetch({ url: url.toString() });
-    if (res.status() !== 200) return route.fulfill({ response: res });
-    const m = await res.json();
-    m.version = 'fake-' + ++fakeVersion;
-    updates++;
-    return route.fulfill({
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(m),
-    });
+  // Visibility wakeups and the canonical clock retain the failed range's backoff.
+  // There is no workspace model poller to trigger a second refresh owner.
+  const retired = [];
+  fp.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/model') retired.push(request.url());
   });
   const asked0 = asks;
-  await fp.waitForTimeout(6000);
-  failing.spacing = { asks: asks - asked0, modelUpdates: updates };
-  await fp.unroute(modelUrl);
-  await fp.route(modelUrl, async (route) => {
-    const url = new URL(route.request().url());
-    url.searchParams.delete('since');
-    const response = await route.fetch({ url: url.toString() });
-    await route.fulfill({ response });
-  });
-  await fp.waitForResponse(
-    (response) => new URL(response.url()).pathname === '/api/model' && response.status() === 200,
-  );
-  await fp.unroute(modelUrl);
+  for (let i = 0; i < 3; i++) {
+    await fp.waitForTimeout(2000);
+    await fp.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    updates++;
+  }
+  failing.spacing = { asks: asks - asked0, wakeups: updates, retired };
   failing.steps.during = await shown();
   // 409, on 30 d (kept): the reader's click asks at once.
   mode = 'conflict';
@@ -393,7 +393,7 @@ export default async function analyticsCheck(browser) {
     .catch(() => {});
   failing.steps.error409 = await shown();
   // 304: back on 7 d, the server answers the kept tag, and the message goes.
-  mode = 'real';
+  mode = 'unchanged';
   await fp.click('#topbar .analytics-range button:has-text("7 d")');
   await settle();
   await fp
@@ -446,11 +446,12 @@ export default async function analyticsCheck(browser) {
       JSON.stringify(failing.steps.error500),
   );
   r.expect(
-    failing.spacing.modelUpdates >= 2 &&
+    failing.spacing.wakeups >= 2 &&
+      failing.spacing.retired.length === 0 &&
       failing.spacing.asks === 0 &&
       kept(failing.steps.during, 'range=7d') &&
       failing.steps.during.message,
-    'while it fails, model updates must not ask again within 10 s: ' +
+    'while it fails, visibility wakeups must not bypass the canonical retry interval: ' +
       JSON.stringify({ spacing: failing.spacing, during: failing.steps.during }),
   );
   r.expect(

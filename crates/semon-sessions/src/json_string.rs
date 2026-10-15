@@ -6,6 +6,12 @@
 //! Readers bind spans/cursors to an authorized source generation and begin at a
 //! verified checkpoint or a prior chunk's cursor. A raw offset is not authority
 //! or proof of a scalar boundary. No prefix or complete record is needed here.
+pub(crate) mod native_identity;
+pub(crate) mod native_js;
+pub(crate) mod native_number;
+pub(crate) mod native_record;
+pub(crate) mod native_scan;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,
@@ -226,7 +232,14 @@ pub fn decode_json_string_layered_chunk(
     })
 }
 
-fn layered_scalar(bytes: &[u8], layers: u8, at_end: bool) -> io::Result<Option<(char, usize)>> {
+pub(crate) fn layered_scalar(
+    bytes: &[u8],
+    layers: u8,
+    at_end: bool,
+) -> io::Result<Option<(char, usize)>> {
+    if !matches!(layers, 1 | 2) {
+        return Err(invalid());
+    }
     if layers == 1 {
         return scalar(bytes, at_end);
     }
@@ -388,213 +401,164 @@ fn index_with_checkpoints(
     record: &[u8],
     checkpoint_bytes: usize,
 ) -> io::Result<Vec<JsonStringSpan>> {
-    let mut lexer = Lexer {
-        bytes: record,
-        checkpoint_bytes,
-        at: 0,
-        fields: 0,
-        spans: Vec::new(),
-    };
-    lexer.value("", 0)?;
-    lexer.ws();
-    if lexer.at != record.len() {
-        return Err(invalid());
+    use native_record::{Container, Location, Span, Token};
+    struct Frame {
+        at: u64,
+        pointer: String,
+        kind: Container,
+        keys: BTreeSet<String>,
     }
-    Ok(lexer.spans)
-}
-
-struct Lexer<'a> {
-    bytes: &'a [u8],
-    checkpoint_bytes: usize,
-    at: usize,
-    fields: usize,
-    spans: Vec<JsonStringSpan>,
-}
-impl Lexer<'_> {
-    fn ws(&mut self) {
-        while self
-            .bytes
-            .get(self.at)
-            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
-        {
-            self.at += 1;
-        }
-    }
-    fn take(&mut self, byte: u8) -> io::Result<()> {
-        self.ws();
-        if self.bytes.get(self.at) != Some(&byte) {
-            return Err(invalid());
-        }
-        self.at += 1;
-        Ok(())
-    }
-    fn string(&mut self, pointer: Option<&str>) -> io::Result<(usize, usize)> {
-        self.take(b'"')?;
-        let start = self.at;
-        let mut checkpoints = pointer.map(|_| vec![start as u64]).unwrap_or_default();
-        let mut checkpoint = start;
-        loop {
-            if self.bytes.get(self.at) == Some(&b'"') {
-                break;
-            }
-            let (_, width) = scalar(self.bytes.get(self.at..).ok_or_else(invalid)?, true)?
-                .ok_or_else(invalid)?;
-            self.at += width;
-            if pointer.is_some() && self.at - checkpoint >= self.checkpoint_bytes {
-                checkpoints.push(self.at as u64);
-                checkpoint = self.at;
-            }
-        }
-        let end = self.at;
-        self.at += 1;
-        if let Some(pointer) = pointer {
-            if self.spans.len() >= MAX_FIELDS {
-                return Err(limit());
-            }
-            if checkpoints.last() != Some(&(end as u64)) {
-                checkpoints.push(end as u64);
-            }
-            self.spans.push(JsonStringSpan {
-                json_pointer: pointer.into(),
-                start: start as u64,
-                end: end as u64,
-                checkpoints,
-            });
-        }
-        Ok((start, end))
-    }
-    fn value(&mut self, pointer: &str, depth: usize) -> io::Result<()> {
-        if depth > MAX_DEPTH || pointer.len() > MAX_POINTER_BYTES {
+    fn key(record: &[u8], span: Span) -> io::Result<String> {
+        let start = usize::try_from(span.start).map_err(|_| invalid())?;
+        let end = usize::try_from(span.end).map_err(|_| invalid())?;
+        if end.saturating_sub(start) > MAX_POINTER_BYTES * 6 {
             return Err(limit());
         }
-        self.ws();
-        match self.bytes.get(self.at).copied() {
-            Some(b'"') => {
-                self.string(Some(pointer))?;
-            }
-            Some(b'{') => {
-                self.at += 1;
-                self.ws();
-                if self.bytes.get(self.at) == Some(&b'}') {
-                    self.at += 1;
-                    return Ok(());
+        let bytes = record.get(start..end).ok_or_else(invalid)?;
+        let key = decode_json_string_chunk(bytes, true, MAX_POINTER_BYTES)?;
+        if !key.complete {
+            return Err(limit());
+        }
+        Ok(key.text)
+    }
+    fn pointer(record: &[u8], stack: &[Frame], location: Location) -> io::Result<String> {
+        let pointer = match location.parent {
+            None => String::new(),
+            Some(parent) => {
+                let frame = stack
+                    .last()
+                    .filter(|frame| frame.at == parent)
+                    .ok_or_else(invalid)?;
+                if let Some(span) = location.key {
+                    format!(
+                        "{}/{}",
+                        frame.pointer,
+                        key(record, span)?.replace('~', "~0").replace('/', "~1")
+                    )
+                } else if let Some(index) = location.index {
+                    format!("{}/{index}", frame.pointer)
+                } else {
+                    return Err(invalid());
                 }
-                let mut keys = BTreeSet::new();
-                loop {
-                    self.fields += 1;
-                    if self.fields > MAX_FIELDS {
+            }
+        };
+        if pointer.len() > MAX_POINTER_BYTES {
+            return Err(limit());
+        }
+        Ok(pointer)
+    }
+    let mut cursor = native_record::Cursor::new();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut spans = Vec::new();
+    let mut fields = 0;
+    let mut string_start = None;
+    let mut checkpoints = Vec::new();
+    let step = cursor.step(
+        record,
+        true,
+        record.len().max(1),
+        usize::MAX,
+        checkpoint_bytes,
+        |token| {
+            match token {
+                Token::Begin { at, kind, location } => {
+                    let pointer = pointer(record, &stack, location)?;
+                    stack.push(Frame {
+                        at,
+                        pointer,
+                        kind,
+                        keys: BTreeSet::new(),
+                    });
+                }
+                Token::End { at, kind } => {
+                    let frame = stack.pop().ok_or_else(invalid)?;
+                    let close = match kind {
+                        Container::Object => b'}',
+                        Container::Array => b']',
+                    };
+                    if frame.kind != kind
+                        || record.get(usize::try_from(at).map_err(|_| invalid())?) != Some(&close)
+                    {
+                        return Err(invalid());
+                    }
+                }
+                Token::Checkpoint {
+                    start,
+                    at,
+                    key: false,
+                } => {
+                    if string_start != Some(start) {
+                        checkpoints.clear();
+                        string_start = Some(start);
+                    }
+                    if checkpoints.last() != Some(&at) {
+                        checkpoints.push(at);
+                    }
+                }
+                Token::Checkpoint { key: true, .. } => {}
+                Token::String {
+                    span,
+                    location,
+                    key: true,
+                } => {
+                    fields += 1;
+                    if fields > MAX_FIELDS {
                         return Err(limit());
                     }
-                    let (start, end) = self.string(None)?;
-                    if end - start > MAX_POINTER_BYTES * 6 {
+                    let frame = stack
+                        .last_mut()
+                        .filter(|frame| Some(frame.at) == location.parent)
+                        .ok_or_else(invalid)?;
+                    if !frame.keys.insert(key(record, span)?) {
                         return Err(limit());
                     }
-                    let key =
-                        decode_json_string_chunk(&self.bytes[start..end], true, MAX_POINTER_BYTES)?;
-                    if !key.complete || !keys.insert(key.text.clone()) {
+                }
+                Token::String {
+                    span,
+                    location,
+                    key: false,
+                } => {
+                    if spans.len() >= MAX_FIELDS || string_start != Some(span.start) {
                         return Err(limit());
                     }
-                    self.take(b':')?;
-                    let next = format!(
-                        "{pointer}/{}",
-                        key.text.replace('~', "~0").replace('/', "~1")
-                    );
-                    self.value(&next, depth + 1)?;
-                    self.ws();
-                    match self.bytes.get(self.at) {
-                        Some(b'}') => {
-                            self.at += 1;
-                            break;
-                        }
-                        Some(b',') => {
-                            self.at += 1;
-                        }
-                        _ => return Err(invalid()),
+                    let pointer = pointer(record, &stack, location)?;
+                    if checkpoints.last() != Some(&span.end) {
+                        checkpoints.push(span.end);
                     }
+                    spans.push(JsonStringSpan {
+                        json_pointer: pointer,
+                        start: span.start,
+                        end: span.end,
+                        checkpoints: std::mem::take(&mut checkpoints),
+                    });
+                    string_start = None;
                 }
-            }
-            Some(b'[') => {
-                self.at += 1;
-                self.ws();
-                if self.bytes.get(self.at) == Some(&b']') {
-                    self.at += 1;
-                    return Ok(());
-                }
-                let mut index = 0usize;
-                loop {
-                    self.value(&format!("{pointer}/{index}"), depth + 1)?;
-                    index = index.checked_add(1).ok_or_else(limit)?;
-                    self.ws();
-                    match self.bytes.get(self.at) {
-                        Some(b']') => {
-                            self.at += 1;
-                            break;
-                        }
-                        Some(b',') => {
-                            self.at += 1;
-                        }
-                        _ => return Err(invalid()),
+                Token::Number { span, location } => {
+                    if span.end <= span.start {
+                        return Err(invalid());
                     }
+                    pointer(record, &stack, location)?;
+                }
+                Token::Literal {
+                    span,
+                    location,
+                    kind,
+                } => {
+                    let start = usize::try_from(span.start).map_err(|_| invalid())?;
+                    let end = usize::try_from(span.end).map_err(|_| invalid())?;
+                    if record.get(start..end) != Some(kind.bytes()) {
+                        return Err(invalid());
+                    }
+                    pointer(record, &stack, location)?;
                 }
             }
-            Some(b't') => self.literal(b"true")?,
-            Some(b'f') => self.literal(b"false")?,
-            Some(b'n') => self.literal(b"null")?,
-            Some(b'-' | b'0'..=b'9') => self.number()?,
-            _ => return Err(invalid()),
-        }
-        Ok(())
+            Ok(())
+        },
+    )?;
+    if !step.complete || step.tokens == 0 || step.consumed != record.len() || !stack.is_empty() {
+        return Err(invalid());
     }
-    fn literal(&mut self, literal: &[u8]) -> io::Result<()> {
-        if self.bytes.get(self.at..self.at + literal.len()) != Some(literal) {
-            return Err(invalid());
-        }
-        self.at += literal.len();
-        Ok(())
-    }
-    fn digits(&mut self) -> bool {
-        let start = self.at;
-        while self.bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
-            self.at += 1;
-        }
-        self.at != start
-    }
-    fn number(&mut self) -> io::Result<()> {
-        if self.bytes.get(self.at) == Some(&b'-') {
-            self.at += 1;
-        }
-        match self.bytes.get(self.at) {
-            Some(b'0') => self.at += 1,
-            Some(b'1'..=b'9') => {
-                self.digits();
-            }
-            _ => return Err(invalid()),
-        }
-        if self.bytes.get(self.at) == Some(&b'.') {
-            self.at += 1;
-            if !self.digits() {
-                return Err(invalid());
-            }
-        }
-        if self
-            .bytes
-            .get(self.at)
-            .is_some_and(|byte| matches!(byte, b'e' | b'E'))
-        {
-            self.at += 1;
-            if self
-                .bytes
-                .get(self.at)
-                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
-            {
-                self.at += 1;
-            }
-            if !self.digits() {
-                return Err(invalid());
-            }
-        }
-        Ok(())
-    }
+    Ok(spans)
 }
 
 #[cfg(test)]
@@ -970,6 +934,42 @@ mod tests {
             assert_eq!(chunk.text.len(), 4096);
             assert!(chunk.consumed <= 12 * 4096);
             assert!(chunk.text.capacity() <= 4096);
+        }
+    }
+
+    #[test]
+    fn ascii_runs_keep_escape_checkpoints_and_reject_malformed_tails() {
+        let prefix = "x".repeat(JSON_STRING_CHECKPOINT_BYTES as usize - 1);
+        let raw = format!("{prefix}\\uD83D\\uDE80{}é", "y".repeat(70_000));
+        let record = format!("{{\"body\":\"{raw}\"}}");
+        let span = index_json_string_spans(record.as_bytes())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            span.checkpoints[1] - span.start,
+            JSON_STRING_CHECKPOINT_BYTES + 11
+        );
+        let reconstructed: String = span
+            .checkpoints
+            .windows(2)
+            .map(|pair| {
+                decode_all(
+                    &record.as_bytes()[pair[0] as usize..pair[1] as usize],
+                    128 * 1024,
+                )
+            })
+            .collect();
+        let oracle: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(reconstructed, oracle["body"].as_str().unwrap());
+        for tail in [b"\x1f".as_slice(), b"\x80", b"\\q", b"\\uD800", b"\xc3"] {
+            let mut bytes = format!("{{\"body\":\"{prefix}").into_bytes();
+            bytes.extend_from_slice(tail);
+            bytes.extend_from_slice(b"\"}");
+            assert_eq!(
+                index_json_string_spans(&bytes).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
     }
 
