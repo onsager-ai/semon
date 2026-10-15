@@ -60,6 +60,13 @@ does not add product requests or workers. The comparison alone has a 30-minute
 job allowance because it runs two full journeys and phase sweeps; product timers,
 the 30-second complete-indexing gate and other suite allowances are unchanged.
 
+The separate request-budget live scenario retains its original six appends at
+five-second intervals and original 30-second window metrics. Passive fetch/JSON
+traces distinguish response status from transport cancellation. After that window
+it observes up to 60 seconds of ordinary catch-up, recording the final generation,
+expected slot count, all six markers and visible entry-key uniqueness separately;
+that observation adds no requests or pollers and is not part of the budget row.
+
 The October 1 baseline ran serially in 27–43 minutes. The largest avoidable costs
 were repeated touch auditing across every session and running independent suites
 one after another. This layout targets the longest suite's runtime plus binary
