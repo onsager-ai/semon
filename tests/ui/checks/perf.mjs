@@ -114,7 +114,11 @@ function serve(dir, now) {
         const lines = timingTail.split('\n');
         timingTail = lines.pop();
         for (const line of lines) {
-          if (!/^semon sessions native: producer=[a-f0-9]+ (phase=|queue_late_us=|breakdown=|catalog_commit_boundary=)/.test(line))
+          if (
+            !/^semon sessions native: producer=[a-f0-9]+ (phase=|queue_late_us=|breakdown=|catalog_commit_boundary=)/.test(
+              line,
+            )
+          )
             continue;
           if (timingEvents.length >= 20000 || timingBytes + line.length > 4 * 1024 * 1024) {
             timingTruncated = true;
@@ -1152,8 +1156,7 @@ async function main() {
       const server = await serve(fixtureDir, fixture.now);
       try {
         screens[screen.name] = await runScreen(browser, screen, server, fixture);
-        if (REFRESH_DIAGNOSTICS)
-          screens[screen.name].serverDiagnostics = server.diagnostics();
+        if (REFRESH_DIAGNOSTICS) screens[screen.name].serverDiagnostics = server.diagnostics();
       } finally {
         await stopServer(server.proc);
       }
