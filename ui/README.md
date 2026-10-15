@@ -124,7 +124,7 @@ when the host is destroyed. External log links require HTTP(S),
 
 External consumers: `node ui/build.mjs --entry /absolute/consumer.ts --output /absolute/consumer.generated.js`
 (typecheck, source security and one pinned Preact runtime). Repeat with `--check`
-for checked-in asset freshness. Recent's typed snapshot renderer is exported
+for checked-in asset freshness. Thermally restricted asset preparation may add `--bundle-only` to the `--entry`/`--output` command (or pass `{ bundleOnly: true }` as `buildConsumer`'s fourth argument). This skips TypeScript program creation only; source/sink security and the sole-runtime invariant still run. It writes an unqualified artifact, requires the normal default consumer `--check` and full type/security/freshness gates in CI, and is rejected with `--check` or without a consumer entry/output. It does not qualify a build or change any CI invocation. Recent's typed snapshot renderer is exported
 from `src/lib`; ordering, metadata refresh, focus/scroll and sheet policy remain host-owned.
 
 `createPanelChrome(options, host)` creates a one-shot native dialog. Options are

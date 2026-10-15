@@ -75,3 +75,27 @@ test('consumer build uses pinned types/security/runtime and rejects stale output
     await rm(dir, { recursive: true });
   }
 });
+
+test('consumer bundle-only preparation cannot bypass check and retains security', async () => {
+  const { buildConsumer } = await import('../build.mjs');
+  await assert.rejects(
+    buildConsumer('/missing/entry.ts', '/missing/output.js', true, { bundleOnly: true }),
+    /cannot be combined with --check/,
+  );
+  const dir = await mkdtemp(join(tmpdir(), 'semon-consumer-preparation-'));
+  try {
+    const entry = join(dir, 'consumer.ts'),
+      output = join(dir, 'consumer.js');
+    await writeFile(entry, 'const value: number = "unqualified"; console.log(value);');
+    await buildConsumer(entry, output, false, { bundleOnly: true });
+    // The ordinary freshness gate still performs type qualification on these bytes.
+    await assert.rejects(buildConsumer(entry, output, true), /not assignable/);
+    await writeFile(entry, 'document.body.innerHTML = "unsafe";');
+    await assert.rejects(
+      buildConsumer(entry, output, false, { bundleOnly: true }),
+      /forbidden application boundary/,
+    );
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});

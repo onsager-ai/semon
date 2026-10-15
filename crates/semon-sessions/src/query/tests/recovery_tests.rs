@@ -1,7 +1,8 @@
 //! Synthetic recovery diagnostics, not production latency or memory budgets.
 //! Run alone with --test-threads=1 --nocapture for interpretable process counters.
-//! Complete selected Index decoding precedes provider budgets/cancellation; these
-//! tests must not describe that fallback as history-independent or cancellable.
+//! Complete selected Index decoding may precede provider callbacks; these measurements
+//! do not establish history-independent work or per-request peak memory. Separate
+//! SelectedReadControl regressions qualify request-scoped limits and cancellation.
 
 use super::*;
 use std::{collections::BTreeMap, sync::mpsc, time::Instant};
