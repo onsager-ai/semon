@@ -15,6 +15,7 @@ passing. The runner prints each check's elapsed milliseconds for balancing group
 ```sh
 node checks/run.mjs                       # all functional checks
 node checks/run.mjs --group transcript    # one CI group
+node checks/live.mjs                     # native append/visibility/request ownership
 SEMON_ORDER_SCHEMES=desktop-light,desktop-dark node checks/order.mjs
 ```
 
@@ -22,6 +23,8 @@ These commands require the fixture servers and environment variables documented
 in `lib.mjs`. Live, order, error-navigation, and performance checks create their
 own scratch fixtures. Timing-sensitive checks retain real polling/backoff windows;
 parallelism does not weaken their assertions or alter product timers.
+The live command executes `live-catalog.mjs` and requires its assertions to pass;
+its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
