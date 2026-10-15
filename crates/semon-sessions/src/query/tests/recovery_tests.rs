@@ -245,6 +245,122 @@ struct HeldProvider {
     started: std::sync::atomic::AtomicBool,
 }
 
+/// A larger selected closure diagnoses availability at the production cap and
+/// at a private test allowance. It changes no production limit or release gate.
+#[test]
+fn recovery_large_shared_owner_preparation_budget_measurement() {
+    let (home, key) = shared_home(8192);
+    let mut oracle = Query::from_sources(admitted(home.options.clone()));
+    let complete_args = json!({"id":key,"after":0,"limit":10});
+    let complete = oracle
+        .call_at("read_transcript", &complete_args, NOW)
+        .unwrap();
+    let total = complete["total"].as_u64().unwrap();
+    assert!(
+        total > 0 && total <= 10,
+        "the shared virtual transcript must remain a small complete result"
+    );
+    assert_eq!(complete["entries"].as_array().unwrap().len() as u64, total);
+    let tools = [
+        ("get_session", json!({"id":key})),
+        ("read_transcript", json!({"id":key,"after":0,"limit":1})),
+        (
+            "read_transcript",
+            json!({"id":key,"before":total,"limit":1}),
+        ),
+        ("read_transcript", complete_args),
+    ];
+    let expected: Vec<_> = tools
+        .iter()
+        .map(|(tool, args)| oracle.call_at(tool, args, NOW).unwrap())
+        .collect();
+    assert_eq!(expected[3], complete);
+    drop(oracle);
+    let archives = Archives::take(&home, &key);
+    let generation = catalog_generation(&home);
+    let source_bytes: usize = archives.0.values().map(|archive| archive.bytes.len()).sum();
+    for accounting_mib in [64, 128] {
+        for ((tool, args), expected) in tools.iter().zip(&expected) {
+            let control = if accounting_mib == 64 {
+                crate::SelectedReadControl::default()
+            } else {
+                crate::SelectedReadControl::default().with_limits(131_072, 128 * 1024 * 1024)
+            };
+            let mut query = Query::from_sources(admitted(home.options.clone()));
+            let memory_before = process_memory();
+            let io_before = process_io();
+            let work_before = archives.work();
+            let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let started = Instant::now();
+            let actual = {
+                let _scope = crate::selected_read::Scope::enter(&control);
+                query.call_selected_at(
+                    "local",
+                    &key,
+                    tool,
+                    args,
+                    Some(&archives),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    NOW,
+                )
+            };
+            let elapsed_us = started.elapsed().as_micros();
+            let (classification, error) = match actual {
+                Ok(actual) => {
+                    assert_eq!(
+                        &actual, expected,
+                        "{accounting_mib} MiB {tool} {args}: admitted result differs from complete native oracle"
+                    );
+                    assert!(
+                        query.native.is_some(),
+                        "diagnostic did not reach complete selected preparation"
+                    );
+                    ("complete", Value::Null)
+                }
+                Err(error) => {
+                    assert_eq!(
+                        error.code, "unavailable",
+                        "unexpected failure at {accounting_mib} MiB: {error}"
+                    );
+                    (
+                        "unavailable",
+                        json!({"code":error.code,"message":error.message}),
+                    )
+                }
+            };
+            let process_io_delta = io_before
+                .zip(process_io())
+                .map(|(before, after)| json!({"rchar":after.0-before.0,"syscr":after.1-before.1}));
+            let work = archives.work();
+            let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - indexes;
+            if classification == "complete" {
+                assert!(
+                    loads >= 2,
+                    "both selected native owner Indexes must be reached"
+                );
+            }
+            assert_eq!(catalog_generation(&home), generation);
+            for archive in archives.0.values() {
+                assert!(!home.options.claude_home.join(&archive.source.path).exists());
+            }
+            eprintln!(
+                "recovery_large_shared_budget {}",
+                json!({
+                    "prefix_records_per_owner":8192,"selected_sources":2,"selected_source_bytes":source_bytes,
+                    "accounting_mib":accounting_mib,"production_default":accounting_mib==64,
+                    "row_limit":131_072,"deadline_seconds":20,"tool":tool,"args":args,
+                    "classification":classification,"error":error,"elapsed_us":elapsed_us,
+                    "full_index_loads":loads,"provider_calls":work.0-work_before.0,
+                    "provider_bytes":work.1-work_before.1,"process_io_delta":process_io_delta,
+                    "memory_before":memory_before,"memory_after":process_memory(),
+                    "memory_scope":"process endpoints and lifetime HWM include fixture/oracle and prior cases; not per-request peaks",
+                    "scope":"synthetic shared native owners; 128 MiB is cfg(test) only; unavailable is diagnostic evidence, not journey acceptance"
+                })
+            );
+        }
+    }
+}
+
 #[test]
 fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
     for prefix in [0, 128, 1024] {
