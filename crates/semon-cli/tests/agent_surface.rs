@@ -823,11 +823,13 @@ fn the_window_is_30_days_unless_widened_and_since_stays_inside_it() {
         json!({"harness": "codex", "since": "29d"}),
     ));
     assert!(!failed);
-    assert_eq!(window_of(&inside), 30 * DAY_MS);
+    assert_eq!(inside["window_start"], answer["window_start"]);
+    assert!(inside["now"].as_i64().unwrap() >= answer["now"].as_i64().unwrap());
     let (inside, failed) =
         content(&server.call(5, "stalls", json!({"idle_minutes": 5, "since": "29d"})));
     assert!(!failed);
-    assert_eq!(window_of(&inside), 30 * DAY_MS);
+    assert_eq!(inside["window_start"], answer["window_start"]);
+    assert!(inside["now"].as_i64().unwrap() >= answer["now"].as_i64().unwrap());
     let (error, failed) =
         content(&server.call(3, "stalls", json!({"idle_minutes": 5, "since": "31d"})));
     assert!(failed);
