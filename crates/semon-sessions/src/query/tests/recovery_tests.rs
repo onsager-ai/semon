@@ -242,6 +242,7 @@ fn recovery_shared_owner_fallback_scope_measurement() {
 struct HeldProvider {
     entered: mpsc::SyncSender<()>,
     cancel: std::sync::Mutex<mpsc::Receiver<()>>,
+    started: std::sync::atomic::AtomicBool,
 }
 
 #[test]
@@ -377,14 +378,16 @@ impl crate::SessionSourceReader for HeldProvider {
         _: u64,
         _: usize,
     ) -> io::Result<crate::SessionSourceRange> {
-        self.entered.try_send(()).unwrap();
         // A fixture-owned whole-operation deadline prevents stranded workers.
         // This demonstrates host callback cancellation, not Index cancellation.
-        let _ = self
-            .cancel
-            .lock()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5));
+        if !self.started.swap(true, Ordering::Relaxed) {
+            self.entered.try_send(()).unwrap();
+            let _ = self
+                .cancel
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+        }
         Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "fixture request cancelled",
@@ -424,6 +427,7 @@ fn recovery_held_fallback_preserves_independent_reads_and_host_cancellation() {
     let provider = HeldProvider {
         entered: entered_tx,
         cancel: std::sync::Mutex::new(cancel_rx),
+        started: std::sync::atomic::AtomicBool::new(false),
     };
     std::thread::scope(|scope| {
         let fallback_sources = sources.clone();
