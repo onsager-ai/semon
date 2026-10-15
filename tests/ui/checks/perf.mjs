@@ -66,9 +66,20 @@ function serve(dir, now) {
         '--cache',
         path.join(dir, 'index.json'),
       ],
-      { env: { ...process.env, SEMON_TEST_NOW: String(now) }, stdio: ['ignore', 'pipe', 'pipe'] },
+      {
+        env: {
+          ...process.env,
+          SEMON_TEST_NOW: String(now),
+          ...(REFRESH_DIAGNOSTICS ? { SEMON_BUILD_TIMING: '1' } : {}),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
     );
     let log = '';
+    let timingTail = '';
+    let timingBytes = 0;
+    let timingTruncated = false;
+    const timingEvents = [];
     let settled = false;
     const fail = (error) => {
       if (settled) return;
@@ -77,12 +88,18 @@ function serve(dir, now) {
       reject(error);
     };
     const read = (chunk) => {
-      log += chunk;
+      log = (log + chunk).slice(-65536);
       const match = /http:\/\/127\.0\.0\.1:(\d+)\/\?t=([0-9a-f]+)/.exec(log);
       if (!match || settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ proc, base: `http://127.0.0.1:${match[1]}`, token: match[2], log: () => log });
+      resolve({
+        proc,
+        base: `http://127.0.0.1:${match[1]}`,
+        token: match[2],
+        log: () => log,
+        diagnostics: () => ({ events: timingEvents, truncated: timingTruncated }),
+      });
     };
     const timer = setTimeout(
       () => fail(new Error(`semon printed no URL within 20 s: ${log}`)),
@@ -90,6 +107,27 @@ function serve(dir, now) {
     );
     proc.stdout.on('data', read);
     proc.stderr.on('data', read);
+    if (REFRESH_DIAGNOSTICS)
+      proc.stderr.on('data', (chunk) => {
+        const at = Date.now();
+        timingTail += chunk;
+        const lines = timingTail.split('\n');
+        timingTail = lines.pop();
+        for (const line of lines) {
+          if (!/^semon sessions native: producer=[a-f0-9]+ (phase=|queue_late_us=|breakdown=|catalog_commit_boundary=)/.test(line))
+            continue;
+          if (timingEvents.length >= 20000 || timingBytes + line.length > 4 * 1024 * 1024) {
+            timingTruncated = true;
+            continue;
+          }
+          timingBytes += line.length;
+          timingEvents.push({ at, line });
+        }
+        if (timingTail.length > 8192) {
+          timingTruncated = true;
+          timingTail = '';
+        }
+      });
     proc.on('error', (error) => fail(error));
     proc.on('exit', (code) =>
       fail(new Error(`semon exited ${code} before printing its URL: ${log}`)),
@@ -1114,6 +1152,8 @@ async function main() {
       const server = await serve(fixtureDir, fixture.now);
       try {
         screens[screen.name] = await runScreen(browser, screen, server, fixture);
+        if (REFRESH_DIAGNOSTICS)
+          screens[screen.name].serverDiagnostics = server.diagnostics();
       } finally {
         await stopServer(server.proc);
       }

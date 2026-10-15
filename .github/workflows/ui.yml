@@ -119,7 +119,9 @@ jobs:
     name: viewer / ${{ matrix.suite }}
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
+    # Product deadlines and every other suite's existing allowance stay unchanged.
+    timeout-minutes: ${{ matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:

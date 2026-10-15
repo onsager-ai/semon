@@ -47,6 +47,16 @@ Workflow dispatch exposes `exhaustive` and `sample_report` for deeper audits.
 The infrastructure tests (`suite-plan`, pixel diff, tap hit-testing, catalog cache,
 and catalog wire validation) guard coverage selection and the comparison machinery.
 
+The diagnostic comparison also enables the existing `SEMON_BUILD_TIMING` observer
+on both fixture servers. Each screen retains at most 20,000 sanitized phase,
+queue and committed-publication records / 4 MiB, timestamped on stderr receipt;
+`truncated` explicitly marks capture overflow. These timestamps approximate worker
+phase completion and include pipe scheduling; native microsecond durations are
+recorded separately. Diagnostic overhead applies to both binaries. This capture
+does not add product requests or workers. The comparison alone has a 30-minute
+job allowance because it runs two full journeys and phase sweeps; product timers,
+the 30-second complete-indexing gate and other suite allowances are unchanged.
+
 The October 1 baseline ran serially in 27–43 minutes. The largest avoidable costs
 were repeated touch auditing across every session and running independent suites
 one after another. This layout targets the longest suite's runtime plus binary
