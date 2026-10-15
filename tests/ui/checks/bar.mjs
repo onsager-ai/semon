@@ -14,14 +14,14 @@ export default async function barCheck(browser) {
       const retired = [];
       try {
         page.on('request', (request) => {
-          if (/\/api\/(model|tx|events)(?:[?/#]|$)/.test(request.url()))
+          if (/\/api\/(model|tx|events|control|session-control)(?:[?/#]|$)/.test(request.url()))
             retired.push(request.url());
         });
         await goto(page, { v: 'session', id: 'harbor' }, D);
         assert.equal(await page.locator('#topbar .t').textContent(), 'harbor');
         assert.equal(await page.locator('#topbar #find-btn').count(), 1);
         assert.equal(await page.locator('#topbar #more-btn').count(), 1);
-        assert.equal(await page.locator('#topbar .session-composer-trigger').count(), 1);
+        assert.equal(await page.locator('#topbar .session-composer-trigger').count(), 0);
         assert.equal(await page.locator('#page [aria-label="Conversation controls"]').count(), 0);
         assert.equal(await overflow(page), 0);
         const trigger = page.locator('#more-btn');

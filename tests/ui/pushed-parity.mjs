@@ -8,7 +8,7 @@
 //   --received DIR  the receiver's --dir. Read with `--machines DIR --no-local`, from an empty home of the reader's own.
 //   --scratch DIR   the reader's own state: its empty home, its caches. Written to.
 //
-// Polls, with a deadline, until all five native Query tools over the received copy equal the local ones, byte for byte,
+// Polls, with a deadline, until all four active native Query tools over the received copy equal the local ones, byte for byte,
 // once the fields in NORMALISED are set aside. While NORMALISED is empty the two stdout texts are compared as they are, so
 // number formatting, escapes and key order count too; with fields to set aside, the normalised JSON is compared as text. A push arrives file by file, so the copy is complete a little after the
 // first pass; the check is the last state it saw, not a race.
@@ -34,6 +34,113 @@ const arg = (name) => {
   }
   return path.resolve(process.argv[i + 1]);
 };
+// The existing native-page fixture census also checks every transcript, recorded
+// turn/handoff body and supported field/output expansion on the exact served pair.
+if (process.argv.includes('--native-pages')) {
+  const { data } = await import('./lib.mjs');
+  const nativeCorpus = async (base, token) => {
+    const fixture = await data({ base, token });
+    const landing = await fetch(base + '/?t=' + token);
+    const cookie = landing.headers
+      .getSetCookie()
+      .map((value) => value.split(';')[0])
+      .join('; ');
+    const get = async (query) => {
+      const response = await fetch(base + '/api/session-entry?' + query, { headers: { cookie } });
+      if (!response.ok) throw Error('pushed-parity native expansion: ' + response.status);
+      return response.json();
+    };
+    const expansions = {};
+    for (const [sid, entries] of Object.entries(fixture.TX)) {
+      for (const entry of entries) {
+        if (!entry.field && !entry.cut) continue;
+        const machine = fixture.SOURCES[fixture.SESS[sid].machine];
+        const query = new URLSearchParams({
+          machine,
+          sid: fixture.KEYS[sid],
+          scope: 'retained_history',
+          after: String(entry.slot),
+          limit: '1',
+        });
+        const selected = await get(query);
+        const saved = selected.entries[0];
+        if (
+          selected.identity.source_key !== machine ||
+          selected.identity.catalog_key !== fixture.KEYS[sid] ||
+          selected.range.first !== entry.slot ||
+          selected.entries.length !== 1 ||
+          saved.entry_id !== entry.entry_id ||
+          JSON.stringify(saved.provenance) !== JSON.stringify(entry.provenance)
+        )
+          throw Error('pushed-parity native expansion changed its selected source');
+        query.set('generation', selected.projection.generation);
+        const key = JSON.stringify([sid, entry.slot]);
+        if (entry.field) {
+          if (!Number.isSafeInteger(entry.field.chunks) || entry.field.chunks < 1)
+            throw Error('pushed-parity native field has no complete chunk count');
+          const anchor = entry.field.provenance ?? entry.provenance;
+          let text = '';
+          for (let chunk = 0; chunk < entry.field.chunks; chunk++) {
+            query.set('field_chunk', String(chunk));
+            const field = await get(query);
+            const complete = chunk + 1 === entry.field.chunks;
+            if (
+              field.identity.source_key !== machine ||
+              field.identity.catalog_key !== fixture.KEYS[sid] ||
+              field.projection.generation !== selected.projection.generation ||
+              field.slot !== entry.slot ||
+              field.field.chunk !== chunk ||
+              field.field.name !== entry.field.name ||
+              field.field.complete !== complete ||
+              field.field.next !== (complete ? null : chunk + 1) ||
+              typeof field.text !== 'string' ||
+              JSON.stringify(field.provenance) !== JSON.stringify(anchor)
+            )
+              throw Error('pushed-parity native field generation/range changed');
+            text += field.text;
+          }
+          expansions[key] = { field: entry.field.name, text };
+        } else {
+          query.set('part', 'output');
+          const page = await get(query);
+          if (
+            page.identity.source_key !== machine ||
+            page.identity.catalog_key !== fixture.KEYS[sid] ||
+            page.projection.generation !== selected.projection.generation ||
+            page.range.first !== entry.slot ||
+            page.entries.length !== 1 ||
+            page.entries[0].entry_id !== entry.entry_id ||
+            JSON.stringify(page.entries[0].provenance) !== JSON.stringify(entry.provenance)
+          )
+            throw Error('pushed-parity native output generation/range changed');
+          expansions[key] = page.entries[0];
+        }
+      }
+    }
+    return {
+      transcripts: fixture.TX,
+      transcript_metadata: fixture.TXM,
+      handoffs: fixture.H,
+      turns: fixture.turns,
+      expansions,
+    };
+  };
+  const direct = await nativeCorpus(process.env.SEMON_REF_BASE, process.env.SEMON_REF_TOKEN);
+  const copy = await nativeCorpus(process.env.SEMON_BASE, process.env.SEMON_TOKEN);
+  const changed = differences(direct, copy);
+  if (changed.length) {
+    const artifactRoot = path.resolve(process.env.SEMON_UI_OUT ?? 'out');
+    fs.mkdirSync(artifactRoot, { recursive: true });
+    fs.writeFileSync(artifactRoot + '/pushed-native-local.json', JSON.stringify(direct));
+    fs.writeFileSync(artifactRoot + '/pushed-native-copy.json', JSON.stringify(copy));
+    throw Error('pushed-parity native-page bodies differ:\n' + changed.join('\n'));
+  }
+  console.log(
+    'pushed-parity: complete native transcript, tool, turn and handoff corpus equals the local server',
+  );
+  process.exit(0);
+}
+
 const fixtureRoot = arg('home'),
   received = arg('received'),
   scratch = arg('scratch');
@@ -74,10 +181,24 @@ function corpus(args, env) {
     } while (true);
     sessions[row.id] = { details: call('get_session', [row.id]), transcript };
   }
+  const disabled = spawnSync(bin, ['query', 'find', 'session', '--all', '--json', ...args], {
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+    timeout: READ_TIMEOUT_MS,
+  });
+  if (
+    disabled.error ||
+    disabled.status !== 1 ||
+    disabled.stdout.trim() ||
+    !disabled.stderr.includes('capability_unavailable')
+  )
+    throw Error(
+      'pushed-parity stale find did not explicitly refuse before search: ' + disabled.stderr,
+    );
   const json = {
     listing,
     sessions,
-    search: call('find', ['session']),
+    paused_find: { error: 'capability_unavailable' },
     stalls: call('stalls', ['--idle-minutes', '1']),
   };
   return { text: JSON.stringify(json), json };
