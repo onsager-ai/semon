@@ -7,6 +7,40 @@ Source `263a02da278716ab2309b8e34a463419e5c781e5`, captured with Hub
 source-derived DOM. Pen reconstruction exports are not pixel authority.
 The approved feedback-20261015-v6 redesign remains separate work after #380.
 
+## Acceptance contract repair — 2026-10-17
+
+The user authorized fixing the acceptance baseline before further product UI
+alignment. This section supersedes the diagnostic-only and unchanged-adapter
+descriptions below; their runs remain historical evidence.
+
+The old adapter added a Composer action, an extra Sessions breadcrumb, mobile
+lineage/state-lead changes and a leading Cached history row. Those additions
+conflicted with the selected complete application's source and actual captures.
+Remove those additions while preserving the independent renderer, fixture-unit
+adaptation, original reference HTML, screen/region coverage, ratchets and
+thresholds. No candidate screenshot replaces a golden. No product UI changes.
+
+`preservation-contract.mjs` records the fixed Source/Hub reference pair and 62
+required viewport/theme/state keys. The actual-application comparison is now
+required on all PR, main and manual visual runs, not only PR #438. Its candidate
+fails for pixel/size differences, missing/duplicate/unknown captures, invalid
+measurements, altered provenance/thresholds or execution errors. It includes the
+previous supplemental Thinking/tool-group/tool-output and completed-child cases.
+Only the exact pinned `eb535ff` before-run remains historical diagnostics; it
+still fails for invalid coverage/execution and reports all visual differences.
+
+There are no new pixel masks or implicit exceptions for paused controls, native
+scope/counts or cached/incomplete notices. Candidate differences need an actual
+fix or a separately evidenced, explicit presentation decision. The new gate is
+not a claim that the current product matches the reference: recomputing all 62
+PNG pairs from run `39012188899` retains 14 exact states and 48 failed states.
+The reference compared with itself passes all 62 cases at unchanged thresholds.
+Hub's existing 48-state goldens and its 16 failures remain untouched.
+
+Validation for this repair is recorded on its follow-up PR. Cloud review inspected
+the actual reference/candidate screenshots. This does not waive the prior local
+thermal restriction, qualify a new rendered candidate or satisfy release gates.
+
 ## Preserved presentation
 
 - The canonical Sessions reader reuses the complete application's two-line rows,
