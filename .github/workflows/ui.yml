@@ -8,6 +8,7 @@ on:
         options:
           - paint
           - retained-images
+          - expanded-scroll
         default: paint
         required: true
 permissions:
@@ -52,7 +53,7 @@ jobs:
           if-no-files-found: error
 
   harbor-paint-protocol:
-    if: github.ref == 'refs/heads/diagnostic/380-harbor-artifact-20261018' && inputs.diagnostic == 'paint'
+    if: github.ref == 'refs/heads/diagnostic/380-harbor-artifact-20261018' && (inputs.diagnostic == 'paint' || inputs.diagnostic == 'expanded-scroll')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -181,6 +182,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Replay the exact main-scope prefix and capture the predeclared paint arms
+        if: inputs.diagnostic == 'paint'
         run: |
           set -euo pipefail
           mkdir -p tests/ui/out/harbor-paint-protocol
@@ -201,6 +203,20 @@ jobs:
             exit 1
           fi
 
+      - name: Observe the expanded transcript before and after trusted scroll
+        if: inputs.diagnostic == 'expanded-scroll'
+        env:
+          SEMON_PRESERVATION_CANDIDATE: 0bea3be5131e2839779c47a0cec3693d3606742f
+          SEMON_DIAGNOSTIC_CANDIDATE_SOURCE: 0bea3be5131e2839779c47a0cec3693d3606742f
+          SEMON_DIAGNOSTIC_ARTIFACT_RUN: '39074185832'
+        run: |
+          set -euo pipefail
+          export SEMON_PRESERVATION_BASE="$SEMON_HARBOR_REFERENCE_BASE"
+          export SEMON_PRESERVATION_TOKEN="$SEMON_HARBOR_REFERENCE_TOKEN"
+          export SEMON_DIAGNOSTIC_REFERENCE_BIN="$SEMON_HARBOR_REFERENCE_BIN"
+          SEMON_UI_OUT="$GITHUB_WORKSPACE/tests/ui/out/harbor-paint-protocol" \
+            node tests/ui/diagnostics/harbor-expansion-scroll.mjs
+
       - name: Preserve bounded server logs for failed capture diagnosis
         if: always()
         run: |
@@ -217,7 +233,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: harbor-fullpage-paint-protocol
+          name: ${{ inputs.diagnostic == 'paint' && 'harbor-fullpage-paint-protocol' || 'harbor-expansion-scroll-protocol' }}
           path: tests/ui/out/harbor-paint-protocol
           if-no-files-found: warn
           retention-days: 30
