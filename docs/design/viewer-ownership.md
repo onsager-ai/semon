@@ -231,12 +231,19 @@ These names never add sessions or turns to the causal cohort or timeline totals.
 An incoming root retains its handoff identity and kind; absent, ambiguous or
 stale related metadata stays explicitly unavailable.
 
-Session list grouping uses only loaded Catalog rows and exact canonical parent
-keys. Missing parents remain visible roots; malformed cycles receive a
-deterministic root, so each loaded identity stays selectable exactly once.
-Children reuse the shared compact row component, with five descendants initially
-shown and a document-owned expansion bounded by the loaded row set. Grouping and
-expansion perform no additional source or transcript reads.
+The canonical Sessions screen preserves the complete reader's flat, two-line
+rows, including child sessions, harness marks, recorded duration and delegation.
+Recent/Project/Machine/Harness grouping uses only loaded Catalog metadata and
+performs no source or transcript reads. Child counts follow exact loaded parent
+keys with cycle protection; they do not claim complete workspace counts. Metadata
+filters use the existing shared Filter/Select sheet. The source-qualified Machine
+field names the selected source rather than advertising an unavailable global
+union. The reader retains filter requests, cursor generations, row focus and
+scroll; `catalogBrowser` owns only the bounded filter choices and shared sheet
+lifetime. Native completeness/retry notices remain explicit. The list's ordinary
+count/scope explanation follows its rows so it does not displace their reading
+geometry. The independent compact Catalog component retains its optional grouped
+snapshot contract; no route selects another application or transport.
 
 ## Selected observation
 
