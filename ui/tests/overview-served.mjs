@@ -229,7 +229,7 @@ test(
                 (
                   await page
                     .locator('#page .nrow')
-                    .filter({ hasText: row.session.name })
+                    .filter({ has: page.getByText(row.session.name, { exact: true }) })
                     .textContent()
                 ).includes(activity[0]),
                 'Home retains the recorded tool name in working activity',
