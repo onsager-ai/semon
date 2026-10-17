@@ -2281,7 +2281,7 @@ export function createCatalogViewer(
       void loadList(false);
     shell.closeDrawer(true);
   }
-  function drawSelected(view: SelectedView) {
+  function drawSelected(view: SelectedView, captureReading = true) {
     if (disposed || active !== view) return;
     const current = view.store.selectedPage(),
       identity = selection.selectedIdentity(),
@@ -2351,6 +2351,21 @@ export function createCatalogViewer(
         },
       );
       return;
+    }
+    // A reader can move before the browser delivers its scroll event. Capture
+    // the existing reading geometry before a late context redraw, as the
+    // complete viewer's scroll transaction does, rather than trusting that
+    // event's cached following flag. Initial tail placement keeps its owner.
+    if (
+      captureReading &&
+      view.following &&
+      !view.opening &&
+      view.root.querySelector('[data-entry-key]') &&
+      !(view === pinView && performance.now() < pinUntil) &&
+      readingGap() > 80
+    ) {
+      view.following = false;
+      pinUntil = 0;
     }
     if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
       view.newCount += current.projection.total - view.lastTotal;
@@ -3201,7 +3216,9 @@ export function createCatalogViewer(
           (anchor ? '#turn=' + encodeURIComponent(anchor) : ''),
       );
     chrome();
-    drawSelected(view);
+    // The navigation transaction restores its saved position below; the
+    // preceding screen's scroll geometry does not belong to this reader.
+    drawSelected(view, false);
     const navigationEpoch = (view.navigationEpoch ?? 0) + 1;
     view.navigationEpoch = navigationEpoch;
     const focusHeading = () => {
@@ -3941,12 +3958,15 @@ export function createCatalogViewer(
       drawSources();
     }
   }
+  function readingGap() {
+    const main = document.querySelector<HTMLElement>('#main')!;
+    return window.matchMedia('(max-width: 760px)').matches
+      ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight
+      : main.scrollHeight - main.scrollTop - main.clientHeight;
+  }
   const readingScroll = () => {
     if (!active || active.opening || !active.store.selectedPage()) return;
-    const main = document.querySelector<HTMLElement>('#main')!,
-      gap = window.matchMedia('(max-width: 760px)').matches
-        ? document.documentElement.scrollHeight - window.scrollY - window.innerHeight
-        : main.scrollHeight - main.scrollTop - main.clientHeight;
+    const gap = readingGap();
     // Content-visibility can adjust a scroll offset after layout has settled,
     // without changing the observed boxes. Keep the initial tail transaction
     // pinned until it settles; reader input cancels it synchronously above.

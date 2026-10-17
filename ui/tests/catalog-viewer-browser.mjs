@@ -1294,6 +1294,170 @@ function withDeadline(promise, label, timeoutMs = 10000) {
   ]).finally(() => clearTimeout(timer));
 }
 
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`late bounded context preserves reading position before scroll delivery at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      let releasePreview;
+      const previewGate = new Promise((resolve) => {
+        releasePreview = resolve;
+      });
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+        let signalPreview;
+        const previewStarted = new Promise((resolve) => {
+          signalPreview = resolve;
+        });
+        const previewGeneration = 'c'.repeat(64);
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(true) });
+          if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
+          if (url.pathname === '/api/session-transcript') {
+            const value = transcript('one', url.searchParams, 60);
+            Object.assign(value.entries.at(-1), { k: 'h', id: 'child-edge', turn: 'parent-turn' });
+            delete value.entries.at(-1).text;
+            value.relationship_context = {
+              state: 'complete',
+              turn_ids: ['parent-turn'],
+              turns: [
+                {
+                  sid: 'one',
+                  id: 'parent-turn',
+                  u: false,
+                  end: { st: 'done', why: 'complete' },
+                  sent: ['child-edge'],
+                  last: true,
+                },
+              ],
+              handoffs: [
+                {
+                  id: 'child-edge',
+                  kind: 'spawn',
+                  ask: 'task',
+                  from: 'one',
+                  to: 'child',
+                  at: 1,
+                  done: 2,
+                  status: 'done',
+                  declined: false,
+                  brief_session: 'child',
+                  source_turn: 'parent-turn',
+                },
+              ],
+              sessions: {
+                child: {
+                  name: 'Child',
+                  harness: 'claude',
+                  model: 'native-model',
+                  kind: 'subagent',
+                  state: 'done',
+                },
+              },
+              previews: { child: previewGeneration },
+            };
+            return route.fulfill({ json: value });
+          }
+          if (url.pathname === '/api/session-home') {
+            signalPreview();
+            await previewGate;
+            return route.fulfill({
+              json: {
+                api: 1,
+                identity: { ...identity('child'), read_scope: 'retained_history' },
+                generation: previewGeneration,
+                incomplete: false,
+                events: { 'child-edge': { brief: 'Hydrated bounded child brief' } },
+                session: {},
+              },
+            });
+          }
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/sessions');
+        // Defer only delivery to the application's scroll listener. Native
+        // geometry and input remain real, modeling a response before that
+        // asynchronous event reaches the owner without a timing-based retry.
+        await page.evaluate(() => {
+          window.deferReaderScroll = false;
+          window.deferredReaderScrolls = 0;
+          window.readerWheelObserved = false;
+          window.addEventListener(
+            'scroll',
+            (event) => {
+              if (
+                window.deferReaderScroll &&
+                (event.target === document || event.target === document.querySelector('#main'))
+              ) {
+                window.deferredReaderScrolls++;
+                event.stopImmediatePropagation();
+              }
+            },
+            { capture: true, passive: true },
+          );
+          document.addEventListener('wheel', (event) => {
+            if (event.isTrusted) window.readerWheelObserved = true;
+          });
+        });
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+        });
+        await page.locator('#page [data-id="one"]').click();
+        await withDeadline(previewStarted, 'bounded child context request');
+        await page.locator('#page [data-entry-key="one:59"]').waitFor();
+        await page.evaluate(() => document.fonts.ready);
+        const inert = await page.locator('#topbar').evaluate((bar) => {
+          const rect = bar.getBoundingClientRect(),
+            x = Math.min(rect.right - 1, innerWidth - 1),
+            y = Math.max(rect.top + 1, 1),
+            target = document.elementFromPoint(x, y);
+          if (!bar.contains(target) || target.closest('button, a, input, [role="button"]'))
+            throw Error('Reader input requires inert topbar padding');
+          return { x, y };
+        });
+        await page.mouse.move(inert.x, inert.y);
+        await page.mouse.wheel(0, 1);
+        await page.waitForFunction(() => window.readerWheelObserved);
+        const before = await page.locator('#page [data-entry-key="one:20"]').evaluate((node) => {
+          window.deferReaderScroll = true;
+          node.scrollIntoView({ block: 'center' });
+          const main = document.querySelector('#main');
+          return {
+            top: node.getBoundingClientRect().top,
+            gap:
+              innerWidth <= 760
+                ? document.documentElement.scrollHeight - scrollY - innerHeight
+                : main.scrollHeight - main.scrollTop - main.clientHeight,
+          };
+        });
+        assert.ok(before.gap > 80, 'The native reader must move away from the tail');
+        await page.waitForFunction(() => window.deferredReaderScrolls > 0);
+        releasePreview();
+        await page
+          .getByText('Hydrated bounded child brief', { exact: true })
+          .waitFor({ state: 'attached' });
+        const after = await page.locator('#page [data-entry-key="one:20"]').evaluate((node) => ({
+          top: node.getBoundingClientRect().top,
+          deferred: window.deferredReaderScrolls,
+        }));
+        assert.ok(after.deferred > 0, 'The reading-scroll event must remain deferred');
+        assert.ok(Math.abs(after.top - before.top) < 2, JSON.stringify({ before, after }));
+        await page.evaluate(() => {
+          window.deferReaderScroll = false;
+          window.dispatchEvent(new Event('scroll'));
+          document.querySelector('#main').dispatchEvent(new Event('scroll'));
+        });
+        await page.getByRole('button', { name: /Jump to bottom/ }).waitFor();
+        await page.evaluate(() => app.destroy());
+      } finally {
+        releasePreview();
+        await browser.close();
+      }
+    });
+
 test('same-projection turn anchors retain loaded fields, focus and the anchor inside the bounded cache', async () => {
   const browser = await chromium.launch();
   try {
