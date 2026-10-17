@@ -553,3 +553,35 @@ the intentionally canceled unread error body. Failure-only diagnostics retain
 bounded stage/counts and allowlisted status-note classifications. Product
 timers, deadlines, error behavior and all original recovery/security assertions
 are unchanged. These corrections require fresh CI; they are not runtime fixes.
+
+### Desktop expanded-transcript capture preparation
+
+The completed39aa evidence made all113 frames/162 regions exact, while the
+68-state expanded comparison exposed five desktop Harbor dock differences and
+six intentional native Filter qualification differences. The five Harbor
+differences are not approved exceptions. A finite four-layout CI diagnostic
+retained both applications at the same scrollTop0 but with different cached
+jump visibility; a no-op upward wheel/Home did not prove either scroll owner had
+processed the expanded geometry. One fixed trusted forward/return pair produced
+matching owner geometry and exact post-input Tools/Output captures in all four
+layouts. The specific earlier reset substep causing divergence remains unproven.
+
+Critical review found that the additional forward/return input changes the
+reference's cached jump state. Those matching captures are supporting evidence
+only and cannot replace the original expansion state. The original comparison
+preparation remains required. The application fix must preserve reading-position
+capture while keeping jump visibility independent of an unchanged metadata
+redraw. It requires focused expansion-at-top/late-metadata/actual-scroll tests
+and final original-protocol CI. No original state, reference, threshold, HTTP
+assertion or pause boundary is waived.
+
+The earlier nearly blank phone-dark Harbor reference capture remains retained.
+The bounded original-prefix diagnostic did not reproduce it with either the
+original programmatic traversal or the fixed trusted-wheel arm. Those passes do
+not establish its underlying cause.
+
+The [current #380 review packet](https://github.com/onsager-ai/semon/issues/380#issuecomment-6228483500)
+links final commit/pin identities, required-check results, runtime and exact
+artifact bindings, explicit human visual decisions, preserved failure history
+and release-only limitations. Historical runs in this document are not
+acceptance of a later pair.
