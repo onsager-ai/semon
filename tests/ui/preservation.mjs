@@ -146,6 +146,10 @@ async function snapshotChromeDiagnostics(page) {
       };
     };
     const active = document.activeElement;
+    const transcript = document.querySelector('.transcript');
+    const transcriptBox = transcript?.getBoundingClientRect();
+    const dockBox = document.querySelector('.session-dock')?.getBoundingClientRect();
+    const transcriptStyle = transcript ? getComputedStyle(transcript) : null;
     return {
       activeElement: active ? describe(active) : null,
       viewport: {
@@ -156,6 +160,16 @@ async function snapshotChromeDiagnostics(page) {
         scrollY,
         mainScrollTop: document.querySelector('#main')?.scrollTop ?? 0,
       },
+      transcriptClip:
+        transcriptBox && transcriptStyle
+          ? {
+              box: [transcriptBox.x, transcriptBox.y, transcriptBox.width, transcriptBox.height],
+              bottom: transcriptBox.bottom,
+              dockTop: dockBox?.top ?? null,
+              clipPath: transcriptStyle.clipPath,
+              readingClip: transcriptStyle.getPropertyValue('--reading-clip').trim(),
+            }
+          : null,
       roots: Object.fromEntries(
         ['#topbar', '.session-dock'].map((selector) => {
           const root = document.querySelector(selector),
