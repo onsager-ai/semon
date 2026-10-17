@@ -27,9 +27,12 @@ concurrency:
 jobs:
   passive-diagnostic:
     if: github.event_name == 'workflow_dispatch' && github.ref_name == 'review/380-passive-notice-diagnostic-20261018'
-    name: bounded passive reading component diagnostic
+    name: bounded passive reading and served fixture diagnostic
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -46,6 +49,19 @@ jobs:
           npm --prefix tests/ui exec -- playwright install --with-deps chromium
       - name: Collect the unchanged passive component assertion
         run: node --test ui/tests/passive-reading-browser.mjs
+      - name: Retrieve the exact f1ab249b runtime for the route-fixture diagnostic
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: viewer-test-binaries
+          run-id: 39050599486
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/served-fixture-binaries
+      - name: Verify served fixture teardown against the reviewed runtime
+        env:
+          SEMON_CATALOG_SERVED_BIN: ${{ runner.temp }}/served-fixture-binaries/semon
+        run: |
+          chmod +x "$SEMON_CATALOG_SERVED_BIN"
+          node --test ui/tests/overview-served.mjs
   foundation:
     name: UI types and generated assets
     runs-on: ubuntu-latest
