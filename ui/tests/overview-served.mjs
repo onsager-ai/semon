@@ -270,6 +270,26 @@ test(
                 true,
                 'unavailable selected status does not fall back to stale completed details',
               );
+              const ingestSelector = '#lanes .treeitem[data-id*="atlas-ingest"]',
+                ingestToggle = page.locator(
+                  ingestSelector + ' > .tree-row > .tree-toggle',
+                );
+              await ingestToggle.focus();
+              await ingestToggle.press('Enter');
+              await page.locator(ingestSelector + '[aria-expanded="false"]').waitFor();
+              assert.equal(
+                await selectedRecent.isVisible(),
+                false,
+                'a keyboard collapse stays closed for the current navigation',
+              );
+              await page.goto(address[1] + '/s/claude/a-review?t=' + address[2] + '&compat=1');
+              await page.locator('#page [aria-label="Transcript"]').waitFor();
+              await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
+              assert.equal(
+                await page.locator(ingestSelector).getAttribute('aria-expanded'),
+                'true',
+                'the next navigation opens its required Recent ancestor despite saved collapse',
+              );
               // Drain active async routes before navigation so no handler races its response.
               await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');

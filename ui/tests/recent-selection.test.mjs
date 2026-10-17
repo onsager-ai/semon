@@ -9,9 +9,18 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { selectRecentChildren } = await import(
+const { recentOrderSource, selectRecentChildren } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].text).toString('base64')
 );
+
+test('one-machine Home and selected-session Recent ordering share scope, multi-machine does not', () => {
+  const oneMachine = [{ key: 'laptop' }],
+    multiMachine = [{ key: 'laptop' }, { key: 'workstation' }],
+    signature = (source, machines) =>
+      JSON.stringify([recentOrderSource(source, machines), false, false]);
+  assert.equal(signature(undefined, oneMachine), signature('laptop', oneMachine));
+  assert.notEqual(signature(undefined, multiMachine), signature('laptop', multiMachine));
+});
 
 test('the selected path fills an ordinary Recent preview before the three-row cap', () => {
   const rows = [
