@@ -80,6 +80,96 @@ async function snapshot(page) {
     };
   });
 }
+async function snapshotChromeDiagnostics(page) {
+  return page.evaluate(() => {
+    const pseudo = (node, which) => {
+      const style = getComputedStyle(node, which);
+      if (
+        style.display === 'none' ||
+        style.content === 'none' ||
+        style.content === 'normal'
+      )
+        return null;
+      return {
+        content: style.content.slice(0, 120),
+        display: style.display,
+        color: style.color,
+        background: style.backgroundColor,
+        backgroundImage: style.backgroundImage,
+        border: style.borderColor,
+        opacity: style.opacity,
+        filter: style.filter,
+        transform: style.transform,
+        width: style.width,
+        height: style.height,
+      };
+    };
+    const describe = (node) => {
+      const box = node.getBoundingClientRect(),
+        css = getComputedStyle(node);
+      return {
+        tag: node.tagName.toLowerCase(),
+        id: node.id,
+        className: node.getAttribute('class') ?? '',
+        role: node.getAttribute('role'),
+        text: (node.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 160),
+        ariaLabel: node.getAttribute('aria-label'),
+        ariaExpanded: node.getAttribute('aria-expanded'),
+        title: node.getAttribute('title'),
+        box: [box.x, box.y, box.width, box.height],
+        style: {
+          display: css.display,
+          visibility: css.visibility,
+          position: css.position,
+          color: css.color,
+          background: css.backgroundColor,
+          backgroundImage: css.backgroundImage,
+          border: css.borderColor,
+          outline: [css.outlineStyle, css.outlineWidth, css.outlineColor],
+          opacity: css.opacity,
+          font: css.font,
+          fontWeight: css.fontWeight,
+          fill: css.fill,
+          stroke: css.stroke,
+          strokeWidth: css.strokeWidth,
+          filter: css.filter,
+          transform: css.transform,
+          textShadow: css.textShadow,
+          boxShadow: css.boxShadow,
+        },
+        state: {
+          hidden: !!node.hidden,
+          disabled: node.matches(':disabled'),
+          hovered: node.matches(':hover'),
+          active: node.matches(':active'),
+          focused: node.matches(':focus'),
+          focusVisible: node.matches(':focus-visible'),
+          focusWithin: node.matches(':focus-within'),
+        },
+        pseudo: { before: pseudo(node, '::before'), after: pseudo(node, '::after') },
+      };
+    };
+    const active = document.activeElement;
+    return {
+      activeElement: active ? describe(active) : null,
+      viewport: {
+        width: innerWidth,
+        height: innerHeight,
+        devicePixelRatio,
+        scrollX,
+        scrollY,
+        mainScrollTop: document.querySelector('#main')?.scrollTop ?? 0,
+      },
+      roots: Object.fromEntries(
+        ['#topbar', '.session-dock'].map((selector) => {
+          const root = document.querySelector(selector),
+            nodes = root ? [root, ...root.querySelectorAll('*')].slice(0, 100) : [];
+          return [selector, nodes.map(describe)];
+        }),
+      ),
+    };
+  });
+}
 async function capture(candidate, reference, key) {
   const images = [],
     artifactDigests = {},
@@ -135,6 +225,18 @@ async function capture(candidate, reference, key) {
     fs.writeFileSync(path.join(out, key + '-' + name + '.json'), evidence);
     artifactDigests[name] = { image: sha256(bytes), evidence: sha256(evidence) };
     images.push(PNG.sync.read(bytes));
+  }
+  const includeChromeDiagnostics =
+    /^(390|820)-(light|dark)-(?:session-harbor|harbor-tools-open|harbor-tool-output-open)$/.test(
+      key,
+    );
+  if (includeChromeDiagnostics) {
+    for (const [name, page] of pages) {
+      evidenceBySide[name].chromeDiagnostics = await snapshotChromeDiagnostics(page);
+      const evidence = Buffer.from(JSON.stringify(evidenceBySide[name], null, 2) + '\n');
+      fs.writeFileSync(path.join(out, key + '-' + name + '.json'), evidence);
+      artifactDigests[name].evidence = sha256(evidence);
+    }
   }
   recordDomDiffSummary(
     report.domDiffSummary,
