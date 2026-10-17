@@ -5,7 +5,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data, titleOf, waitForCaptureReady } from './lib.mjs';
+import {
+  ENV,
+  launch,
+  served,
+  goto,
+  data,
+  titleOf,
+  waitForCaptureReady,
+  homePostTagDiagnostics,
+} from './lib.mjs';
 import { sample, BASE } from './fixture.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
@@ -60,6 +69,7 @@ const report = {
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
+const homePostPages = [];
 const sessionTraceBudget = { responses: 0, responseBytes: 0, summaryBytes: 0, stopped: false },
   MAX_SESSION_TRACE_RESPONSES = 36,
   MAX_SESSION_TRACE_RESPONSE_BYTES = 64 * 1024 * 1024,
@@ -988,20 +998,22 @@ try {
         dark,
       };
     const candidate = await served(browser, {
-        ...options,
-        captureRequests: true,
-        captureReadiness: true,
-        captureRole: 'candidate',
-      }),
-      reference = await served(browser, {
-        ...options,
-        captureRequests: true,
-        captureReadiness: true,
-        captureRole: selfParity ? 'candidate' : 'reference',
-        base: referenceBase,
-        token: referenceToken,
-        ...(selfParity ? {} : { path: '/?compat=1' }),
-      });
+      ...options,
+      captureRequests: true,
+      captureReadiness: true,
+      captureRole: 'candidate',
+      captureHomePostTag: process.env.SEMON_HOME_POST_TAG_DIAGNOSTICS === '1',
+      onCaptureHomePostTagPage: (page) => homePostPages.push({ scheme, side: 'candidate', page }),
+    });
+    const reference = await served(browser, {
+      ...options,
+      captureRequests: true,
+      captureReadiness: true,
+      captureRole: selfParity ? 'candidate' : 'reference',
+      base: referenceBase,
+      token: referenceToken,
+      ...(selfParity ? {} : { path: '/?compat=1' }),
+    });
     captureSessionTraceResponses(candidate, scheme);
     const retired = candidate.requests ?? [];
     for (const frame of expectedFrames) {
@@ -1080,6 +1092,12 @@ try {
 } catch (error) {
   report.errors.push(error.stack ?? error.message);
 } finally {
+  if (homePostPages.length)
+    report.homePostTagDiagnostics = homePostPages.map(({ scheme, side, page }) => ({
+      scheme,
+      side,
+      ...homePostTagDiagnostics(page),
+    }));
   await browser?.close();
   report.failures = assessPixelComparison(report);
   report.acceptance = assessVisualAcceptances(report, 'pixels', report.failures);

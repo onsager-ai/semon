@@ -55,6 +55,9 @@ export const VIEWPORTS = {
 const CAPTURE_STABLE_MS = 200;
 const CAPTURE_TIMEOUT_MS = 8000;
 const CAPTURE_API_EVENT_LIMIT = 2000;
+const HOME_POST_TAG_HEADER = 'x-semon-capture-id';
+const HOME_POST_TAG_PATTERN = /^[0-9a-f]{16}-[1-9][0-9]{0,7}$/;
+const HOME_POST_DIAGNOSTIC_LIMIT = 128;
 const CAPTURE_GENERATION_QUERY_KEYS = new Set(['generation', 'errors_generation']);
 // Fail only selected content reads. Optional observations and native controls
 // remain in the raw event log and retain their own existing suite assertions.
@@ -103,6 +106,88 @@ function selectedApiQueryDigest(url, origin, { retryScope = false } = {}) {
 function recordCaptureApiEvent(page, event) {
   if (page.captureApiEvents.length < CAPTURE_API_EVENT_LIMIT) page.captureApiEvents.push(event);
   else page.captureApiEventsTruncated++;
+}
+
+function homePostTagFromRequest(request) {
+  if (request.method() !== 'POST') return { id: null, present: false };
+  let url;
+  try {
+    url = new URL(request.url());
+  } catch {
+    return { id: null, present: false };
+  }
+  if (url.pathname !== '/api/viewer/home') return { id: null, present: false };
+  try {
+    const headers = request.headers(),
+      entry = Object.entries(headers).find(([name]) => name.toLowerCase() === HOME_POST_TAG_HEADER),
+      value = entry?.[1];
+    return {
+      id: typeof value === 'string' && HOME_POST_TAG_PATTERN.test(value) ? value : null,
+      present: !!entry,
+    };
+  } catch {
+    return { id: null, present: false };
+  }
+}
+
+// Pair only the opaque request header and page-side record. A missing, repeated,
+// truncated, or route-less record stays unknown; no timing or sequence fallback.
+export function homePostTagDiagnostics(page) {
+  if (!page.captureHomePostTagEnabled) return null;
+  const invocations = page.captureHomePostTagInvocations ?? [],
+    requests = page.captureHomePostTagRequests ?? [],
+    invocationCounts = new Map(),
+    requestCounts = new Map(),
+    retentionComplete =
+      (page.captureHomePostTagInvocationsTruncated ?? 0) === 0 &&
+      (page.captureHomePostTagRequestsTruncated ?? 0) === 0 &&
+      (page.captureApiEventsTruncated ?? 0) === 0;
+  for (const invocation of invocations)
+    invocationCounts.set(invocation.id, (invocationCounts.get(invocation.id) ?? 0) + 1);
+  for (const request of requests)
+    if (request.tagId)
+      requestCounts.set(request.tagId, (requestCounts.get(request.tagId) ?? 0) + 1);
+  return {
+    scope:
+      'candidate same-origin POST /api/viewer/home; string/URL input, plain init, and string body only',
+    invocations,
+    invocationsTruncated: page.captureHomePostTagInvocationsTruncated ?? 0,
+    requests: requests.map((request) => {
+      const matching = invocations.filter((invocation) => invocation.id === request.tagId),
+        rawEvents = (page.captureApiEvents ?? []).filter((event) => event.id === request.requestId);
+      const rawStarted = rawEvents.some(
+        (event) =>
+          event.event === 'started' &&
+          event.method === 'POST' &&
+          event.path === '/api/viewer/home' &&
+          event.homePostTagHeaderPresent === true &&
+          event.homePostTagId === request.tagId,
+      );
+      const exact =
+        retentionComplete &&
+        typeof request.tagId === 'string' &&
+        HOME_POST_TAG_PATTERN.test(request.tagId) &&
+        request.tagHeaderPresent === true &&
+        requestCounts.get(request.tagId) === 1 &&
+        invocationCounts.get(request.tagId) === 1 &&
+        matching.length === 1 &&
+        rawStarted &&
+        typeof matching[0].routeMarker === 'string' &&
+        matching[0].routeMarker.length > 0 &&
+        matching[0].routeMarker.length <= 512;
+      return {
+        requestId: request.requestId,
+        tagId: request.tagId,
+        tagHeaderPresent: request.tagHeaderPresent,
+        nodeRouteKey: request.routeKey,
+        association: exact ? 'unique-exact-tag' : 'unknown',
+        invocationRouteMarker: exact ? matching[0].routeMarker : null,
+        rawEvents,
+      };
+    }),
+    requestsTruncated: page.captureHomePostTagRequestsTruncated ?? 0,
+    apiEventsTruncated: page.captureApiEventsTruncated ?? 0,
+  };
 }
 
 // Node prepares the next capture before the browser dispatches its navigation.
@@ -420,16 +505,50 @@ export async function served(browser, opts = {}) {
     page.captureReadinessEnabled = true;
     page.captureRole = opts.captureRole ?? 'unknown';
     page.captureRouteKey = 'initial';
+    page.captureHomePostTagEnabled =
+      opts.captureHomePostTag === true && page.captureRole === 'candidate';
+    page.captureHomePostTagInvocations = [];
+    page.captureHomePostTagInvocationsTruncated = 0;
+    page.captureHomePostTagRequests = [];
+    page.captureHomePostTagRequestsTruncated = 0;
+    if (page.captureHomePostTagEnabled && typeof opts.onCaptureHomePostTagPage === 'function')
+      opts.onCaptureHomePostTagPage(page);
     page.inFlightApiRequests = new Map();
     page.captureApiIdleWaiters = new Set();
     page.captureApiEvents = [];
     page.captureApiEventsTruncated = 0;
     page.captureApiRequestSequence = 0;
     page.captureApiActivityAt = Date.now();
+    if (page.captureHomePostTagEnabled) {
+      await page.exposeFunction('__semonCaptureHomePostInvocation', (record) => {
+        if (
+          !record ||
+          typeof record.id !== 'string' ||
+          !HOME_POST_TAG_PATTERN.test(record.id) ||
+          (record.routeMarker !== null &&
+            (typeof record.routeMarker !== 'string' || record.routeMarker.length > 512))
+        ) {
+          page.captureHomePostTagInvocationsTruncated++;
+          return;
+        }
+        if (page.captureHomePostTagInvocations.length < HOME_POST_DIAGNOSTIC_LIMIT)
+          page.captureHomePostTagInvocations.push({
+            id: record.id,
+            routeMarker: record.routeMarker,
+          });
+        else page.captureHomePostTagInvocationsTruncated++;
+      });
+    }
     page.on('request', (request) => {
       const apiPath = selectedApiPath(request.url(), origin);
       if (page.requests) page.requests.push(request.url());
       if (apiPath) {
+        const homePost =
+          page.captureHomePostTagEnabled &&
+          apiPath === '/api/viewer/home' &&
+          request.method() === 'POST'
+            ? homePostTagFromRequest(request)
+            : null;
         const tracked = {
           id: ++page.captureApiRequestSequence,
           method: request.method(),
@@ -438,7 +557,23 @@ export async function served(browser, opts = {}) {
           retryScopeDigest: selectedApiQueryDigest(request.url(), origin, { retryScope: true }),
           routeKey: page.captureRouteKey,
           startedAt: Date.now(),
+          ...(homePost
+            ? {
+                homePostTagId: homePost.id,
+                homePostTagHeaderPresent: homePost.present,
+              }
+            : {}),
         };
+        if (homePost) {
+          if (page.captureHomePostTagRequests.length < HOME_POST_DIAGNOSTIC_LIMIT)
+            page.captureHomePostTagRequests.push({
+              requestId: tracked.id,
+              tagId: homePost.id,
+              tagHeaderPresent: homePost.present,
+              routeKey: tracked.routeKey,
+            });
+          else page.captureHomePostTagRequestsTruncated++;
+        }
         Object.assign(tracked, captureRequestOwnership(page, tracked));
         page.inFlightApiRequests.set(request, tracked);
         page.captureApiActivityAt = Date.now();
@@ -489,7 +624,7 @@ export async function served(browser, opts = {}) {
           at: Date.now(),
         });
     });
-    await page.addInitScript(() => {
+    await page.addInitScript((captureHomePostTag) => {
       const state = { version: 0, lastMutationAt: performance.now(), waiters: new Set() },
         observer = new MutationObserver(() => {
           state.version++;
@@ -503,7 +638,91 @@ export async function served(browser, opts = {}) {
         subtree: true,
       });
       Object.defineProperty(window, '__semonCaptureReadiness', { value: state });
-    });
+      if (!captureHomePostTag) return;
+      try {
+        const bytes = new Uint8Array(8);
+        crypto.getRandomValues(bytes);
+        const nonce = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+        let sequence = 0;
+        const nativeFetch = window.fetch,
+          plainRecord = (value) => {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+            const prototype = Object.getPrototypeOf(value);
+            if (prototype !== Object.prototype && prototype !== null) return false;
+            return Reflect.ownKeys(value).every((key) => {
+              const descriptor = Object.getOwnPropertyDescriptor(value, key);
+              return !!descriptor && 'value' in descriptor;
+            });
+          },
+          supportedHeaders = (value) => {
+            if (value === undefined || value instanceof Headers) return true;
+            if (!plainRecord(value)) return false;
+            return Reflect.ownKeys(value).every((key) => {
+              const descriptor = Object.getOwnPropertyDescriptor(value, key);
+              return typeof key === 'string' && typeof descriptor?.value === 'string';
+            });
+          };
+        window.fetch = function (input, init) {
+          let prepared;
+          try {
+            if (
+              arguments.length <= 2 &&
+              (typeof input === 'string' || input instanceof URL) &&
+              (init === undefined || plainRecord(init))
+            ) {
+              const url = new URL(input instanceof URL ? input.href : input, location.href),
+                method = init?.method ?? 'GET';
+              if (
+                url.origin === location.origin &&
+                url.pathname === '/api/viewer/home' &&
+                typeof method === 'string' &&
+                method.toUpperCase() === 'POST' &&
+                typeof init?.body === 'string' &&
+                supportedHeaders(init?.headers)
+              ) {
+                const headers = new Headers(init?.headers);
+                if (!headers.has('x-semon-capture-id') && sequence < 99999999) {
+                  const descriptors =
+                    init === undefined ? {} : Object.getOwnPropertyDescriptors(init);
+                  delete descriptors.headers;
+                  const taggedInit = Object.create(
+                    init === undefined ? Object.prototype : Object.getPrototypeOf(init),
+                  );
+                  Object.defineProperties(taggedInit, descriptors);
+                  const id = `${nonce}-${++sequence}`;
+                  headers.set('x-semon-capture-id', id);
+                  Object.defineProperty(taggedInit, 'headers', {
+                    value: headers,
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                  });
+                  prepared = {
+                    taggedInit,
+                    record: {
+                      id,
+                      routeMarker:
+                        typeof window.__semonCaptureRouteMarker === 'string'
+                          ? window.__semonCaptureRouteMarker
+                          : null,
+                    },
+                  };
+                }
+              }
+            }
+          } catch {}
+          if (!prepared) return Reflect.apply(nativeFetch, this, arguments);
+          const binding = window.__semonCaptureHomePostInvocation;
+          if (typeof binding !== 'function') return Reflect.apply(nativeFetch, this, arguments);
+          try {
+            Promise.resolve(binding(prepared.record)).catch(() => {});
+          } catch {
+            return Reflect.apply(nativeFetch, this, arguments);
+          }
+          return Reflect.apply(nativeFetch, this, [input, prepared.taggedInit]);
+        };
+      } catch {}
+    }, page.captureHomePostTagEnabled);
   } else if (opts.captureRequests) {
     page.on('request', (request) => page.requests.push(request.url()));
   }
@@ -545,9 +764,12 @@ export async function served(browser, opts = {}) {
     // Keep pending initial reads in the same readiness transaction until they
     // finish; changing its key early would lose late failures or valid recovery.
     await waitForCaptureReady(page, 'initial viewer load');
-    page.captureRouteKey = await page.evaluate(() =>
-      JSON.stringify(history.state ?? { v: 'unknown' }),
-    );
+    page.captureRouteKey = await page.evaluate(() => {
+      const marker = JSON.stringify(history.state ?? { v: 'unknown' });
+      if (typeof window.__semonCaptureHomePostInvocation === 'function')
+        window.__semonCaptureRouteMarker = marker;
+      return marker;
+    });
   }
   return page;
 }
@@ -778,9 +1000,9 @@ export async function goto(page, route, D) {
   const url = new URL(destination, page.url());
   if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
   if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
+  const current = JSON.stringify(route);
   if (page.captureReadinessEnabled) {
     const previous = page.captureRouteKey;
-    const current = JSON.stringify(route);
     let previousRoute;
     try {
       previousRoute = JSON.parse(previous);
@@ -809,7 +1031,9 @@ export async function goto(page, route, D) {
   }
   try {
     await page.evaluate(
-      ({ r, url }) => {
+      ({ r, url, marker }) => {
+        if (typeof window.__semonCaptureHomePostInvocation === 'function')
+          window.__semonCaptureRouteMarker = marker;
         history.pushState(r, '', url);
         dispatchEvent(new PopStateEvent('popstate', { state: r }));
       },
@@ -821,6 +1045,7 @@ export async function goto(page, route, D) {
               ? { ...route, ...(route.id ? { id: key } : { sid: key }) }
               : route,
         url: url.pathname + url.search + url.hash,
+        marker: current,
       },
     );
   } finally {
