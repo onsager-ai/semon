@@ -373,20 +373,22 @@ for (const width of [390, 1280])
           true,
         );
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        await page
-          .locator('#topbar')
-          .getByRole('button', { name: 'Choose a machine', exact: true })
-          .click();
+        const openMachineChooser = async () => {
+          await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
+          await page
+            .locator('#topbar')
+            .getByRole('link', { name: 'Choose a machine', exact: true })
+            .click();
+        };
+        await openMachineChooser();
         await page.locator('[data-source-key="second"]').click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !history.state?.sheet);
-        await page
-          .locator('#topbar')
-          .getByRole('button', { name: 'Choose a machine', exact: true })
-          .click();
+        await openMachineChooser();
         await page.locator('[data-source-key="source"]').click();
+        await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         assert.equal(
           await page.evaluate(
@@ -396,28 +398,38 @@ for (const width of [390, 1280])
           true,
         );
         await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
         await page.locator('[data-source-key="second"]').waitFor();
         assert.equal(new URL(page.url()).searchParams.get('choose_source'), '1');
         await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page.goForward();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goForward();
         await page.locator('[data-source-key="source"]').waitFor();
+        await page.goForward();
+        await page.locator('#page [data-id="one"]').waitFor();
         await page.goForward();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         // Revisit the other source after restoring the source navigation entry.
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !history.state?.sheet);
         await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
         await page.locator('[data-source-key="second"]').waitFor();
+        await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
         await page.goBack();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !history.state?.sheet);
-        await page
-          .locator('#topbar')
-          .getByRole('button', { name: 'Choose a machine', exact: true })
-          .click();
+        await openMachineChooser();
         await page.locator('[data-source-key="source"]').click();
+        await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         if (process.env.SEMON_CATALOG_OUT)
           await page.screenshot({
@@ -1577,6 +1589,9 @@ test('cached history restores tail following independently of another reader pos
     returningToB = true;
     await page.goBack();
     await page.locator('#page [data-entry-key="two:64"]').waitFor();
+    // Retained readers refresh metadata on the existing selected observer.
+    // Advance its controlled clock; restoration itself reuses cached metadata.
+    await page.clock.runFor(3100);
     // The accepted metadata title proves the restoration's asynchronous
     // observer finished before the next projection is appended.
     await page
