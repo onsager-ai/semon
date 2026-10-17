@@ -13,7 +13,11 @@ const {
   parseCausalTrace,
   reachableTraceSummary,
   traceRootActor,
+  traceRootTime,
   traceHopActor,
+  traceHopClass,
+  traceHandoffIconKey,
+  traceSessionChip,
   traceSentenceParts,
   traceHandoffOutcome,
   traceTurnOutcome,
@@ -94,6 +98,73 @@ test('trace relationship sentences preserve recorded ask, subagent, relay and us
   );
 });
 
+test('trace hops preserve the recorded icons, generic move wording, and missing-child marker', () => {
+  const icon = (kind, fields = {}) =>
+      traceHandoffIconKey(relationship(kind, kind, 'atlas', 'child', fields)),
+    who = (id) => ({ className: 'who', text: id });
+
+  assert.equal(icon('ask'), 'ask');
+  assert.equal(icon('spawn'), 'out');
+  assert.equal(icon('relay'), 'out');
+  assert.equal(icon('move'), 'move');
+  assert.equal(icon('toyou', { ask: 'question', status: 'work' }), 'qc');
+  assert.equal(icon('toyou', { ask: 'question', status: 'done' }), 'done');
+  assert.equal(icon('toyou', { ask: 'decision', status: 'wait' }), 'decide');
+  assert.equal(icon('toyou', { ask: 'decision', status: 'done' }), 'done');
+  assert.equal(icon('toyou', { ask: 'result', status: 'new' }), 'result');
+
+  const move = relationship('move', 'move', 'atlas', 'target', {
+    fromMachine: 'machine-a',
+    toMachine: 'machine-b',
+  });
+  assert.equal(
+    traceSentenceParts(move, who, new Map())
+      .map((part) => part.text)
+      .join(''),
+    'Semon moved target',
+  );
+  assert.equal(
+    traceHopClass(relationship('spawn', 'spawn', 'atlas', 'child'), false),
+    'child k-spawn s-done stub',
+  );
+  assert.equal(
+    traceHopClass(relationship('relay', 'relay', 'atlas', 'child'), true),
+    'child k-relay s-done',
+  );
+  assert.equal(
+    traceHopClass(relationship('move', 'move', 'atlas', 'target'), false),
+    'child k-move s-done',
+  );
+  assert.equal(
+    traceHopClass(relationship('toyou', 'toyou', 'atlas', 'you'), false),
+    'child k-toyou s-done',
+  );
+});
+
+test('trace root metadata does not invent time and restores the harness chip', () => {
+  const formatTime = (at) => `at:${at}`,
+    unstarted = { id: 'unstarted', sid: 'atlas', start: null, u: { k: 'u', text: '' }, at: 120 },
+    started = {
+      id: 'started',
+      sid: 'atlas',
+      start: relationship('start', 'ask', 'you', 'atlas'),
+      at: 120,
+    };
+  assert.equal(traceRootTime(unstarted, formatTime), undefined);
+  assert.equal(
+    traceRootTime(started, formatTime),
+    'at:110',
+  );
+  assert.deepEqual(traceSessionChip({ harness: 'claude' }), {
+    chip: 'Claude Code',
+    chipClass: 'claude',
+  });
+  assert.deepEqual(traceSessionChip({ harness: 'claude', kind: 'Subagent' }), {
+    chip: 'Subagent',
+    chipClass: 'claude',
+  });
+});
+
 test('trace outcomes retain recorded state and event time without inventing a read receipt', () => {
   const result = relationship('result', 'toyou', 'atlas', 'you', { ask: 'result' }),
     end = { st: 'done', why: 'toyou', h: 'result' },
@@ -161,6 +232,30 @@ test('trace outcomes retain recorded state and event time without inventing a re
     ),
     { state: 'idle', text: 'No reply in these logs' },
   );
+});
+
+test('a user-directed turn waits only for a handoff recorded as waiting', () => {
+  for (const status of ['new', 'work', 'err', 'done', 'wait']) {
+    const handoff = relationship('to-you', 'toyou', 'atlas', 'you', {
+      ask: 'question',
+      status,
+    });
+    assert.equal(
+      traceTurnOutcome(
+        {
+          id: 'turn',
+          sid: 'atlas',
+          end: { st: status, why: 'toyou', h: handoff.id },
+          sent: [handoff],
+        },
+        new Map([[handoff.id, handoff]]),
+        (id) => id,
+        (at) => `at:${at}`,
+      ).state,
+      status === 'wait' ? 'wait' : 'done',
+      status,
+    );
+  }
 });
 
 test('trace cost labels keep the original precision and mark unpriced totals', () => {
@@ -269,6 +364,24 @@ test('causal participant parser rejects unrelated or excessive identity scope', 
   const parsed = parseCausalTrace(data, 'fixture', 'selected', 'turn');
   assert.deepEqual(parsed.participants, {});
   assert.equal(parsed.turns.selected[0].end.h, 'end-handoff');
+  const moveTrace = parseCausalTrace(
+    {
+      ...data,
+      handoffs: [
+        {
+          ...relationship('move', 'move', 'selected', 'selected'),
+          from_machine: 'machine-a',
+          to_machine: 'machine-b',
+        },
+      ],
+      turns: [{ ...data.turns[0], sent: ['move'] }],
+    },
+    'fixture',
+    'selected',
+    'turn',
+  );
+  assert.equal(moveTrace.handoffs.get('move')?.fromMachine, '');
+  assert.equal(moveTrace.handoffs.get('move')?.toMachine, '');
   for (const id of ['__proto__', 'constructor', 'toString']) {
     const named = {
       ...data,

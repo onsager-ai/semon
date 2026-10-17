@@ -1,7 +1,7 @@
 import { array, boolean, dictionary, number, object, text } from '../domain/validate';
 import { createTraceCalculations } from '../domain/trace';
 import type { Cost, Handoff, Session, SessionState, Turn } from '../domain/types';
-import { clock, shortModel } from '../domain/format';
+import { clock } from '../domain/format';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
 import { parseRecordedRelationship } from '../domain/relationships';
@@ -110,10 +110,6 @@ export function parseCausalTrace(
   for (const value of array(data.handoffs, object)) {
     const relationship = parseRecordedRelationship(value),
       edge = relationship.edge;
-    if (edge.kind === 'move') {
-      edge.fromMachine = source;
-      edge.toMachine = source;
-    }
     if (handoffs.has(edge.id)) throw Error('Duplicate causal handoff');
     handoffs.set(edge.id, edge);
     previewOwners.set(edge.id, {
@@ -254,8 +250,33 @@ export function traceRootActor(turn: Turn) {
   return turn.start?.from ?? (turn.u ? 'you' : turn.sid);
 }
 
+export function traceRootTime(turn: Turn, formatTime: (at: number) => string) {
+  return turn.start ? formatTime(turn.start.at) : undefined;
+}
+
 export function traceHopActor(edge: Handoff) {
   return edge.kind === 'toyou' ? edge.from : edge.to;
+}
+
+export function traceHandoffIconKey(edge: Handoff) {
+  if (edge.kind === 'spawn' || edge.kind === 'relay') return 'out';
+  if (edge.kind !== 'toyou') return edge.kind;
+  if (edge.ask === 'result') return 'result';
+  if (edge.status === 'done') return 'done';
+  return edge.ask === 'question' ? 'qc' : 'decide';
+}
+
+export function traceHopClass(edge: Handoff, hasChild: boolean) {
+  const stub = !hasChild && edge.kind !== 'toyou' && edge.kind !== 'move' ? ' stub' : '';
+  return 'child k-' + edge.kind + ' s-' + edge.status + stub;
+}
+
+export function traceSessionChip(session?: Pick<Session, 'kind' | 'harness'>) {
+  const label = session?.kind ?? HARNESS[session?.harness ?? ''];
+  return {
+    chip: label || undefined,
+    chipClass: session?.harness,
+  };
 }
 
 export function traceSentenceParts(
@@ -281,15 +302,7 @@ export function traceSentenceParts(
         : ' relayed to ';
     return [session(edge.from, currentTurn), verb(text), session(edge.to, starts.get(edge.id)?.id)];
   }
-  if (edge.kind === 'move')
-    return [
-      verb('Semon moved '),
-      session(edge.to),
-      verb(' from '),
-      { className: 'verb mach', text: edge.fromMachine },
-      verb(' to '),
-      { className: 'verb mach', text: edge.toMachine },
-    ];
+  if (edge.kind === 'move') return [verb('Semon moved '), session(edge.to)];
   const text = {
     question: ' asked you',
     result: ' sent you a result',
@@ -348,7 +361,7 @@ export function traceTurnOutcome(
     const outcome = traceHandoffOutcome(handoff),
       label = [edgeAskLabel(handoff), outcome.text].filter(Boolean).join(' · ');
     return {
-      state: outcome.state,
+      state: handoff.status === 'wait' ? 'wait' : 'done',
       text: withTime(label, handoff.at),
     };
   }
@@ -446,7 +459,7 @@ export function renderCausalTrace(
       turn: turn.id,
       name: data.sessions[turn.sid]?.name,
       harness: harness(turn.sid),
-      chip: shortModel(data.sessions[turn.sid]?.model),
+      ...traceSessionChip(data.sessions[turn.sid]),
     };
   };
   const rootParts: Hop['parts'] = data.root.start
@@ -480,15 +493,11 @@ export function renderCausalTrace(
     key: 'root:' + data.root.id,
     className: 'k-root',
     nodeClass: data.sessions[traceRootActor(data.root)]?.harness ?? 'you',
-    icon: data.root.start ? (I[data.root.start.kind] ?? I.ask) : data.root.u ? I.ask : I.more,
+    icon: data.root.start ? I[traceHandoffIconKey(data.root.start)] : data.root.u ? I.ask : I.more,
     handoff: data.root.start?.id,
     turn: data.root.id,
     parts: rootParts,
-    time: data.root.start
-      ? clock(data.root.start.at, now)
-      : data.root.u
-        ? clock(data.root.at ?? now, now)
-        : undefined,
+    time: traceRootTime(data.root, (at) => clock(at, now)),
     brief: data.root.u?.text || data.root.start?.brief || undefined,
     meta: meta(data.root),
   });
@@ -501,9 +510,9 @@ export function renderCausalTrace(
         edgeOutcome = traceHandoffOutcome(edge);
       hops.push({
         key: edge.id,
-        className: 'child k-' + edge.kind + ' s-' + edge.status,
+        className: traceHopClass(edge, !!child),
         nodeClass: data.sessions[traceHopActor(edge)]?.harness ?? 'you',
-        icon: I[edge.kind] ?? I.result,
+        icon: I[traceHandoffIconKey(edge)],
         handoff: edge.id,
         turn: child?.id,
         parts: isResult
