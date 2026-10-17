@@ -404,3 +404,38 @@ comparison remains historical rather than inherited evidence. Performance has
 52 report-only budget overages and no warnings/failures; this debt is not fixed.
 The current pair, required checks, original artifacts and unresolved visual
 decisions are maintained in the #380 evidence continuation linked from both PRs.
+
+### Restoring native-page history isolation
+
+Hub's existing approved application navigation contract requires an empty Recent
+slot on unselected native pages and no workspace-history reads for chrome. The
+selected Source263 was used for the twelve explicitly approved native references
+in Hub commit a84eef99, which is already included in selected Hub503. The
+canonical candidate had added a Home read at native-page entry and recheck,
+populating workspace Recent. This is an application isolation regression; its
+location in the sidebar does not make it an approved native-data difference.
+
+The overview refresh owner now refuses native host content before any reader
+request or epoch work. Native location handling stays within its server-owned
+content before interpreting source/reader paths, and capability rechecks do not
+start reader requests. The existing eight-second effect lifetime and teardown are
+preserved. Home/Analytics links still enter their reader document; selected-source
+and selected-session Recent retain their existing bounded publications. Four
+focused browser cases cover both widths/themes, cadence, visibility, manual
+refresh, history notifications, input/focus/content identity and destroy without
+APIs. Existing lifecycle cases retain replacement/effect checks with zero native
+history reads. Hub retains its six-layout Recent refresh assertion on the selected
+reader and adds native-page isolation assertions. Final embedded assets, consumer
+freshness and exact-pair runtime/visual/security checks remain required.
+
+The corrected served fixture also qualifies the authoritative selected sid lookup
+as unavailable while preserving stale details.state=done, matching its ranged
+metadata. It waits for distinct cold/warm accepted selected-name witnesses. The
+previous fixture only changed the range response, allowing the valid later sid
+lookup to replace it with Done. Supporting run39061220845 passes both served
+cases and all87 lifecycle cases against the old exact runtime, then exposes two
+functional tooltip selector failures: the first menu tooltip is now the restored
+Claude availability explanation, while the assertion expects a run state word.
+The test now targets the visible run state dot explicitly, preserving its hover
+allowance, exact state-word and both Escape assertions. No production status or
+tooltip change is justified by those fixture failures. Final checks remain pending.
