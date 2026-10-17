@@ -9,7 +9,7 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { recentOrderSource, selectRecentChildren } = await import(
+const { recentOrderSource, selectRecentChildren, selectRecentRoots } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].text).toString('base64')
 );
 
@@ -51,5 +51,29 @@ test('an expanded Recent group returns every loaded child', () => {
   assert.deepEqual(
     selectRecentChildren(rows, (row) => row.rank, new Set(), true).map((row) => row.id),
     rows.map((row) => row.id),
+  );
+});
+
+test('a published selected root preserves the original eight-root slice', () => {
+  const rows = Array.from({ length: 9 }, (_, i) => ({ id: 'root-' + i }));
+  assert.deepEqual(
+    selectRecentRoots(rows, new Set(['root-8']), new Set(rows.map((row) => row.id))),
+    rows.slice(0, 8),
+  );
+});
+
+test('only a qualified selected-metadata root outside the publication may replace the eighth', () => {
+  const published = Array.from({ length: 8 }, (_, i) => ({ id: 'root-' + i })),
+    fallback = { id: JSON.stringify(['source', 'selected-ancestor']) },
+    rows = [...published, fallback],
+    ids = new Set(published.map((row) => row.id));
+  assert.deepEqual(selectRecentRoots(rows, new Set([fallback.id]), ids), [
+    ...published.slice(0, 7),
+    fallback,
+  ]);
+  assert.deepEqual(selectRecentRoots(rows, new Set(), ids), published);
+  assert.deepEqual(
+    selectRecentRoots(rows, new Set([JSON.stringify(['other-source', 'selected-ancestor'])]), ids),
+    published,
   );
 });

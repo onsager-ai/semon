@@ -603,6 +603,7 @@ export function createCatalogViewer(
     const controller = scope.request(),
       deadline = scope.timeout(() => controller.abort(), 15000);
     if (
+      path === '/api/viewer/home' ||
       path.startsWith('/api/viewer/home?') ||
       path.startsWith('/api/viewer/analytics?') ||
       path.startsWith('/api/session-home?') ||
@@ -1104,14 +1105,14 @@ export function createCatalogViewer(
       recentTree = shell.slots.recent.querySelector<HTMLElement>('#lanes'),
       machineRecent =
         !viewerHost?.nativePage && !['home', 'analytics', 'machines', 'machine'].includes(route),
-      recentScope = 'Recent sessions on this machine.';
+      recentScope = overview.recentScope(machineRecent);
     if (recentHeading) {
       recentHeading.textContent = 'Recent';
-      if (machineRecent) recentHeading.setAttribute('data-tip', recentScope);
+      if (recentScope) recentHeading.setAttribute('data-tip', recentScope);
       else recentHeading.removeAttribute('data-tip');
     }
     if (recentTree) {
-      if (machineRecent) recentTree.setAttribute('aria-description', recentScope);
+      if (recentScope) recentTree.setAttribute('aria-description', recentScope);
       else recentTree.removeAttribute('aria-description');
     }
     shell.update(
@@ -1393,7 +1394,7 @@ export function createCatalogViewer(
           items,
           navigation.route.v === 'trace' ? navigation.route.sid : active?.key,
           rail,
-          active?.meta,
+          active && active.sourceKey === capabilities.source_key ? active.meta : undefined,
         ),
       );
     const pinned = shell.slots.recent.querySelector<HTMLElement>('.tree-row.stuck');
@@ -3550,9 +3551,11 @@ export function createCatalogViewer(
         return;
       }
       if (navigation.route.v === 'trace') {
+        void overview.refresh();
         await loadCausal();
         return;
       }
+      void overview.refresh();
       if (!capabilities.source_key) return;
       const next = parseCatalogCapabilities(
         await api('/api/session-capabilities?' + currentParams()),
@@ -3935,6 +3938,7 @@ export function createCatalogViewer(
       overview.draw();
       void overview.refresh(true);
     } else goList(false);
+    if (!machineBookmark) void overview.refresh();
   }
   scope.listen(window, 'popstate', () => {
     if (overlayBackPending) {

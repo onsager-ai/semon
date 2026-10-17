@@ -22,7 +22,7 @@ import { createSeenResults } from './seenResults';
 import { HARNESSES, I, STATE } from './registry';
 import { selectedSessionState } from './sessionPresentation';
 import { ago, clock, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
-import { recentOrderSource, selectRecentChildren } from '../domain/recent';
+import { recentOrderSource, selectRecentChildren, selectRecentRoots } from '../domain/recent';
 import type { EffectScope } from './effects';
 import type { ControlView } from '../lib/control';
 import type { ViewerRoute } from '../lib/routes';
@@ -235,6 +235,8 @@ export function createOverviewPages(host: OverviewHost) {
     error: string | null = null,
     home: HomeData | null = null,
     homeSource: string | null = null,
+    workspaceHome: HomeData | null = null,
+    workspaceCurrent = false,
     analytics: AnalyticsData | null = null,
     machineLabels: Record<string, string> = {},
     selections: Record<string, Selection> = {},
@@ -257,8 +259,10 @@ export function createOverviewPages(host: OverviewHost) {
     if (!value) return;
     selections = value.selections;
     machineLabels = value.labels;
-    recentRows = value.recent;
-    recentNow = value.now;
+    if (!workspaceHome) {
+      recentRows = value.recent;
+      recentNow = value.now;
+    }
   }
   let recentRows: HomeRow[] = [],
     recentNow = 0;
@@ -282,81 +286,90 @@ export function createOverviewPages(host: OverviewHost) {
     rail = false,
     selectedMetadata?: CatalogSession | null,
   ): RecentSnapshot {
-    const borrowed = source ? recentRows.filter((row) => row.source_key === source) : recentRows;
-    const rows: HomeRow[] = borrowed.length
-      ? borrowed
-          .map((row) => {
-            const observed = catalog.find((item) => item.key === row.catalog_key);
-            return observed
-              ? {
-                  ...row,
+    const machines = workspaceHome?.machines ?? home?.machines ?? [],
+      borrowed = workspaceHome
+        ? recentRows
+        : source
+          ? recentRows.filter((row) => row.source_key === source)
+          : recentRows;
+    const rows: HomeRow[] = workspaceHome
+      ? [...borrowed]
+      : borrowed.length
+        ? borrowed
+            .map((row) => {
+              const observed = catalog.find((item) => item.key === row.catalog_key);
+              return observed
+                ? {
+                    ...row,
+                    session: {
+                      ...row.session,
+                      name: observed.name,
+                      kind: observed.presentation_kind ?? row.session.kind,
+                      last: observed.last ?? row.session.last,
+                      parent: observed.parent ?? undefined,
+                      model: observed.model,
+                      repo: observed.repo,
+                    },
+                  }
+                : row;
+            })
+            .concat(
+              catalog
+                .filter((item) => !borrowed.some((row) => row.catalog_key === item.key))
+                .slice(0, 60)
+                .map((row) => ({
+                  id: JSON.stringify([source, row.key]),
+                  source_key: source!,
+                  catalog_key: row.key,
+                  contentGeneration: null,
                   session: {
-                    ...row.session,
-                    name: observed.name,
-                    kind: observed.presentation_kind ?? row.session.kind,
-                    last: observed.last ?? row.session.last,
-                    parent: observed.parent ?? undefined,
-                    model: observed.model,
-                    repo: observed.repo,
+                    name: row.name,
+                    kind: row.presentation_kind ?? undefined,
+                    harness: row.harness,
+                    model: row.model,
+                    repo: row.repo,
+                    state: 'off',
+                    start: row.start ?? 0,
+                    last: row.last ?? 0,
+                    parent: row.parent ?? undefined,
+                    cost: row.cost.usd,
+                    waiting_for: null,
+                    waiting_since: null,
                   },
-                }
-              : row;
-          })
-          .concat(
-            catalog
-              .filter((item) => !borrowed.some((row) => row.catalog_key === item.key))
-              .slice(0, 60)
-              .map((row) => ({
-                id: JSON.stringify([source, row.key]),
-                source_key: source!,
-                catalog_key: row.key,
-                contentGeneration: null,
-                session: {
-                  name: row.name,
-                  kind: row.presentation_kind ?? undefined,
-                  harness: row.harness,
-                  model: row.model,
-                  repo: row.repo,
-                  state: 'off',
-                  start: row.start ?? 0,
-                  last: row.last ?? 0,
-                  parent: row.parent ?? undefined,
-                  cost: row.cost.usd,
-                  waiting_for: null,
-                  waiting_since: null,
-                },
-              })),
-          )
-          .sort((a, b) => b.session.last - a.session.last)
-          .slice(0, 60)
-      : catalog.slice(0, 60).map((row) => ({
-          id: JSON.stringify([source, row.key]),
-          source_key: source!,
-          catalog_key: row.key,
-          contentGeneration: null,
-          session: {
-            name: row.name,
-            kind: row.presentation_kind ?? undefined,
-            harness: row.harness,
-            model: row.model,
-            repo: row.repo,
-            state: row.details?.state ?? 'off',
-            start: row.start ?? 0,
-            last: row.last ?? 0,
-            parent: row.parent ?? undefined,
-            branch: row.branch ?? undefined,
-            cost: row.cost.usd,
-            waiting_for: null,
-            waiting_since: null,
-          },
-        }));
+                })),
+            )
+            .sort((a, b) => b.session.last - a.session.last)
+            .slice(0, 60)
+        : catalog.slice(0, 60).map((row) => ({
+            id: JSON.stringify([source, row.key]),
+            source_key: source!,
+            catalog_key: row.key,
+            contentGeneration: null,
+            session: {
+              name: row.name,
+              kind: row.presentation_kind ?? undefined,
+              harness: row.harness,
+              model: row.model,
+              repo: row.repo,
+              state: row.details?.state ?? 'off',
+              start: row.start ?? 0,
+              last: row.last ?? 0,
+              parent: row.parent ?? undefined,
+              branch: row.branch ?? undefined,
+              cost: row.cost.usd,
+              waiting_for: null,
+              waiting_since: null,
+            },
+          }));
+    const published = new Set(rows.map((row) => row.id));
     if (source && selectedMetadata && selectedMetadata.key === current) {
       for (const relative of [
         ...(selectedMetadata.details?.family?.ancestors ?? []),
         ...(selectedMetadata.details?.family?.runs ?? []),
       ]) {
         if (relative.key === selectedMetadata.key) continue;
-        if (rows.some((row) => row.catalog_key === relative.key)) continue;
+        if (rows.some((row) => row.source_key === source && row.catalog_key === relative.key))
+          continue;
         rows.push({
           id: JSON.stringify([source, relative.key]),
           source_key: source,
@@ -473,7 +486,11 @@ export function createOverviewPages(host: OverviewHost) {
     const requiredPath = new Set([...path, ...expandedPath]);
     const order = host.orderScope(
       'recent',
-      JSON.stringify([recentOrderSource(source, home?.machines ?? []), host.reviews(), rail]),
+      JSON.stringify([
+        recentOrderSource(workspaceHome ? undefined : source, machines),
+        host.reviews(),
+        rail,
+      ]),
     );
     const visibleParents = new Set(
       [...document.querySelectorAll<HTMLElement>('#lanes .treeitem')]
@@ -509,7 +526,7 @@ export function createOverviewPages(host: OverviewHost) {
         forcedRecentOpen.has(row.id) ||
         expandedPath.has(row.id) ||
         (recentOpen.get(row.id) ??
-          (home?.machines.length === 1 ? recentOpen.get(row.catalog_key) : undefined) ??
+          (machines.length === 1 ? recentOpen.get(row.catalog_key) : undefined) ??
           (expandedUnder.has(row.id) || kids.some((child) => rank(child) < 2)));
       const shown = orderRows(
         order,
@@ -535,10 +552,14 @@ export function createOverviewPages(host: OverviewHost) {
           row.session.name,
           STATE[row.session.state] ?? 'Status unavailable',
           HARNESSES[row.session.harness]?.name ?? row.session.harness,
-          home?.machines.find((machine) => machine.key === row.source_key)?.label ?? row.source_key,
+          machines.find((machine) => machine.key === row.source_key)?.label ?? row.source_key,
         ].join(', '),
         current:
-          current === row.catalog_key ? 'page' : rail && path.has(row.id) ? 'true' : undefined,
+          source === row.source_key && current === row.catalog_key
+            ? 'page'
+            : rail && path.has(row.id)
+              ? 'true'
+              : undefined,
         state: row.session.state,
         stateLabel: STATE[row.session.state] ?? 'Status unavailable',
         age: row.session.last > 0 ? ago(row.session.last, recentNow) : '',
@@ -561,17 +582,17 @@ export function createOverviewPages(host: OverviewHost) {
                 },
               ]
             : []),
-          ...((home?.machines.length ?? 0) > 1
+          ...(machines.length > 1
             ? [
                 {
                   className: 'row-machine host',
                   text:
-                    home?.machines.find((machine) => machine.key === row.source_key)?.label ??
+                    machines.find((machine) => machine.key === row.source_key)?.label ??
                     row.source_key,
                   priority: 2,
                   tip:
                     'Machine: ' +
-                    (home?.machines.find((machine) => machine.key === row.source_key)?.label ??
+                    (machines.find((machine) => machine.key === row.source_key)?.label ??
                       row.source_key),
                   icon: I.machine,
                 },
@@ -620,7 +641,7 @@ export function createOverviewPages(host: OverviewHost) {
       (a, b) => b.session.last - a.session.last || a.id.localeCompare(b.id),
       { limit: 8, must: path },
     );
-    const visibleRoots = orderedRoots.slice(0, 8);
+    const visibleRoots = selectRecentRoots(orderedRoots, path, published);
     return {
       // Host-owned pages preserve their empty Recent slot. No filter was run
       // there, so the reader's "No sessions match" result does not apply.
@@ -1014,7 +1035,10 @@ export function createOverviewPages(host: OverviewHost) {
   }
   function draw() {
     if (disposed) return;
-    if (host.nativeContent) {
+    if (
+      host.nativeContent ||
+      !['home', 'analytics', 'machines', 'machine'].includes(host.route())
+    ) {
       host.chrome();
       return;
     }
@@ -1283,8 +1307,29 @@ export function createOverviewPages(host: OverviewHost) {
     );
     return incomplete;
   }
+  function acceptWorkspace(next: HomeData, incomplete: boolean) {
+    workspaceHome = next;
+    workspaceCurrent = !incomplete;
+    recentRows = next.recent;
+    recentNow = next.now;
+  }
+  async function refreshWorkspace(current: () => boolean) {
+    try {
+      const value = await host.api('/api/viewer/home', { seen: [...seen.SEEN_RESULTS] });
+      if (!current()) return;
+      const data = object(value),
+        observations = array(data.observations, object),
+        pending = array(data.pending_observations ?? [], parseSelection);
+      if (pending.length > 8) throw Error('Pending observations exceed their bound');
+      // Chrome consumes only the published compact metadata. Preview reads and
+      // selected repairs remain with the visible overview/selected reader.
+      acceptWorkspace(parseHome(value), observations.length > 0 || pending.length > 0);
+    } catch {
+      if (current()) workspaceCurrent = false;
+    }
+  }
   async function refresh(force = false) {
-    if (disposed || !['home', 'analytics', 'machines', 'machine'].includes(host.route())) return;
+    if (disposed) return;
     if (!force && host.route() === 'analytics' && Date.now() < analyticsRetryAt) return;
     if (loading) {
       queued = true;
@@ -1293,6 +1338,7 @@ export function createOverviewPages(host: OverviewHost) {
     }
     cancelRetry();
     const route = host.route(),
+      sidebarOnly = !['home', 'analytics', 'machines', 'machine'].includes(route),
       ticket = ++epoch,
       requestedQuery =
         route === 'analytics'
@@ -1308,8 +1354,14 @@ export function createOverviewPages(host: OverviewHost) {
       (route !== 'machine' ||
         new URLSearchParams({ source: host.selectedMachine()! }).toString() === requestedQuery);
     loading = true;
-    host.root.setAttribute('aria-busy', 'true');
+    if (!sidebarOnly) host.root.setAttribute('aria-busy', 'true');
+    const workspaceRead =
+      route === 'home' || route === 'machines' ? undefined : refreshWorkspace(current);
     try {
+      if (sidebarOnly) {
+        await workspaceRead;
+        return;
+      }
       const args = new URLSearchParams(requestedQuery);
       if (observationAfter)
         args.set(
@@ -1358,18 +1410,22 @@ export function createOverviewPages(host: OverviewHost) {
         );
       };
       if (route !== 'analytics') {
-        const next = parseHome(value);
+        const next = parseHome(value),
+          publicationIncomplete = observations.length > 0 || pending.length > 0;
         if (
           route === 'machine' &&
           (next.machines.length !== 1 || next.machines[0].key !== host.selectedMachine())
         )
           throw Error('Machine activity source changed');
-        const pages = Math.max(
-          1,
-          ...(['inbox', 'working', 'answered'] as const).map((section) =>
-            Math.ceil((home?.[section].length ?? 0) / 100),
-          ),
-        );
+        const pages =
+          route === 'home' && homeSource === null
+            ? Math.max(
+                1,
+                ...(['inbox', 'working', 'answered'] as const).map((section) =>
+                  Math.ceil((home?.[section].length ?? 0) / 100),
+                ),
+              )
+            : 1;
         for (let page = 1; page < pages; page++) {
           const args = new URLSearchParams();
           for (const section of ['inbox', 'working', 'answered'] as const)
@@ -1416,8 +1472,11 @@ export function createOverviewPages(host: OverviewHost) {
         if (route === 'home') host.observeLaunchControl?.(object(value).launch_control ?? null);
         home = next;
         homeSource = route === 'machine' ? host.selectedMachine() : null;
-        recentRows = next.recent;
-        recentNow = next.now;
+        if (route !== 'machine') acceptWorkspace(next, publicationIncomplete);
+        else if (!workspaceHome) {
+          recentRows = next.recent;
+          recentNow = next.now;
+        }
         error = observations.length
           ? 'Some machine history is still being observed. Retrying…'
           : null;
@@ -1434,8 +1493,7 @@ export function createOverviewPages(host: OverviewHost) {
         if (previewsIncomplete) observations.push({ state: 'previews_unavailable' });
         home = next;
         homeSource = route === 'machine' ? host.selectedMachine() : null;
-        recentRows = next.recent;
-        recentNow = next.now;
+        if (route !== 'machine') acceptWorkspace(next, publicationIncomplete);
       } else {
         const data = object(value);
         const nextAnalytics = parseAnalytics(data),
@@ -1465,10 +1523,12 @@ export function createOverviewPages(host: OverviewHost) {
         : null;
     } catch (failure) {
       if (current()) {
+        if (route === 'home' || route === 'machines') workspaceCurrent = false;
         error = failure instanceof Error ? failure.message : 'Overview unavailable. Retrying…';
         if (route === 'analytics') analyticsRetryAt = Date.now() + 10000;
       }
     } finally {
+      await workspaceRead;
       if (!disposed && ticket === epoch) {
         loading = false;
         draw();
@@ -1493,18 +1553,26 @@ export function createOverviewPages(host: OverviewHost) {
     machine: () => home?.machines.find((row) => row.key === host.selectedMachine()),
     actions,
     waitingCount: () =>
-      home && homeSource === null
+      workspaceHome && workspaceCurrent
         ? Math.max(
             0,
-            home.totals.waiting -
-              home.inbox.filter(
+            workspaceHome.totals.waiting -
+              workspaceHome.inbox.filter(
                 (row) =>
                   row.event?.ask === 'result' &&
-                  ((home!.machines.length === 1 && seen.SEEN_RESULTS.has(row.event.id)) ||
+                  ((workspaceHome!.machines.length === 1 && seen.SEEN_RESULTS.has(row.event.id)) ||
                     seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id]))),
               ).length,
           )
         : undefined,
+    recentScope: (machineScoped: boolean) =>
+      workspaceHome
+        ? workspaceCurrent
+          ? undefined
+          : 'Some workspace activity is unavailable. Showing saved Recent sessions.'
+        : machineScoped || homeSource !== null
+          ? 'Recent sessions on this machine.'
+          : undefined,
     recentSnapshot,
     markResults(source: string, ids: readonly string[]) {
       let changed = false;

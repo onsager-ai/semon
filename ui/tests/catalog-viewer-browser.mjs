@@ -104,6 +104,369 @@ const list = (items) => ({
   items,
   next_cursor: null,
 });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`workspace Recent stays separate from focused Machine publications at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch(),
+        page = await browser.newPage({
+          viewport: { width, height: 900 },
+          colorScheme,
+          isMobile: width === 390,
+          hasTouch: width === 390,
+        }),
+        now = Date.parse('2026-10-07T12:00:00Z'),
+        machines = Array.from({ length: 16 }, (_, i) => ({
+          key: 'source-' + i,
+          label: 'Machine ' + i,
+          up: true,
+          working: 0,
+          sessions: 60,
+          last: now - 1000,
+        })),
+        row = (machine, key, name, parent = null) => ({
+          id: JSON.stringify([machine, key]),
+          source_key: machine,
+          catalog_key: key,
+          session: {
+            name,
+            harness: 'claude',
+            model: 'native-model',
+            repo: null,
+            state: 'idle',
+            last: now - 1000,
+            start: now - 2000,
+            waiting_for: null,
+            waiting_since: null,
+            cost: 1,
+            parent,
+          },
+        }),
+        globalRecent = [
+          row('source-0', 'shared', 'Alpha shared'),
+          row('source-1', 'shared', 'Beta shared'),
+          ...Array.from({ length: 58 }, (_, i) =>
+            row('source-0', 'child-' + i, 'Published child ' + i, 'shared'),
+          ),
+        ],
+        requests = [],
+        errors = [];
+      let workspaceReads = 0,
+        workspaceMode = 'ready';
+      const publication = (machine, retired = false) => ({
+        api: 1,
+        version: (machine ? 'a' : retired ? 'c' : workspaceMode === 'partial' ? 'f' : 'd').repeat(
+          64,
+        ),
+        now,
+        next: { inbox: null, working: null, answered: null },
+        totals: { waiting: machine ? 100 : retired ? 99 : 4, working: 0, answered: 0 },
+        machines: machine ? machines.filter((item) => item.key === machine) : machines,
+        recent: machine
+          ? Array.from({ length: 60 }, (_, i) =>
+              row(machine, i ? 'focused-' + i : 'shared', 'Focused ' + machine + ' row ' + i),
+            )
+          : retired
+            ? [row('source-0', 'retired', 'Retired publication')]
+            : globalRecent.map((item) =>
+                workspaceMode === 'partial' && item.source_key === 'source-1'
+                  ? { ...item, session: { ...item.session, name: 'Beta partial' } }
+                  : item,
+              ),
+        inbox: Array.from({ length: machine ? 100 : retired ? 99 : 4 }, (_, i) => ({
+          ...row(machine ?? 'source-0', 'waiting-' + i, 'Waiting ' + i),
+          event: {
+            id: 'question-' + i,
+            at: now - 1000,
+            done: null,
+            ask: 'decision',
+            status: 'wait',
+            brief: 'Recorded decision',
+            answer: null,
+            declined: false,
+          },
+        })),
+        working: [],
+        answered: [],
+        observations:
+          !machine && workspaceMode === 'partial'
+            ? [{ source_key: 'source-15', state: 'unavailable' }]
+            : [],
+        pending_observations:
+          !machine && workspaceMode === 'pending'
+            ? [{ source_key: 'source-15', catalog_key: 'waiting-for-publication' }]
+            : [],
+      });
+      try {
+        page.on('pageerror', (error) => errors.push(String(error)));
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url()),
+            machine = url.searchParams.get('machine') ?? 'source-0';
+          requests.push(url.pathname + url.search);
+          const font = url.pathname.match(
+            /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
+          );
+          if (font)
+            return route.fulfill({
+              contentType: 'font/woff2',
+              body: await readFile(
+                new URL(
+                  '../../crates/semon-sessions/src/fonts/' + font[1] + '/' + font[2] + '.woff2',
+                  import.meta.url,
+                ),
+              ),
+            });
+          if (url.pathname === '/viewer.css')
+            return route.fulfill({ contentType: 'text/css', body: css });
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({
+              json: {
+                api: 1,
+                items: machines.map((item) => ({ source_key: item.key, label: item.label })),
+                next_cursor: null,
+              },
+            });
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
+          if (url.pathname === '/api/viewer/home') {
+            const focused = url.searchParams.get('source');
+            if (focused) return route.fulfill({ json: publication(focused) });
+            const number = ++workspaceReads;
+            if (workspaceMode === 'unavailable')
+              return route.fulfill({
+                status: 503,
+                headers: { 'x-fixture-workspace-mode': workspaceMode },
+                json: { error: 'overview_unavailable' },
+              });
+            return route.fulfill({
+              headers: {
+                'x-fixture-workspace-mode': workspaceMode,
+                'x-fixture-publication': number === 1 ? 'retired' : 'current',
+              },
+              json: publication(null, number === 1),
+            });
+          }
+          if (url.pathname === '/api/sessions') {
+            const value = meta('shared');
+            value.transcript = {
+              generation: 'b'.repeat(64),
+              errors_generation: 'b'.repeat(64),
+              total: 3,
+            };
+            return route.fulfill({
+              json: {
+                ...list([value]),
+                machine,
+                machine_info: { key: machine, label: machine, freshness: 'cached' },
+              },
+            });
+          }
+          if (url.pathname === '/api/session-identity')
+            return route.fulfill({
+              json: { api: 1, identity: { ...identity('shared'), source_key: machine } },
+            });
+          if (url.pathname === '/api/session-transcript') {
+            const value = transcript('shared', url.searchParams, 3);
+            value.identity.source_key = machine;
+            return route.fulfill({ json: value });
+          }
+          if (url.pathname === '/api/session-trace')
+            return route.fulfill({
+              json: {
+                api: 1,
+                source_key: machine,
+                catalog_key: 'shared',
+                root: 'trace-root',
+                generation: 'e'.repeat(64),
+                sessions: {
+                  shared: {
+                    ...globalRecent[1].session,
+                    cost: { usd: 1, unpriced_models: [] },
+                    tokens: [0, 0, 0],
+                    busy: [],
+                    wait_edges: [],
+                    wait_edges_truncated: false,
+                  },
+                },
+                participants: {},
+                handoffs: [],
+                turns: [
+                  {
+                    id: 'trace-root',
+                    sid: 'shared',
+                    at: now - 2000,
+                    u: true,
+                    sent: [],
+                    end: { st: 'done', why: 'replied', at: now - 1000 },
+                    last: true,
+                  },
+                ],
+                frontier: [],
+                previews: {},
+                incomplete: false,
+                previews_incomplete: false,
+              },
+            });
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return route.fulfill({ contentType: 'text/html', body: html });
+        });
+        await page.goto('http://catalog.test/machines/source-0?machine=source-0');
+        await page.clock.install({ time: new Date(now) });
+        await page.clock.pauseAt(new Date(now + 1));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          const nativeFetch = window.fetch.bind(window);
+          let globalReads = 0;
+          window.workspaceAborts = [];
+          window.fetch = async (input, options = {}) => {
+            const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+            if (url.pathname !== '/api/viewer/home' || url.searchParams.has('source'))
+              return nativeFetch(input, options);
+            const number = ++globalReads;
+            options.signal.addEventListener('abort', () => workspaceAborts.push(number), {
+              once: true,
+            });
+            if (number === 1) {
+              window.workspaceNetworkPending = true;
+              return new Promise((_, reject) => {
+                options.signal.addEventListener(
+                  'abort',
+                  () => reject(new DOMException('Retired fixture request', 'AbortError')),
+                  { once: true },
+                );
+              });
+            }
+            const response = await nativeFetch(input, options);
+            if (number === 2) {
+              const value = await response.json();
+              window.workspaceBodyDelivered = true;
+              response.json = async () => {
+                window.workspaceBodyPending = true;
+                await new Promise((resolve) => (window.releaseWorkspaceBody = resolve));
+                window.workspaceBodyReturned = true;
+                return value;
+              };
+            } else if (number === 3) {
+              const value = await response.json();
+              response.json = async () => {
+                window.workspaceCurrentBodyPending = true;
+                await new Promise((resolve) => (window.releaseCurrentWorkspaceBody = resolve));
+                return value;
+              };
+            }
+            return response;
+          };
+          window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
+        });
+        await page.waitForFunction(() => document.querySelectorAll('#page .nrow').length === 60);
+        assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-0/);
+        await page.waitForFunction(() => window.workspaceNetworkPending);
+        // The exact bare Home request belongs to the existing navigation abort owner.
+        await page.evaluate(() => document.querySelector('#nav [data-go="machines"]').click());
+        await page.waitForFunction(() => window.workspaceBodyPending);
+        assert.equal(await page.evaluate(() => workspaceAborts.includes(1)), true);
+        assert.equal(await page.evaluate(() => window.workspaceBodyDelivered), true);
+        // Already delivered JSON can still finish after cancellation: its epoch must reject it.
+        await page.evaluate(() => {
+          history.pushState(null, '', '/machines/source-1?machine=source-1');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+        await page.waitForFunction(() => workspaceAborts.includes(2));
+        await page.waitForFunction(() => window.workspaceCurrentBodyPending);
+        await page.evaluate(() => window.releaseWorkspaceBody());
+        await page.waitForFunction(() => window.workspaceBodyReturned);
+        await page.clock.runFor(32);
+        assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
+        assert.equal(
+          (await page.locator('#nav [data-go="home"]').textContent()).replace(/\s/g, ''),
+          'Home',
+          'retired waiting totals cannot publish while the current workspace body is held',
+        );
+        await page.evaluate(() => window.releaseCurrentWorkspaceBody());
+        await page.waitForFunction(
+          () =>
+            document.querySelectorAll('#page .nrow').length === 60 &&
+            document.querySelector('#page .nrow')?.textContent.includes('Focused source-1'),
+        );
+        await page.waitForFunction(() =>
+          document.querySelector('#lanes')?.textContent.includes('Alpha shared'),
+        );
+        assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
+        assert.equal((await page.locator('#lanes .row-machine').count()) > 1, true);
+        const homeText = () => page.locator('#nav [data-go="home"]').textContent();
+        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
+        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-1/);
+
+        await page.locator('#page .nrow').first().click();
+        await page.locator('#page [data-entry-key="shared:0"]').waitFor();
+        const current = page.locator('#lanes .srow[aria-current="page"]');
+        assert.equal(await current.count(), 1);
+        assert.equal(await current.getAttribute('data-id'), JSON.stringify(['source-1', 'shared']));
+        assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
+        assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
+
+        for (const mode of ['unavailable', 'partial', 'pending', 'ready']) {
+          workspaceMode = mode;
+          const response = page.waitForResponse(
+            (value) => value.headers()['x-fixture-workspace-mode'] === mode,
+          );
+          await page.clock.runFor(8100);
+          await (await response).finished();
+          await page.waitForFunction(
+            (ready) =>
+              ready
+                ? !document.querySelector('#lanes')?.hasAttribute('aria-description')
+                : document
+                    .querySelector('#lanes')
+                    ?.getAttribute('aria-description')
+                    ?.includes('unavailable'),
+            mode === 'ready',
+          );
+          assert.equal((await homeText()).replace(/\s/g, ''), mode === 'ready' ? 'Home4' : 'Home');
+          await page.waitForFunction(
+            (label) => document.querySelector('#lanes')?.textContent.includes(label),
+            mode === 'partial' ? 'Beta partial' : 'Beta shared',
+          );
+        }
+        await page.evaluate(() => {
+          history.pushState(null, '', '/trace/native/shared/trace-root?machine=source-1');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+        await page.locator('#page .agents-panel').waitFor();
+        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
+        assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
+        assert.equal(
+          requests.some((path) => path.startsWith('/api/model')),
+          false,
+        );
+        assert.equal(
+          requests.some((path) => path.startsWith('/api/session-home')),
+          false,
+        );
+        assert.equal(
+          requests.some((path) => path.startsWith('/api/session-observe')),
+          false,
+        );
+        assert.deepEqual(errors, []);
+        await page.evaluate(() => window.app.destroy());
+      } finally {
+        try {
+          if (!page.isClosed())
+            await page.evaluate(() => {
+              window.releaseWorkspaceBody?.();
+              window.releaseCurrentWorkspaceBody?.();
+              window.app?.destroy();
+            });
+          await page.unrouteAll({ behavior: 'wait' });
+        } finally {
+          await browser.close();
+        }
+      }
+    });
+
 function transcript(key, p, total = 65, generation = 'b') {
   const limit = Number(p.get('limit') ?? 60),
     first = p.has('after') ? Number(p.get('after')) : Math.max(0, total - limit),

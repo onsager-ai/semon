@@ -23,3 +23,18 @@ export function selectRecentChildren<Row extends { id: string }>(
   for (const row of items) if (keep.size < TREE_ROWS) keep.add(row.id);
   return items.filter((row) => keep.has(row.id));
 }
+
+/** The original eight-root cap, with a bounded selected-metadata fallback. */
+export function selectRecentRoots<Row extends { id: string }>(
+  ordered: readonly Row[],
+  required: ReadonlySet<string>,
+  published: ReadonlySet<string>,
+): Row[] {
+  const visible = ordered.slice(0, 8),
+    fallback = ordered.find((row) => required.has(row.id) && !published.has(row.id));
+  if (fallback && !visible.some((row) => row.id === fallback.id)) {
+    if (visible.length === 8) visible[7] = fallback;
+    else visible.push(fallback);
+  }
+  return visible;
+}
