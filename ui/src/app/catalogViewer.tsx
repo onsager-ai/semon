@@ -441,7 +441,6 @@ export function createCatalogViewer(
     back = document.createElement('button'),
     jumpActions = document.createElement('div'),
     jumpSlot = document.createElement('span'),
-    composerTarget = document.createElement('span'),
     jumpTarget = document.createElement('div');
   const readerResize = new ResizeObserver(() => {
     if (
@@ -547,7 +546,7 @@ export function createCatalogViewer(
   jumpTarget.className = 'jump-wrap';
   jumpTarget.hidden = true;
   jumpSlot.append(jumpTarget);
-  jumpActions.append(jumpSlot, composerTarget);
+  jumpActions.append(jumpSlot);
   const recent = createRecentRenderer(shell.slots.recent.querySelector<HTMLElement>('#lanes')!, {
     open(key) {
       if (overview.openRecent(key)) return;
@@ -1346,7 +1345,9 @@ export function createCatalogViewer(
           route === 'analytics'
             ? [overview.actions]
             : active
-              ? [composerTarget, ...(content ? [content.actions] : [sources])]
+              ? content
+                ? [content.actions]
+                : [sources]
               : route === 'sessions' && !sourcesOpen && capabilities.source_candidates
                 ? [sources]
                 : route === 'trace'
@@ -2329,7 +2330,6 @@ export function createCatalogViewer(
       renderSessionScreen(
         view.root,
         {
-          composerTarget,
           id: view.key,
           name: view.meta?.name ?? 'Session',
           control: controlFor(view),
@@ -2462,7 +2462,6 @@ export function createCatalogViewer(
     renderSessionScreen(
       view.root,
       {
-        composerTarget,
         id: view.key,
         name: view.meta?.name ?? 'Session',
         footer,
