@@ -1,11 +1,21 @@
 name: Viewer UI artifact diagnostics
 on:
   workflow_dispatch:
+    inputs:
+      diagnostic:
+        description: Select one bounded Harbor investigation
+        type: choice
+        options:
+          - paint
+          - retained-images
+        default: paint
+        required: true
 permissions:
   contents: read
   actions: read
 jobs:
   retained-harbor-images:
+    if: inputs.diagnostic == 'retained-images'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -42,7 +52,7 @@ jobs:
           if-no-files-found: error
 
   harbor-paint-protocol:
-    if: github.ref == 'refs/heads/diagnostic/380-harbor-artifact-20261018'
+    if: github.ref == 'refs/heads/diagnostic/380-harbor-artifact-20261018' && inputs.diagnostic == 'paint'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
