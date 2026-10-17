@@ -242,15 +242,7 @@ function Section({ heading, count }: { heading: string; count: number }) {
     </div>
   );
 }
-function Live({
-  row,
-  host,
-  machine = false,
-}: {
-  row: LiveRow;
-  host: ActivityHost;
-  machine?: boolean;
-}) {
+function Live({ row, host }: { row: LiveRow; host: ActivityHost }) {
   return (
     <button
       class="nrow"
@@ -268,16 +260,10 @@ function Live({
       />
       <span class="nm">{screenText(row.name)}</span>
       <span class="ag">
-        {machine ? (
-          screenText(row.age ?? '')
-        ) : (
-          <>
-            {row.harness && <Harness mark={row.harness} />}
-            {screenText(row.status)}
-          </>
-        )}
+        {row.harness && <Harness mark={row.harness} />}
+        {screenText(row.status)}
       </span>
-      {(!machine || !row.activity) && <span class="for">{screenText(row.detail)}</span>}
+      <span class="for">{screenText(row.detail)}</span>
       {row.activity && (
         <span class="act">
           <span class="spin" />
@@ -450,6 +436,9 @@ export function MachineView({
 }) {
   return (
     <>
+      <div class="ph sr">
+        <h1>{screenText(snapshot.name)}</h1>
+      </div>
       {snapshot.observation && (
         <p class="catalog-note" role="status">
           {snapshot.observation}
@@ -460,7 +449,7 @@ export function MachineView({
           <Section heading="Sessions" count={snapshot.totalSessions} />
           <div class="list">
             {snapshot.sessions.map((row) => (
-              <Live key={row.id} row={row} host={host} machine />
+              <Live key={row.id} row={row} host={host} />
             ))}
           </div>
         </>
@@ -475,7 +464,7 @@ export function MachineView({
           <Section heading="Moved off" count={snapshot.off.length} />
           <div class="list">
             {snapshot.off.map((row) => (
-              <Live key={row.id} row={row} host={host} machine />
+              <Live key={row.id} row={row} host={host} />
             ))}
           </div>
         </>

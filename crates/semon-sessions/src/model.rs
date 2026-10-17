@@ -4678,10 +4678,20 @@ impl<'a> Builder<'a> {
             events.insert(h.out.id.clone(), fields);
         }
         let current = turns.iter().rev().copied().find(|turn| turn.sid == key);
+        let detail_from = current.and_then(|turn| {
+            if let Some(start) = &turn.start {
+                self.handoffs
+                    .iter()
+                    .find(|handoff| &handoff.out.id == start)
+                    .map(|handoff| handoff.out.from.as_str())
+            } else {
+                turn.u.then_some("you")
+            }
+        });
         let activity=self.by_key.get(key).map(|index| &self.sessions[*index]).and_then(|session|session.out.activity.as_ref()).and_then(|(name,_,_,at)| {
             tx.slots.iter().rev().find(|slot|slot.call_name()==Some(name.as_str()) && slot.t==Some(*at)).and_then(|slot|slot.file.as_ref().and_then(|file|file.path.to_str().map(|path|serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"activity","tool":name,"cwd":file.cwd}))))
         });
-        serde_json::json!({"events":events,"detail":current.and_then(origin),"activity":activity})
+        serde_json::json!({"events":events,"detail":current.and_then(origin),"detail_from":detail_from,"activity":activity})
     }
 
     #[cfg(test)]

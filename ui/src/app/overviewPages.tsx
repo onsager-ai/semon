@@ -20,8 +20,7 @@ import { parseAnalytics, type AnalyticsData } from '../state/analytics-wire';
 import { renderAnalyticsPresentation } from './analyticsPresentation';
 import { createSeenResults } from './seenResults';
 import { HARNESSES, I, STATE } from './registry';
-import { runningToolLabel } from '../domain/toolNames';
-import { ago, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
+import { ago, clock, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
 import type { EffectScope } from './effects';
 import type { ControlView } from '../lib/control';
 
@@ -44,6 +43,7 @@ interface HomeRow extends Selection {
     waiting_since: number | null;
     cost: number | null;
     detail?: string;
+    detail_from?: string;
     parent?: string;
     branch?: string;
     activity?: readonly [string, string, number];
@@ -120,6 +120,7 @@ function parseHomeRow(value: unknown, now: number): HomeRow {
       parent: nullable(session.parent, text) ?? undefined,
       branch: nullable(session.branch, text) ?? undefined,
       detail: nullable(session.detail, text) ?? undefined,
+      detail_from: nullable(session.detail_from, text) ?? undefined,
       activity: parseActivity(session.activity, now),
     },
     event: event
@@ -178,6 +179,16 @@ function parseHome(value: unknown): HomeData {
     working: array(data.working, (row) => parseHomeRow(row, number(data.now))),
     answered: array(data.answered, (row) => parseHomeRow(row, number(data.now))),
   };
+}
+
+function promptSender(row: HomeRow, recent: readonly HomeRow[]): string | null {
+  const from = row.session.detail_from;
+  if (from === 'you') return 'for you';
+  if (!from) return null;
+  const sender = recent.find(
+    (candidate) => candidate.source_key === row.source_key && candidate.catalog_key === from,
+  );
+  return sender ? 'for ' + sender.session.name : null;
 }
 interface OverviewHost {
   root: HTMLElement;
@@ -720,14 +731,7 @@ export function createOverviewPages(host: OverviewHost) {
             home!.machines.length > 1
               ? home!.machines.find((machine) => machine.key === row.source_key)?.label
               : null,
-            row.session.detail
-              ? 'for ' +
-                (home!.recent.find(
-                  (parent) =>
-                    parent.source_key === row.source_key &&
-                    parent.catalog_key === row.session.parent,
-                )?.session.name ?? 'you')
-              : null,
+            promptSender(row, home!.recent),
             row.session.detail ? previewLine(row.session.detail) : null,
           ]
             .filter(Boolean)
@@ -987,24 +991,18 @@ export function createOverviewPages(host: OverviewHost) {
                       ? 'Waiting on you'
                       : 'Recorded history',
                 status:
-                  row.session.kind ?? HARNESSES[row.session.harness]?.name ?? row.session.harness,
+                  row.session.state === 'work'
+                    ? (HARNESSES[row.session.harness]?.name ?? row.session.harness)
+                    : ago(row.session.last, home!.now),
                 age: ago(row.session.last, home!.now),
                 detail: [
-                  row.session.kind ?? HARNESSES[row.session.harness]?.name ?? row.session.harness,
-                  machine.label,
+                  promptSender(row, home!.recent),
                   row.session.detail ? previewLine(row.session.detail) : null,
                 ]
                   .filter(Boolean)
                   .join(' · '),
-                activity:
-                  row.session.state === 'work' && row.session.activity
-                    ? ([
-                        runningToolLabel(row.session.activity[0]),
-                        row.session.activity[1],
-                        row.session.activity[2],
-                      ] as const)
-                    : undefined,
-                harness: mark(row.session.harness),
+                activity: row.session.state === 'work' ? row.session.activity : undefined,
+                harness: row.session.state === 'work' ? mark(row.session.harness) : undefined,
               })),
             off: [],
             moves: [],
@@ -1036,23 +1034,22 @@ export function createOverviewPages(host: OverviewHost) {
           {
             up: home.machines.filter((machine) => machine.up).length,
             working: home.machines.reduce((sum, machine) => sum + machine.working, 0),
-            rows: home.machines.map((machine) => ({
-              id: machine.key,
-              name: machine.label,
-              state: machine.up ? 'work' : 'off',
-              stateLabel: machine.up ? 'Online' : 'Offline',
-              status: machine.working
-                ? machine.working + ' working'
-                : machine.up
-                  ? 'Online'
-                  : 'Offline',
-              detail:
-                machine.sessions +
-                ' sessions' +
-                (machine.last == null
-                  ? ''
-                  : ' · ' + timeText(Math.max(0, home!.now - machine.last)) + ' ago'),
-            })),
+            rows: [...home.machines]
+              .sort((a, b) => Number(a.up) - Number(b.up))
+              .map((machine) => ({
+                id: machine.key,
+                name: machine.label,
+                state: !machine.up ? 'err' : machine.working ? 'work' : 'idle',
+                stateLabel: STATE[!machine.up ? 'err' : machine.working ? 'work' : 'idle'],
+                status: !machine.up ? 'offline' : machine.working ? 'up' : 'idle',
+                detail: machine.up
+                  ? machine.working +
+                    ' working · ' +
+                    machine.sessions +
+                    (machine.sessions === 1 ? ' session' : ' sessions')
+                  : 'Not responding' +
+                    (machine.last == null ? '' : ' since ' + clock(machine.last, home!.now)),
+              })),
             admin: host.admin(),
           },
           {
@@ -1182,6 +1179,7 @@ export function createOverviewPages(host: OverviewHost) {
               };
             });
             const detail = nullable(session.detail, text);
+            const detailFrom = nullable(session.detail_from, text);
             const activity = parseActivity(session.activity, next.now);
             const failed = boolean(value.incomplete);
             if (failed && rows.length > 1) {
@@ -1191,6 +1189,7 @@ export function createOverviewPages(host: OverviewHost) {
             for (const row of rows) {
               row.previewReady = !failed;
               row.session.detail = detail ?? undefined;
+              row.session.detail_from = detailFrom ?? undefined;
               row.session.activity = activity;
               if (row.event && events[row.event.id])
                 Object.assign(row.event, events[row.event.id], {
@@ -1332,6 +1331,7 @@ export function createOverviewPages(host: OverviewHost) {
             if (!retained || retained.contentGeneration !== row.contentGeneration) continue;
             row.previewReady = retained.previewReady;
             row.session.detail = retained.session.detail;
+            row.session.detail_from = retained.session.detail_from;
             if (retained.session.activity) row.session.activity = retained.session.activity;
             if (row.event && retained.event) {
               row.event.brief = retained.event.brief;

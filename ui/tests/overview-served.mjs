@@ -261,6 +261,21 @@ test(
             await page.locator('.analytics-metrics').waitFor();
             await screenshot('analytics');
             await navigate('machines');
+            for (const machine of home.machines) {
+              const machineRow = page
+                .locator('#page .nrow[data-m]')
+                .filter({ hasText: machine.label });
+              await machineRow.waitFor();
+              assert.equal(
+                await machineRow.locator('.ag').textContent(),
+                !machine.up ? 'offline' : machine.working ? 'up' : 'idle',
+              );
+              if (machine.up)
+                assert.match(
+                  await machineRow.locator('.for').textContent(),
+                  new RegExp(machine.working + ' working.*' + machine.sessions + ' sessions?'),
+                );
+            }
             await page.locator('#page [data-m]').first().click();
             await page.getByRole('button', { name: 'Back to Machines', exact: true }).waitFor();
             await page.locator('#page .nrow[data-id]').first().waitFor();
@@ -279,6 +294,33 @@ test(
             );
             await page.waitForFunction(
               () => document.querySelector('#page')?.getAttribute('aria-busy') !== 'true',
+            );
+            // Geometry comes from the selected complete application's styles
+            // at 263a02d, including the phone overrides, not the deferred v6.
+            const machineGeometry = await page.locator('#page').evaluate((node) => {
+              const pageStyle = getComputedStyle(node),
+                row = getComputedStyle(node.querySelector('.nrow'));
+              return {
+                padding: pageStyle.padding,
+                gap: pageStyle.gap,
+                rowPadding: row.padding,
+                rowGap: row.columnGap,
+                title: node.querySelector('.ph.sr h1')?.textContent,
+              };
+            });
+            assert.deepEqual(machineGeometry, {
+              padding: width === 390 ? '2px 16px 72px' : '8px 32px 88px',
+              gap: width === 390 ? '16px' : '24px',
+              rowPadding: '11px 0px',
+              rowGap: '10px',
+              title: home.machines[0].label,
+            });
+            const quill = page.locator('#page .nrow').filter({ hasText: 'quill' });
+            assert.match(await quill.locator('.for').textContent(), /for you.*Add PDF export/);
+            assert.equal(
+              await quill.locator('.ag .hicon').count(),
+              0,
+              'non-working rows retain their age without a harness icon',
             );
             assert.match(
               await page.locator('#page .nrow').filter({ hasText: 'Principal' }).textContent(),

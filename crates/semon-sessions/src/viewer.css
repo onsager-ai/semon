@@ -1108,16 +1108,6 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .session-row-main { width: 100%; }
 .session-row-main .nm { flex: 1 1 auto; min-width: 0; }
 /* Native machine details retain the shared machine screen's reference geometry. */
-.page.machine-page { padding: 8px var(--gutter) calc(88px + env(safe-area-inset-bottom, 0px)); gap: 24px; }
-.machine-page .sec-h { margin: 0 0 -14px; font-size: var(--fs-sm); line-height: calc(var(--lh-cap) + 2px); letter-spacing: normal; text-transform: none; color: var(--ink-2); }
-.machine-page .sec-h .n { font-family: inherit; font-variant-numeric: tabular-nums; }
-.machine-page .list { border-top: 0; margin: 0 -8px; }
-.machine-page .nrow { grid-template-columns: 8px minmax(0, 1fr) auto; column-gap: 12px; padding-inline: 8px; }
-.machine-page .nrow .for, .machine-page .nrow .act { line-height: var(--lh-cap); }
-.machine-page .nrow .nm, .machine-page .nrow .ag { line-height: var(--lh-ui); }
-.machine-page .nrow .ag { font-variant-numeric: tabular-nums; }
-.machine-page .nrow .act { gap: 8px; }
-.machine-page .nrow .act .el { font-family: inherit; font-variant-numeric: tabular-nums; padding-left: 0; }
 /* Loaded Catalog children share the established compact navigation pitch. */
 .session-list .kids-wrap { display: grid; border-bottom: 1px solid var(--line); padding-bottom: var(--s1); }
 .session-list .kids-wrap > .nrow { border-bottom-color: transparent; }
