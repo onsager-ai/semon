@@ -1469,6 +1469,151 @@ for (const width of [390, 1280])
       }
     });
 
+test('cached history restores tail following independently of another reader position', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({
+        viewport: { width: 1280, height: 900 },
+        colorScheme: 'dark',
+      }),
+      observations = { one: { generation: 'b', total: 65 }, two: { generation: 'b', total: 65 } };
+    let returningToB = false;
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url()),
+        key = url.searchParams.get('sid');
+      if (url.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: capabilities(true) });
+      if (url.pathname === '/api/session-identity')
+        return route.fulfill({ json: { api: 1, identity: identity(key) } });
+      if (url.pathname === '/api/sessions') {
+        const keys = key ? [key] : ['one', 'two'];
+        return route.fulfill({
+          json: list(
+            keys.map((key) => ({
+              ...meta(key),
+              ...(key === 'two' && returningToB ? { name: 'Restored session two' } : {}),
+              transcript: {
+                generation: observations[key].generation.repeat(64),
+                errors_generation: observations[key].generation.repeat(64),
+                total: observations[key].total,
+              },
+            })),
+          ),
+        });
+      }
+      if (url.pathname === '/api/session-transcript') {
+        const { generation, total } = observations[key];
+        if (
+          url.searchParams.has('generation') &&
+          url.searchParams.get('generation') !== generation.repeat(64)
+        )
+          return route.fulfill({
+            status: 409,
+            json: { error: 'stale_projection', resynchronize: true },
+          });
+        return route.fulfill({ json: transcript(key, url.searchParams, total, generation) });
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.evaluate(() => {
+      window.deferHistoryScroll = false;
+      window.addEventListener(
+        'scroll',
+        (event) => {
+          if (window.deferHistoryScroll && event.target === document.querySelector('#main'))
+            event.stopImmediatePropagation();
+        },
+        { capture: true, passive: true },
+      );
+    });
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    const gap = () =>
+      page
+        .locator('#main')
+        .evaluate((node) => node.scrollHeight - node.scrollTop - node.clientHeight);
+    await page.locator('#page [data-id="two"]').click();
+    await page.locator('#page [data-entry-key="two:64"]').waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.clock.runFor(34);
+    assert.ok((await gap()) < 2, 'Reader B initially follows the tail');
+    await page.locator('#nav [data-go="sessions"]').click();
+    await page.locator('#page [data-id="one"]').click();
+    await page.locator('#page [data-entry-key="one:64"]').waitFor();
+    const inert = await page.locator('#topbar').evaluate((bar) => {
+      const rect = bar.getBoundingClientRect(),
+        x = rect.right - 1,
+        y = rect.top + 1,
+        target = document.elementFromPoint(x, y);
+      if (!bar.contains(target) || target.closest('button, a, input, [role="button"]'))
+        throw Error('History input requires inert topbar padding');
+      return { x, y };
+    });
+    await page.mouse.click(inert.x, inert.y);
+    await page
+      .locator('#page [data-entry-key="one:20"]')
+      .evaluate((node) => node.scrollIntoView({ block: 'center' }));
+    await page.clock.runFor(34);
+    await page.getByRole('button', { name: /Jump to bottom/ }).waitFor();
+    await page
+      .getByRole('button', { name: 'Session menu: details, cost and actions' })
+      .evaluate((node) => node.focus({ preventScroll: true }));
+    const anchor = await page
+      .locator('#page [data-entry-key="one:20"]')
+      .evaluate((node) => node.getBoundingClientRect().top);
+    // Keep the native restoration real while preventing a later scroll event
+    // from concealing an incorrectly demoted cached following flag.
+    await page.evaluate(() => {
+      window.deferHistoryScroll = true;
+    });
+    await page.goBack();
+    await page.locator('#page [data-id="one"]').waitFor();
+    returningToB = true;
+    await page.goBack();
+    await page.locator('#page [data-entry-key="two:64"]').waitFor();
+    // The accepted metadata title proves the restoration's asynchronous
+    // observer finished before the next projection is appended.
+    await page
+      .locator('#page .ph > h1')
+      .filter({ hasText: 'Restored session two' })
+      .waitFor({ state: 'attached' });
+    assert.ok((await gap()) < 2, 'History restores B to its saved tail');
+    assert.equal(
+      await page.locator('#page .ph > h1').evaluate((node) => node === document.activeElement),
+      true,
+    );
+    observations.two = { generation: 'c', total: 75 };
+    await page.clock.runFor(3100);
+    await page.locator('#page [data-entry-key="two:74"]').waitFor({ state: 'attached' });
+    assert.ok((await gap()) < 2, 'Restored B follows the appended bounded projection');
+    await page.evaluate(() => {
+      window.deferHistoryScroll = false;
+      document.querySelector('#main').dispatchEvent(new Event('scroll'));
+    });
+    await page.goForward();
+    await page.locator('#page [data-id="one"]').waitFor();
+    await page.goForward();
+    await page.locator('#page [data-entry-key="one:20"]').waitFor();
+    assert.equal(
+      await page.locator('#page .ph > h1').evaluate((node) => node === document.activeElement),
+      true,
+    );
+    const restored = await page
+      .locator('#page [data-entry-key="one:20"]')
+      .evaluate((node) => node.getBoundingClientRect().top);
+    assert.ok(Math.abs(restored - anchor) < 2, JSON.stringify({ anchor, restored }));
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
 test('same-projection turn anchors retain loaded fields, focus and the anchor inside the bounded cache', async () => {
   const browser = await chromium.launch();
   try {
