@@ -423,11 +423,30 @@ test(
               'expanded Recent keeps descendant status in its flag, without a rail dot shifting age',
             );
             if (width === 1280 && colorScheme === 'light') {
-              // Leave selected-row discovery to transcript metadata, not Home or page summaries.
+              // Leave selected-row discovery to selected native metadata, not Home or page summaries.
               let sawUnavailableStatus = false,
+                sawUnavailableLookup = false,
                 sawSelectedRemovedFromHome = false,
                 sawAcceptedHomeWitness = false;
-              let homeWitnessName = 'Accepted filtered Home publication';
+              let homeWitnessName = 'Accepted filtered Home publication',
+                selectedWitnessName = 'Update the ingest docs [accepted cold selected observation]';
+              const unavailableSelected = (session) => {
+                session.status = { state: null, observation: 'unavailable' };
+                session.details = {
+                  turns: 0,
+                  calls: null,
+                  errors: null,
+                  tool_calls: {},
+                  signals: {},
+                  cost: { usd: null, unpriced_models: [] },
+                  cwd: null,
+                  copied_usage: false,
+                  reported_runs: [],
+                  cost_check: [],
+                  ...session.details,
+                  state: 'done',
+                };
+              };
               const withoutHomeSelected = async (route) => {
                 const response = await route.fetch();
                 const body = await response.json();
@@ -455,11 +474,19 @@ test(
               };
               const withoutCatalogSelected = async (route) => {
                 const query = new URL(route.request().url()).searchParams;
-                // This mock only changes the catalog listing, never a selected-session lookup.
-                if (query.has('sid')) return route.continue();
+                if (query.has('sid') && query.get('sid') !== 'a-docs') return route.continue();
                 const response = await route.fetch();
                 const body = await response.json();
-                if (Array.isArray(body.items))
+                if (query.get('sid') === 'a-docs') {
+                  // The selected observation is authoritative too. Keep its status
+                  // consistent with the ranged read while preserving native identity.
+                  const selected = body.items?.find((row) => row.key === 'a-docs');
+                  if (selected) {
+                    unavailableSelected(selected);
+                    selected.name = selectedWitnessName;
+                    sawUnavailableLookup = true;
+                  }
+                } else if (Array.isArray(body.items))
                   body.items = body.items.filter((row) => row.key !== 'a-docs');
                 await route.fulfill({ response, body: JSON.stringify(body) });
               };
@@ -468,22 +495,7 @@ test(
                 const response = await route.fetch();
                 const body = await response.json();
                 if (query.get('sid') === 'a-docs' && body.session?.key === 'a-docs') {
-                  body.session.status = { state: null, observation: 'unavailable' };
-                  body.session.details = {
-                    state: 'done',
-                    turns: 0,
-                    calls: null,
-                    errors: null,
-                    tool_calls: {},
-                    signals: {},
-                    cost: { usd: null, unpriced_models: [] },
-                    cwd: null,
-                    copied_usage: false,
-                    reported_runs: [],
-                    cost_check: [],
-                    ...body.session.details,
-                    state: 'done',
-                  };
+                  unavailableSelected(body.session);
                   sawUnavailableStatus = true;
                 }
                 await route.fulfill({ response, body: JSON.stringify(body) });
@@ -516,6 +528,12 @@ test(
               );
               const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
               await selectedRecent.waitFor({ state: 'visible' });
+              await selectedRecent.getByText(selectedWitnessName, { exact: true }).waitFor();
+              assert.equal(
+                sawUnavailableLookup,
+                true,
+                'the cold selected observation was accepted with unavailable status',
+              );
               const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
                 listedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem');
               await listedChildren.nth(2).waitFor({ state: 'visible' });
@@ -568,6 +586,8 @@ test(
               // A fresh document preserves the existing ranked order; verify selected-path
               // promotion separately while the same Recent ordering scope is still alive.
               homeWitnessName = 'Accepted warm filtered Home publication';
+              selectedWitnessName = 'Update the ingest docs [accepted warm selected observation]';
+              sawUnavailableLookup = false;
               sawSelectedRemovedFromHome = false;
               sawAcceptedHomeWitness = false;
               await page.route(/\/api\/viewer\/home(?:\?.*)?$/, withoutHomeSelected);
@@ -622,6 +642,19 @@ test(
                 'the SPA-selected metadata reports unavailable status',
               );
               await selectedRecent.waitFor({ state: 'visible' });
+              await selectedRecent.getByText(selectedWitnessName, { exact: true }).waitFor();
+              assert.equal(
+                sawUnavailableLookup,
+                true,
+                'the warm selected observation was accepted with unavailable status',
+              );
+              assert.equal(
+                await selectedRecent
+                  .locator('.dot')
+                  .evaluate((node) => node.classList.contains('off')),
+                true,
+                'the warm unavailable status does not reuse stale completed details',
+              );
               await warmListedChildren.nth(2).waitFor({ state: 'visible' });
               const promotedIds = await warmListedChildren.evaluateAll((nodes) =>
                 nodes.map((node) => node.getAttribute('data-id') ?? ''),
