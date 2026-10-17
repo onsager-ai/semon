@@ -1875,7 +1875,12 @@ export function createCatalogViewer(
       ...item,
       presentation: catalogSessionRow(item, descendants.get(item.key)),
     }));
-    catalogBrowser.update({ harness, repo, model, q: query }, items, capabilities.source_key);
+    catalogBrowser.update(
+      { harness, repo, model, q: query },
+      items,
+      capabilities.source_key,
+      sourceLabel(capabilities.source_key),
+    );
     const groupKey = (item: CatalogSession) =>
       groupBy === 'project'
         ? (item.repo ?? 'No repo (roles)')

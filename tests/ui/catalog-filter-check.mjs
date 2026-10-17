@@ -79,7 +79,7 @@ export async function catalogFilterCheck(browser, name) {
         await filterSheet(page);
         for (const [label, value] of [
           ['Harness', row.harness],
-          ['Project', row.repo],
+          ['Repo', row.repo],
         ]) {
           const select = page.locator(`.filters-sheet .sh-select[data-label="${label}"]`);
           await select.locator('.sh-select-trigger').click();
@@ -123,15 +123,15 @@ export async function catalogFilterCheck(browser, name) {
         );
         assert.equal(
           await page
-            .locator('.sh-select[data-label="Project"] [role="option"][aria-selected="true"]')
+            .locator('.sh-select[data-label="Repo"] [role="option"][aria-selected="true"]')
             .getAttribute('data-value'),
           row.repo,
         );
         await doneFilterSheet(page);
-        await pickFilter(page, 'Project', '');
+        await pickFilter(page, 'Repo', '');
         await page.waitForFunction(() => !new URLSearchParams(location.search).has('repo'));
         assert.equal(new URL(page.url()).searchParams.get('harness'), row.harness);
-        await pickFilter(page, 'Project', '__none__');
+        await pickFilter(page, 'Repo', '__none__');
         await page.waitForFunction(
           () => new URLSearchParams(location.search).get('no_repo') === '1',
         );
@@ -148,7 +148,7 @@ export async function catalogFilterCheck(browser, name) {
             ) === JSON.stringify(ids),
           withoutRepository,
         );
-        await pickFilter(page, 'Project', '');
+        await pickFilter(page, 'Repo', '');
         await page.waitForFunction(() => !new URLSearchParams(location.search).has('no_repo'));
         assert.ok(requests.some((url) => url.searchParams.get('harness') === row.harness));
         assert.ok(

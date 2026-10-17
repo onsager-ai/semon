@@ -24,9 +24,11 @@ export function createCatalogBrowser(host: {
     select: (label, value, onChange) => createSelect({ label, value, options: [], onChange }),
     canOpen: host.canOpen,
     change(key, value) {
+      if (key === 'machine') return;
       filters = { ...filters, [key]: value };
     },
     cleared(key) {
+      if (key === 'machine') return;
       filters = { ...filters, [key]: '' };
       host.changed(filters);
     },
@@ -46,7 +48,12 @@ export function createCatalogBrowser(host: {
   });
   return {
     element: owner.element,
-    update(values: CatalogFilters, rows: readonly CatalogSession[], source: string) {
+    update(
+      values: CatalogFilters,
+      rows: readonly CatalogSession[],
+      source: string,
+      sourceLabel: string,
+    ) {
       // Options are observations of the loaded source, never a workspace census.
       for (const key of [...options.keys()])
         if (!key.startsWith(source + '\u0000')) options.delete(key);
@@ -70,17 +77,29 @@ export function createCatalogBrowser(host: {
                 : value;
         return {
           key,
-          label: key === 'repo' ? 'Project' : key === 'harness' ? 'Harness' : 'Model',
+          label: key === 'repo' ? 'Repo' : key === 'harness' ? 'Harness' : 'Model',
           value: filters[key],
           display: label(filters[key]),
           options: [
-            { value: '', label: 'All' },
+            {
+              value: '',
+              label:
+                key === 'repo' ? 'All repos' : key === 'harness' ? 'All harnesses' : 'All models',
+            },
             ...[...seen]
               .filter(Boolean)
               .sort()
               .map((value) => ({ value, label: label(value) })),
           ],
         };
+      });
+      // A selected source never advertises an unavailable workspace union.
+      fields.splice(1, 0, {
+        key: 'machine',
+        label: 'Machine',
+        value: '',
+        display: sourceLabel,
+        options: [{ value: '', label: sourceLabel }],
       });
       owner.update(fields);
     },

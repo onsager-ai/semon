@@ -446,7 +446,8 @@ export function createOverviewPages(host: OverviewHost) {
           HARNESSES[row.session.harness]?.name ?? row.session.harness,
           home?.machines.find((machine) => machine.key === row.source_key)?.label ?? row.source_key,
         ].join(', '),
-        current: current === row.catalog_key ? 'page' : undefined,
+        current:
+          current === row.catalog_key ? 'page' : rail && path.has(row.id) ? 'true' : undefined,
         state: row.session.state,
         stateLabel: STATE[row.session.state] ?? 'Status unavailable',
         age: timeText(Math.max(0, recentNow - row.session.last)),
