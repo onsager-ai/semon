@@ -345,6 +345,23 @@ export function traceSessionChip(session?: Pick<Session, 'kind' | 'harness'>) {
   };
 }
 
+export function traceSessionMeta(
+  session: Pick<Session, 'name' | 'kind' | 'harness'> | undefined,
+  sessionId: string,
+  turn: string | undefined,
+  outcome: { state: string; text?: string },
+) {
+  return {
+    state: outcome.state,
+    stateLabel: STATE[outcome.state] ?? outcome.state,
+    text: outcome.text ?? '',
+    session: sessionId,
+    turn,
+    name: session?.name,
+    ...traceSessionChip(session),
+  };
+}
+
 /** Open a source-qualified relay participant without asserting it joined this trace. */
 export function traceQualifiedUnjoinedRelay(data: CausalTrace, edge: Handoff, hasChild: boolean) {
   if (hasChild || edge.kind !== 'relay' || !Object.hasOwn(data.participants, edge.to)) return;
@@ -527,25 +544,29 @@ export function renderCausalTrace(
       darkTheme: matchMedia('(prefers-color-scheme: dark)').matches,
     };
   };
-  const meta = (turn: Turn) => {
-    const outcome = traceTurnOutcome(
-      turn,
-      data.handoffs,
-      (id) => causalSessionPart(data, id).text,
-      (at) => clock(at, now),
-      data.readResults,
-    );
+  const sessionMeta = (
+    sessionId: string,
+    turnId: string | undefined,
+    outcome: { state: string; text?: string },
+  ) => {
+    const session = Object.hasOwn(data.sessions, sessionId) ? data.sessions[sessionId] : undefined;
     return {
-      state: outcome.state,
-      stateLabel: STATE[outcome.state] ?? 'Recorded',
-      text: outcome.text,
-      session: turn.sid,
-      turn: turn.id,
-      name: data.sessions[turn.sid]?.name,
-      harness: harness(turn.sid),
-      ...traceSessionChip(data.sessions[turn.sid]),
+      ...traceSessionMeta(session, sessionId, turnId, outcome),
+      harness: harness(sessionId),
     };
   };
+  const meta = (turn: Turn) =>
+    sessionMeta(
+      turn.sid,
+      turn.id,
+      traceTurnOutcome(
+        turn,
+        data.handoffs,
+        (id) => causalSessionPart(data, id).text,
+        (at) => clock(at, now),
+        data.readResults,
+      ),
+    );
   const rootParts: Hop['parts'] = data.root.start
     ? traceSentenceParts(
         data.root.start,
@@ -618,30 +639,32 @@ export function renderCausalTrace(
           : {
               meta: child
                 ? meta(child)
-                : {
-                    state: edgeOutcome.state,
-                    stateLabel: STATE[edgeOutcome.state] ?? edgeOutcome.state,
-                    text: edgeOutcome.text ?? '',
-                    note:
-                      (edge.kind === 'spawn' || edge.kind === 'relay') && !child
-                        ? "Its turn isn't in these logs"
-                        : undefined,
-                    ...(unjoinedRelay
-                      ? {
-                          session: unjoinedRelay.session,
-                          name: unjoinedRelay.name,
-                          harness: unjoinedRelay.summary
-                            ? harness(unjoinedRelay.session)
-                            : undefined,
-                          ...(unjoinedRelay.summary
-                            ? traceSessionChip({
-                                kind: unjoinedRelay.summary.kind || undefined,
-                                harness: unjoinedRelay.summary.harness,
-                              })
-                            : {}),
-                        }
-                      : {}),
-                  },
+                : edge.kind === 'toyou'
+                  ? sessionMeta(edge.from, turn.id, edgeOutcome)
+                  : {
+                      state: edgeOutcome.state,
+                      stateLabel: STATE[edgeOutcome.state] ?? edgeOutcome.state,
+                      text: edgeOutcome.text ?? '',
+                      note:
+                        (edge.kind === 'spawn' || edge.kind === 'relay') && !child
+                          ? "Its turn isn't in these logs"
+                          : undefined,
+                      ...(unjoinedRelay
+                        ? {
+                            session: unjoinedRelay.session,
+                            name: unjoinedRelay.name,
+                            harness: unjoinedRelay.summary
+                              ? harness(unjoinedRelay.session)
+                              : undefined,
+                            ...(unjoinedRelay.summary
+                              ? traceSessionChip({
+                                  kind: unjoinedRelay.summary.kind || undefined,
+                                  harness: unjoinedRelay.summary.harness,
+                                })
+                              : {}),
+                          }
+                        : {}),
+                    },
             }),
       });
       if (child) walk(child);
