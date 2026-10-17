@@ -300,6 +300,7 @@ for (const width of [390, 1280])
         workspaceMode = 'ready',
         stage = 'setup',
         primaryFailure;
+      page.setDefaultTimeout(10000);
       // Keep product time paused while Node polls actual state with the existing
       // deadline; a readiness check must not depend on a frozen animation frame.
       const ready = async (label, predicate, arg) => {
@@ -454,22 +455,49 @@ for (const width of [390, 1280])
                     wait_edges_truncated: false,
                   },
                 },
-                participants: {},
-                handoffs: [],
+                participants: { 'unjoined-peer': 'Recorded peer' },
+                participant_summaries: {
+                  'unjoined-peer': {
+                    name: 'Recorded peer',
+                    harness: 'codex',
+                    kind: 'Subagent',
+                    model: 'native-model',
+                    tokens: [1, 2, 0],
+                    cost: { usd: 2, unpriced_models: [] },
+                    observed_extent: {
+                      scope: 'whole_session',
+                      last: now - 1000,
+                      status: { state: 'work', observation: 'current' },
+                    },
+                  },
+                },
+                handoffs: [
+                  {
+                    id: 'peer-relay',
+                    kind: 'relay',
+                    from: 'shared',
+                    to: 'unjoined-peer',
+                    at: now - 120000,
+                    status: 'done',
+                    brief: '',
+                    declined: false,
+                  },
+                ],
                 turns: [
                   {
                     id: 'trace-root',
                     sid: 'shared',
-                    at: now - 2000,
+                    at: now - 600000,
                     u: true,
-                    sent: [],
+                    sent: ['peer-relay'],
                     end: { st: 'done', why: 'replied', at: now - 1000 },
                     last: true,
                   },
                 ],
                 frontier: [],
                 previews: {},
-                incomplete: false,
+                incomplete: true,
+                incomplete_only_missing_receiving_turns: true,
                 previews_incomplete: false,
               },
             });
@@ -615,6 +643,28 @@ for (const width of [390, 1280])
         });
         stage = 'Trace publication';
         await withDeadline(page.locator('#page .agents-panel').waitFor(), stage);
+        const peer = page.locator('#page .agent-peer');
+        assert.equal(await peer.getAttribute('data-depth'), '0');
+        assert.equal(await peer.locator('.agent-harness-dot.h-codex').count(), 1);
+        assert.equal(await peer.locator('.agent-relay-icon').count(), 1);
+        assert.ok((await peer.locator('.agent-track .agent-gridline').count()) > 0);
+        assert.equal(await peer.locator('.agent-segment,.agent-wait,.agent-spawn-tick').count(), 0);
+        assert.equal(await peer.getAttribute('data-agent-id'), null);
+        assert.equal(await peer.getAttribute('data-critical'), null);
+        assert.match(await peer.getAttribute('aria-label'), /receiving|turn isn't in these logs/);
+        assert.match(
+          await peer.locator('.agent-duration').getAttribute('data-tip'),
+          /Whole-session/,
+        );
+        assert.match(
+          await page.locator('#page .flow').textContent(),
+          /Its turn isn't in these logs/,
+        );
+        assert.doesNotMatch(
+          await page.locator('#page .trace-summary').textContent(),
+          /context is unavailable/,
+        );
+        assert.equal(await page.locator('#page .agent-edges path').count(), 0);
         assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
         assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);

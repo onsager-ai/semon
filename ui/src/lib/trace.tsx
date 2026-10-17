@@ -48,6 +48,7 @@ export interface AgentRow {
   tokens?: string;
   qualification?: string;
   duration?: string;
+  extentTip?: string;
   cost?: string;
   costTip?: string;
   segments?: readonly { left: number; width: number; kind: string }[];
@@ -59,6 +60,7 @@ export interface AgentRow {
 }
 export interface AgentChart {
   summary: readonly string[];
+  extentTip?: string;
   start: string;
   end: string;
   ticks: readonly { left: number; label: string; nearEnd: boolean }[];
@@ -270,7 +272,9 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                 <h2 class="agents-title">Agents</h2>
                 <div class="agents-summary">
                   {agents.summary.map((item, i) => (
-                    <span key={i}>{screenText(item)}</span>
+                    <span key={i} data-tip={i === 1 ? agents.extentTip : undefined}>
+                      {screenText(item)}
+                    </span>
                   ))}
                 </div>
                 <div class="agents-axis">
@@ -339,19 +343,48 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                         key={row.id}
                         class="agent-row agent-peer"
                         type="button"
-                        aria-label={'Open recorded ' + row.label}
+                        data-depth="0"
+                        aria-label={
+                          'Open recorded ' +
+                          row.label +
+                          (row.duration
+                            ? ', ' + row.duration + ' whole-session observed extent'
+                            : '')
+                        }
+                        data-tip={row.qualification}
                         onClick={() => active(() => host.session(row.id, row.turn))}
                       >
                         <span class="agent-label">
                           <span class="agent-identity">
                             <span class={'agent-indent ' + indent(row.depth)} />
+                            <span
+                              class={'agent-harness-dot ' + row.harnessClass}
+                              aria-hidden="true"
+                            />
+                            {row.relay && (
+                              <Glyph path="M4 7h13l-3-3M20 17H7l3 3" className="agent-relay-icon" />
+                            )}
                             <span class="agent-name">{screenText(row.name)}</span>
                           </span>
                           <span class="agent-meta">
                             <span class="agent-model">{screenText(row.model ?? '')}</span>
-                            <span class="agent-peer-qualification" data-tip={row.qualification}>
-                              {screenText(row.qualification ?? '')}
-                            </span>
+                            {row.state !== undefined && (
+                              <span
+                                class={'agent-status stat ' + row.state}
+                                data-tip={row.stateLabel}
+                              >
+                                <span
+                                  class={'dot ' + row.state}
+                                  role="img"
+                                  aria-label={row.stateLabel}
+                                />
+                              </span>
+                            )}
+                            {!row.duration && (
+                              <span class="agent-peer-qualification" data-tip={row.qualification}>
+                                {screenText(row.qualification ?? '')}
+                              </span>
+                            )}
                             <span
                               class="agent-tokens"
                               data-tip="Recorded catalog token totals; this trace has no joined turn"
@@ -360,8 +393,20 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                             </span>
                           </span>
                         </span>
+                        <span class="agent-duration" data-tip={row.extentTip}>
+                          {row.duration}
+                        </span>
                         <span class="agent-cost" data-tip={row.costTip}>
                           {row.cost}
+                        </span>
+                        <span class="agent-track" aria-hidden="true">
+                          {agents.ticks.map((tick, i) => (
+                            <span
+                              key={'grid' + i}
+                              class={'agent-gridline ' + left(tick.left)}
+                              aria-hidden="true"
+                            />
+                          ))}
                         </span>
                       </button>
                     ) : (

@@ -249,14 +249,36 @@ They established that the atlas-ingest branch emits its Harbor relay and a
 qualified participant identity, while its joined turn is unavailable. A separate
 allowlisted participant summary now reuses that same generation-qualified Catalog
 read for recorded model, token and cost totals. The navigable peer row explicitly
-states that no joined turn is available. It cannot contribute invented activity,
-duration, timeline segments, waits or critical edges, and stays outside joined-turn
-traversal and activity calculations. As in the selected application, unique
+states that no joined turn is available. An optional `observed_extent` has the
+explicit `whole_session` scope, a bounded published `last`, and the same qualified
+`status` shape as Catalog relatives. One additional shared runtime/facts/source
+capture, beyond the identity lookup's earlier capture, applies the existing
+custody, physical source stamp, PID, lifecycle and generation fences to at most
+128 peers with at most 64 published source stamps each. The response checks the
+runtime generation before and after this work and validates custody before
+publication. These additional bounded metadata observations add no body reads or
+poller. Only current Working observations extend to the
+capture clock; retained or unavailable observations cannot imply live activity.
+The row and chart tooltips distinguish this whole-session extent from a receiving
+turn. Qualified harness marks, the recorded relay icon and inert chart gridlines
+preserve the selected row layout without claiming activity. Peers never contribute
+invented turns, activity, timeline segments, waits
+or critical edges, and stay outside joined-turn traversal and activity calculations.
+As in the selected application, unique
 qualified participants still contribute to the agent count and session-cost total;
 those totals do not assert a receiving turn. Unknown or unpriced costs remain
 unknown. The unchanged
 128-participant and shared decoded-metadata input bounds remain; those input
 bounds do not claim a serialized-response byte cap.
+
+`incomplete` remains true for absent receiving turns. The optional
+`incomplete_only_missing_receiving_turns` flag permits the UI to omit a redundant
+global notice only when the producer found exclusively absent, unambiguous joins,
+complete previews and no frontier or other missing metadata. The UI independently
+requires every reachable unjoined spawn/relay to have a qualified participant and
+the visible “Its turn isn't in these logs” hop note. Legacy responses, ambiguous
+joins, unavailable observations, stale metadata, bounds and other missing context
+retain the global warning. No request owner, body scan, authority or bound changes.
 
 Trace relationship names return to the selected application's static prose.
 Turning them into touch-sized buttons had enlarged phone line boxes and changed

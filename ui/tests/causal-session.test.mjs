@@ -22,6 +22,7 @@ const {
   traceSessionChip,
   traceSessionMeta,
   traceQualifiedUnjoinedRelay,
+  traceMissingContextLocallyCovered,
   traceTokenTotal,
   traceTokenText,
   traceSentenceParts,
@@ -713,6 +714,68 @@ test('passive relay summaries are scoped catalog facts and retain safe session n
     tokens: [1.5, 2, 0.5],
     cost: { usd: null, unpriced_models: ['unknown-model'] },
   });
+  const extent = {
+      scope: 'whole_session',
+      last: 200,
+      status: { state: 'work', observation: 'current' },
+    },
+    withExtent = (observed_extent) =>
+      parseCausalTrace(
+        {
+          ...data,
+          incomplete: true,
+          incomplete_only_missing_receiving_turns: true,
+          participant_summaries: {
+            harbor: { ...data.participant_summaries.harbor, observed_extent },
+          },
+        },
+        'fixture',
+        'selected',
+        'turn',
+      ),
+    qualified = withExtent(extent);
+  assert.deepEqual(qualified.participantSummaries.harbor.observedExtent, {
+    scope: 'whole_session',
+    last: 200,
+    status: { state: 'work', observation: 'current' },
+  });
+  assert.equal(qualified.starts.size, 0);
+  assert.deepEqual(
+    Object.values(qualified.turns)
+      .flat()
+      .map((turn) => turn.id),
+    ['turn'],
+  );
+  assert.equal(Object.hasOwn(qualified.sessions, 'harbor'), false);
+  assert.equal(traceMissingContextLocallyCovered(qualified), true);
+  for (const changed of [
+    { incompleteOnlyMissingReceivingTurns: false },
+    { incompleteOnlyMissingReceivingTurns: undefined },
+    { incomplete: false },
+    { previewsIncomplete: true },
+    { frontier: [{ catalog_key: 'harbor', turn: 'unread' }] },
+    { participants: {} },
+    { participants: { harbor: '' } },
+    { root: { ...qualified.root, sent: [] } },
+  ])
+    assert.equal(traceMissingContextLocallyCovered({ ...qualified, ...changed }), false);
+  assert.equal(traceMissingContextLocallyCovered(parsed), false);
+  assert.equal(
+    withExtent({ ...extent, last: null }).participantSummaries.harbor.observedExtent.last,
+    null,
+  );
+  for (const invalid of [
+    { ...extent, scope: 'receiving_turn' },
+    { ...extent, last: -1 },
+    { ...extent, last: 1.5 },
+    { ...extent, last: Number.MAX_SAFE_INTEGER + 1 },
+    { ...extent, last: Infinity },
+    { ...extent, busy: [[1, 2]] },
+    { ...extent, status: undefined },
+    { ...extent, status: { state: 'work', observation: 'retained' } },
+    { ...extent, status: { state: 'work', observation: 'unavailable' } },
+  ])
+    assert.throws(() => withExtent(invalid));
   assert.deepEqual(causalSessionPart(parsed, 'harbor'), {
     className: 'who',
     text: 'Harbor',
