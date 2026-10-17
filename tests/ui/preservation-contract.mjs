@@ -67,7 +67,8 @@ function registryErrors(registry) {
     keys = new Set();
   for (const entry of registry.acceptances) {
     const allowedScope =
-      (entry?.comparator === 'pixels' && ['main', 'two-machines', 'pushed'].includes(entry.scope)) ||
+      (entry?.comparator === 'pixels' &&
+        ['main', 'two-machines', 'pushed'].includes(entry.scope)) ||
       (entry?.comparator === 'preservation' && entry.scope === 'required');
     const expectedReference = entry?.scope === 'pushed' ? 'served-parity' : REFERENCE.source;
     const expectedHub = entry?.scope === 'pushed' ? null : REFERENCE.hub;
@@ -157,7 +158,9 @@ function inspectPixelRows(rows, expected, kind, coverage, visual) {
     if (!validArtifactDigests(row.artifactDigests))
       coverage.push(`Missing or invalid ${kind} artifact digests: ${row.key}`);
     if (row.size !== null || row.ratio > MAX_RATIO)
-      visual.push(`${row.key}: ${row.size ? 'size ' + row.size.join(' vs ') : 'pixel mismatch ' + row.ratio}`);
+      visual.push(
+        `${row.key}: ${row.size ? 'size ' + row.size.join(' vs ') : 'pixel mismatch ' + row.ratio}`,
+      );
   }
   for (const key of expected) if (!seen.has(key)) coverage.push(`Missing ${kind} case: ${key}`);
 }
@@ -217,9 +220,7 @@ export function assessVisualAcceptances(
     ...(report.results ?? []).map((row) => ({ kind: 'frame', row })),
     ...(report.regions ?? []).map((row) => ({ kind: 'region', row })),
   ];
-  const failures = rows.filter(
-    ({ row }) => row && (row.size !== null || row.ratio > MAX_RATIO),
-  );
+  const failures = rows.filter(({ row }) => row && (row.size !== null || row.ratio > MAX_RATIO));
   const scope = report.scope ?? report.mode ?? 'required';
   const used = new Set();
 
@@ -235,12 +236,13 @@ export function assessVisualAcceptances(
     };
     const candidates = entries
       .map((entry, index) => ({ entry, index }))
-      .filter(({ entry }) =>
-        entry &&
-        entry.comparator === comparator &&
-        entry.scope === scope &&
-        entry.key === row.key &&
-        entry.kind === kind,
+      .filter(
+        ({ entry }) =>
+          entry &&
+          entry.comparator === comparator &&
+          entry.scope === scope &&
+          entry.key === row.key &&
+          entry.kind === kind,
       );
     const label = `${comparator}/${scope}/${kind}/${row.key}`;
     if (candidates.length !== 1) {
@@ -269,7 +271,9 @@ export function assessVisualAcceptances(
       !used.has(index) &&
       !failures.some(({ kind, row }) => entry?.kind === kind && entry?.key === row.key)
     )
-      errors.push(`Unused visual acceptance record: ${entry?.comparator ?? 'unknown'}/${entry?.scope ?? 'unknown'}/${entry?.key ?? 'unknown'}`);
+      errors.push(
+        `Unused visual acceptance record: ${entry?.comparator ?? 'unknown'}/${entry?.scope ?? 'unknown'}/${entry?.key ?? 'unknown'}`,
+      );
   });
 
   const rawVisualCount = rawFailures?.visual?.length ?? 0;
@@ -279,7 +283,8 @@ export function assessVisualAcceptances(
     errors,
     pending,
     accepted,
-    pass: (rawFailures?.coverage?.length ?? 0) === 0 &&
+    pass:
+      (rawFailures?.coverage?.length ?? 0) === 0 &&
       pending.length === 0 &&
       errors.length === 0 &&
       accepted.length === failures.length,
@@ -297,7 +302,8 @@ export function assessPreservation(report) {
   if (!/^[a-f0-9]{40}$/.test(report.candidate ?? '')) coverage.push('Missing candidate commit SHA');
   if (!/^[a-f0-9]{64}$/.test(report.candidateFingerprint ?? ''))
     coverage.push('Missing candidate runtime fingerprint');
-  if (!['required', 'historical-before'].includes(report.mode)) coverage.push('Unknown preservation mode');
+  if (!['required', 'historical-before'].includes(report.mode))
+    coverage.push('Unknown preservation mode');
   if (report.threshold !== THRESHOLD || report.maxRatio !== MAX_RATIO)
     coverage.push('Changed visual thresholds');
   if (!Array.isArray(report.errors) || report.errors.length)

@@ -22,7 +22,10 @@ test('summarizes bounded text and geometry differences across exact states', () 
   assert.equal(summary.bySelector['#page'].changedFields.text, 1);
   assert.equal(summary.bySelector['#page'].changedFields.box, 1);
   assert.equal(summary.bySelector['#page'].examples[0].key, 'phone-light|session-harbor');
-  assert.equal(summary.bySelector['#page'].examples[0].examples[0].candidateText, 'Candidate answer');
+  assert.equal(
+    summary.bySelector['#page'].examples[0].examples[0].candidateText,
+    'Candidate answer',
+  );
 });
 
 test('summaries cap state examples while preserving aggregate counts', () => {
