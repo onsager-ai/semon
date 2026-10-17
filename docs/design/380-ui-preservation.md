@@ -321,3 +321,8 @@ session link, selected metadata can precede the existing bounded catalog refresh
 the test waits for the third preview row before asserting the exact three-row
 cap. Failure-only diagnostics retain bounded public metadata and preserve the
 original exception. No application refresh cadence or wait timeout is changed.
+Cold direct-link coverage asserts inclusion within that cap, matching the
+original ranked ordering. A separate same-document route transition starts with
+the selected child absent and verifies its required-path promotion to the front
+of the retained ordering scope. This preserves both contracts without making a
+fresh page depend on response arrival order.
