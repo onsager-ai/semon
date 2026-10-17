@@ -152,7 +152,28 @@ for (const width of [390, 1280])
         requests = [],
         errors = [];
       let workspaceReads = 0,
-        workspaceMode = 'ready';
+        workspaceMode = 'ready',
+        stage = 'setup',
+        primaryFailure;
+      // Keep product time paused while Node polls actual state with the existing
+      // deadline; a readiness check must not depend on a frozen animation frame.
+      const ready = async (label, predicate, arg) => {
+        stage = label;
+        let finished = false;
+        try {
+          await withDeadline(
+            (async () => {
+              while (!finished) {
+                if (await page.evaluate(predicate, arg)) return;
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+            })(),
+            label,
+          );
+        } finally {
+          finished = true;
+        }
+      };
       const publication = (machine, retired = false) => ({
         api: 1,
         version: (machine ? 'a' : retired ? 'c' : workspaceMode === 'partial' ? 'f' : 'd').repeat(
@@ -358,12 +379,15 @@ for (const width of [390, 1280])
           };
           window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
         });
-        await page.waitForFunction(() => document.querySelectorAll('#page .nrow').length === 60);
+        await ready(
+          'initial focused Machine rows',
+          () => document.querySelectorAll('#page .nrow').length === 60,
+        );
         assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-0/);
-        await page.waitForFunction(() => window.workspaceNetworkPending);
+        await ready('first workspace network gate', () => window.workspaceNetworkPending);
         // The exact bare Home request belongs to the existing navigation abort owner.
         await page.evaluate(() => document.querySelector('#nav [data-go="machines"]').click());
-        await page.waitForFunction(() => window.workspaceBodyPending);
+        await ready('delivered retired workspace body gate', () => window.workspaceBodyPending);
         assert.equal(await page.evaluate(() => workspaceAborts.includes(1)), true);
         assert.equal(await page.evaluate(() => window.workspaceBodyDelivered), true);
         // Already delivered JSON can still finish after cancellation: its epoch must reject it.
@@ -371,10 +395,10 @@ for (const width of [390, 1280])
           history.pushState(null, '', '/machines/source-1?machine=source-1');
           dispatchEvent(new PopStateEvent('popstate'));
         });
-        await page.waitForFunction(() => workspaceAborts.includes(2));
-        await page.waitForFunction(() => window.workspaceCurrentBodyPending);
+        await ready('retired delivered body cancellation', () => workspaceAborts.includes(2));
+        await ready('fresh workspace body gate', () => window.workspaceCurrentBodyPending);
         await page.evaluate(() => window.releaseWorkspaceBody());
-        await page.waitForFunction(() => window.workspaceBodyReturned);
+        await ready('retired delivered body return', () => window.workspaceBodyReturned);
         await page.clock.runFor(32);
         assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
         assert.equal(
@@ -383,12 +407,13 @@ for (const width of [390, 1280])
           'retired waiting totals cannot publish while the current workspace body is held',
         );
         await page.evaluate(() => window.releaseCurrentWorkspaceBody());
-        await page.waitForFunction(
+        await ready(
+          'second focused Machine rows',
           () =>
             document.querySelectorAll('#page .nrow').length === 60 &&
             document.querySelector('#page .nrow')?.textContent.includes('Focused source-1'),
         );
-        await page.waitForFunction(() =>
+        await ready('current workspace Recent publication', () =>
           document.querySelector('#lanes')?.textContent.includes('Alpha shared'),
         );
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
@@ -399,8 +424,10 @@ for (const width of [390, 1280])
         assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
         assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-1/);
 
-        await page.locator('#page .nrow').first().click();
-        await page.locator('#page [data-entry-key="shared:0"]').waitFor();
+        stage = 'open focused session';
+        await withDeadline(page.locator('#page .nrow').first().click(), stage);
+        stage = 'selected transcript';
+        await withDeadline(page.locator('#page [data-entry-key="shared:0"]').waitFor(), stage);
         const current = page.locator('#lanes .srow[aria-current="page"]');
         assert.equal(await current.count(), 1);
         assert.equal(await current.getAttribute('data-id'), JSON.stringify(['source-1', 'shared']));
@@ -413,8 +440,10 @@ for (const width of [390, 1280])
             (value) => value.headers()['x-fixture-workspace-mode'] === mode,
           );
           await page.clock.runFor(8100);
-          await (await response).finished();
-          await page.waitForFunction(
+          stage = 'workspace response after ' + mode;
+          await withDeadline((async () => (await response).finished())(), stage);
+          await ready(
+            'workspace scope after ' + mode,
             (ready) =>
               ready
                 ? !document.querySelector('#lanes')?.hasAttribute('aria-description')
@@ -425,7 +454,8 @@ for (const width of [390, 1280])
             mode === 'ready',
           );
           assert.equal((await homeText()).replace(/\s/g, ''), mode === 'ready' ? 'Home4' : 'Home');
-          await page.waitForFunction(
+          await ready(
+            'workspace rows after ' + mode,
             (label) => document.querySelector('#lanes')?.textContent.includes(label),
             mode === 'partial' ? 'Beta partial' : 'Beta shared',
           );
@@ -434,7 +464,8 @@ for (const width of [390, 1280])
           history.pushState(null, '', '/trace/native/shared/trace-root?machine=source-1');
           dispatchEvent(new PopStateEvent('popstate'));
         });
-        await page.locator('#page .agents-panel').waitFor();
+        stage = 'Trace publication';
+        await withDeadline(page.locator('#page .agents-panel').waitFor(), stage);
         assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
         assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
@@ -452,17 +483,77 @@ for (const width of [390, 1280])
         );
         assert.deepEqual(errors, []);
         await page.evaluate(() => window.app.destroy());
+      } catch (error) {
+        primaryFailure = error;
+        let snapshot;
+        try {
+          snapshot = await withDeadline(
+            page.evaluate(() => ({
+              pathname: location.pathname,
+              search: location.search,
+              page: document.querySelector('#page')?.textContent.slice(0, 4000),
+              recent: document.querySelector('#lanes')?.textContent.slice(0, 4000),
+              nav: document.querySelector('#nav')?.textContent.slice(0, 1000),
+              networkPending: window.workspaceNetworkPending,
+              bodyDelivered: window.workspaceBodyDelivered,
+              bodyPending: window.workspaceBodyPending,
+              bodyReturned: window.workspaceBodyReturned,
+              currentBodyPending: window.workspaceCurrentBodyPending,
+              aborts: window.workspaceAborts?.slice(-16),
+            })),
+            'workspace failure diagnostic',
+          );
+        } catch (diagnosticError) {
+          snapshot = { diagnosticError: String(diagnosticError).slice(0, 1000) };
+        }
+        console.error(
+          'workspace-publication failure ' +
+            JSON.stringify({
+              width,
+              colorScheme,
+              stage,
+              workspaceReads,
+              workspaceMode,
+              requests: requests.slice(-40).map((value) => value.slice(0, 512)),
+              errors: errors.slice(-20).map((value) => value.slice(0, 1000)),
+              snapshot,
+            }),
+        );
+        throw error;
       } finally {
+        let teardownFailure;
         try {
           if (!page.isClosed())
-            await page.evaluate(() => {
-              window.releaseWorkspaceBody?.();
-              window.releaseCurrentWorkspaceBody?.();
-              window.app?.destroy();
-            });
-          await page.unrouteAll({ behavior: 'wait' });
+            await withDeadline(
+              page.evaluate(() => {
+                window.releaseWorkspaceBody?.();
+                window.releaseCurrentWorkspaceBody?.();
+                window.app?.destroy();
+              }),
+              'workspace fixture release',
+            );
+          await withDeadline(page.unrouteAll({ behavior: 'wait' }), 'workspace owned routes drain');
+        } catch (teardownError) {
+          teardownFailure = teardownError;
         } finally {
-          await browser.close();
+          try {
+            await withDeadline(browser.close(), 'workspace browser close');
+          } catch (closeError) {
+            teardownFailure = teardownFailure
+              ? new AggregateError(
+                  [teardownFailure, closeError],
+                  'Workspace teardown and close failed',
+                )
+              : closeError;
+          }
+        }
+        if (teardownFailure) {
+          if (primaryFailure)
+            throw new AggregateError(
+              [primaryFailure, teardownFailure],
+              'Workspace assertion and teardown failed',
+            );
+          throw teardownFailure;
         }
       }
     });
