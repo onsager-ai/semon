@@ -884,11 +884,8 @@ export default async function (browser) {
       await page.waitForTimeout(100);
       const btn = page.locator('.step[data-long] .viewall:visible').first();
       r.expect((await btn.count()) === 1, "harbor's server-cut output offers View all");
-      await clickWithFailureDiagnostics(
-        page,
-        '.step[data-long] .viewall',
-        'extras View all',
-        () => btn.click(),
+      await clickWithFailureDiagnostics(page, '.step[data-long] .viewall', 'extras View all', () =>
+        btn.click(),
       );
       await page.waitForSelector('dialog.panel.full[open]');
       await page.waitForTimeout(200);
