@@ -1941,14 +1941,20 @@ for (const { width, colorScheme } of [
       await page
         .getByText('Search is incomplete while recorded sessions are being indexed.')
         .waitFor();
-      await page.getByText('History observation is stale').waitFor();
+      const staleWarning = page
+        .locator('.catalog-note[role="status"]')
+        .filter({ hasText: 'History observation is stale' });
+      await staleWarning.waitFor();
       for (const warning of [
         'Search checked a bounded part of the index. Load more sessions to continue looking for matches.',
         'Search is incomplete while recorded sessions are being indexed.',
         'History observation is stale',
       ]) {
         assert.equal(
-          await page.getByText(warning).evaluate((node) => node.closest('.filters-sheet')),
+          await page
+            .locator('.catalog-note[role="status"]')
+            .filter({ hasText: warning })
+            .evaluate((node) => node.closest('.filters-sheet')),
           null,
         );
       }
@@ -1985,11 +1991,12 @@ for (const { width, colorScheme } of [
       await query.fill('missing');
       await query.press('Enter');
       await page.getByText('No recorded sessions match these filters.').waitFor();
-      await page.getByText('History observation is unavailable').waitFor();
+      const unavailableWarning = page
+        .locator('.catalog-note[role="status"]')
+        .filter({ hasText: 'History observation is unavailable' });
+      await unavailableWarning.waitFor();
       assert.equal(
-        await page
-          .getByText('History observation is unavailable')
-          .evaluate((node) => node.closest('.filters-sheet')),
+        await unavailableWarning.evaluate((node) => node.closest('.filters-sheet')),
         null,
       );
       assert.equal(
