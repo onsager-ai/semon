@@ -55,7 +55,13 @@ export function selectedSessionFooter(
   origin?: { id: string; name: string; status: string; done?: number; turn?: string },
 ): FooterView | undefined {
   const details = session.details;
-  if (!details) return undefined;
+  if (!details || (!origin && details.role)) return undefined;
+  if (
+    origin &&
+    !['work', 'done', 'err'].includes(details.state) &&
+    !['done', 'err'].includes(origin.status)
+  )
+    return undefined;
   const recordedState = selectedSessionState(session),
     returned =
       !!origin &&
@@ -454,17 +460,27 @@ export function selectedSessionMenu(
     }));
   const reports = metadata?.reported_runs ?? [],
     reported = reports.filter((row) => row.cost_usd != null),
+    family = metadata?.family,
+    familyRuns = family?.runs ?? [],
     costDetails: MenuDetail[] = [];
-  if (metadata?.family?.runs.length)
-    costDetails.push({ label: 'This session', value: money(ownCost.usd) });
+  if (familyRuns.length)
+    costDetails.push(
+      { label: 'This session', value: money(ownCost.usd) },
+      {
+        label: familyRuns.length === 1 ? 'Its run' : 'Its ' + familyRuns.length + ' runs',
+        value: money(
+          family?.state === 'complete' && familyRuns.every((run) => run.cost.usd != null)
+            ? familyRuns.reduce((sum, run) => sum + run.cost.usd!, 0)
+            : null,
+        ),
+      },
+    );
   if (reports.length)
     costDetails.push({
       label: (HARNESS[session.harness] ?? session.harness) + "'s own figure",
       value: reported.length
         ? money(reported.reduce((sum, row) => sum + row.cost_usd!, 0)) +
-          ', last ' +
-          reported.length +
-          (reported.length === 1 ? ' run' : ' runs')
+          (reported.length === 1 ? ', last run' : ', last ' + reported.length + ' runs')
         : 'not reported',
     });
   return {
@@ -524,35 +540,43 @@ export function selectedSessionMenu(
         const check = metadata?.cost_check
           .slice()
           .reverse()
-          .find(
-            (row) =>
-              row.ok === false &&
-              row.reported_usd != null &&
-              row.reported_usd > 0 &&
-              row.computed_usd != null,
-          );
+          .find((row) => row.ok === false && row.reported_usd != null && row.computed_usd != null);
         if (!check) return undefined;
-        const difference = (check.computed_usd! / check.reported_usd! - 1) * 100;
+        const difference =
+          check.reported_usd === 0
+            ? 100
+            : (Math.abs(check.computed_usd! - check.reported_usd!) /
+                Math.abs(check.reported_usd!)) *
+              100;
         return (
           "Semon's estimate for that run is " +
-          Math.round(Math.abs(difference)) +
+          Math.round(difference) +
           '% ' +
-          (difference > 0 ? 'above' : 'below') +
+          (check.computed_usd! > check.reported_usd! ? 'above' : 'below') +
           ' ' +
           (HARNESS[session.harness] ?? session.harness) +
-          "'s figure."
+          "'s figure: API rates differ from what a plan is charged."
         );
       })(),
-      runs: (metadata?.family?.runs ?? []).map((run) => ({
-        id: run.key,
-        depth: run.parent === session.key ? 0 : 1,
-        label: 'Open ' + run.name,
-        name: run.name,
-        kind: run.kind,
-        state: 'off',
-        stateLabel: 'Recorded history',
-        cost: money(run.cost.usd),
-      })),
+      runs: catalogSessionGroups(
+        [...familyRuns].sort((a, b) => (b.last ?? 0) - (a.last ?? 0)),
+      ).flatMap(({ root, children }) => {
+        const depths = new Map([[root.key, 0]]);
+        return [root, ...children].map((run) => {
+          const depth = run === root ? 0 : (depths.get(run.parent ?? '') ?? -1) + 1;
+          depths.set(run.key, depth);
+          return {
+            id: run.key,
+            depth,
+            label: 'Open ' + run.name,
+            name: run.name,
+            kind: run.kind,
+            state: 'off',
+            stateLabel: 'Recorded history',
+            cost: money(run.cost.usd),
+          };
+        });
+      }),
       models,
       includesRuns: !!metadata?.family?.runs.length,
     },
