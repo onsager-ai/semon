@@ -471,3 +471,24 @@ passes the original six cases once without emitting an unavailable stage/errno;
 the historical cause remains unproven and no runtime fix is claimed. Temporary
 instrumentation/workflows stay outside the PR. Final exact-pair checks and any
 evidence-bound visual decisions remain required.
+
+### Native fixture mount and unavailable-state receipts
+
+Run39063938849 exposes a mistaken native fixture selector: catalog-title belongs
+to the title container and is cleared for Machines, so the nested title span
+never receives it. The independently built fixture now emits a receipt only
+after both real mount calls return. All six native captures, empty Recent,
+history-read refusal through document exit, drawer/focus and qualified reader
+navigation assertions remain intact.
+
+The same run misses the second temporary-unavailable note in the recovery
+fixture. Its8100ms clock advance can cross both capability recheck and a selected
+range's1000ms retry, depending on when the mocked503 arrives. The old failure
+does not retain the response/DOM clock witnesses needed to establish that exact
+interleaving. The fixture now holds only the first range503 until the advance
+returns, verifies its exact response headers while the clock is paused, then
+requires the original unavailable note and1100ms recovery. It does not wait for
+the intentionally canceled unread error body. Failure-only diagnostics retain
+bounded stage/counts and allowlisted status-note classifications. Product
+timers, deadlines, error behavior and all original recovery/security assertions
+are unchanged. These corrections require fresh CI; they are not runtime fixes.
