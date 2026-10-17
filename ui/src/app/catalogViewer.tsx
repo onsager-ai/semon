@@ -2397,7 +2397,7 @@ export function createCatalogViewer(
         started:
           view.store.loadedRanges()[0]?.first === 0 && view.meta?.start != null
             ? {
-                lead: 'Started ' + clock(view.meta.start, Date.now()) + ' on ',
+                lead: 'Started ' + clock(view.meta.start, Date.now()) + ' on\u00a0',
                 machine: sourceLabel(view.sourceKey),
               }
             : undefined,
