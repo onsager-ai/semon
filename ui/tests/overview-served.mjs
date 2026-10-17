@@ -114,6 +114,7 @@ test(
             colorScheme,
             timezoneId: 'UTC',
           });
+          let captureServedFixtureFailure;
           try {
             const page = await context.newPage();
             page.setDefaultTimeout(60000);
@@ -157,7 +158,7 @@ test(
                   fullPage: name !== 'session-menu',
                 });
             };
-            const captureServedFixtureFailure = async (stage, context = {}) => {
+            captureServedFixtureFailure = async (stage, context = {}) => {
               const ui = await page.evaluate(() => {
                 const text = (node, limit = 500) =>
                   (node?.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, limit);
@@ -474,34 +475,15 @@ test(
               await selectedRecent.waitFor({ state: 'visible' });
               const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
                 listedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem');
-              try {
-                await listedChildren.nth(2).waitFor({ state: 'visible' });
-              } catch (error) {
-                await captureServedFixtureFailure('Recent third-child readiness', {
-                  expectedChildCount: 3,
-                }).catch(() => {
-                  console.error('[Recent preview diagnostic unavailable]');
-                });
-                throw error;
-              }
+              await listedChildren.nth(2).waitFor({ state: 'visible' });
               const listedChildIds = await listedChildren.evaluateAll((nodes) =>
                 nodes.map((node) => node.getAttribute('data-id') ?? ''),
               );
-              try {
-                assert.equal(
-                  listedChildIds.length,
-                  3,
-                  'the selected child occupies one of the three Recent preview slots',
-                );
-              } catch (error) {
-                await captureServedFixtureFailure('Recent preview child count', {
-                  listedChildIds,
-                  expectedChildCount: 3,
-                }).catch(() => {
-                  console.error('[Recent preview diagnostic unavailable]');
-                });
-                throw error;
-              }
+              assert.equal(
+                listedChildIds.length,
+                3,
+                'the selected child occupies one of the three Recent preview slots',
+              );
               assert.ok(
                 listedChildIds.some((id) => id.includes('a-docs')),
                 'the selected child remains visible within the capped preview',
@@ -744,14 +726,7 @@ test(
             await page
               .getByRole('button', { name: 'Open Check retry safety', exact: true })
               .click();
-            try {
-              await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
-            } catch (error) {
-              await captureServedFixtureFailure('Open in Harbor visibility').catch(() => {
-                console.error('[open-in-harbor diagnostic unavailable]');
-              });
-              throw error;
-            }
+            await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
             assert.match(
               await page.locator('#page .session-foot').textContent(),
               /Returned to harbor.*Failed/,
@@ -813,6 +788,17 @@ test(
             );
             assert.deepEqual(errors, []);
             evidence.push({ width, colorScheme, requests, errors });
+          } catch (error) {
+            if (captureServedFixtureFailure)
+              await captureServedFixtureFailure('context journey failure', {
+                error:
+                  error instanceof Error
+                    ? { name: error.name, message: error.message }
+                    : String(error),
+              }).catch(() => {
+                console.error('[served fixture diagnostic unavailable]');
+              });
+            throw error;
           } finally {
             await context.close();
           }
