@@ -335,7 +335,9 @@ export function traceSessionHarnessClass(data: CausalTrace, id: string) {
     participant = Object.hasOwn(data.participantSummaries, id)
       ? data.participantSummaries[id]
       : undefined,
-    family =
+    directHarness = session?.harness ?? participant?.harness;
+  if (directHarness !== undefined) return traceHarnessClass(id, directHarness);
+  const family =
       Object.hasOwn(data.participants, id) || Object.hasOwn(data.participantSummaries, id)
         ? data.metadata?.details?.family
         : undefined,
@@ -343,7 +345,7 @@ export function traceSessionHarnessClass(data: CausalTrace, id: string) {
       (candidate) => candidate.key === id,
     ),
     relative = relatives.length === 1 ? relatives[0] : undefined;
-  return traceHarnessClass(id, session?.harness ?? participant?.harness ?? relative?.harness);
+  return traceHarnessClass(id, relative?.harness);
 }
 
 export function traceHandoffIconKey(edge: Handoff) {
