@@ -803,6 +803,10 @@ function harborAtEnd(position) {
   return position.activeMax <= 1 || position.activePosition >= position.activeMax - 1;
 }
 
+function harborAtTop(position) {
+  return position.activePosition <= 1;
+}
+
 async function harborWheelPoint(page) {
   return page.evaluate(() => {
     const bar = document.querySelector('#topbar');
@@ -820,8 +824,95 @@ async function harborWheelPoint(page) {
 async function captureHarborWheelViewports(page, scheme, side) {
   const maxSteps = 16;
   let position = await harborScrollPosition(page);
+  await saveHarborViewport(page, scheme, side, 'wheel-pre-reset');
+  let reachedTop = harborAtTop(position);
+  for (let step = 1; !reachedTop && step <= maxSteps; step++) {
+    const before = position;
+    const deltaY = -Math.max(
+      1,
+      Math.min(Math.round(before.viewportHeight * 0.75), before.activePosition),
+    );
+    await page.evaluate(() => {
+      window.__harborPrefixWheel = null;
+      document.addEventListener(
+        'wheel',
+        (event) => {
+          window.__harborPrefixWheel = {
+            trusted: event.isTrusted,
+            deltaY: event.deltaY,
+            deltaMode: event.deltaMode,
+          };
+        },
+        { once: true, capture: true, passive: true },
+      );
+    });
+    const point = await harborWheelPoint(page);
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.wheel(0, deltaY);
+    let failure = null;
+    try {
+      await page.waitForFunction(() => window.__harborPrefixWheel?.trusted === true, null, {
+        timeout: 8000,
+      });
+      await page.waitForFunction(
+        (previous) => {
+          const main = document.querySelector('#main');
+          return previous.activeScroller === 'window'
+            ? scrollY < previous.windowY - 1 || scrollY <= 1
+            : previous.activeScroller === 'main'
+              ? main.scrollTop < previous.mainTop - 1 || main.scrollTop <= 1
+              : true;
+        },
+        before,
+        { timeout: 8000 },
+      );
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+      await waitForCaptureReady(page, `Harbor trusted wheel reset step ${step}`);
+    } catch (error) {
+      failure = error;
+    }
+    position = await harborScrollPosition(page);
+    const event = await page.evaluate(() => window.__harborPrefixWheel);
+    await saveHarborViewport(page, scheme, side, `wheel-reset-${String(step).padStart(3, '0')}`);
+    appendPaintCapture({
+      side,
+      label: `wheel-reset-${String(step).padStart(3, '0')}-movement`,
+      direction: 'up',
+      point,
+      requestedDeltaY: deltaY,
+      event,
+      before,
+      after: position,
+      ...(failure ? { errorName: failure.name ?? 'Error' } : {}),
+    });
+    if (
+      failure ||
+      !event?.trusted ||
+      (position.activePosition >= before.activePosition - 1 && !harborAtTop(position))
+    ) {
+      report.errors.push(
+        `${side} Harbor wheel reset step ${step}: ${failure?.message ?? 'no trusted progress'}`,
+      );
+      break;
+    }
+    reachedTop = harborAtTop(position);
+  }
+  appendPaintCapture({
+    side,
+    label: 'wheel-reset-result',
+    reachedTop,
+    position,
+  });
+  if (!reachedTop) {
+    report.errors.push(
+      `${side} Harbor wheel reset exceeded ${maxSteps} steps without reaching top`,
+    );
+    return;
+  }
   let reachedEnd = harborAtEnd(position);
-  await saveHarborViewport(page, scheme, side, 'wheel-000-initial');
+  await saveHarborViewport(page, scheme, side, 'wheel-000-at-top');
   for (let step = 1; !reachedEnd && step <= maxSteps; step++) {
     const before = position;
     const deltaY = Math.max(
@@ -1401,8 +1492,17 @@ try {
           if (!referenceRoute) throw new Error('original reference route mapping is unavailable');
           await navigate(reference, referenceRoute, referenceData);
           if (paintDiagnostic && frame === HARBOR_FRAME && paintArm === 'wheel-traversal') {
-            await captureHarborWheelViewports(candidate, scheme, 'candidate');
-            await captureHarborWheelViewports(reference, scheme, 'reference');
+            for (const [side, page] of [
+              ['candidate', candidate],
+              ['reference', reference],
+            ])
+              try {
+                await captureHarborWheelViewports(page, scheme, side);
+              } catch (error) {
+                report.errors.push(
+                  `${side} Harbor wheel diagnostic failed: ${error.name ?? 'Error'}`,
+                );
+              }
           }
           await captureFrame(candidate, reference, key, phone);
           if (paintDiagnostic && frame === HARBOR_FRAME && paintArm === 'programmatic-end') {
