@@ -93,12 +93,53 @@ function parseTraceParticipantSummary(value: unknown): TraceParticipantSummary {
       status = parseRecordedStatus(extent.status);
     if (
       extent.scope !== 'whole_session' ||
-      Object.keys(extent).some((key) => !['scope', 'last', 'status'].includes(key)) ||
+      Object.keys(extent).some(
+        (key) => !['scope', 'last', 'status', 'recorded_activity'].includes(key),
+      ) ||
       !status ||
       (last !== null && (!Number.isSafeInteger(last) || last < 0))
     )
       throw Error('Invalid causal participant observed extent');
     observedExtent = { scope: 'whole_session', last, status };
+    if (extent.recorded_activity !== undefined) {
+      const activity = object(extent.recorded_activity);
+      if (activity.state === 'unavailable' && Object.keys(activity).every((key) => key === 'state'))
+        observedExtent.recordedActivity = { state: 'unavailable' };
+      else {
+        if (
+          activity.state !== 'available' ||
+          activity.kind !== 'timestamp_clusters' ||
+          status.observation === 'unavailable' ||
+          Object.keys(activity).some((key) => !['state', 'kind', 'intervals'].includes(key))
+        )
+          throw Error('Invalid causal recorded activity');
+        if (!Array.isArray(activity.intervals) || activity.intervals.length > 256)
+          throw Error('Invalid causal recorded activity');
+        const intervals = array(activity.intervals, (value) => {
+          if (!Array.isArray(value) || value.length !== 2)
+            throw Error('Invalid causal recorded activity');
+          const pair = array(value, number);
+          if (
+            pair.length !== 2 ||
+            pair.some((at) => !Number.isSafeInteger(at) || at < 0) ||
+            pair[1]! < pair[0]!
+          )
+            throw Error('Invalid causal recorded activity');
+          return pair as [number, number];
+        });
+        if (
+          intervals.length > 256 ||
+          JSON.stringify(intervals).length > 16 * 1024 ||
+          intervals.some((pair, index) => index > 0 && pair[0] < intervals[index - 1]![1])
+        )
+          throw Error('Invalid causal recorded activity');
+        observedExtent.recordedActivity = {
+          state: 'available',
+          kind: 'timestamp_clusters',
+          intervals,
+        };
+      }
+    }
   }
   return {
     ...(observedExtent ? { observedExtent } : {}),

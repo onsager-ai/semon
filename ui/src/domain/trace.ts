@@ -383,6 +383,13 @@ export function createTraceCalculations(
         const observedEnd = observedPeerEnd(peer),
           knownExtent = finite(observedEnd),
           observedStatus = knownExtent ? peer.summary.observedExtent?.status : undefined,
+          activity = peer.summary.observedExtent?.recordedActivity,
+          activityTip =
+            activity?.state === 'available'
+              ? 'Recorded whole-session timestamp clusters; gaps are unknown, not continuous CPU activity; its receiving turn is not in these logs'
+              : undefined,
+          activityQualification =
+            activity?.state === 'unavailable' ? 'Recorded activity unavailable' : undefined,
           recordedCost = peer.summary.cost,
           peerModel = [
             peer.summary.kind || HARNESS[peer.summary.harness],
@@ -408,6 +415,7 @@ export function createTraceCalculations(
             "Its turn isn't in these logs",
             tokens,
             costText(recordedCost) + ' recorded catalog session total',
+            activityTip ?? activityQualification,
           ]
             .filter(Boolean)
             .join(', '),
@@ -426,6 +434,17 @@ export function createTraceCalculations(
               }
             : {}),
           qualification: "Its turn isn't in these logs",
+          ...(activityTip ? { activityTip } : {}),
+          ...(activityQualification ? { activityQualification } : {}),
+          ...(knownExtent && activity?.state === 'available'
+            ? {
+                recordedActivity: activity.intervals.flatMap(([from, to]) => {
+                  const a = Math.max(start, peer.handoff.at, from),
+                    b = Math.min(end, observedEnd, to);
+                  return b > a ? [{ left: pct(a), width: Math.max(0.2, pct(b) - pct(a)) }] : [];
+                }),
+              }
+            : {}),
           tokens,
           cost,
           costTip: 'Recorded catalog session total: ' + costText(recordedCost),

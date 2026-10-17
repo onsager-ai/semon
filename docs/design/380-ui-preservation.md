@@ -262,14 +262,34 @@ capture clock; retained or unavailable observations cannot imply live activity.
 The row and chart tooltips distinguish this whole-session extent from a receiving
 turn. Qualified harness marks, the recorded relay icon and inert chart gridlines
 preserve the selected row layout without claiming activity. Peers never contribute
-invented turns, activity, timeline segments, waits
-or critical edges, and stay outside joined-turn traversal and activity calculations.
+invented turns, idle continuity, waits or critical edges, and stay outside
+joined-turn traversal and causal activity calculations.
 As in the selected application, unique
 qualified participants still contribute to the agent count and session-cost total;
 those totals do not assert a receiving turn. Unknown or unpriced costs remain
 unknown. The unchanged
 128-participant and shared decoded-metadata input bounds remain; those input
 bounds do not claim a serialized-response byte cap.
+
+Optional `observed_extent.recorded_activity` separates whole-session recorded
+timestamp clusters from a receiving turn: `state: available` carries
+`kind: timestamp_clusters` and at most 256 ordered, nonoverlapping integer-ms
+intervals (16 KiB); `state: unavailable` carries no intervals. The existing peer
+header lookup admits at most 1 MiB and charges its entire content-free metadata
+against the existing shared 4 MiB decoded-metadata budget before any source or
+status rejection; unavailable peers cannot bypass the cap. Only its `busy` clusters
+escape the allowlist, under the same generation, source, custody and status fences;
+runtime drift clears current activity along with current status. No extra query,
+Event Index/body read, source scan or poller is added. The producer already hashes
+these clusters in the header generation. They cluster recorded timestamps within
+five minutes; they do not prove continuous CPU activity.
+
+The peer track clips only these recorded clusters to the relay/qualified extent,
+with no idle fill, tail extrapolation, receiving turn or causal edge. Blank ranges
+stay unknown. Missing, malformed or capped activity has a visible per-peer
+unavailable qualification; it never becomes an accepted prefix. Activity availability
+does not change causal `incomplete` or its receiving-turn coverage flag. Old
+responses without the optional activity field remain compatible and gain no marks.
 
 `incomplete` remains true for absent receiving turns. The optional
 `incomplete_only_missing_receiving_turns` flag permits the UI to omit a redundant
