@@ -51,6 +51,8 @@ export function createTraceCalculations(
     shortMoney(usd: number): string;
     hcls(id: string): string;
     usageTotal(session: Session): number;
+    tokenTotal?(tokens: readonly number[]): number;
+    tokenText?(total: number): string;
     nameOf(id: string): string;
   },
   now: () => number,
@@ -66,8 +68,8 @@ export function createTraceCalculations(
   } = state;
   const workingEnd = (session: Session) =>
     session.state === 'work' && session.liveObservation !== false ? now() : session.last;
-  const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } =
-    domain;
+  const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } = domain;
+  const tokenText = domain.tokenText ?? ((total: number) => tok(total / 1_000_000));
   const clock = (at: number) => formatClock(at, now()),
     dur = (from: number, to: number) => formatDuration(from, to, now()),
     kindText = (s: Session) => s.kind ?? HARNESS[s.harness];
@@ -302,7 +304,7 @@ export function createTraceCalculations(
         state: s.state,
         stateLabel: status,
         tokens:
-          tok(allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid]), 0) / 1000000) +
+          tokenText(allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid]), 0)) +
           ' tokens',
         duration,
         cost: rollup.usd == null ? '—' : shortMoney(rollup.usd),
@@ -359,7 +361,10 @@ export function createTraceCalculations(
           ]
             .filter(Boolean)
             .join(' · '),
-          tokens = tok(peer.summary.tokens.reduce((sum, value) => sum + value, 0)) + ' tokens',
+          tokens =
+            (domain.tokenTotal && domain.tokenText
+              ? tokenText(domain.tokenTotal(peer.summary.tokens))
+              : tok(peer.summary.tokens.reduce((sum, value) => sum + value, 0))) + ' tokens',
           cost =
             recordedCost.usd == null || recordedCost.unpriced_models?.length
               ? '—'

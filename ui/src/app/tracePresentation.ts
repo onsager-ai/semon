@@ -8,7 +8,7 @@ import type {
   TraceParticipantSummary,
   Turn,
 } from '../domain/types';
-import { clock } from '../domain/format';
+import { clock, tok } from '../domain/format';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
 import { parseRecordedRelationship } from '../domain/relationships';
@@ -35,6 +35,24 @@ export interface CausalTrace {
   metadata?: CatalogSession;
   readResults?: ReadonlySet<string>;
 }
+
+/** The native trace stores token components in millions rounded to 1,000 tokens. */
+export function traceTokenTotal(tokens: readonly number[]): number {
+  return tokens.reduce((sum, value) => sum + Math.round(value * 1_000_000), 0);
+}
+
+/** Format nonnegative integer token totals with deterministic one-decimal half-up rounding. */
+export function traceTokenText(total: number): string {
+  if (
+    !Number.isSafeInteger(total) ||
+    total < 0 ||
+    total > Number.MAX_SAFE_INTEGER - 50_000
+  )
+    return tok(total / 1_000_000);
+  if (total < 1_000_000) return tok(total / 1_000_000);
+  return (Math.floor((total + 50_000) / 100_000) / 10).toFixed(1) + 'M';
+}
+
 const optionalText = (value: unknown) => (value == null ? undefined : text(value));
 const optionalNumber = (value: unknown) => (value == null ? undefined : number(value));
 function state(value: unknown): SessionState {
@@ -514,8 +532,9 @@ export function renderCausalTrace(
       costText: traceCostText,
       shortMoney: traceShortMoney,
       hcls: (id) => traceSessionHarnessClass(data, id) ?? '',
-      usageTotal: (session) =>
-        (session.tokens ?? []).reduce((sum, value) => sum + value, 0) * 1000000,
+      usageTotal: (session) => traceTokenTotal(session.tokens ?? []),
+      tokenTotal: traceTokenTotal,
+      tokenText: traceTokenText,
       nameOf: (id) => causalSessionPart(data, id).text,
     },
     () => now,

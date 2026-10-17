@@ -21,6 +21,8 @@ const {
   traceSessionChip,
   traceSessionMeta,
   traceQualifiedUnjoinedRelay,
+  traceTokenTotal,
+  traceTokenText,
   traceSentenceParts,
   traceHandoffOutcome,
   traceTurnOutcome,
@@ -28,6 +30,16 @@ const {
   traceShortMoney,
 } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+);
+const { outputFiles: traceDomainFiles } = await build({
+  entryPoints: [new URL('../src/domain/trace.ts', import.meta.url).pathname],
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'node',
+});
+const { createTraceCalculations } = await import(
+  'data:text/javascript;base64,' + Buffer.from(traceDomainFiles[0].contents).toString('base64')
 );
 const relationship = (id, kind, from, to, fields = {}) => ({
   id,
@@ -73,6 +85,131 @@ test('trace summary counts only root-reachable outgoing handoffs and keeps incom
   assert.equal(traceRootActor({ ...root, start: spawn }), 'selected');
   assert.equal(traceHopActor(result), 'selected');
   assert.equal(traceHopActor(spawn), 'child');
+});
+
+test('trace token totals preserve exact integer sums and round positive half-million boundaries up', () => {
+  const referencePrincipal = [0.52, 44.1, 0.23],
+    nativePrincipal = [0.64, 43.98, 0.23],
+    referenceSentinel = [0.12, 9.4, 0.03],
+    nativeSentinel = [0.12, 9.4, 0.03],
+    legacyLabel = (parts) =>
+      ((parts.reduce((sum, value) => sum + value, 0) * 1_000_000) / 1_000_000).toFixed(1) + 'M';
+
+  assert.equal(legacyLabel(nativePrincipal), '44.8M');
+  assert.equal(legacyLabel(nativeSentinel), '9.5M');
+  assert.equal(traceTokenTotal(referencePrincipal), 44_850_000);
+  assert.equal(traceTokenTotal(nativePrincipal), 44_850_000);
+  assert.equal(traceTokenTotal(referenceSentinel), 9_550_000);
+  assert.equal(traceTokenTotal(nativeSentinel), 9_550_000);
+  assert.equal(traceTokenText(traceTokenTotal(nativePrincipal)), '44.9M');
+  assert.equal(traceTokenText(traceTokenTotal(nativeSentinel)), '9.6M');
+  assert.equal(traceTokenText(44_849_000), '44.8M');
+  assert.equal(traceTokenText(44_851_000), '44.9M');
+  assert.equal(traceTokenText(999_499), '999k');
+  assert.equal(traceTokenText(999_500), '1000k');
+  assert.equal(traceTokenText(0), '0k');
+});
+
+test('createTraceCalculations agentSnapshot formats sessions and passive peers from integer totals', () => {
+  const session = (id, tokens) => ({
+      id,
+      name: id,
+      harness: 'claude',
+      kind: 'Session',
+      state: 'done',
+      liveObservation: false,
+      machine: 'local',
+      model: 'claude-opus-5-5',
+      start: 100,
+      last: 200,
+      tokens,
+      cost: { usd: 0, unpriced_models: [] },
+      busy: [],
+      wait_edges: [],
+      wait_edges_truncated: false,
+    }),
+    turn = (id, sid, sent = []) => ({
+      id,
+      sid,
+      start: null,
+      u: true,
+      at: 100,
+      end: { at: 200, st: 'done', why: 'replied', h: null },
+      sent,
+      last: false,
+    }),
+    sessions = {
+      principal: session('principal', [0.64, 43.98, 0.23]),
+      sentinel: session('sentinel', [0.12, 9.4, 0.03]),
+      atlas: session('atlas', [0, 0, 0]),
+    },
+    participantSummaries = {
+      harbor: {
+        name: 'Harbor',
+        harness: 'claude',
+        kind: 'Subagent',
+        model: 'claude-opus-5-5',
+        tokens: [0.12, 9.4, 0.03],
+        cost: { usd: 0, unpriced_models: [] },
+      },
+    },
+    traceState = { sessions, participantSummaries, turns: {}, starts: new Map() },
+    baseDomain = {
+      costForSessions: () => ({ usd: 0, unpriced_models: [] }),
+      costForSession: () => ({ usd: 0, unpriced_models: [] }),
+      costText: () => '$0.00',
+      shortMoney: () => '$0.00',
+      hcls: () => '',
+      usageTotal: (value) =>
+        (value.tokens ?? []).reduce((sum, token) => sum + token, 0) * 1_000_000,
+      nameOf: (id) => id,
+    },
+    calculator = createTraceCalculations(
+      traceState,
+      {
+        ...baseDomain,
+        usageTotal: (value) => traceTokenTotal(value.tokens ?? []),
+        tokenTotal: traceTokenTotal,
+        tokenText: traceTokenText,
+      },
+      () => 200,
+      new Map(),
+      { claude: 'Claude Code' },
+      { done: 'Done', wait: 'Waiting', work: 'Working', idle: 'Idle', err: 'Error' },
+    ),
+    legacyCalculator = createTraceCalculations(
+      traceState,
+      baseDomain,
+      () => 200,
+      new Map(),
+      { claude: 'Claude Code' },
+      { done: 'Done', wait: 'Waiting', work: 'Working', idle: 'Idle', err: 'Error' },
+    ),
+    rowTokens = (chart, id) => chart.rows.find((row) => row.id === id)?.tokens;
+
+  assert.equal(
+    rowTokens(calculator.agentSnapshot(turn('principal-turn', 'principal')), 'principal'),
+    '44.9M tokens',
+  );
+  assert.equal(
+    rowTokens(calculator.agentSnapshot(turn('sentinel-turn', 'sentinel')), 'sentinel'),
+    '9.6M tokens',
+  );
+
+  const relay = relationship('atlas-harbor', 'relay', 'atlas', 'harbor', { at: 110, done: 150 }),
+    passiveTurn = turn('atlas-turn', 'atlas', [relay]),
+    passiveChart = calculator.agentSnapshot(passiveTurn),
+    legacyPassiveChart = legacyCalculator.agentSnapshot(passiveTurn);
+  assert.equal(rowTokens(passiveChart, 'harbor'), '9.6M tokens');
+  assert.equal(
+    rowTokens(legacyCalculator.agentSnapshot(turn('principal-legacy', 'principal')), 'principal'),
+    '44.8M tokens',
+  );
+  assert.equal(
+    rowTokens(legacyCalculator.agentSnapshot(turn('sentinel-legacy', 'sentinel')), 'sentinel'),
+    '9.5M tokens',
+  );
+  assert.equal(rowTokens(legacyPassiveChart, 'harbor'), '9.5M tokens');
 });
 
 test('trace relationship sentences preserve recorded ask, subagent, relay and user-message wording', () => {
