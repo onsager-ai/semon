@@ -38,6 +38,7 @@ if (
 
 const out = path.join(ENV.out, 'preservation');
 const MAX_CAPTURE_SCROLL_EVIDENCE = 128;
+const MAX_IGNORED_CAPTURE_WHEELS = 16;
 fs.mkdirSync(out, { recursive: true });
 const report = {
   candidate: process.env.SEMON_PRESERVATION_CANDIDATE ?? process.env.GITHUB_SHA,
@@ -430,19 +431,75 @@ async function captureWheelPointValidation(page, point) {
   }, point);
 }
 
-async function armCaptureWheel(page, direction) {
-  await page.evaluate((wheelDirection) => {
-    window.__semonCaptureWheelReceipt = null;
-    document.addEventListener(
-      'wheel',
-      (event) => {
+async function armCaptureWheel(page, direction, point, key) {
+  return page.evaluate(
+    ({ direction, point, key, maxIgnored }) => {
+      const previous = window.__semonCaptureWheelState;
+      if (previous?.listener) document.removeEventListener('wheel', previous.listener, true);
+      const routeMarker = () => {
+        const state = history.state;
+        const route = {};
+        if (state && typeof state === 'object')
+          for (const field of ['v', 'id', 'sid']) {
+            const value = state[field];
+            if (typeof value === 'string' && value.length <= 128) route[field] = value;
+          }
+        return JSON.stringify({
+          document: performance.timeOrigin,
+          pathname: location.pathname,
+          route,
+        });
+      };
+      const nonce = (window.__semonCaptureWheelNonce ?? 0) + 1;
+      window.__semonCaptureWheelNonce = nonce;
+      const armedAt = performance.now();
+      const state = {
+        nonce,
+        key,
+        direction,
+        expected: {
+          deltaY: direction === 'down' ? 160 : -100000,
+          deltaMode: 0,
+          clientX: point.x,
+          clientY: point.y,
+          armedAt,
+          routeMarker: routeMarker(),
+        },
+        ignoredCount: 0,
+        ignoredTruncated: false,
+        receipt: null,
+        listener: null,
+      };
+      const listener = (event) => {
+        const currentRouteMarker = routeMarker();
+        const matches =
+          event.isTrusted === true &&
+          event.deltaY === state.expected.deltaY &&
+          event.deltaMode === state.expected.deltaMode &&
+          event.clientX === state.expected.clientX &&
+          event.clientY === state.expected.clientY &&
+          event.timeStamp >= state.expected.armedAt &&
+          currentRouteMarker === state.expected.routeMarker;
+        if (!matches) {
+          if (state.ignoredCount < maxIgnored) state.ignoredCount++;
+          else {
+            state.ignoredTruncated = true;
+            document.removeEventListener('wheel', listener, true);
+            state.listener = null;
+          }
+          return;
+        }
         const target =
           event.target?.nodeType === Node.ELEMENT_NODE ? event.target : event.target?.parentElement;
-        window.__semonCaptureWheelReceipt = {
+        state.receipt = {
           trusted: event.isTrusted,
-          direction: wheelDirection,
+          direction,
           deltaY: event.deltaY,
           deltaMode: event.deltaMode,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          timeStamp: event.timeStamp,
+          routeMarker: currentRouteMarker,
           target: target
             ? {
                 tag: target.tagName.toLowerCase(),
@@ -451,10 +508,36 @@ async function armCaptureWheel(page, direction) {
               }
             : null,
         };
-      },
-      { once: true, capture: true, passive: true },
-    );
-  }, direction);
+        document.removeEventListener('wheel', listener, true);
+        state.listener = null;
+      };
+      state.listener = listener;
+      window.__semonCaptureWheelState = state;
+      document.addEventListener('wheel', listener, { capture: true, passive: true });
+      return nonce;
+    },
+    { direction, point: { x: point.x, y: point.y }, key, maxIgnored: MAX_IGNORED_CAPTURE_WHEELS },
+  );
+}
+
+async function finishCaptureWheel(page, nonce) {
+  return page
+    .evaluate((expectedNonce) => {
+      const state = window.__semonCaptureWheelState;
+      if (!state || state.nonce !== expectedNonce) return null;
+      if (state.listener) document.removeEventListener('wheel', state.listener, true);
+      state.listener = null;
+      return {
+        nonce: state.nonce,
+        key: state.key,
+        direction: state.direction,
+        expected: state.expected,
+        ignoredCount: state.ignoredCount,
+        ignoredTruncated: state.ignoredTruncated,
+        receipt: state.receipt,
+      };
+    }, nonce)
+    .catch(() => null);
 }
 
 async function waitForCaptureWheel(page, deadline, predicateLabel, predicate, arg = null) {
@@ -523,10 +606,9 @@ async function normalizeDesktopSessionScroll(pages, key) {
         entry.pointerMoveError = safeReadinessError(error);
         fail(`${key} ${side} move to fixed capture wheel point: ${entry.pointerMoveError}`);
       }
-      let positiveArmed = false;
+      let positiveNonce = null;
       try {
-        await armCaptureWheel(page, 'down');
-        positiveArmed = true;
+        positiveNonce = await armCaptureWheel(page, 'down', point, key);
       } catch (error) {
         entry.positiveArmError = safeReadinessError(error);
         fail(`${key} ${side} arm positive capture wheel: ${entry.positiveArmError}`);
@@ -537,16 +619,18 @@ async function normalizeDesktopSessionScroll(pages, key) {
         entry.positiveCommandError = safeReadinessError(error);
         fail(`${key} ${side} send positive capture wheel: ${entry.positiveCommandError}`);
       }
-      if (positiveArmed && !entry.positiveArmError && !entry.positiveCommandError) {
+      if (positiveNonce !== null && !entry.positiveArmError && !entry.positiveCommandError) {
         try {
           await waitForCaptureWheel(
             page,
             deadline,
             'positive movement',
-            ({ beforeMainTop, expectedFlow }) => {
-              const receipt = window.__semonCaptureWheelReceipt;
+            ({ beforeMainTop, expectedFlow, nonce }) => {
+              const capture = window.__semonCaptureWheelState;
+              const receipt = capture?.receipt;
               const mainTop = document.querySelector('#main')?.scrollTop ?? null;
               return (
+                capture?.nonce === nonce &&
                 receipt?.trusted === true &&
                 receipt.direction === 'down' &&
                 (window.scrollY > 1 ||
@@ -557,6 +641,7 @@ async function normalizeDesktopSessionScroll(pages, key) {
             {
               beforeMainTop: beforeMainTop ?? 0,
               expectedFlow: expectedMainFlow,
+              nonce: positiveNonce,
             },
           );
         } catch (error) {
@@ -564,19 +649,17 @@ async function normalizeDesktopSessionScroll(pages, key) {
           fail(`${key} ${side} positive capture wheel: ${entry.positiveWaitError}`);
         }
       }
-      entry.positiveEvent = await page
-        .evaluate(() => window.__semonCaptureWheelReceipt)
-        .catch(() => null);
+      entry.positiveEvent =
+        positiveNonce === null ? null : await finishCaptureWheel(page, positiveNonce);
       entry.advanced = await captureScrollGeometry(page).catch((error) => {
         entry.advancedError = safeReadinessError(error);
         fail(`${key} ${side} post-positive geometry: ${entry.advancedError}`);
         return null;
       });
 
-      let returnArmed = false;
+      let returnNonce = null;
       try {
-        await armCaptureWheel(page, 'up');
-        returnArmed = true;
+        returnNonce = await armCaptureWheel(page, 'up', point, key);
       } catch (error) {
         entry.returnArmError = safeReadinessError(error);
         fail(`${key} ${side} arm return capture wheel: ${entry.returnArmError}`);
@@ -587,26 +670,26 @@ async function normalizeDesktopSessionScroll(pages, key) {
         entry.returnCommandError = safeReadinessError(error);
         fail(`${key} ${side} send return capture wheel: ${entry.returnCommandError}`);
       }
-      if (returnArmed && !entry.returnArmError && !entry.returnCommandError) {
+      if (returnNonce !== null && !entry.returnArmError && !entry.returnCommandError) {
         try {
           await waitForCaptureWheel(
             page,
             deadline,
             'return to top',
-            () =>
-              window.__semonCaptureWheelReceipt?.trusted === true &&
-              window.__semonCaptureWheelReceipt?.direction === 'up' &&
+            (nonce) =>
+              window.__semonCaptureWheelState?.nonce === nonce &&
+              window.__semonCaptureWheelState?.receipt?.trusted === true &&
+              window.__semonCaptureWheelState?.receipt?.direction === 'up' &&
               scrollY <= 1 &&
               (document.querySelector('#main')?.scrollTop ?? 0) <= 1,
+            returnNonce,
           );
         } catch (error) {
           entry.returnWaitError = safeReadinessError(error);
           fail(`${key} ${side} return capture wheel: ${entry.returnWaitError}`);
         }
       }
-      entry.returnEvent = await page
-        .evaluate(() => window.__semonCaptureWheelReceipt)
-        .catch(() => null);
+      entry.returnEvent = returnNonce === null ? null : await finishCaptureWheel(page, returnNonce);
       entry.returned = await captureScrollGeometry(page).catch((error) => {
         entry.returnedError = safeReadinessError(error);
         fail(`${key} ${side} post-return geometry: ${entry.returnedError}`);
@@ -639,10 +722,36 @@ async function normalizeDesktopSessionScroll(pages, key) {
         fail(`${key} ${side} window was not confirmed at top before capture wheels`);
       if (!entry.pointValidation?.insideMain || !entry.pointValidation?.inert)
         fail(`${key} ${side} fixed capture wheel point was not inert inside #main`);
-      if (entry.positiveEvent?.trusted !== true || entry.positiveEvent.deltaY <= 0)
+      const positiveReceipt = entry.positiveEvent?.receipt;
+      const returnReceipt = entry.returnEvent?.receipt;
+      if (
+        !positiveReceipt ||
+        positiveReceipt.trusted !== true ||
+        positiveReceipt.direction !== 'down' ||
+        positiveReceipt.deltaY !== 160 ||
+        positiveReceipt.deltaMode !== 0 ||
+        positiveReceipt.clientX !== point.x ||
+        positiveReceipt.clientY !== point.y ||
+        positiveReceipt.routeMarker !== entry.positiveEvent?.expected?.routeMarker ||
+        entry.positiveEvent?.nonce !== positiveNonce ||
+        entry.positiveEvent?.key !== key
+      )
         fail(`${key} ${side} positive capture wheel was not a trusted downward event`);
-      if (entry.returnEvent?.trusted !== true || entry.returnEvent.deltaY >= 0)
+      if (
+        !returnReceipt ||
+        returnReceipt.trusted !== true ||
+        returnReceipt.direction !== 'up' ||
+        returnReceipt.deltaY !== -100000 ||
+        returnReceipt.deltaMode !== 0 ||
+        returnReceipt.clientX !== point.x ||
+        returnReceipt.clientY !== point.y ||
+        returnReceipt.routeMarker !== entry.returnEvent?.expected?.routeMarker ||
+        entry.returnEvent?.nonce !== returnNonce ||
+        entry.returnEvent?.key !== key
+      )
         fail(`${key} ${side} return capture wheel was not a trusted upward event`);
+      if (entry.positiveEvent?.ignoredTruncated || entry.returnEvent?.ignoredTruncated)
+        fail(`${key} ${side} nonmatching capture wheel diagnostics truncated`);
       if (positiveChainedToWindow)
         fail(`${key} ${side} positive capture wheel chained to window scroll`);
       if (entry.expectedMainFlow === 'overflow' && !positiveMoved)
@@ -708,7 +817,7 @@ async function capture(candidate, reference, key, routeHint) {
       await page.waitForFunction(
         () => scrollY <= 1 && document.querySelector('#main').scrollTop <= 1,
       );
-      if (!desktopSessionCapture) await waitForCaptureReady(page, `${key} ${name}`);
+      await waitForCaptureReady(page, `${key} ${name}`);
     }),
   );
   const resetErrors = (
@@ -718,7 +827,7 @@ async function capture(candidate, reference, key, routeHint) {
         const [name, page] = pages[index],
           state = await readinessSnapshot(page);
         return (
-          `${key} ${name} after scroll reset failed: ${safeReadinessError(result.reason)}; ` +
+          `${key} ${name} after scroll reset readiness failed: ${safeReadinessError(result.reason)}; ` +
           `snapshot=${JSON.stringify(state)}`
         );
       }),
