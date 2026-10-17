@@ -112,7 +112,10 @@ test('retired mockup data remains available as inert historical provenance', () 
   });
   assert.equal(Object.keys(historical.main).length, 113);
   assert.equal(Object.keys(historical['two-machines']).length, 12);
-  for (const row of [...Object.values(historical.main), ...Object.values(historical['two-machines'])]) {
+  for (const row of [
+    ...Object.values(historical.main),
+    ...Object.values(historical['two-machines']),
+  ]) {
     assert.ok(Number.isFinite(row.ratio) && row.ratio >= 0 && row.ratio <= 1);
     assert.ok(Array.isArray(row.size) && row.size.length === 2);
   }
@@ -124,7 +127,10 @@ test('actual-frame contract rejects gaps, wrong provenance, bad digests and raw 
   assert.match(assessPixelComparison(missing).coverage.join(), /Missing frame case/);
   const wrongReference = pixelReport();
   wrongReference.reference = 'candidate';
-  assert.match(assessPixelComparison(wrongReference).coverage.join(), /Wrong actual visual reference/);
+  assert.match(
+    assessPixelComparison(wrongReference).coverage.join(),
+    /Wrong actual visual reference/,
+  );
   const badDigest = pixelReport();
   delete badDigest.results[0].artifactDigests.diff.evidence;
   assert.match(assessPixelComparison(badDigest).coverage.join(), /artifact digests/);
