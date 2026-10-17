@@ -110,8 +110,11 @@ Catalog, selected metadata and transcripts through source-qualified native pages
 and pins their generation across every range. Prompt and answer expectations use
 the same bounded native preview API as the browser. The reference census projects
 recorded timing into the default 24-hour observation window; retained evidence
-stays complete. Neither fixture metadata nor browser traffic reads `/api/model`.
-Browser traffic must use bounded Source and selected-session APIs. Compatibility query bookmarks are
+stays complete. Candidate fixture metadata and capture traffic use bounded
+Source and selected-session APIs. The actual visual comparator makes one pinned
+reference-only `/api/model?delta=1&content=1` read to resolve old trace turn IDs;
+its digest and per-state handoff/input mapping are reported. Candidate browser
+traffic never calls that retired endpoint. Compatibility query bookmarks are
 normalized to the same reader. Existing mismatch ratchets and approved baselines
 remain required.
 

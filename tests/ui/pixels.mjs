@@ -5,15 +5,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data } from './lib.mjs';
+import { ENV, launch, served, goto, data, waitForCaptureReady } from './lib.mjs';
 import { sample, BASE } from './fixture.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
   assessPixelComparison,
   assessVisualAcceptances,
   expectedPixelCoverage,
+  PARITY_MODEL_SOURCE,
   PIXEL_REGIONS,
   REFERENCE,
+  REFERENCE_MODEL_SOURCE,
   sha256,
   THRESHOLD,
   MAX_RATIO,
@@ -39,7 +41,8 @@ const report = {
   candidateFingerprint: null,
   reference: selfParity ? 'served-parity' : REFERENCE.source,
   ...(selfParity ? {} : { referenceHub: REFERENCE.hub }),
-  referenceModelSource: 'tests/ui/fixture-data/overhaul.json',
+  referenceModelSource: selfParity ? PARITY_MODEL_SOURCE : REFERENCE_MODEL_SOURCE,
+  referenceModelDigest: null,
   scope,
   threshold: THRESHOLD,
   maxRatio: MAX_RATIO,
@@ -47,6 +50,7 @@ const report = {
   results: [],
   regions: [],
   errors: [],
+  apiDiagnostics: [],
   routeMappings: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
@@ -111,7 +115,31 @@ async function snapshot(page) {
 function minute(t) {
   return Math.round(((t - BASE) / 60000) * 1000) / 1000;
 }
-function referenceHandoffs(D, source) {
+async function pinnedReferenceModel(base, token) {
+  const origin = new URL(base).origin,
+    landing = await fetch(base + '/?t=' + encodeURIComponent(token));
+  if (!landing.ok || new URL(landing.url).origin !== origin)
+    throw new Error(`pinned reference model landing failed: HTTP ${landing.status}`);
+  const cookies =
+      typeof landing.headers.getSetCookie === 'function'
+        ? landing.headers.getSetCookie()
+        : [landing.headers.get('set-cookie')].filter(Boolean),
+    cookie = cookies.map((value) => value.split(';')[0]).join('; ');
+  if (!cookie)
+    throw new Error('pinned reference model landing did not set an authorization cookie');
+  const response = await fetch(base + '/api/model?delta=1&content=1', {
+    headers: { cookie, accept: 'application/json' },
+  });
+  if (!response.ok || new URL(response.url).origin !== origin)
+    throw new Error(`pinned reference model request failed: HTTP ${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer()),
+    model = JSON.parse(bytes.toString('utf8'));
+  if (!Array.isArray(model.handoffs) || !Array.isArray(model.turns))
+    throw new Error('pinned reference model is missing handoffs or turns');
+  return { model, digest: sha256(bytes) };
+}
+
+function referenceHandoffs(D, source, referenceModel) {
   const ids = new Map();
   for (const h of source.H) {
     const match = D.H.find(
@@ -122,12 +150,71 @@ function referenceHandoffs(D, source) {
         candidate.to === h.to &&
         minute(candidate.at) === h.at,
     );
-    if (match) ids.set(match.id, h.id);
+    if (!match) continue;
+    if (!referenceModel) {
+      ids.set(match.id, { fixtureId: h.id, modelId: h.id });
+      continue;
+    }
+    const semantic = (candidate) =>
+        candidate.kind === h.kind &&
+        candidate.from === h.from &&
+        candidate.to === h.to &&
+        minute(candidate.at) === h.at,
+      exact = referenceModel.handoffs.find((candidate) => candidate.id === h.id),
+      matches = exact && semantic(exact) ? [exact] : referenceModel.handoffs.filter(semantic);
+    if (matches.length !== 1) {
+      report.errors.push(
+        `Reference handoff mapping for ${match.id} -> ${h.id} has ${matches.length} exact model matches`,
+      );
+      continue;
+    }
+    ids.set(match.id, { fixtureId: h.id, modelId: matches[0].id });
   }
   return ids;
 }
 
-function screens(D, source, handoffIds) {
+function originalTurnId(turn, referenceModel, handoffIds) {
+  if (!referenceModel) return { id: turn.id };
+  const start = turn.start ? handoffIds.get(turn.start)?.modelId : null,
+    userText = typeof turn.text === 'string' ? turn.text : turn.u?.text,
+    matches = referenceModel.turns.filter((candidate) => {
+      if (candidate.sid !== turn.sid) return false;
+      if (start) return candidate.start === start;
+      if (!turn.u || !candidate.u) return false;
+      return (
+        (userText == null || candidate.text === userText) &&
+        (turn.at == null || candidate.at === turn.at)
+      );
+    });
+  if (matches.length !== 1)
+    throw new Error(
+      `pinned reference turn mapping for ${turn.sid}:${turn.id} has ${matches.length} exact ` +
+        `matches (start=${start ?? 'none'}, user=${Boolean(turn.u)}, at=${turn.at ?? 'none'})`,
+    );
+  return matches[0];
+}
+
+function inputEvidence(turn) {
+  if (!turn?.u) return null;
+  const text = typeof turn.text === 'string' ? turn.text : (turn.u?.text ?? '');
+  return { text: String(text).slice(0, 160), chars: String(text).length, at: turn.at ?? null };
+}
+
+function handoffEvidence(handoff, id) {
+  return handoff
+    ? {
+        id: handoff.id,
+        kind: handoff.kind,
+        from: handoff.from,
+        to: handoff.to,
+        at: handoff.at,
+      }
+    : id
+      ? { id }
+      : null;
+}
+
+function screens(D, source, handoffIds, referenceModel) {
   const list = [
     { name: 'home', route: { v: 'home' } },
     { name: 'analytics', route: { v: 'analytics' } },
@@ -149,48 +236,94 @@ function screens(D, source, handoffIds) {
       });
       continue;
     }
-    const referenceTurn = turn.start
-      ? handoffIds.get(turn.start)
+    const fixtureTurn = turn.start
+      ? handoffIds.get(turn.start)?.fixtureId
       : source.TX[turn.sid]?.[at]?.k === 'u'
         ? turn.sid + ':' + at
         : null;
-    if (!referenceTurn) {
+    if (!fixtureTurn) {
       report.errors.push(
-        `Reference turn mapping missing for ${turn.sid}:${turn.id} at transcript entry ${at}`,
+        `Historical frame key missing for ${turn.sid}:${turn.id} at transcript entry ${at}`,
       );
     }
-    const stableTurn = referenceTurn ?? turn.id;
+    let referenceTurn = null;
+    try {
+      referenceTurn = originalTurnId(turn, referenceModel, handoffIds);
+    } catch (error) {
+      report.errors.push(error.message);
+    }
+    const stableTurn = fixtureTurn ?? turn.id;
     list.push({
       name: 'trace-' + turn.sid + '-' + String(stableTurn).replace(/[^\w-]/g, '_'),
       route: { v: 'trace', sid: turn.sid, turn: turn.id },
-      referenceRoute: referenceTurn ? { v: 'trace', sid: turn.sid, turn: referenceTurn } : null,
+      referenceRoute: referenceTurn ? { v: 'trace', sid: turn.sid, turn: referenceTurn.id } : null,
+      referenceTurnBinding: {
+        candidateTurn: turn.id,
+        candidateSession: turn.sid,
+        candidateAt: turn.at ?? null,
+        candidateStart: handoffEvidence(
+          D.H.find((handoff) => handoff.id === turn.start),
+          turn.start,
+        ),
+        candidateInput: inputEvidence(turn),
+        referenceTurn: referenceTurn?.id ?? null,
+        referenceAt: referenceTurn?.at ?? null,
+        referenceStart: handoffEvidence(
+          referenceModel?.handoffs.find((handoff) => handoff.id === referenceTurn?.start),
+          referenceTurn?.start,
+        ),
+        referenceInput: inputEvidence(referenceTurn),
+        historicalFrameKey: stableTurn,
+      },
     });
   }
   return list;
 }
 
 async function navigateReference(page, route) {
+  if (page.captureReadinessEnabled) page.captureRouteKey = JSON.stringify(route);
   await page.evaluate((value) => {
     history.pushState(value, '');
     dispatchEvent(new PopStateEvent('popstate', { state: value }));
   }, route);
-  await page.waitForFunction((value) => {
-    const panel = document.querySelector('#page');
-    return (
-      history.state?.v === value.v &&
-      !!document.querySelector('#topbar .t, #topbar #find') &&
-      panel?.childElementCount > 0 &&
-      !panel.hasAttribute('aria-busy') &&
-      !panel.querySelector('[aria-busy="true"]') &&
-      (value.v !== 'session' ||
-        !!panel.querySelector('section[aria-label="Transcript"], .transcript')) &&
-      (value.v !== 'trace' || !!panel.querySelector('.trace-summary'))
+  try {
+    await page.waitForFunction((value) => {
+      const panel = document.querySelector('#page');
+      return (
+        history.state?.v === value.v &&
+        !!document.querySelector('#topbar .t, #topbar #find') &&
+        panel?.childElementCount > 0 &&
+        !panel.hasAttribute('aria-busy') &&
+        !panel.querySelector('[aria-busy="true"]') &&
+        (value.v !== 'session' ||
+          !!panel.querySelector('section[aria-label="Transcript"], .transcript')) &&
+        (value.v !== 'trace' || !!panel.querySelector('.trace-summary'))
+      );
+    }, route);
+  } catch (error) {
+    const state = await page.evaluate(() => {
+      const panel = document.querySelector('#page');
+      return {
+        historyState: history.state,
+        pathname: location.pathname,
+        title: document.querySelector('#topbar .t')?.textContent ?? null,
+        busy:
+          !panel || panel.hasAttribute('aria-busy') || !!panel.querySelector('[aria-busy="true"]'),
+        traceSummary: !!panel?.querySelector('.trace-summary'),
+        pageText: panel?.innerText.slice(0, 600) ?? null,
+      };
+    });
+    state.apiDiagnostics = page.captureApiEvents?.slice(-20) ?? [];
+    throw new Error(
+      `pinned reference route ${JSON.stringify(route)} did not settle; ` +
+        `state=${JSON.stringify(state)}; pageErrors=${JSON.stringify(page.errors ?? [])}; ` +
+        `wait=${error.message}`,
     );
-  }, route);
+  }
   if (route.v === 'analytics')
     await page.waitForSelector('.analytics-metrics[data-analytics-ready]');
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(60);
+  await waitForCaptureReady(page, `pinned reference route ${route.v}`);
 }
 
 async function navigate(page, route, referenceData) {
@@ -213,7 +346,7 @@ async function prepareFrame(page, phone) {
     }
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
-  await page.waitForTimeout(120);
+  await waitForCaptureReady(page, `frame scroll ${page.url()}`);
   return page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
 }
 
@@ -319,7 +452,7 @@ async function regionShot(page, region, key, side) {
     const opener = page.locator(region.open).first();
     if (!(await opener.count())) throw new Error(`open control missing: ${region.open}`);
     await opener.click();
-    await page.waitForTimeout(200);
+    await waitForCaptureReady(page, `${key} opened region`);
   }
   const evidence = await regionEvidence(page, region);
   const evidenceDigest = saveJson(key, side + '-geometry', evidence);
@@ -334,7 +467,7 @@ async function regionShot(page, region, key, side) {
     : await target.screenshot({ animations: 'disabled', caret: 'hide' });
   if (region.open) {
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(150);
+    await waitForCaptureReady(page, `${key} closed region`);
   }
   save(key, side, bytes);
   return {
@@ -353,7 +486,7 @@ async function resetTopScroll(page) {
   await page.evaluate(
     () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
   );
-  await page.waitForTimeout(120);
+  await waitForCaptureReady(page, 'region top scroll');
 }
 
 async function sharedTranscriptViewport(candidate, reference, region) {
@@ -393,7 +526,7 @@ async function sharedTranscriptViewport(candidate, reference, region) {
         }),
       ),
     );
-    await Promise.all(pages.map((page) => page.waitForTimeout(120)));
+    await Promise.all(pages.map((page) => waitForCaptureReady(page, 'transcript viewport resize')));
     const stabilized = await Promise.all(
       pages.map((page) => page.locator(region.selector).first().boundingBox()),
     );
@@ -507,7 +640,7 @@ async function captureRegion(candidate, reference, region, key) {
 
 async function openDrawer(page) {
   await page.click('#lead-btn');
-  await page.waitForTimeout(350);
+  await waitForCaptureReady(page, 'drawer opened');
 }
 
 try {
@@ -525,8 +658,10 @@ try {
   browser = await launch();
   const D = await data(),
     original = sample('overhaul.json'),
-    handoffIds = referenceHandoffs(D, original),
-    routes = screens(D, original, handoffIds),
+    pinnedModel = selfParity ? null : await pinnedReferenceModel(referenceBase, referenceToken);
+  report.referenceModelDigest = pinnedModel?.digest ?? null;
+  const handoffIds = referenceHandoffs(D, original, pinnedModel?.model),
+    routes = screens(D, original, handoffIds, pinnedModel?.model),
     routeByName = new Map();
   for (const route of routes) {
     if (routeByName.has(route.name))
@@ -538,6 +673,7 @@ try {
     frame: route.name,
     candidateRoute: route.route,
     referenceRoute: Object.hasOwn(route, 'referenceRoute') ? route.referenceRoute : route.route,
+    ...(route.referenceTurnBinding ? { referenceTurnBinding: route.referenceTurnBinding } : {}),
   }));
   if (expectedFrames.includes('drawer'))
     report.routeMappings.push({
@@ -573,9 +709,17 @@ try {
         viewport: { width: phone ? 390 : 1280, height: phone ? 844 : 860 },
         dark,
       };
-    const candidate = await served(browser, { ...options, captureRequests: true }),
+    const candidate = await served(browser, {
+        ...options,
+        captureRequests: true,
+        captureReadiness: true,
+        captureRole: 'candidate',
+      }),
       reference = await served(browser, {
         ...options,
+        captureRequests: true,
+        captureReadiness: true,
+        captureRole: selfParity ? 'candidate' : 'reference',
         base: referenceBase,
         token: referenceToken,
         ...(selfParity ? {} : { path: '/?compat=1' }),
@@ -588,8 +732,7 @@ try {
         try {
           await goto(candidate, { v: 'home' }, D);
           await navigate(reference, { v: 'home' }, referenceData);
-          await openDrawer(candidate);
-          await openDrawer(reference);
+          await Promise.all([openDrawer(candidate), openDrawer(reference)]);
           await captureFrame(candidate, reference, key, phone);
         } catch (error) {
           report.errors.push(`${key} navigation: ${error.message}`);
@@ -630,6 +773,18 @@ try {
         )
         .map((url) => `${scheme} retired candidate request: ${new URL(url).pathname}`),
     );
+    for (const [side, page] of [
+      ['candidate', candidate],
+      ['reference', reference],
+    ]) {
+      report.apiDiagnostics.push(
+        ...page.captureApiEvents.map((event) => ({ scheme, side, ...event })),
+      );
+      if (page.captureApiEventsTruncated)
+        report.errors.push(
+          `${scheme} ${side} API diagnostics truncated after ${page.captureApiEventsTruncated} events`,
+        );
+    }
     await candidate.context().close();
     await reference.context().close();
   }

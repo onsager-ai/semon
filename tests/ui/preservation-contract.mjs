@@ -7,6 +7,9 @@ export const REFERENCE = {
   source: '263a02da278716ab2309b8e34a463419e5c781e5',
   hub: '503fbe090749ea1d58b9ca9fa4ccae7289ee426e',
 };
+export const REFERENCE_MODEL_SOURCE =
+  'pinned reference /api/model?delta=1&content=1 (reference-only)';
+export const PARITY_MODEL_SOURCE = 'served parity model';
 export const BEFORE = 'eb535ff8920fe9aa54e78babc9649cf6c9400ad6';
 export const THRESHOLD = 0.1;
 export const MAX_RATIO = 0.0001;
@@ -186,8 +189,16 @@ export function assessPixelComparison(report) {
     coverage.push('Wrong selected Hub provenance');
   if (report.coverageSource !== 'tests/ui/visual-coverage.json')
     coverage.push('Wrong visual coverage source');
-  if (report.referenceModelSource !== 'tests/ui/fixture-data/overhaul.json')
-    coverage.push('Wrong historical reference model source');
+  const expectedModelSource =
+    report.scope === 'pushed' ? PARITY_MODEL_SOURCE : REFERENCE_MODEL_SOURCE;
+  if (report.referenceModelSource !== expectedModelSource)
+    coverage.push('Wrong visual reference model source');
+  if (report.scope === 'pushed') {
+    if (report.referenceModelDigest !== null)
+      coverage.push('Unexpected pushed-parity reference model digest');
+  } else if (!/^[a-f0-9]{64}$/.test(report.referenceModelDigest ?? '')) {
+    coverage.push('Missing pinned reference model digest');
+  }
   if (report.threshold !== THRESHOLD || report.maxRatio !== MAX_RATIO)
     coverage.push('Changed visual thresholds');
   if (!Array.isArray(report.errors) || report.errors.length)
