@@ -1,6 +1,9 @@
 #!/bin/sh
 # Explicit local fixture for native controller qualification, never a user server.
 set -eu
+# Real-SSH feature qualification is deferred while product transport is paused.
+printf '%s\n' 'capability_unavailable: SSH qualification is paused in the collection configuration' >&2
+exit 1
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 : "${SEMON_CODEX_PACKAGE:?complete pinned native package required}"
 : "${SEMON_SSH_BINARY:?qualified Semon push/readback binary required}"

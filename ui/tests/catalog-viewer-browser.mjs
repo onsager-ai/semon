@@ -6,7 +6,8 @@ import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
-    contents: "export {mountViewerApplication} from './src/app/viewer';",
+    contents:
+      "import {installSelect} from './src/lib/select'; installSelect(); export {mountViewerApplication} from './src/app/viewer';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -22,7 +23,7 @@ const html = (
   .replace('<link rel="stylesheet" href="/shell.css">', '');
 const css = (
   await Promise.all(
-    ['viewer', 'shell'].map((name) =>
+    ['viewer', 'shell', 'select'].map((name) =>
       readFile(new URL(`../../crates/semon-sessions/src/${name}.css`, import.meta.url), 'utf8'),
     ),
   )
@@ -36,6 +37,7 @@ const source = (key) => ({
   tail_sha256: Array(32).fill(2),
 });
 const meta = (key) => ({
+  lifecycle: 'current',
   key,
   name: 'Session ' + key,
   harness: 'claude',
@@ -102,6 +104,675 @@ const list = (items) => ({
   items,
   next_cursor: null,
 });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`native host chrome stays isolated from reader publications at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch(),
+        page = await browser.newPage({
+          viewport: { width, height: 900 },
+          colorScheme,
+          isMobile: width === 390,
+          hasTouch: width === 390,
+        }),
+        requests = [],
+        errors = [];
+      try {
+        page.setDefaultTimeout(10000);
+        page.on('pageerror', (error) => errors.push(String(error)));
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname.startsWith('/api/')) {
+            requests.push(url.pathname + url.search);
+            return route.fulfill({ status: 503, json: { error: 'unexpected_native_chrome_read' } });
+          }
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/workspace/settings?machine=source-0');
+        await page.clock.install({ time: new Date('2026-10-18T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-18T00:00:00.001Z'));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          const element = document.createElement('section');
+          element.innerHTML =
+            '<form action="/native-save" method="post"><input name="task" value="Retained task"><button>Save native task</button></form>';
+          document.querySelector('#page').append(element);
+          window.nativeContent = element;
+          window.nativeInput = element.querySelector('input');
+          window.nativeDestroys = 0;
+          window.app = CatalogViewer.mountViewerApplication({
+            machinesPath: '/manage/machines',
+            nativePage: { title: 'Workspace settings', nav: 'machines' },
+            initialMachines: {
+              element,
+              destroy() {
+                window.nativeDestroys++;
+                element.remove();
+              },
+            },
+          });
+        });
+        const assertNative = async () => {
+          assert.equal(
+            await page.evaluate(() => nativeContent === document.querySelector('#page > section')),
+            true,
+          );
+          assert.equal(
+            await page.evaluate(() => nativeInput === document.querySelector('#page input')),
+            true,
+          );
+          assert.equal(await page.locator('#lanes .srow').count(), 0);
+          assert.equal(await page.locator('#page .catalog-session').count(), 0);
+          assert.deepEqual(
+            requests,
+            [],
+            'native chrome must not start a workspace or selected read',
+          );
+          assert.deepEqual(errors, []);
+        };
+        await assertNative();
+        assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
+        assert.equal(
+          await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
+          '/analytics',
+        );
+        assert.equal(
+          await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+          '/manage/machines',
+        );
+        if (width === 390) {
+          await page.getByRole('button', { name: 'Open menu', exact: true }).tap();
+          assert.equal(await page.locator('#lanes .srow').count(), 0);
+          await page.evaluate(() => {
+            window.nativeDrawerClosed = new Promise((resolve) =>
+              window.addEventListener('popstate', () => resolve(), { once: true }),
+            );
+          });
+          await page.keyboard.press('Escape');
+          await withDeadline(
+            page.evaluate(() => window.nativeDrawerClosed),
+            'native isolation drawer history close',
+          );
+          assert.equal(await page.evaluate(() => !!history.state?.drawer), false);
+        }
+        await page.locator('#page input').fill('Edited native task');
+        await page.locator('#page input').press('End');
+        await page.clock.runFor(8100);
+        await assertNative();
+        assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
+        assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
+        await page.evaluate(() => {
+          Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            get: () => 'visible',
+          });
+          document.dispatchEvent(new Event('visibilitychange'));
+          window.dispatchEvent(new Event('semon:refresh'));
+        });
+        await page.clock.runFor(8100);
+        await assertNative();
+        // Native links leave this document. A same-document history notification
+        // cannot turn the native host into a source-selected reader either.
+        for (const path of [
+          '/sessions?machine=source-1',
+          '/s/native/shared?machine=source-1',
+          '/analytics',
+          '/',
+        ]) {
+          await page.evaluate((path) => {
+            history.pushState(null, '', path);
+            dispatchEvent(new PopStateEvent('popstate'));
+          }, path);
+          await page.clock.runFor(32);
+          await assertNative();
+          assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
+          assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
+        }
+        await page.evaluate(() => {
+          app.destroy();
+          app.destroy();
+        });
+        assert.equal(await page.evaluate(() => nativeDestroys), 1);
+        assert.equal(await page.locator('#page form').count(), 0);
+        await page.clock.runFor(8100);
+        assert.deepEqual(requests, []);
+        assert.deepEqual(errors, []);
+      } finally {
+        try {
+          if (!page.isClosed()) await page.evaluate(() => window.app?.destroy());
+          await withDeadline(
+            page.unrouteAll({ behavior: 'wait' }),
+            'native isolation routes drain',
+          );
+        } finally {
+          await withDeadline(browser.close(), 'native isolation browser close');
+        }
+      }
+    });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`workspace Recent stays separate from focused Machine publications at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch(),
+        page = await browser.newPage({
+          viewport: { width, height: 900 },
+          colorScheme,
+          isMobile: width === 390,
+          hasTouch: width === 390,
+        }),
+        now = Date.parse('2026-10-07T12:00:00Z'),
+        machines = Array.from({ length: 16 }, (_, i) => ({
+          key: 'source-' + i,
+          label: 'Machine ' + i,
+          up: true,
+          working: 0,
+          sessions: 60,
+          last: now - 1000,
+        })),
+        row = (machine, key, name, parent = null) => ({
+          id: JSON.stringify([machine, key]),
+          source_key: machine,
+          catalog_key: key,
+          session: {
+            name,
+            harness: 'claude',
+            model: 'native-model',
+            repo: null,
+            state: 'idle',
+            last: now - 1000,
+            start: now - 2000,
+            waiting_for: null,
+            waiting_since: null,
+            cost: 1,
+            parent,
+          },
+        }),
+        globalRecent = [
+          row('source-0', 'shared', 'Alpha shared'),
+          row('source-1', 'shared', 'Beta shared'),
+          ...Array.from({ length: 58 }, (_, i) =>
+            row('source-0', 'child-' + i, 'Published child ' + i, 'shared'),
+          ),
+        ],
+        requests = [],
+        errors = [];
+      let workspaceReads = 0,
+        workspaceMode = 'ready',
+        stage = 'setup',
+        primaryFailure;
+      page.setDefaultTimeout(10000);
+      // Keep product time paused while Node polls actual state with the existing
+      // deadline; a readiness check must not depend on a frozen animation frame.
+      const ready = async (label, predicate, arg) => {
+        stage = label;
+        let finished = false;
+        try {
+          await withDeadline(
+            (async () => {
+              while (!finished) {
+                if (await page.evaluate(predicate, arg)) return;
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+            })(),
+            label,
+          );
+        } finally {
+          finished = true;
+        }
+      };
+      const publication = (machine, retired = false) => ({
+        api: 1,
+        version: (machine ? 'a' : retired ? 'c' : workspaceMode === 'partial' ? 'f' : 'd').repeat(
+          64,
+        ),
+        now,
+        next: { inbox: null, working: null, answered: null },
+        totals: { waiting: machine ? 100 : retired ? 99 : 4, working: 0, answered: 0 },
+        machines: machine ? machines.filter((item) => item.key === machine) : machines,
+        recent: machine
+          ? Array.from({ length: 60 }, (_, i) =>
+              row(machine, i ? 'focused-' + i : 'shared', 'Focused ' + machine + ' row ' + i),
+            )
+          : retired
+            ? [row('source-0', 'retired', 'Retired publication')]
+            : globalRecent.map((item) =>
+                workspaceMode === 'partial' && item.source_key === 'source-1'
+                  ? { ...item, session: { ...item.session, name: 'Beta partial' } }
+                  : item,
+              ),
+        inbox: Array.from({ length: machine ? 100 : retired ? 99 : 4 }, (_, i) => ({
+          ...row(machine ?? 'source-0', 'waiting-' + i, 'Waiting ' + i),
+          event: {
+            id: 'question-' + i,
+            at: now - 1000,
+            done: null,
+            ask: 'decision',
+            status: 'wait',
+            brief: 'Recorded decision',
+            answer: null,
+            declined: false,
+          },
+        })),
+        working: [],
+        answered: [],
+        observations:
+          !machine && workspaceMode === 'partial'
+            ? [{ source_key: 'source-15', state: 'unavailable' }]
+            : [],
+        pending_observations:
+          !machine && workspaceMode === 'pending'
+            ? [{ source_key: 'source-15', catalog_key: 'waiting-for-publication' }]
+            : [],
+      });
+      try {
+        page.on('pageerror', (error) => errors.push(String(error)));
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url()),
+            machine = url.searchParams.get('machine') ?? 'source-0';
+          requests.push(url.pathname + url.search);
+          const font = url.pathname.match(
+            /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
+          );
+          if (font)
+            return route.fulfill({
+              contentType: 'font/woff2',
+              body: await readFile(
+                new URL(
+                  '../../crates/semon-sessions/src/fonts/' + font[1] + '/' + font[2] + '.woff2',
+                  import.meta.url,
+                ),
+              ),
+            });
+          if (url.pathname === '/viewer.css')
+            return route.fulfill({ contentType: 'text/css', body: css });
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({
+              json: {
+                api: 1,
+                items: machines.map((item) => ({ source_key: item.key, label: item.label })),
+                next_cursor: null,
+              },
+            });
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
+          if (url.pathname === '/api/viewer/home') {
+            const focused = url.searchParams.get('source');
+            if (focused) return route.fulfill({ json: publication(focused) });
+            const number = ++workspaceReads;
+            if (workspaceMode === 'unavailable')
+              return route.fulfill({
+                status: 503,
+                headers: { 'x-fixture-workspace-mode': workspaceMode },
+                json: { error: 'overview_unavailable' },
+              });
+            return route.fulfill({
+              headers: {
+                'x-fixture-workspace-mode': workspaceMode,
+                'x-fixture-publication': number === 1 ? 'retired' : 'current',
+              },
+              json: publication(null, number === 1),
+            });
+          }
+          if (url.pathname === '/api/sessions') {
+            const value = meta('shared');
+            value.transcript = {
+              generation: 'b'.repeat(64),
+              errors_generation: 'b'.repeat(64),
+              total: 3,
+            };
+            return route.fulfill({
+              json: {
+                ...list([value]),
+                machine,
+                machine_info: { key: machine, label: machine, freshness: 'cached' },
+              },
+            });
+          }
+          if (url.pathname === '/api/session-identity')
+            return route.fulfill({
+              json: { api: 1, identity: { ...identity('shared'), source_key: machine } },
+            });
+          if (url.pathname === '/api/session-transcript') {
+            const value = transcript('shared', url.searchParams, 3);
+            value.identity.source_key = machine;
+            return route.fulfill({ json: value });
+          }
+          if (url.pathname === '/api/session-trace')
+            return route.fulfill({
+              json: {
+                api: 1,
+                source_key: machine,
+                catalog_key: 'shared',
+                root: 'trace-root',
+                generation: 'e'.repeat(64),
+                sessions: {
+                  shared: {
+                    ...globalRecent[1].session,
+                    cost: { usd: 1, unpriced_models: [] },
+                    tokens: [0, 0, 0],
+                    busy: [],
+                    wait_edges: [],
+                    wait_edges_truncated: false,
+                  },
+                },
+                participants: { 'unjoined-peer': 'Recorded peer' },
+                participant_summaries: {
+                  'unjoined-peer': {
+                    name: 'Recorded peer',
+                    harness: 'codex',
+                    kind: 'Subagent',
+                    model: 'native-model',
+                    tokens: [1, 2, 0],
+                    cost: { usd: 2, unpriced_models: [] },
+                    observed_extent: {
+                      scope: 'whole_session',
+                      last: now - 1000,
+                      status: { state: 'work', observation: 'current' },
+                      recorded_activity: {
+                        state: 'available',
+                        kind: 'timestamp_clusters',
+                        intervals: [
+                          [now - 130000, now - 100000],
+                          [now - 90000, now - 80000],
+                        ],
+                      },
+                    },
+                  },
+                },
+                handoffs: [
+                  {
+                    id: 'peer-relay',
+                    kind: 'relay',
+                    from: 'shared',
+                    to: 'unjoined-peer',
+                    at: now - 120000,
+                    status: 'done',
+                    brief: '',
+                    declined: false,
+                  },
+                ],
+                turns: [
+                  {
+                    id: 'trace-root',
+                    sid: 'shared',
+                    at: now - 600000,
+                    u: true,
+                    sent: ['peer-relay'],
+                    end: { st: 'done', why: 'replied', at: now - 1000 },
+                    last: true,
+                  },
+                ],
+                frontier: [],
+                previews: {},
+                incomplete: true,
+                incomplete_only_missing_receiving_turns: true,
+                previews_incomplete: false,
+              },
+            });
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return route.fulfill({ contentType: 'text/html', body: html });
+        });
+        await page.goto('http://catalog.test/machines/source-0?machine=source-0');
+        await page.clock.install({ time: new Date(now) });
+        await page.clock.pauseAt(new Date(now + 1));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          const nativeFetch = window.fetch.bind(window);
+          let globalReads = 0;
+          window.workspaceAborts = [];
+          window.fetch = async (input, options = {}) => {
+            const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+            if (url.pathname !== '/api/viewer/home' || url.searchParams.has('source'))
+              return nativeFetch(input, options);
+            const number = ++globalReads;
+            options.signal.addEventListener('abort', () => workspaceAborts.push(number), {
+              once: true,
+            });
+            if (number === 1) {
+              window.workspaceNetworkPending = true;
+              return new Promise((_, reject) => {
+                options.signal.addEventListener(
+                  'abort',
+                  () => reject(new DOMException('Retired fixture request', 'AbortError')),
+                  { once: true },
+                );
+              });
+            }
+            const response = await nativeFetch(input, options);
+            if (number === 2) {
+              const value = await response.json();
+              window.workspaceBodyDelivered = true;
+              response.json = async () => {
+                window.workspaceBodyPending = true;
+                await new Promise((resolve) => (window.releaseWorkspaceBody = resolve));
+                window.workspaceBodyReturned = true;
+                return value;
+              };
+            } else if (number === 3) {
+              const value = await response.json();
+              response.json = async () => {
+                window.workspaceCurrentBodyPending = true;
+                await new Promise((resolve) => (window.releaseCurrentWorkspaceBody = resolve));
+                return value;
+              };
+            }
+            return response;
+          };
+          window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
+        });
+        await ready(
+          'initial focused Machine rows',
+          () => document.querySelectorAll('#page .nrow').length === 60,
+        );
+        assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-0/);
+        await ready('first workspace network gate', () => window.workspaceNetworkPending);
+        // The exact bare Home request belongs to the existing navigation abort owner.
+        await page.evaluate(() => document.querySelector('#nav [data-go="machines"]').click());
+        await ready('delivered retired workspace body gate', () => window.workspaceBodyPending);
+        assert.equal(await page.evaluate(() => workspaceAborts.includes(1)), true);
+        assert.equal(await page.evaluate(() => window.workspaceBodyDelivered), true);
+        // Already delivered JSON can still finish after cancellation: its epoch must reject it.
+        await page.evaluate(() => {
+          history.pushState(null, '', '/machines/source-1?machine=source-1');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+        await ready('retired delivered body cancellation', () => workspaceAborts.includes(2));
+        await ready('fresh workspace body gate', () => window.workspaceCurrentBodyPending);
+        await page.evaluate(() => window.releaseWorkspaceBody());
+        await ready('retired delivered body return', () => window.workspaceBodyReturned);
+        await page.clock.runFor(32);
+        assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
+        assert.equal(
+          (await page.locator('#nav [data-go="home"]').textContent()).replace(/\s/g, ''),
+          'Home',
+          'retired waiting totals cannot publish while the current workspace body is held',
+        );
+        await page.evaluate(() => window.releaseCurrentWorkspaceBody());
+        await ready(
+          'second focused Machine rows',
+          () =>
+            document.querySelectorAll('#page .nrow').length === 60 &&
+            document.querySelector('#page .nrow')?.textContent.includes('Focused source-1'),
+        );
+        await ready('current workspace Recent publication', () =>
+          document.querySelector('#lanes')?.textContent.includes('Alpha shared'),
+        );
+        assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
+        assert.equal((await page.locator('#lanes .row-machine').count()) > 1, true);
+        const homeText = () => page.locator('#nav [data-go="home"]').textContent();
+        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
+        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-1/);
+
+        stage = 'open focused session';
+        await withDeadline(page.locator('#page .nrow').first().click(), stage);
+        stage = 'selected transcript';
+        await withDeadline(page.locator('#page [data-entry-key="shared:0"]').waitFor(), stage);
+        const current = page.locator('#lanes .srow[aria-current="page"]');
+        assert.equal(await current.count(), 1);
+        assert.equal(await current.getAttribute('data-id'), JSON.stringify(['source-1', 'shared']));
+        assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
+        assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
+
+        for (const mode of ['unavailable', 'partial', 'pending', 'ready']) {
+          workspaceMode = mode;
+          const response = page.waitForResponse(
+            (value) => value.headers()['x-fixture-workspace-mode'] === mode,
+          );
+          await page.clock.runFor(8100);
+          stage = 'workspace response after ' + mode;
+          const receipt = await withDeadline(response, stage);
+          assert.equal(receipt.status(), mode === 'unavailable' ? 503 : 200);
+          // Error reads intentionally release their unread body; the exact HTTP
+          // receipt and resulting chrome state are this fixture's witnesses.
+          if (mode !== 'unavailable') await withDeadline(receipt.finished(), stage + ' body');
+          await ready(
+            'workspace scope after ' + mode,
+            (ready) =>
+              ready
+                ? !document.querySelector('#lanes')?.hasAttribute('aria-description')
+                : document
+                    .querySelector('#lanes')
+                    ?.getAttribute('aria-description')
+                    ?.includes('unavailable'),
+            mode === 'ready',
+          );
+          assert.equal((await homeText()).replace(/\s/g, ''), mode === 'ready' ? 'Home4' : 'Home');
+          await ready(
+            'workspace rows after ' + mode,
+            (label) => document.querySelector('#lanes')?.textContent.includes(label),
+            mode === 'partial' ? 'Beta partial' : 'Beta shared',
+          );
+        }
+        await page.evaluate(() => {
+          history.pushState(null, '', '/trace/native/shared/trace-root?machine=source-1');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+        stage = 'Trace publication';
+        await withDeadline(page.locator('#page .agents-panel').waitFor(), stage);
+        const peer = page.locator('#page .agent-peer');
+        assert.equal(await peer.getAttribute('data-depth'), '0');
+        assert.equal(await peer.locator('.agent-harness-dot.h-codex').count(), 1);
+        assert.equal(await peer.locator('.agent-relay-icon').count(), 1);
+        assert.ok((await peer.locator('.agent-track .agent-gridline').count()) > 0);
+        assert.equal(await peer.locator('.agent-segment.busy').count(), 2);
+        assert.equal(
+          await peer.locator('.agent-segment.idle,.agent-wait,.agent-spawn-tick').count(),
+          0,
+        );
+        assert.match(
+          await peer.locator('.agent-track').getAttribute('data-tip'),
+          /whole-session timestamp clusters.*not continuous CPU activity/,
+        );
+        assert.equal(await peer.getAttribute('data-agent-id'), null);
+        assert.equal(await peer.getAttribute('data-critical'), null);
+        assert.match(await peer.getAttribute('aria-label'), /receiving|turn isn't in these logs/);
+        assert.match(
+          await peer.locator('.agent-duration').getAttribute('data-tip'),
+          /Whole-session/,
+        );
+        assert.match(
+          await page.locator('#page .flow').textContent(),
+          /Its turn isn't in these logs/,
+        );
+        assert.doesNotMatch(
+          await page.locator('#page .trace-summary').textContent(),
+          /context is unavailable/,
+        );
+        assert.equal(await page.locator('#page .agent-edges path').count(), 0);
+        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
+        assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
+        assert.equal(
+          requests.some((path) => path.startsWith('/api/model')),
+          false,
+        );
+        assert.equal(
+          requests.some((path) => path.startsWith('/api/session-home')),
+          false,
+        );
+        assert.equal(
+          requests.some((path) => path.startsWith('/api/session-observe')),
+          false,
+        );
+        assert.deepEqual(errors, []);
+        await page.evaluate(() => window.app.destroy());
+      } catch (error) {
+        primaryFailure = error;
+        let snapshot;
+        try {
+          snapshot = await withDeadline(
+            page.evaluate(() => ({
+              pathname: location.pathname,
+              search: location.search,
+              page: document.querySelector('#page')?.textContent.slice(0, 4000),
+              recent: document.querySelector('#lanes')?.textContent.slice(0, 4000),
+              nav: document.querySelector('#nav')?.textContent.slice(0, 1000),
+              networkPending: window.workspaceNetworkPending,
+              bodyDelivered: window.workspaceBodyDelivered,
+              bodyPending: window.workspaceBodyPending,
+              bodyReturned: window.workspaceBodyReturned,
+              currentBodyPending: window.workspaceCurrentBodyPending,
+              aborts: window.workspaceAborts?.slice(-16),
+            })),
+            'workspace failure diagnostic',
+          );
+        } catch (diagnosticError) {
+          snapshot = { diagnosticError: String(diagnosticError).slice(0, 1000) };
+        }
+        console.error(
+          'workspace-publication failure ' +
+            JSON.stringify({
+              width,
+              colorScheme,
+              stage,
+              workspaceReads,
+              workspaceMode,
+              requests: requests.slice(-40).map((value) => value.slice(0, 512)),
+              errors: errors.slice(-20).map((value) => value.slice(0, 1000)),
+              snapshot,
+            }),
+        );
+        throw error;
+      } finally {
+        let teardownFailure;
+        try {
+          if (!page.isClosed())
+            await withDeadline(
+              page.evaluate(() => {
+                window.releaseWorkspaceBody?.();
+                window.releaseCurrentWorkspaceBody?.();
+                window.app?.destroy();
+              }),
+              'workspace fixture release',
+            );
+          await withDeadline(page.unrouteAll({ behavior: 'wait' }), 'workspace owned routes drain');
+        } catch (teardownError) {
+          teardownFailure = teardownError;
+        } finally {
+          try {
+            await withDeadline(browser.close(), 'workspace browser close');
+          } catch (closeError) {
+            teardownFailure = teardownFailure
+              ? new AggregateError(
+                  [teardownFailure, closeError],
+                  'Workspace teardown and close failed',
+                )
+              : closeError;
+          }
+        }
+        if (teardownFailure) {
+          if (primaryFailure)
+            throw new AggregateError(
+              [primaryFailure, teardownFailure],
+              'Workspace assertion and teardown failed',
+            );
+          throw teardownFailure;
+        }
+      }
+    });
+
 function transcript(key, p, total = 65, generation = 'b') {
   const limit = Number(p.get('limit') ?? 60),
     first = p.has('after') ? Number(p.get('after')) : Math.max(0, total - limit),
@@ -110,7 +781,12 @@ function transcript(key, p, total = 65, generation = 'b') {
     api: 1,
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
-    projection: { version: 5, generation: generation.repeat(64), total },
+    projection: {
+      version: 5,
+      generation: generation.repeat(64),
+      errors_generation: generation.repeat(64),
+      total,
+    },
     range: { first, end, next: end < total ? end : null },
     entries: Array.from({ length: end - first }, (_, i) => ({
       k: 'a',
@@ -164,12 +840,22 @@ for (const width of [390, 1280])
                 next_cursor: null,
               },
             });
+          if (u.pathname === '/api/session-source-candidates')
+            return route.fulfill({
+              json: {
+                api: 1,
+                source_key: u.searchParams.get('machine') ?? 'source',
+                items: [],
+                next_cursor: null,
+              },
+            });
           if (u.pathname === '/api/session-capabilities')
             return route.fulfill({
               json: {
                 ...capabilities(true),
                 source_key: u.searchParams.get('machine') ?? 'source',
                 selected_entry: true,
+                source_candidates: true,
               },
             });
           if (u.pathname === '/api/session-entry') {
@@ -202,7 +888,20 @@ for (const width of [390, 1280])
           if (u.pathname === '/api/sessions')
             return route.fulfill({
               json: {
-                ...list([meta('one'), meta('two')]),
+                ...list(
+                  [meta('one'), meta('two')].map((item) =>
+                    u.searchParams.get('sid') === item.key
+                      ? {
+                          ...item,
+                          transcript: {
+                            generation: nativeGeneration.repeat(64),
+                            errors_generation: nativeGeneration.repeat(64),
+                            total: nativeTotal,
+                          },
+                        }
+                      : item,
+                  ),
+                ),
                 machine: u.searchParams.get('machine'),
                 machine_info: {
                   key: u.searchParams.get('machine'),
@@ -281,12 +980,23 @@ for (const width of [390, 1280])
           window.app = CatalogViewer.mountViewerApplication({
             machinesPath: '/machines',
             catalogControlStream: '/catalog/status',
+            navigation: {
+              leading: [
+                {
+                  key: 'new-session',
+                  label: 'New Session',
+                  href: '/sessions/new',
+                  icon: 'M4 12h16',
+                },
+              ],
+            },
             loadMachines: async () => {
               throw Error('No native inventory in this fixture');
             },
           });
         });
         await page.locator('#page [data-id="one"]').waitFor();
+        assert.equal(await page.locator('#nav [data-go="new-session"]').count(), 0);
         await page.evaluate(() => document.fonts.ready);
         if (process.env.SEMON_CATALOG_OUT) {
           await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
@@ -300,10 +1010,8 @@ for (const width of [390, 1280])
         const original = await page.evaluateHandle(() =>
           document.querySelector('#page [data-entry-key="one:5"]'),
         );
-        const draft = page.locator('#page textarea');
-        await draft.fill('Retained native draft');
-        await draft.focus();
-        const draftNode = await draft.elementHandle();
+        assert.equal(await page.getByRole('button', { name: 'Open Composer' }).count(), 0);
+        assert.equal(await page.evaluate(() => streams.length), 0);
         await page.getByRole('button', { name: 'Load recorded text', exact: true }).click();
         await page.getByRole('button', { name: 'Load more text', exact: true }).waitFor();
         assert.match(
@@ -320,10 +1028,10 @@ for (const width of [390, 1280])
           await page.locator('#page [data-entry-key="one:6"]').innerText(),
           /and final native text chunk/,
         );
-        assert.equal(await draft.inputValue(), 'Retained native draft');
+        await page.keyboard.press('Escape');
         await page.getByRole('button', { name: 'Load earlier records' }).first().click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        assert.equal(await draft.inputValue(), 'Retained native draft');
+        await page.keyboard.press('Escape');
         await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
         await page.locator('#page [data-id="two"]').click();
         await page.locator('#page [data-entry-key="two:5"]').waitFor();
@@ -344,15 +1052,23 @@ for (const width of [390, 1280])
           true,
         );
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        await page.evaluate(() => document.querySelector('.catalog-sources').click());
+        const openMachineChooser = async () => {
+          await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
+          await page
+            .locator('#topbar')
+            .getByRole('link', { name: 'Choose a machine', exact: true })
+            .click();
+        };
+        await openMachineChooser();
         await page.locator('[data-source-key="second"]').click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
-        await page.locator('#page textarea').fill('Second source draft');
-        await page.evaluate(() => document.querySelector('.catalog-sources').click());
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !history.state?.sheet);
+        await openMachineChooser();
         await page.locator('[data-source-key="source"]').click();
+        await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
         assert.equal(
           await page.evaluate(
             (node) => node === document.querySelector('#page [data-entry-key="one:5"]'),
@@ -361,34 +1077,51 @@ for (const width of [390, 1280])
           true,
         );
         await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
         await page.locator('[data-source-key="second"]').waitFor();
         assert.equal(new URL(page.url()).searchParams.get('choose_source'), '1');
         await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Second source draft');
+        await page.goForward();
+        await page.locator('#page [data-id="one"]').waitFor();
         await page.goForward();
         await page.locator('[data-source-key="source"]').waitFor();
         await page.goForward();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goForward();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
+        // Revisit the other source after restoring the source navigation entry.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !history.state?.sheet);
+        await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
+        await page.locator('[data-source-key="second"]').waitFor();
+        await page.goBack();
+        await page.locator('#page [data-id="one"]').waitFor();
+        await page.goBack();
+        await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !history.state?.sheet);
+        await openMachineChooser();
+        await page.locator('[data-source-key="source"]').click();
+        await page.locator('#page [data-id="one"]').click();
+        await page.locator('#page [data-entry-key="one:0"]').waitFor();
         if (process.env.SEMON_CATALOG_OUT)
           await page.screenshot({
             path: process.env.SEMON_CATALOG_OUT + '/selected-' + width + '-' + colorScheme + '.png',
           });
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
-        assert.equal(
-          await page.evaluate(
-            (node) => node === document.querySelector('#page textarea'),
-            draftNode,
-          ),
-          true,
-        );
         await page
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.scrollIntoView({ block: 'start' }));
-        await page
-          .locator('#page textarea')
-          .evaluate((node) => node.focus({ preventScroll: true }));
+        const focusTarget = page.getByRole('button', {
+          name: 'Session menu: details, cost and actions',
+        });
+        const focusNode = await focusTarget.elementHandle();
+        await focusTarget.evaluate((node) => node.focus({ preventScroll: true }));
         const anchorBefore = await page
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.getBoundingClientRect().top);
@@ -396,9 +1129,8 @@ for (const width of [390, 1280])
         nativeTotal = 66;
         await page.clock.runFor(3100);
         await page.locator('#page [data-entry-key="one:65"]').waitFor();
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
         assert.equal(
-          await page.evaluate((node) => node === document.activeElement, draftNode),
+          await page.evaluate((node) => node === document.activeElement, focusNode),
           true,
         );
         const anchorAfter = await page
@@ -411,18 +1143,18 @@ for (const width of [390, 1280])
         );
         await page.getByRole('button', { name: 'Reload recorded text', exact: true }).waitFor();
         assert.equal(requests.filter((p) => p.startsWith('/api/session-entry')).length, 2);
+        await page.keyboard.press('Escape');
         await page.getByRole('button', { name: /Jump to bottom/ }).click();
         await page.waitForFunction(
           () => document.querySelector('#page > div')?.getAttribute('aria-busy') === 'false',
         );
-        await page.locator('#page textarea').focus();
+        await focusTarget.focus();
         nativeGeneration = 'd';
         nativeTotal = 67;
         await page.clock.runFor(3100);
         await page.locator('#page [data-entry-key="one:66"]').waitFor({ state: 'attached' });
-        assert.equal(await page.locator('#page textarea').inputValue(), 'Retained native draft');
         assert.equal(
-          await page.evaluate((node) => node === document.activeElement, draftNode),
+          await page.evaluate((node) => node === document.activeElement, focusNode),
           true,
         );
         const endGap = await page.evaluate(() => {
@@ -452,13 +1184,20 @@ for (const width of [390, 1280])
     });
 test('temporary boot failure and pending projection recover without starting global content', async () => {
   const browser = await chromium.launch();
+  let releaseFirstRange,
+    page,
+    capabilityReads = 0,
+    ready = false,
+    rangeReads = 0,
+    stage = 'create fixture';
+  const requests = [];
+  const firstRangeHeld = new Promise((resolve) => {
+      releaseFirstRange = resolve;
+    }),
+    firstRangeStarted = Promise.withResolvers();
   try {
-    const page = await browser.newPage(),
-      requests = [];
-    let capabilityReads = 0,
-      ready = false,
-      rangeReads = 0;
-    await page.route('http://catalog.test/**', (route) => {
+    page = await browser.newPage();
+    await page.route('http://catalog.test/**', async (route) => {
       const url = new URL(route.request().url()),
         p = url.pathname;
       requests.push(p);
@@ -469,7 +1208,11 @@ test('temporary boot failure and pending projection recover without starting glo
       if (p === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
       if (p === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
       if (p === '/api/session-transcript') {
-        if (++rangeReads === 1) return route.fulfill({ status: 503, body: '' });
+        if (++rangeReads === 1) {
+          firstRangeStarted.resolve();
+          await firstRangeHeld;
+          return route.fulfill({ status: 503, body: '' });
+        }
         return route.fulfill({ json: transcript('one', url.searchParams) });
       }
       return route.fulfill({
@@ -519,9 +1262,14 @@ test('temporary boot failure and pending projection recover without starting glo
         },
       });
     });
-    await page.getByText('Session history is unavailable.', { exact: false }).waitFor();
+    stage = 'observe unavailable boot';
+    await page
+      .getByText('The source is updating or temporarily unavailable.', { exact: false })
+      .waitFor();
+    stage = 'recover boot and select pending projection';
     await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
+    assert.equal(await page.getByRole('button', { name: 'Open Composer' }).count(), 0);
     await page
       .getByRole('region', { name: 'Environment status' })
       .getByText('This session has ended.', { exact: true })
@@ -529,30 +1277,103 @@ test('temporary boot failure and pending projection recover without starting glo
     await page
       .getByText('Current native session selection is unavailable.', { exact: false })
       .waitFor();
-    assert.equal(await page.locator('.composer-unavailable').isVisible(), true);
-    assert.equal(await page.locator('textarea').isVisible(), false);
+    assert.equal(await page.locator('.composer-unavailable').count(), 0);
+    assert.equal(await page.locator('textarea').count(), 0);
     assert.equal(
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
     );
+    stage = 'refresh pending projection';
+    await page.keyboard.press('Escape');
     ready = true;
     await page.clock.runFor(8100);
+    await withDeadline(firstRangeStarted.promise, 'first unavailable selected range request');
+    assert.equal(rangeReads, 1);
+    // Deliver the temporary error while the product clock is paused. Advancing
+    // across the recheck and retry together can otherwise miss this transient UI.
+    const unavailableResponse = withDeadline(
+      page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === '/api/session-transcript' &&
+          url.searchParams.get('machine') === 'source' &&
+          url.searchParams.get('sid') === 'one' &&
+          response.request().method() === 'GET'
+        );
+      }),
+      'first unavailable selected range response headers',
+    );
+    stage = 'deliver unavailable selected range';
+    releaseFirstRange();
+    assert.equal((await unavailableResponse).status(), 503);
+    stage = 'observe unavailable selected range';
     await page
       .getByText('The source is updating or temporarily unavailable.', { exact: false })
       .waitFor();
+    stage = 'recover selected range after original retry interval';
     await page.clock.runFor(1100);
     await page.locator('#page [data-entry-key="one:5"]').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Open Composer' }).count(), 0);
     await page
       .getByRole('region', { name: 'Environment status' })
       .getByText('This session has ended.', { exact: true })
       .waitFor();
     assert.equal(requests.includes('/api/model'), false);
+    stage = 'destroy fixture';
     await page.evaluate(() => app.destroy());
     const afterDestroy = requests.length;
     await page.clock.runFor(30000);
     assert.equal(requests.length, afterDestroy);
     assert.equal(await page.evaluate(() => runtimeStreams.every((stream) => stream.closed)), true);
+  } catch (error) {
+    let dom;
+    try {
+      dom = await withDeadline(
+        page.evaluate(() => {
+          const known = [
+            'The source is updating or temporarily unavailable.',
+            'Current native session selection is unavailable.',
+            'Loading',
+            'No native records',
+            'Cached history',
+            'Recorded history',
+          ];
+          return {
+            clock: Date.now(),
+            path: location.pathname,
+            historyKeys: Object.keys(history.state ?? {}).slice(0, 12),
+            entries: document.querySelectorAll('#page [data-entry-key]').length,
+            notes: [...document.querySelectorAll('#page [role="status"], #page .catalog-note')]
+              .slice(0, 12)
+              .map((node) => {
+                const text = node.textContent.trim();
+                return {
+                  known: known.find((prefix) => text.startsWith(prefix)) ?? null,
+                  length: text.length,
+                  visible: node.getBoundingClientRect().height > 0,
+                };
+              }),
+          };
+        }),
+        'unavailable projection failure evidence',
+      );
+    } catch {
+      dom = { diagnosticUnavailable: true };
+    }
+    console.error(
+      'unavailable projection fixture failure: ' +
+        JSON.stringify({
+          stage,
+          capabilityReads,
+          rangeReads,
+          ready,
+          requests: requests.slice(-20),
+          dom,
+        }),
+    );
+    throw error;
   } finally {
+    releaseFirstRange();
     await browser.close();
   }
 });
@@ -642,7 +1463,9 @@ for (const width of [390, 1280])
           },
         });
       });
-      await page.getByText('Source inventory is unavailable.', { exact: false }).waitFor();
+      await page
+        .getByText('The source is updating or temporarily unavailable.', { exact: false })
+        .waitFor();
       assert.equal(requests.includes('/api/session-capabilities'), false);
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
@@ -689,14 +1512,22 @@ for (const width of [390, 1280])
     }
   });
 
-test('partial catalog discovery completes while retaining uncommitted filter focus', async () => {
+test('partial catalog discovery completes while retaining uncommitted search focus', async () => {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    let reads = 0;
+    let reads = 0,
+      complete = false;
     await page.route('http://catalog.test/**', (route) => {
       const path = new URL(route.request().url()).pathname;
-      if (path === '/api/session-capabilities') return route.fulfill({ json: capabilities(false) });
+      if (path === '/api/session-capabilities')
+        return route.fulfill({
+          json: {
+            ...capabilities(false),
+            metadata_search: true,
+            filters: ['harness', 'repo', 'q'],
+          },
+        });
       if (path === '/api/sessions') {
         reads++;
         return route.fulfill({
@@ -707,8 +1538,8 @@ test('partial catalog discovery completes while retaining uncommitted filter foc
             machine_info: { key: 'source', label: 'Source', freshness: 'cached' },
             generation: 'a'.repeat(64),
             observed_at: null,
-            freshness: reads === 1 ? 'updating' : 'cached',
-            completeness: { state: reads === 1 ? 'partial' : 'complete' },
+            freshness: complete ? 'cached' : 'updating',
+            completeness: { state: complete ? 'complete' : 'partial' },
             capabilities: {
               pagination: true,
               filters: ['harness', 'repo'],
@@ -732,9 +1563,10 @@ test('partial catalog discovery completes while retaining uncommitted filter foc
     await page.addScriptTag({ content: outputFiles[0].text });
     await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
     await page.getByText('More sessions are being discovered. This list is incomplete.').waitFor();
-    const harness = page.getByRole('textbox', { name: 'Harness', exact: true });
+    const harness = page.getByRole('searchbox', { name: 'Search session details', exact: true });
     await harness.fill('uncommitted');
     await harness.evaluate((node) => node.setSelectionRange(2, 7));
+    complete = true;
     await page
       .getByText('More sessions are being discovered. This list is incomplete.')
       .waitFor({ state: 'hidden' });
@@ -880,7 +1712,7 @@ test('bounded metadata search preserves literal query and exposes empty partial 
     await page.goto('http://catalog.test/sessions');
     await page.addScriptTag({ content: outputFiles[0].text });
     await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
-    const input = page.getByRole('textbox', { name: 'Search session details', exact: true });
+    const input = page.getByRole('searchbox', { name: 'Search session details', exact: true });
     await input.waitFor();
     await input.fill(query);
     await input.press('Tab');
@@ -956,20 +1788,43 @@ for (const width of [390, 1280])
       await page.goto('http://catalog.test/sessions');
       await page.addScriptTag({ content: outputFiles[0].text });
       await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
-      const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      const query = page.getByRole('searchbox', { name: 'Search session details', exact: true });
       await query.waitFor();
-      // One submit reads the whole form, including fields that have not blurred.
-      await page.locator('.catalog-filters').evaluate((form) => {
-        form.elements.namedItem('q').value = 'Session';
-        form.elements.namedItem('harness').value = 'claude';
-        form.elements.namedItem('repo').value = '/repo';
+      // Filter choices commit together when the existing shared sheet closes.
+      await page.locator('.facet-btn').click();
+      for (const [label, value] of [
+        ['Harness', 'claude'],
+        ['Repo', '/repo'],
+      ]) {
+        const select = page.locator(`.sh-select[data-label="${label}"]`);
+        await select.locator('.sh-select-trigger').click();
+        await select.locator(`[role="option"][data-value="${value}"]`).click();
+      }
+      const committed = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === '/api/sessions' &&
+          url.searchParams.get('harness') === 'claude' &&
+          url.searchParams.get('repo') === '/repo'
+        );
+      });
+      await page.locator('.filters-sheet .fdone').click();
+      await committed;
+      await page.waitForFunction(() => !history.state?.sheet);
+      assert.equal(reads.length, 2);
+      await query.fill('Session');
+      const searched = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname === '/api/sessions' && url.searchParams.get('q') === 'Session';
       });
       await query.press('Enter');
+      await searched;
       await page.getByRole('button', { name: 'Clear filters', exact: true }).waitFor();
-      assert.equal(reads.length, 2);
-      assert.equal(reads[1].q, 'Session');
-      assert.equal(reads[1].harness, 'claude');
-      assert.equal(reads[1].repo, '/repo');
+      await page.waitForFunction(() => new URLSearchParams(location.search).get('q') === 'Session');
+      assert.equal(reads.length, 3);
+      assert.equal(reads[2].q, 'Session');
+      assert.equal(reads[2].harness, 'claude');
+      assert.equal(reads[2].repo, '/repo');
       const row = page.locator('#page [data-id="row-18"]');
       await row.scrollIntoViewIfNeeded();
       const listScroll = await page.evaluate(() =>
@@ -980,7 +1835,8 @@ for (const width of [390, 1280])
       assert.ok(listScroll > 100);
       await row.press('Enter');
       await page.locator('[data-entry-key]').first().waitFor();
-      await page.getByRole('button', { name: 'Back to sessions', exact: false }).press('Enter');
+      if (width < 761) await page.locator('#lead-btn').click();
+      await page.getByRole('link', { name: 'Sessions', exact: true }).press('Enter');
       await row.waitFor();
       assert.equal(await query.inputValue(), 'Session');
       assert.equal(await row.evaluate((node) => document.activeElement === node), true);
@@ -1074,8 +1930,7 @@ for (const width of [390, 1280])
       name = 'Meaningful later name';
       await page.clock.runFor(8100);
       await page.waitForFunction(
-        () =>
-          document.querySelector('.catalog-session-name')?.textContent === 'Meaningful later name',
+        () => document.querySelector('#topbar .l1 .t')?.textContent === 'Meaningful later name',
       );
       assert.equal(reads, firstReads);
       assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
@@ -1088,12 +1943,10 @@ for (const width of [390, 1280])
         }),
       );
       await page.clock.runFor(3100);
-      assert.equal(
-        await page.locator('.catalog-session-name').textContent(),
-        'Meaningful later name',
-      );
+      assert.equal(await page.locator('#topbar .l1 .t').textContent(), 'Meaningful later name');
       assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
-      await page.getByRole('button', { name: 'Back to sessions' }).click();
+      if (width < 761) await page.locator('#lead-btn').click();
+      await page.getByRole('link', { name: 'Sessions', exact: true }).click();
       assert.match(
         await page.locator('[data-session-row="list"][data-id="one"] .nm').innerText(),
         /Meaningful later name/,
@@ -1102,3 +1955,1043 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`complete Catalog rows and grouping stay focused at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+        const requests = [],
+          children = Array.from({ length: 7 }, (_, i) => ({
+            ...meta('child-' + i),
+            parent: 'parent',
+            presentation_kind: 'Subagent',
+          })),
+          items = [meta('parent'), ...children, { ...meta('orphan'), parent: 'unloaded-parent' }];
+        await page.route('http://catalog.test/**', (route) => {
+          const u = new URL(route.request().url());
+          if (u.pathname.startsWith('/api/')) requests.push(u.pathname + u.search);
+          if (u.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(false) });
+          if (u.pathname === '/api/sessions') return route.fulfill({ json: list(items) });
+          if (u.pathname === '/api/session-identity')
+            return route.fulfill({
+              json: { ...identity(u.searchParams.get('sid')), read_scope: 'retained_history' },
+            });
+          return route.fulfill({
+            contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+            body: u.pathname === '/viewer.css' ? css : html,
+          });
+        });
+        await page.goto('http://catalog.test/sessions');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+          Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            get: () => 'hidden',
+          });
+        });
+        const parent = page.locator('[data-session-row="list"][data-id="parent"]');
+        await parent.waitFor();
+        assert.equal(await page.locator('[data-session-row="list"]').count(), 9);
+        assert.equal(await page.locator('[data-id="orphan"][data-session-row="list"]').count(), 1);
+        await parent.evaluate((node) => {
+          window.parentRow = node;
+        });
+        const group = page.getByRole('button', { name: 'Project', exact: true });
+        const before = requests.length;
+        await group.focus();
+        await group.press('Enter');
+        assert.equal(await group.getAttribute('aria-pressed'), 'true');
+        assert.equal(await group.evaluate((node) => node === document.activeElement), true);
+        assert.equal(await page.locator('[data-session-row="list"]').count(), 9);
+        await page.getByRole('button', { name: 'Recent', exact: true }).press('Enter');
+        await parent.evaluate((node) => {
+          window.parentRow = node;
+        });
+        await page.getByRole('button', { name: 'Recent', exact: true }).press('Enter');
+        assert.equal(
+          await page.evaluate(
+            () =>
+              parentRow === document.querySelector('[data-session-row="list"][data-id="parent"]'),
+          ),
+          true,
+        );
+        assert.equal(requests.length, before, 'local grouping requested source preparation');
+        const child = page.locator('[data-session-row="list"][data-id="child-0"]');
+        assert.equal(await child.locator('.session-row-meta').count(), 1);
+        assert.equal(await child.locator('.row-delegation').count(), 1);
+        assert.ok(
+          await child.evaluate(
+            (node, minimum) => node.getBoundingClientRect().height >= minimum,
+            width < 761 ? 44 : 36,
+          ),
+        );
+        await child.press('Enter');
+        await page.waitForFunction(
+          () => history.state?.v === 'session' && history.state.id === 'child-0',
+        );
+        assert.equal(
+          requests.some(
+            (path) => path.startsWith('/api/model') || path.startsWith('/api/session-transcript'),
+          ),
+          false,
+        );
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
+
+async function fulfillCatalogStatic(route, url) {
+  const font = url.pathname.match(
+    /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
+  );
+  if (font)
+    return route.fulfill({
+      contentType: 'font/woff2',
+      body: await readFile(
+        new URL(
+          '../../crates/semon-sessions/src/fonts/' + font[1] + '/' + font[2] + '.woff2',
+          import.meta.url,
+        ),
+      ),
+    });
+  return route.fulfill({
+    contentType: url.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+    body: url.pathname === '/viewer.css' ? css : html,
+  });
+}
+
+function withDeadline(promise, label, timeoutMs = 10000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Timed out waiting for ' + label)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`late bounded context preserves reading position before scroll delivery at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      let releasePreview;
+      const previewGate = new Promise((resolve) => {
+        releasePreview = resolve;
+      });
+      try {
+        const page = await browser.newPage({
+          viewport: { width, height: 900 },
+          colorScheme,
+          isMobile: width === 390,
+          hasTouch: width === 390,
+        });
+        let signalPreview;
+        const previewStarted = new Promise((resolve) => {
+          signalPreview = resolve;
+        });
+        const previewGeneration = 'c'.repeat(64);
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(true) });
+          if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
+          if (url.pathname === '/api/session-transcript') {
+            const value = transcript('one', url.searchParams, 60);
+            Object.assign(value.entries.at(-1), { k: 'h', id: 'child-edge', turn: 'parent-turn' });
+            delete value.entries.at(-1).text;
+            value.relationship_context = {
+              state: 'complete',
+              turn_ids: ['parent-turn'],
+              turns: [
+                {
+                  sid: 'one',
+                  id: 'parent-turn',
+                  u: false,
+                  end: { st: 'done', why: 'complete' },
+                  sent: ['child-edge'],
+                  last: true,
+                },
+              ],
+              handoffs: [
+                {
+                  id: 'child-edge',
+                  kind: 'spawn',
+                  ask: 'task',
+                  from: 'one',
+                  to: 'child',
+                  at: 1,
+                  done: 2,
+                  status: 'done',
+                  declined: false,
+                  brief_session: 'child',
+                  source_turn: 'parent-turn',
+                },
+              ],
+              sessions: {
+                child: {
+                  name: 'Child',
+                  harness: 'claude',
+                  model: 'native-model',
+                  kind: 'subagent',
+                  state: 'done',
+                },
+              },
+              previews: { child: previewGeneration },
+            };
+            return route.fulfill({ json: value });
+          }
+          if (url.pathname === '/api/session-home') {
+            signalPreview();
+            await previewGate;
+            return route.fulfill({
+              json: {
+                api: 1,
+                identity: { ...identity('child'), read_scope: 'retained_history' },
+                generation: previewGeneration,
+                incomplete: false,
+                events: { 'child-edge': { brief: 'Hydrated bounded child brief' } },
+                session: {},
+              },
+            });
+          }
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/sessions');
+        // Defer only delivery to the application's scroll listener. Native
+        // geometry and input remain real, modeling a response before that
+        // asynchronous event reaches the owner without a timing-based retry.
+        await page.evaluate(() => {
+          window.deferReaderScroll = false;
+          window.deferredReaderScrolls = 0;
+          window.readerWheelObserved = false;
+          window.addEventListener(
+            'scroll',
+            (event) => {
+              if (
+                window.deferReaderScroll &&
+                (event.target === document || event.target === document.querySelector('#main'))
+              ) {
+                window.deferredReaderScrolls++;
+                event.stopImmediatePropagation();
+              }
+            },
+            { capture: true, passive: true },
+          );
+          document.addEventListener('wheel', (event) => {
+            if (event.isTrusted) window.readerWheelObserved = true;
+          });
+        });
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+        });
+        await page.locator('#page [data-id="one"]').click();
+        await withDeadline(previewStarted, 'bounded child context request');
+        await page.locator('#page [data-entry-key="one:59"]').waitFor();
+        await page.evaluate(() => document.fonts.ready);
+        const inert = await page.locator('#topbar').evaluate((bar) => {
+          const rect = bar.getBoundingClientRect(),
+            x = Math.min(rect.right - 1, innerWidth - 1),
+            y = Math.max(rect.top + 1, 1),
+            target = document.elementFromPoint(x, y);
+          if (!bar.contains(target) || target.closest('button, a, input, [role="button"]'))
+            throw Error('Reader input requires inert topbar padding');
+          return { x, y };
+        });
+        await page.mouse.move(inert.x, inert.y);
+        await page.mouse.wheel(0, 1);
+        await page.waitForFunction(() => window.readerWheelObserved);
+        const before = await page.locator('#page [data-entry-key="one:20"]').evaluate((node) => {
+          window.deferReaderScroll = true;
+          node.scrollIntoView({ block: 'center' });
+          const main = document.querySelector('#main');
+          return {
+            top: node.getBoundingClientRect().top,
+            gap:
+              innerWidth <= 760
+                ? document.documentElement.scrollHeight - scrollY - innerHeight
+                : main.scrollHeight - main.scrollTop - main.clientHeight,
+          };
+        });
+        assert.ok(before.gap > 80, 'The native reader must move away from the tail');
+        await page.waitForFunction(() => window.deferredReaderScrolls > 0);
+        releasePreview();
+        await page
+          .getByText('Hydrated bounded child brief', { exact: true })
+          .waitFor({ state: 'attached' });
+        const after = await page.locator('#page [data-entry-key="one:20"]').evaluate((node) => ({
+          top: node.getBoundingClientRect().top,
+          deferred: window.deferredReaderScrolls,
+        }));
+        assert.ok(after.deferred > 0, 'The reading-scroll event must remain deferred');
+        assert.ok(Math.abs(after.top - before.top) < 2, JSON.stringify({ before, after }));
+        await page.evaluate(() => {
+          window.deferReaderScroll = false;
+          window.dispatchEvent(new Event('scroll'));
+          document.querySelector('#main').dispatchEvent(new Event('scroll'));
+        });
+        await page.getByRole('button', { name: /Jump to bottom/ }).waitFor();
+        await page.evaluate(() => app.destroy());
+      } finally {
+        releasePreview();
+        await browser.close();
+      }
+    });
+
+test('cached history restores tail following independently of another reader position', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({
+        viewport: { width: 1280, height: 900 },
+        colorScheme: 'dark',
+      }),
+      observations = { one: { generation: 'b', total: 65 }, two: { generation: 'b', total: 65 } };
+    let returningToB = false;
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url()),
+        key = url.searchParams.get('sid');
+      if (url.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: capabilities(true) });
+      if (url.pathname === '/api/session-identity')
+        return route.fulfill({ json: { api: 1, identity: identity(key) } });
+      if (url.pathname === '/api/sessions') {
+        const keys = key ? [key] : ['one', 'two'];
+        return route.fulfill({
+          json: list(
+            keys.map((key) => ({
+              ...meta(key),
+              ...(key === 'two' && returningToB ? { name: 'Restored session two' } : {}),
+              transcript: {
+                generation: observations[key].generation.repeat(64),
+                errors_generation: observations[key].generation.repeat(64),
+                total: observations[key].total,
+              },
+            })),
+          ),
+        });
+      }
+      if (url.pathname === '/api/session-transcript') {
+        const { generation, total } = observations[key];
+        if (
+          url.searchParams.has('generation') &&
+          url.searchParams.get('generation') !== generation.repeat(64)
+        )
+          return route.fulfill({
+            status: 409,
+            json: { error: 'stale_projection', resynchronize: true },
+          });
+        return route.fulfill({ json: transcript(key, url.searchParams, total, generation) });
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.evaluate(() => {
+      window.deferHistoryScroll = false;
+      window.addEventListener(
+        'scroll',
+        (event) => {
+          if (window.deferHistoryScroll && event.target === document.querySelector('#main'))
+            event.stopImmediatePropagation();
+        },
+        { capture: true, passive: true },
+      );
+    });
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    const gap = () =>
+      page
+        .locator('#main')
+        .evaluate((node) => node.scrollHeight - node.scrollTop - node.clientHeight);
+    await page.locator('#page [data-id="two"]').click();
+    await page.locator('#page [data-entry-key="two:64"]').waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.clock.runFor(34);
+    assert.ok((await gap()) < 2, 'Reader B initially follows the tail');
+    await page.locator('#nav [data-go="sessions"]').click();
+    await page.locator('#page [data-id="one"]').click();
+    await page.locator('#page [data-entry-key="one:64"]').waitFor();
+    const inert = await page.locator('#topbar').evaluate((bar) => {
+      const rect = bar.getBoundingClientRect(),
+        x = rect.right - 1,
+        y = rect.top + 1,
+        target = document.elementFromPoint(x, y);
+      if (!bar.contains(target) || target.closest('button, a, input, [role="button"]'))
+        throw Error('History input requires inert topbar padding');
+      return { x, y };
+    });
+    await page.mouse.click(inert.x, inert.y);
+    await page
+      .locator('#page [data-entry-key="one:20"]')
+      .evaluate((node) => node.scrollIntoView({ block: 'center' }));
+    await page.clock.runFor(34);
+    await page.getByRole('button', { name: /Jump to bottom/ }).waitFor();
+    await page
+      .getByRole('button', { name: 'Session menu: details, cost and actions' })
+      .evaluate((node) => node.focus({ preventScroll: true }));
+    const anchor = await page
+      .locator('#page [data-entry-key="one:20"]')
+      .evaluate((node) => node.getBoundingClientRect().top);
+    // Keep the native restoration real while preventing a later scroll event
+    // from concealing an incorrectly demoted cached following flag.
+    await page.evaluate(() => {
+      window.deferHistoryScroll = true;
+    });
+    await page.goBack();
+    await page.locator('#page [data-id="one"]').waitFor();
+    returningToB = true;
+    await page.goBack();
+    await page.locator('#page [data-entry-key="two:64"]').waitFor();
+    // Retained readers refresh metadata on the existing selected observer.
+    // Advance its controlled clock; restoration itself reuses cached metadata.
+    await page.clock.runFor(3100);
+    // The accepted metadata title proves the restoration's asynchronous
+    // observer finished before the next projection is appended.
+    await page
+      .locator('#page .ph > h1')
+      .filter({ hasText: 'Restored session two' })
+      .waitFor({ state: 'attached' });
+    assert.ok((await gap()) < 2, 'History restores B to its saved tail');
+    assert.equal(
+      await page.locator('#page .ph > h1').evaluate((node) => node === document.activeElement),
+      true,
+    );
+    observations.two = { generation: 'c', total: 75 };
+    await page.clock.runFor(3100);
+    await page.locator('#page [data-entry-key="two:74"]').waitFor({ state: 'attached' });
+    assert.ok((await gap()) < 2, 'Restored B follows the appended bounded projection');
+    await page.evaluate(() => {
+      window.deferHistoryScroll = false;
+      document.querySelector('#main').dispatchEvent(new Event('scroll'));
+    });
+    await page.goForward();
+    await page.locator('#page [data-id="one"]').waitFor();
+    await page.goForward();
+    await page.locator('#page [data-entry-key="one:20"]').waitFor();
+    assert.equal(
+      await page.locator('#page .ph > h1').evaluate((node) => node === document.activeElement),
+      true,
+    );
+    const restored = await page
+      .locator('#page [data-entry-key="one:20"]')
+      .evaluate((node) => node.getBoundingClientRect().top);
+    assert.ok(Math.abs(restored - anchor) < 2, JSON.stringify({ anchor, restored }));
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('same-projection turn anchors retain loaded fields, focus and the anchor inside the bounded cache', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }),
+      requests = [],
+      transcriptReads = [];
+    let anchorReads = 0,
+      anchorRangeReads = 0,
+      releaseFirstAnchor,
+      signalFirstAnchor,
+      releaseStaleAnchor,
+      signalStaleAnchor;
+    const firstAnchorStarted = new Promise((resolve) => {
+      signalFirstAnchor = resolve;
+    });
+    const staleAnchorStarted = new Promise((resolve) => {
+      signalStaleAnchor = resolve;
+    });
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url());
+      requests.push(url.pathname + url.search);
+      if (url.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: { ...capabilities(true), selected_entry: true } });
+      if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
+      if (url.pathname === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
+      if (url.pathname === '/api/session-anchor') {
+        const call = ++anchorReads;
+        if (call === 1) {
+          signalFirstAnchor();
+          await new Promise((resolve) => {
+            releaseFirstAnchor = resolve;
+          });
+        }
+        if (call === 3) {
+          signalStaleAnchor();
+          await new Promise((resolve) => {
+            releaseStaleAnchor = resolve;
+          });
+        }
+        const newer = call === 4;
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            catalog_key: 'one',
+            turn: url.searchParams.get('turn'),
+            slot: newer ? 20 : 0,
+            generation: (newer ? 'd' : 'b').repeat(64),
+          },
+        });
+      }
+      if (url.pathname === '/api/session-transcript') {
+        const query = url.searchParams,
+          after = query.get('after'),
+          generation = query.get('generation') === 'd'.repeat(64) ? 'd' : 'b';
+        transcriptReads.push({
+          after,
+          limit: query.get('limit'),
+          generation,
+          errorsGeneration: query.get('errors_generation'),
+        });
+        if (anchorReads > 0 && after === '0' && ++anchorRangeReads === 1)
+          return route.fulfill({ status: 409, json: { error: 'stale_projection' } });
+        const errorsGeneration =
+          query.get('errors_generation') === 'c'.repeat(64) || (anchorReads === 2 && after === '0')
+            ? 'c'
+            : generation;
+        const value = transcript('one', query, 600, generation);
+        value.projection.errors_generation = errorsGeneration.repeat(64);
+        for (const row of value.entries) {
+          if (row.slot === 0) {
+            row.turn = 'anchor-turn';
+            row.text = 'Anchor target record';
+          }
+          if (generation === 'd' && row.slot === 20) {
+            row.turn = 'anchor-turn';
+            row.text = 'New generation anchor slot';
+          }
+          if (row.slot === 400) {
+            row.clipped = true;
+            row.field = { name: 'text', chunks: 2, complete: false };
+          }
+        }
+        if (value.entries.some((row) => row.turn === 'anchor-turn'))
+          value.relationship_context = {
+            state: 'complete',
+            turn_ids: ['anchor-turn'],
+            turns: [
+              {
+                sid: 'one',
+                id: 'anchor-turn',
+                u: false,
+                end: { st: 'done', why: 'complete' },
+                sent: [],
+                last: true,
+              },
+            ],
+            handoffs: [],
+            sessions: {},
+            previews: {},
+          };
+        value.identity.source_key = query.get('machine') ?? 'source';
+        return route.fulfill({ json: value });
+      }
+      if (url.pathname === '/api/session-entry') {
+        const chunk = Number(url.searchParams.get('field_chunk')),
+          text = chunk === 0 ? 'First expansion chunk ' : 'Final field segment.';
+        return route.fulfill({
+          json: {
+            api: 1,
+            identity: { ...identity('one'), read_scope: 'retained_history' },
+            projection: { version: 5, generation: 'b'.repeat(64) },
+            slot: 400,
+            field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
+            text,
+            observation: { source_bytes: Buffer.byteLength(text) },
+            freshness: { state: 'cached' },
+            provenance: { source: source('one'), offset: 400, block: 0, native_event_id: null },
+          },
+        });
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    await page.locator('#page [data-id="one"]').click();
+    await page.locator('#page [data-entry-key="one:599"]').waitFor();
+    for (const first of [440, 340]) {
+      await page.getByRole('button', { name: 'Load earlier records' }).click();
+      await page.locator(`#page [data-entry-key="one:${first}"]`).waitFor();
+    }
+    const field = page.locator('#page [data-entry-key="one:400"]');
+    await page.getByRole('button', { name: 'Load recorded text', exact: true }).click();
+    await page.getByRole('button', { name: 'Load more text', exact: true }).click();
+    await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Load earlier records' }).click();
+    await page.locator('#page [data-entry-key="one:240"]').waitFor();
+    assert.equal(await page.locator('#page [data-entry-key]').count(), 300);
+    await page.locator('#main').evaluate((node) => {
+      node.scrollTop = 500;
+    });
+    const scrollBefore = await page.locator('#main').evaluate((node) => node.scrollTop);
+    await page.evaluate(() => {
+      const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
+      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      dispatchEvent(new PopStateEvent('popstate', { state }));
+    });
+    await withDeadline(firstAnchorStarted, 'first turn anchor request');
+    await page.clock.runFor(34);
+    assert.equal(
+      await page.evaluate(
+        () => document.activeElement === document.querySelector('#page .ph > h1'),
+      ),
+      true,
+    );
+    assert.equal(await page.locator('#main').evaluate((node) => node.scrollTop), scrollBefore);
+    const menu = page.getByRole('button', { name: 'Session menu: details, cost and actions' });
+    await menu.focus();
+    releaseFirstAnchor();
+    await page.locator('#page [data-entry-key="one:0"]').waitFor();
+    assert.match(
+      await page.locator('#page [data-entry-key="one:0"]').innerText(),
+      /Anchor target record/,
+    );
+    assert.match(await field.innerText(), /Final field segment\./);
+    assert.equal(anchorReads, 2, 'one 409 may re-resolve the same turn once');
+    assert.equal(await menu.evaluate((node) => node === document.activeElement), true);
+    assert.deepEqual(
+      transcriptReads
+        .filter((read) => read.errorsGeneration === 'c'.repeat(64))
+        .map(({ after, limit }) => [after, limit]),
+      [
+        ['240', '100'],
+        ['340', '100'],
+        ['440', '100'],
+      ],
+    );
+    assert.ok(
+      transcriptReads
+        .filter((read) => read.errorsGeneration === 'c'.repeat(64))
+        .every((read) => read.generation === 'b'),
+      'range recovery keeps the same native generation while accepting the new errors generation',
+    );
+    assert.equal(
+      transcriptReads.filter((read) => read.after === '0').length,
+      2,
+      're-accepting the validated anchor must not issue another transcript read',
+    );
+    assert.equal(await page.locator('#page [data-entry-key]').count(), 300);
+
+    // A stale response for this same turn must not survive a session-list round trip.
+    await page.evaluate(() => {
+      const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
+      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      dispatchEvent(new PopStateEvent('popstate', { state }));
+    });
+    await withDeadline(staleAnchorStarted, 'superseded turn anchor request');
+    await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
+    await page.locator('#page [data-id="one"]').waitFor();
+    await page.evaluate(() => {
+      const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
+      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      dispatchEvent(new PopStateEvent('popstate', { state }));
+    });
+    await page.getByText('New generation anchor slot', { exact: true }).waitFor();
+    assert.equal(anchorReads, 4);
+    const readsBeforeStaleResponse = transcriptReads.length;
+    releaseStaleAnchor();
+    await page.clock.runFor(34);
+    assert.equal(anchorReads, 4, 'the older same-turn navigation did not resolve again');
+    assert.equal(transcriptReads.length, readsBeforeStaleResponse);
+    assert.equal(await page.getByText('New generation anchor slot', { exact: true }).count(), 1);
+    await page.evaluate(() => window.app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a lost transcript capability cancels a pending turn anchor before any range request', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(),
+      requests = [];
+    let capabilityReads = 0,
+      releaseAnchor,
+      signalAnchorStarted,
+      signalMetadataAfterLoss;
+    const anchorStarted = new Promise((resolve) => {
+        signalAnchorStarted = resolve;
+      }),
+      metadataAfterLoss = new Promise((resolve) => {
+        signalMetadataAfterLoss = resolve;
+      });
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url());
+      requests.push(url.pathname + url.search);
+      if (url.pathname === '/api/session-capabilities') {
+        const selected = ++capabilityReads === 1;
+        return route.fulfill({ json: capabilities(selected) });
+      }
+      if (url.pathname === '/api/sessions') {
+        if (capabilityReads > 1) signalMetadataAfterLoss();
+        return route.fulfill({ json: list([meta('one')]) });
+      }
+      if (url.pathname === '/api/session-anchor') {
+        signalAnchorStarted();
+        await new Promise((resolve) => {
+          releaseAnchor = resolve;
+        });
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            catalog_key: 'one',
+            turn: url.searchParams.get('turn'),
+            slot: 12,
+            generation: 'b'.repeat(64),
+          },
+        });
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/s/claude/one?machine=source#turn=pending-turn');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    await withDeadline(anchorStarted, 'pending turn anchor request');
+    await page.clock.runFor(8100);
+    await withDeadline(metadataAfterLoss, 'metadata read after capability loss');
+    releaseAnchor();
+    await page.clock.runFor(34);
+    assert.equal(capabilityReads, 2);
+    assert.equal(
+      requests.some((request) => request.startsWith('/api/session-transcript')),
+      false,
+      'a superseded anchor did not issue a transcript read after capability loss',
+    );
+    await page.evaluate(() => window.app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('child activity reads stay separate from event previews and honor participant state and generation', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }),
+      edges = [
+        {
+          id: 'activity',
+          sid: 'active-child',
+          name: 'Active child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'unavailable',
+          sid: 'unavailable-child',
+          name: 'Unavailable preview child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'tool-mismatch',
+          sid: 'tool-mismatch-child',
+          name: 'Wrong tool child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'since-mismatch',
+          sid: 'since-mismatch-child',
+          name: 'Wrong time child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'result',
+          sid: 'result-child',
+          name: 'Result child',
+          state: 'work',
+          preview: 'result',
+        },
+        { id: 'done', sid: 'done-child', name: 'Done child', state: 'done' },
+      ],
+      participantActivity = {
+        'active-child': { tool: 'Bash', since: 1000 },
+        'unavailable-child': { tool: 'Read', since: 2000 },
+        'tool-mismatch-child': { tool: 'Bash', since: 3000 },
+        'since-mismatch-child': { tool: 'Bash', since: 4000 },
+        'result-child': { tool: 'Bash', since: 5000 },
+        'done-child': { tool: 'Edit', since: 6000 },
+      },
+      activityTuples = {
+        'active-child': ['Bash', 'echo active work', null, 1000],
+        'unavailable-child': ['Read', 'cat active work', null, 2000],
+        'tool-mismatch-child': ['Read', 'wrong tool', null, 3000],
+        'since-mismatch-child': ['Bash', 'wrong since', null, 4999],
+        'result-child': ['Bash', 'result already recorded', null, 5000],
+      },
+      homeRequests = [],
+      anchorTurns = [];
+    let homeResponses = 0,
+      signalHomeResponses,
+      signalParentAnchor,
+      signalActivityEvent,
+      releaseActivityEvent;
+    const allHomeResponses = new Promise((resolve) => {
+      signalHomeResponses = resolve;
+    });
+    const parentAnchorStarted = new Promise((resolve) => {
+      signalParentAnchor = resolve;
+    });
+    const activityEventStarted = new Promise((resolve) => {
+      signalActivityEvent = resolve;
+    });
+    const previewGeneration = 'c'.repeat(64),
+      childDetails = {
+        state: 'done',
+        turns: 1,
+        calls: 0,
+        errors: 0,
+        tool_calls: {},
+        signals: {},
+        cost: { usd: null, unpriced_models: [] },
+        copied_usage: false,
+        copilot: null,
+        reported_runs: [],
+        cost_check: [],
+      },
+      relationships = edges.map(({ id, sid, preview }, index) => ({
+        id,
+        kind: 'spawn',
+        from: 'parent',
+        to: sid,
+        at: index + 1,
+        ...(id === 'done' ? { done: 20 } : {}),
+        status: id === 'done' ? 'done' : 'work',
+        declined: false,
+        ...(preview === 'brief' ? { brief_session: sid } : {}),
+        ...(preview === 'result' ? { result_session: sid } : {}),
+        source_turn: 'parent-turn',
+        target_turn: sid + '-turn',
+      })),
+      sessions = Object.fromEntries(
+        edges.map(({ sid, name, state }) => [
+          sid,
+          {
+            name,
+            harness: 'claude',
+            model: 'native-model',
+            kind: 'subagent',
+            state,
+            live_observation: state === 'work',
+            activity: participantActivity[sid],
+          },
+        ]),
+      ),
+      previews = Object.fromEntries(edges.map(({ sid }) => [sid, previewGeneration]));
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: capabilities(true) });
+      if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('parent')]) });
+      if (url.pathname === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
+      if (url.pathname === '/api/session-anchor') {
+        const turn = url.searchParams.get('turn');
+        anchorTurns.push(turn);
+        if (turn === 'parent-turn') signalParentAnchor();
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            catalog_key: url.searchParams.get('sid'),
+            turn,
+            slot: 0,
+            generation: 'b'.repeat(64),
+          },
+        });
+      }
+      if (url.pathname === '/api/session-transcript') {
+        const sid = url.searchParams.get('sid');
+        if (sid === 'done-child') {
+          const value = transcript(sid, url.searchParams, 1, 'b');
+          value.session = { ...meta(sid), details: childDetails };
+          Object.assign(value.entries[0], { k: 'h', id: 'done', turn: 'done-child-turn' });
+          delete value.entries[0].text;
+          value.relationship_context = {
+            state: 'complete',
+            turn_ids: ['done-child-turn'],
+            turns: [
+              {
+                sid,
+                id: 'done-child-turn',
+                start: 'done',
+                u: false,
+                end: { st: 'done', why: 'complete' },
+                sent: [],
+                last: true,
+              },
+            ],
+            handoffs: [relationships.find((edge) => edge.id === 'done')],
+            sessions: {
+              parent: {
+                name: 'Parent run',
+                harness: 'claude',
+                model: 'native-model',
+                kind: 'codex-run',
+                state: 'done',
+              },
+              'done-child': sessions['done-child'],
+            },
+            previews: {},
+          };
+          return route.fulfill({ json: value });
+        }
+        const value = transcript('parent', url.searchParams, edges.length, 'b');
+        value.entries.forEach((row, index) => {
+          Object.assign(row, { k: 'h', id: edges[index].id, turn: 'parent-turn' });
+          delete row.text;
+        });
+        value.relationship_context = {
+          state: 'complete',
+          turn_ids: ['parent-turn'],
+          turns: [
+            {
+              sid: 'parent',
+              id: 'parent-turn',
+              start: 'activity',
+              u: false,
+              end: { st: 'done', why: 'complete' },
+              sent: edges.map((edge) => edge.id),
+              last: true,
+            },
+          ],
+          handoffs: relationships,
+          sessions,
+          previews,
+        };
+        return route.fulfill({ json: value });
+      }
+      if (url.pathname === '/api/session-home') {
+        const sid = url.searchParams.get('sid'),
+          eventIds = JSON.parse(url.searchParams.get('events') ?? '[]'),
+          sessionFields = JSON.parse(url.searchParams.get('session_fields') ?? '[]'),
+          unavailable = eventIds.includes('unavailable');
+        homeRequests.push({ sid, eventIds, sessionFields, unavailable });
+        const events = {};
+        for (const id of eventIds) {
+          if (id === 'activity') {
+            signalActivityEvent();
+            await new Promise((resolve) => {
+              releaseActivityEvent = resolve;
+            });
+            events[id] = { brief: 'Native event brief' };
+          } else if (id === 'tool-mismatch' || id === 'since-mismatch')
+            events[id] = { brief: 'Mismatch preview' };
+          else if (id === 'result') events[id] = { result: 'Recorded child result' };
+        }
+        const response = {
+          api: 1,
+          identity: { ...identity(sid), read_scope: 'retained_history' },
+          generation: previewGeneration,
+          incomplete: unavailable,
+          events,
+          session: sessionFields.includes('activity') ? { activity: activityTuples[sid] } : {},
+        };
+        await route.fulfill({ json: response });
+        if (++homeResponses === 10) signalHomeResponses();
+        return;
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    await page.locator('#page [data-id="parent"]').click();
+    await withDeadline(activityEventStarted, 'native edge event preview request');
+    await page.locator('.child-card[data-h="activity"] .cc-now').waitFor({ state: 'attached' });
+    releaseActivityEvent();
+    await withDeadline(allHomeResponses, 'child event and activity home responses');
+    const expand = async (id) => {
+      const card = page.locator(`.child-card[data-h="${id}"]`);
+      await card.locator('.cc-toggle').click();
+      return card;
+    };
+    const active = await expand('activity');
+    assert.match(await active.locator('.cc-brief').innerText(), /Native event brief/);
+    assert.match(await active.locator('.cc-now').innerText(), /echo active work/);
+    const unavailable = await expand('unavailable');
+    assert.match(await unavailable.locator('.cc-now').innerText(), /cat active work/);
+    const wrongTool = await expand('tool-mismatch');
+    assert.equal(await wrongTool.locator('.cc-now').count(), 0);
+    const wrongSince = await expand('since-mismatch');
+    assert.equal(await wrongSince.locator('.cc-now').count(), 0);
+    const result = await expand('result');
+    assert.match(await result.locator('.cc-result').innerText(), /Recorded child result/);
+    assert.equal(await result.locator('.cc-now').count(), 0);
+    const done = await expand('done');
+    assert.equal(await done.locator('.cc-now').count(), 0);
+    const activityReads = homeRequests.filter(
+      ({ eventIds, sessionFields }) => eventIds.length === 0 && sessionFields.includes('activity'),
+    );
+    assert.deepEqual(activityReads.map((request) => request.sid).sort(), [
+      'active-child',
+      'result-child',
+      'since-mismatch-child',
+      'tool-mismatch-child',
+      'unavailable-child',
+    ]);
+    assert.equal(
+      homeRequests.some(
+        (request) => request.sid === 'done-child' && request.sessionFields.includes('activity'),
+      ),
+      false,
+    );
+    assert.equal(
+      homeRequests.some(
+        (request) =>
+          request.sid === 'unavailable-child' &&
+          request.eventIds.length === 1 &&
+          request.unavailable,
+      ),
+      true,
+      'an unavailable event preview is independent from the child activity read',
+    );
+    assert.equal(
+      homeRequests.some(
+        (request) => request.sid === 'active-child' && request.eventIds.includes('activity'),
+      ),
+      true,
+      'the native edge named activity keeps its event read alongside the separate activity read',
+    );
+    await done.locator('.cc-name').click();
+    await page
+      .getByRole('button', { name: 'Open Parent run where it sent this', exact: true })
+      .waitFor();
+    await page.getByRole('button', { name: 'Open in Parent run', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Open in Parent run', exact: true }).click();
+    await withDeadline(parentAnchorStarted, 'parent turn anchor request');
+    await page.locator('#page [data-entry-key="parent:0"]').waitFor();
+    assert.deepEqual(anchorTurns, ['done-child-turn', 'parent-turn']);
+    assert.equal(new URL(page.url()).hash, '#turn=parent-turn');
+    await page.evaluate(() => window.app.destroy());
+  } finally {
+    await browser.close();
+  }
+});

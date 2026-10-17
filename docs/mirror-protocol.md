@@ -1,8 +1,13 @@
 # The mirror protocol
 
-`semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so the receiver can build the same session model with `semon-sessions` (`Options::facts`) as `semon sessions --model-json` builds here. This document is the whole contract: any server that implements it can receive a push.
+`semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so `semon-sessions` can discover, index and query those native sources using the recorded facts (`Options::facts`). This document is the whole contract: any server that implements it can receive a push.
 
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<name>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
+
+The generic mirror protocol is independent of the retired Encrypted Relay.
+Mirrored content is readable by the receiver; sender redaction and HTTPS do not
+provide end-to-end encryption. A source mirror does not contain the complete
+workspace and native harness state required for independent recovery.
 
 ## What is sent
 
@@ -98,6 +103,37 @@ Append requests and 200/409 `Length` responses add optional `generation` fields.
 Status `acked_bytes` is an acknowledged complete redaction-batch boundary, never an intermediate piece of a long line. A receiver independently verifies matching generation, stored length at least that boundary, stored prefix head hash at `min(4096, acked_bytes)`, current file identity and a complete JSONL line boundary. A malformed, ambiguous, stale or missing proof is unavailable. The reference receiver returns 200 with `{"confirmed":[<verified targets>]}`; 409 rejects stale observations. Even a receiver-confirmed prefix must be rechecked under the same write/generation lock when used later. A receiver may use `semon_sessions::codex_native_id_prefix(path, accepted_bytes)` to read the exact first complete `session_meta` record through sealed copies within 64 KiB; duplicate fields, malformed records and incomplete prefixes provide no identity. Filename, cwd and timing never prove an active/archive move.
 
 A receiver may overlay verified, deduplicated provisional Codex paths in the optional `Facts.codex_provisional_rollouts` field **only in its served view**. Stored authoritative full facts retain the original `codex_rollouts`, including unknown (`None`) versus explicitly empty. A provisional overlay never makes full inventory known. Model source reads select the union of committed and provisional paths; bootstrap without a committed inventory selects only the explicit provisional subset. A native ID already selected by a committed source keeps that source until the next complete inventory commit. A sender's local/full facts never populate the provisional field, and the reference receiver refuses that field on `/facts`.
+
+## Optional native Codex relocation
+
+An append may include `relocation` with `from_path`, `native_id` and
+`prefix_sha256`. It applies only between allowlisted `sessions/` and
+`archived_sessions/` paths in the same Codex home, with a previously confirmed
+32-character custody generation and a complete acknowledged prefix at `offset`.
+The SHA-256 covers every byte of that **redacted** prefix, not only the head.
+The sender proposes a move only for a unique previously acknowledged local inode
+whose former path disappeared and whose explicit first native header still matches.
+
+A supporting receiver verifies the old custody generation, native header,
+confirmed prefix digest and destination head under its existing Raw write fence.
+It copies exactly that logical prefix into a new independent Raw file, then
+applies any intervening append. Sealed source bytes use the existing logical
+reader. Local copy bytes count against quota; stale copies remain independent and
+unchanged. An old Raw path longer than the sender's confirmed boundary can supply
+only that verified prefix, including recovery from a lost acknowledgement.
+
+SQLite relocation intents precede Raw writes; Index reuse follows validated
+native identity and content evidence. Facts retain sole authoritative rollout
+selection. A partially synced candidate sharing an already selected native ID
+cannot become a duplicate provisional current source. Index discovery hints
+identify candidate paths but grant no authority; the receiver revalidates the
+selected Raw native header and current inventory.
+
+An existing destination uses ordinary offset/head/generation admission, including
+idempotent retries and Unarchive. Unsupported or rejected relocation falls back
+to the existing 409 reconciliation and normal transfer. Failed or interrupted
+proof commits permit conservative repair, never trusted reuse of ambiguous bytes.
+Native Codex Archive is unrelated to Semon retained-history or Hub S3/R2 archival.
 
 ## Bounded sender scheduling and checkpoints
 

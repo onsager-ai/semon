@@ -1,10 +1,10 @@
 # Viewer UI/UX overhaul
 
-Status: approved 2026-09-29. Phases 1 (audit) and 2 (reworked mockup) are done; phase 3 ports it one screen per PR.
+Status: approved 2026-09-29. The audit and design migration are complete; the remaining implementation and comparison gates run against the served application.
 
 Scope: a UI/UX overhaul of the session viewer, approved and ported one screen per PR.
 
-The reference is `tests/ui/reference/overhaul.html`; the previous mockup, `semon-sample.html`, stays beside it until every screen is ported. `tests/ui/reference-map.json` says which reference each screen of the pixel comparison uses, and a screen's port PR flips it to `overhaul.html`. Its screenshots come from the Mockup screenshots workflow (`tests/ui/shots.json`), at 390 and 1280 px, light and dark.
+The original HTML references, adapter and mockup screenshot workflow are retired from the active tree; their source and reports remain in Git history. Current visual authority is the selected complete application, Source `263a02da278716ab2309b8e34a463419e5c781e5` with Hub `503fbe090749ea1d58b9ca9fa4ccae7289ee426e`. CI serves that exact binary through `compat=1` and compares every required state. `tests/ui/visual-coverage.json` preserves the historical 113 full-frame names and 162 strict region captures at threshold 0.1 and maximum ratio 0.0001; `historical-pixel-ratchet.json` retains the old per-case mockup ratios and dimensions for reference only. `preservation-contract.mjs` independently keeps the 62-state actual-application gate. The retained fixture JSON is deep-compared in CI with extraction from pinned source commit `bf9190ef2b80fcd56726f61dc480346b698039a2`. A mismatch stays raw and failing until an exact-state visual acceptance binds the candidate runtime-binary fingerprint, reference pins, screenshots, diff and bounded text/geometry evidence digests in `tests/ui/visual-acceptance.json`; the reviewed commit SHA is provenance and does not imply ancestry.
 
 ## Visual system
 

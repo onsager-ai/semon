@@ -57,6 +57,58 @@ fn execution(input: &str, enrollment: &str) -> Execution {
     )
     .unwrap()
 }
+#[tokio::test]
+async fn collection_ssh_execution_refuses_stale_calls_without_transport() {
+    let mut e = execution("retained work", "00000000-0000-0000-0000-000000000001");
+    // Retained receipt reconstruction remains usable; it grants no connection.
+    e.dispatch_fresh = false;
+    let target = Target {
+        address: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        username: String::new(),
+    };
+    let pin = HostKey {
+        algorithm: String::new(),
+        key: String::new(),
+    };
+    let key = Credential(Zeroizing::new(String::new()));
+    let model = ModelCredential(Zeroizing::new(String::new()));
+    crate::TRANSPORT_ADMISSIONS.with(|counts| counts.set((0, 0)));
+    assert_eq!(
+        e.authorize(&target, &pin, &key).await.unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        e.observe(&target, &pin, &key).await.unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        e.reconnect(&target, &pin, &key, "").await.unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        e.dispatch(&target, &pin, &key, "").await.unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        e.reconcile(&target, &pin, &key, "").await.unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        e.repair(&target, &pin, &key, "", 0, &model)
+            .await
+            .unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        e.revoke(&target, &pin, &key, "").await.unwrap_err(),
+        Error::Unavailable
+    );
+    assert_eq!(
+        crate::TRANSPORT_ADMISSIONS.with(|counts| counts.get()),
+        (0, 0)
+    );
+}
 #[test]
 fn consent_identities_and_capabilities_are_separate() {
     let s = session("synthetic work");
@@ -99,10 +151,10 @@ fn consent_identities_and_capabilities_are_separate() {
     assert_eq!(
         CAPABILITIES,
         Capabilities {
-            dispatch: true,
-            reconcile: true,
-            credential_repair: true,
-            revoke_execution: true,
+            dispatch: false,
+            reconcile: false,
+            credential_repair: false,
+            revoke_execution: false,
             pause: false,
             snapshot: false,
             restore: false,

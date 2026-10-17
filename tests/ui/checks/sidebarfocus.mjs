@@ -6,34 +6,51 @@ export default async function sidebarFocus(browser) {
   const D = await data(),
     page = await served(browser, { size: 'desktop' });
   try {
-    const model = structuredClone(D.model),
-      base = Object.values(model.sessions).find((s) => s.lane),
-      parent = 'focus-parent';
-    model.sessions[parent] = {
-      ...base,
-      name: 'Focus parent',
-      parent: null,
-      kind: undefined,
-      lane: true,
-      state: 'work',
-      last: model.now + 1,
-    };
-    for (let i = 0; i < 40; i++)
-      model.sessions['focus-child-' + i] = {
+    const response = await page.request.get(new URL('/api/viewer/home', page.url()).href);
+    assert.equal(response.status(), 200);
+    const home = await response.json(),
+      base = home.recent[0],
+      source = base.source_key,
+      key = 'focus-parent',
+      parent = JSON.stringify([source, key]);
+    home.recent = [
+      {
         ...base,
-        name: 'Focus child ' + i,
-        parent,
-        kind: 'Subagent',
-        lane: false,
-        state: i === 0 ? 'wait' : 'work',
-        last: model.now - i,
-      };
-    model.version += '-focus';
-    await page.route('**/api/model**', (route) => route.fulfill({ json: model }));
+        id: parent,
+        catalog_key: key,
+        session: {
+          ...base.session,
+          name: 'Focus parent',
+          parent: null,
+          state: 'work',
+          last: home.now + 1,
+          content_generation: null,
+        },
+      },
+    ];
+    for (let i = 0; i < 40; i++) {
+      const child = 'focus-child-' + i;
+      home.recent.push({
+        ...base,
+        id: JSON.stringify([source, child]),
+        catalog_key: child,
+        session: {
+          ...base.session,
+          name: 'Focus child ' + i,
+          parent: key,
+          state: i === 0 ? 'wait' : 'work',
+          last: home.now - i,
+          content_generation: null,
+        },
+      });
+    }
+    home.version += '-focus';
+    home.observations = [];
+    await page.route('**/api/viewer/home**', (route) => route.fulfill({ json: home }));
     await page.reload();
     await page.waitForFunction(() => history.state?.v === 'home');
-    const item = page.locator('#lanes > .treeitem[data-id="' + parent + '"]');
-    await item.locator('.tree-all[data-id="' + parent + '"]').click();
+    const item = page.getByRole('treeitem', { name: 'Focus parent', exact: true });
+    await item.locator('.tree-all').first().click();
     await item
       .locator(':scope > .tree-group > .treeitem')
       .first()

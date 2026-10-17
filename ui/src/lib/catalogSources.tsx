@@ -8,6 +8,7 @@ export function renderCatalogSources(
     note: string;
     more: boolean;
     machinesHref: string;
+    bookmarks?: readonly { source_key: string; catalog_key: string; harness: string }[];
   },
   host: { select(key: string): void; more(): void; retry(): void },
 ) {
@@ -29,6 +30,32 @@ export function renderCatalogSources(
         <p class="catalog-note" role="status">
           Loading machines…
         </p>
+      )}
+      {!!view.bookmarks?.length && (
+        <div class="session-list" aria-label="Matching session origins">
+          {view.bookmarks.map((item) => (
+            <a
+              class="nrow"
+              key={JSON.stringify([item.source_key, item.catalog_key])}
+              href={
+                '/s/' +
+                encodeURIComponent(item.harness) +
+                '/' +
+                encodeURIComponent(item.catalog_key) +
+                '?' +
+                new URLSearchParams({ machine: item.source_key })
+              }
+            >
+              <span class="nm">{screenText(item.catalog_key)}</span>
+              <span>
+                {screenText(
+                  view.items.find((source) => source.source_key === item.source_key)?.label ??
+                    item.source_key,
+                )}
+              </span>
+            </a>
+          ))}
+        </div>
       )}
       <div class="session-list">
         {view.items.map((item) => (
@@ -52,16 +79,8 @@ export function renderCatalogSources(
         </button>
       )}
       <p class="catalog-note">
-        This source list contains names and keys only. History across sources and text search are
-        unavailable.
-      </p>
-      <p class="catalog-note">
         <a class="link" href={view.machinesHref}>
           Manage machines
-        </a>
-        {' · '}
-        <a class="link" href="/sessions?compat=1">
-          Open compatibility view (loads workspace history)
         </a>
       </p>
     </>,

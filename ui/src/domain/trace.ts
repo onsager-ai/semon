@@ -1,7 +1,25 @@
-import type { Session, Handoff, Turn } from './types';
+import type { Session, Handoff, Turn, Cost, TraceParticipantSummary } from './types';
 import type { AgentRow, AgentChart } from '../lib/trace';
-import type { createDomain } from './calculations';
 import { clock as formatClock, dur as formatDuration, tok, shortModel } from './format';
+
+/** Results viewed in the selected bounded trace, never unrelated loaded turns. */
+export function reachableResultIds(root: Turn, starts: ReadonlyMap<string, Turn>): string[] {
+  const visited = new Set<string>(),
+    results = new Set<string>();
+  const walk = (turn: Turn) => {
+    if (visited.has(turn.id)) return;
+    visited.add(turn.id);
+    for (const edge of turn.sent) {
+      if (edge.kind === 'toyou' && edge.ask === 'result') results.add(edge.id);
+      if (edge.kind !== 'spawn' && edge.kind !== 'relay') continue;
+      const child = starts.get(edge.id);
+      if (child) walk(child);
+    }
+  };
+  walk(root);
+  return [...results];
+}
+
 interface AgentNode {
   sid: string;
   turn: Turn | null;
@@ -13,35 +31,67 @@ interface AgentNode {
 interface AgentTree {
   rootNode: AgentNode;
   peers: AgentNode[];
+  passivePeers: { sid: string; handoff: Handoff; summary: TraceParticipantSummary }[];
   handoffs: Handoff[];
   spawns: Handoff[];
 }
 const finite = (value: number | undefined): value is number =>
   typeof value === 'number' && Number.isFinite(value);
+/** A whole-session observation never joins the peer's receiving turn. */
+export function traceParticipantObservedEnd(
+  summary: TraceParticipantSummary,
+  now: number,
+): number | undefined {
+  const extent = summary.observedExtent,
+    status = extent?.status;
+  if (
+    extent?.scope !== 'whole_session' ||
+    !status ||
+    status.state == null ||
+    (status.observation !== 'current' && status.observation !== 'retained') ||
+    (status.observation === 'retained' && (status.state === 'work' || status.state === 'wait'))
+  )
+    return undefined;
+  if (status.state === 'work' && status.observation === 'current')
+    return Number.isFinite(now) ? now : undefined;
+  return extent.last !== null && Number.isSafeInteger(extent.last) && extent.last >= 0
+    ? extent.last
+    : undefined;
+}
 export function createTraceCalculations(
   state: {
     sessions: Record<string, Session>;
+    participantSummaries?: Record<string, TraceParticipantSummary>;
     turns: Record<string, Turn[]>;
     starts: Map<string, Turn>;
   },
-  domain: Pick<
-    ReturnType<typeof createDomain>,
-    | 'costForSessions'
-    | 'costForSession'
-    | 'costText'
-    | 'shortMoney'
-    | 'hcls'
-    | 'usageTotal'
-    | 'nameOf'
-  >,
+  domain: {
+    costForSessions(sessions: Session[]): Cost;
+    costForSession(id: string): Cost;
+    costText(cost: Cost): string;
+    shortMoney(usd: number): string;
+    hcls(id: string): string;
+    usageTotal(session: Session): number;
+    tokenTotal?(tokens: readonly number[]): number;
+    tokenText?(total: number): string;
+    nameOf(id: string): string;
+  },
   now: () => number,
   RUN_EXPANDED: Map<string, Set<string>>,
   HARNESS: Record<string, string>,
   STATE: Record<string, string>,
 ) {
-  const { sessions: SESS, turns: TURNS, starts: STARTS } = state;
+  const {
+    sessions: SESS,
+    participantSummaries: PARTICIPANT_SUMMARIES,
+    turns: TURNS,
+    starts: STARTS,
+  } = state;
+  const workingEnd = (session: Session) =>
+    session.state === 'work' && session.liveObservation !== false ? now() : session.last;
   const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } =
     domain;
+  const tokenText = domain.tokenText ?? ((total: number) => tok(total / 1_000_000));
   const clock = (at: number) => formatClock(at, now()),
     dur = (from: number, to: number) => formatDuration(from, to, now()),
     kindText = (s: Session) => s.kind ?? HARNESS[s.harness];
@@ -55,6 +105,10 @@ export function createTraceCalculations(
     model.peers.forEach(walk);
     return rows;
   };
+  const observedPeerEnd = (peer: AgentTree['passivePeers'][number]) => {
+    const end = traceParticipantObservedEnd(peer.summary, now());
+    return finite(end) && end >= peer.handoff.at ? end : undefined;
+  };
   // Walk only the turns connected by recorded spawns and relays; the relay rows remain peers in the view.
   function traceAgentTree(root: Turn): AgentTree {
     const rootNode: AgentNode = {
@@ -66,6 +120,7 @@ export function createTraceCalculations(
       children: [],
     };
     const peers: AgentNode[] = [],
+      passivePeers: AgentTree['passivePeers'] = [],
       handoffs: Handoff[] = [],
       spawns: Handoff[] = [],
       seenTurns = new Set(),
@@ -93,41 +148,55 @@ export function createTraceCalculations(
           };
           node.children.push(child);
           children.push(child);
-        } else if (h.kind === 'relay' && SESS[h.to] && !seenSessions.has(h.to)) {
-          const peerTurn = STARTS.get(h.id);
-          seenSessions.add(h.to);
-          const peer: AgentNode = {
-            sid: h.to,
-            turn: peerTurn ?? null,
-            handoff: h,
-            kind: 'relay',
-            depth: 0,
-            children: [],
-          };
-          peers.push(peer);
-          children.push(peer);
+        } else if (h.kind === 'relay' && !seenSessions.has(h.to)) {
+          const joined = Object.hasOwn(SESS, h.to) ? SESS[h.to] : undefined;
+          if (joined) {
+            const peerTurn = STARTS.get(h.id);
+            seenSessions.add(h.to);
+            const peer: AgentNode = {
+              sid: h.to,
+              turn: peerTurn ?? null,
+              handoff: h,
+              kind: 'relay',
+              depth: 0,
+              children: [],
+            };
+            peers.push(peer);
+            children.push(peer);
+          } else {
+            const summary =
+              PARTICIPANT_SUMMARIES && Object.hasOwn(PARTICIPANT_SUMMARIES, h.to)
+                ? PARTICIPANT_SUMMARIES[h.to]
+                : undefined;
+            if (summary) {
+              seenSessions.add(h.to);
+              passivePeers.push({ sid: h.to, handoff: h, summary });
+            }
+          }
         }
       }
       for (const child of children) walk(child);
     };
     walk(rootNode);
-    return { rootNode, peers, handoffs, spawns };
+    return { rootNode, peers, passivePeers, handoffs, spawns };
   }
   function agentSnapshot(root: Turn): AgentChart {
     const model = traceAgentTree(root),
       session = SESS[root.sid];
     const start = root.at ?? root.start?.at ?? session.start;
     const nextTurn = (TURNS[root.sid] ?? []).find((t) => (t.at ?? 0) > start);
-    const upper =
-      root.end?.at ?? nextTurn?.at ?? (session.state === 'work' ? now() : session.last) ?? start;
+    const upper = root.end?.at ?? nextTurn?.at ?? workingEnd(session) ?? start;
     const end = Math.max(
       start,
       upper,
       ...model.handoffs.map((h) => h.done).filter(finite),
+      ...model.passivePeers.map(observedPeerEnd).filter(finite),
       ...allRunNodes(model)
         .filter((n) => n.kind !== 'root')
         .map((n) =>
-          SESS[n.sid]?.state === 'work' ? now() : (n.handoff?.done ?? SESS[n.sid]?.last),
+          SESS[n.sid]?.state === 'work' && SESS[n.sid]?.liveObservation !== false
+            ? now()
+            : (n.handoff?.done ?? SESS[n.sid]?.last),
         )
         .filter(finite),
     );
@@ -184,12 +253,19 @@ export function createTraceCalculations(
       active += p.change;
       peak = Math.max(peak, active);
     }
-    const totalCost = costForSessions(
-      allRunNodes(model)
-        .map((n) => SESS[n.sid])
-        .filter(Boolean),
-    );
-    const participantCount = allRunNodes(model).length;
+    const runNodes = allRunNodes(model),
+      joinedCost = costForSessions(runNodes.map((n) => SESS[n.sid]).filter(Boolean)),
+      participantCosts = [joinedCost, ...model.passivePeers.map((peer) => peer.summary.cost)],
+      totalCost: Cost = {
+        ...joinedCost,
+        usd: participantCosts.some((cost) => cost.usd == null)
+          ? null
+          : participantCosts.reduce((sum, cost) => sum + cost.usd!, 0),
+        unpriced_models: [
+          ...new Set(participantCosts.flatMap((cost) => cost.unpriced_models ?? [])),
+        ],
+      };
+    const participantCount = runNodes.length + model.passivePeers.length;
     const summary = [
       participantCount + (participantCount === 1 ? ' agent' : ' agents'),
       dur(start, end),
@@ -211,7 +287,7 @@ export function createTraceCalculations(
         to =
           node.kind === 'root'
             ? end
-            : s.state === 'work'
+            : s.state === 'work' && s.liveObservation !== false
               ? now()
               : (handoff!.done ?? s.last ?? from);
       const duration = dur(from, to),
@@ -221,7 +297,9 @@ export function createTraceCalculations(
             .map((x) => SESS[x.sid])
             .filter(Boolean),
         ),
-        status = STATE[s.state] ?? s.state;
+        status =
+          (s.liveObservation === false && ['work', 'wait'].includes(s.state) ? 'Recorded: ' : '') +
+          (STATE[s.state] ?? s.state);
       const segments: { left: number; width: number; kind: string }[] = [],
         segment = (a: number, b: number, kind: string) => {
           if (b > a) segments.push({ left: pct(a), width: Math.max(0.2, pct(b) - pct(a)), kind });
@@ -252,7 +330,7 @@ export function createTraceCalculations(
         state: s.state,
         stateLabel: status,
         tokens:
-          tok(allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid]), 0) / 1000000) +
+          tokenText(allNodes(node).reduce((sum, n) => sum + usageTotal(SESS[n.sid]), 0)) +
           ' tokens',
         duration,
         cost: rollup.usd == null ? '—' : shortMoney(rollup.usd),
@@ -273,7 +351,7 @@ export function createTraceCalculations(
           ? {
               parent,
               started: pct(handoff!.at),
-              done: pct(handoff!.done ?? (s.state === 'work' ? now() : s.last)),
+              done: pct(handoff!.done ?? workingEnd(s)),
               returned: Number.isFinite(handoff!.done),
             }
           : undefined,
@@ -298,12 +376,89 @@ export function createTraceCalculations(
       }
     };
     add(model.rootNode, 0);
-    if (model.peers.length) {
+    if (model.peers.length || model.passivePeers.length) {
       rows.push({ kind: 'heading', id: 'relayed-heading', depth: 0, label: '', name: '' });
       for (const peer of model.peers) add(peer, 0);
+      for (const peer of model.passivePeers) {
+        const observedEnd = observedPeerEnd(peer),
+          knownExtent = finite(observedEnd),
+          observedStatus = knownExtent ? peer.summary.observedExtent?.status : undefined,
+          activity = peer.summary.observedExtent?.recordedActivity,
+          activityTip =
+            activity?.state === 'available'
+              ? 'Recorded whole-session timestamp clusters; gaps are unknown, not continuous CPU activity; its receiving turn is not in these logs'
+              : undefined,
+          activityQualification =
+            activity?.state === 'unavailable' ? 'Recorded activity unavailable' : undefined,
+          recordedCost = peer.summary.cost,
+          peerModel = [
+            peer.summary.kind || HARNESS[peer.summary.harness],
+            shortModel(peer.summary.model),
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          tokens =
+            (domain.tokenTotal && domain.tokenText
+              ? tokenText(domain.tokenTotal(peer.summary.tokens))
+              : tok(peer.summary.tokens.reduce((sum, value) => sum + value, 0))) + ' tokens',
+          cost =
+            recordedCost.usd == null || recordedCost.unpriced_models?.length
+              ? '—'
+              : shortMoney(recordedCost.usd);
+        rows.push({
+          kind: 'peer',
+          id: peer.sid,
+          depth: 0,
+          label: [
+            peer.summary.name,
+            peerModel,
+            "Its turn isn't in these logs",
+            tokens,
+            costText(recordedCost) + ' recorded catalog session total',
+            activityTip ?? activityQualification,
+          ]
+            .filter(Boolean)
+            .join(', '),
+          name: peer.summary.name,
+          harnessClass: hcls(peer.sid),
+          relay: true,
+          model: peerModel,
+          ...(knownExtent
+            ? {
+                duration: dur(peer.handoff.at, observedEnd),
+                extentTip:
+                  'Whole-session observed extent after the recorded relay; its receiving turn is not in these logs · ' +
+                  observedStatus!.observation,
+                state: observedStatus!.state!,
+                stateLabel: STATE[observedStatus!.state!] ?? observedStatus!.state!,
+              }
+            : {}),
+          qualification: "Its turn isn't in these logs",
+          ...(activityTip ? { activityTip } : {}),
+          ...(activityQualification ? { activityQualification } : {}),
+          ...(knownExtent && activity?.state === 'available'
+            ? {
+                recordedActivity: activity.intervals.flatMap(([from, to]) => {
+                  const a = Math.max(start, peer.handoff.at, from),
+                    b = Math.min(end, observedEnd, to);
+                  return b > a ? [{ left: pct(a), width: Math.max(0.2, pct(b) - pct(a)) }] : [];
+                }),
+              }
+            : {}),
+          tokens,
+          cost,
+          costTip: 'Recorded catalog session total: ' + costText(recordedCost),
+        });
+      }
     }
     return {
       summary,
+      ...(model.passivePeers.some((peer) => finite(observedPeerEnd(peer)))
+        ? {
+            extentTip:
+              'Includes qualified whole-session observations for peers whose receiving turn is not in these logs; these do not add causal activity',
+          }
+        : {}),
       start: clock(start),
       end: clock(end),
       ticks: ticks.map((offset) => ({

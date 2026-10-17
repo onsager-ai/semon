@@ -9,6 +9,7 @@ use std::io::{self, Read};
 use zeroize::Zeroizing;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    semon_ssh::require_collection_ssh()?;
     let mut input = String::new();
     io::stdin().take(131073).read_to_string(&mut input)?;
     let value: Value = serde_json::from_str(&input)?;
@@ -73,4 +74,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({"launch":result.launch,"state":result.state,"thread":result.thread,"snapshotObserved":result.snapshot.as_ref().is_some_and(|s|s["thread"].as_str()==result.thread.as_deref())})
     );
     Ok(())
+}
+
+#[test]
+fn collection_controller_install_refuses_before_fixture_input() {
+    let error = main().unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "capability_unavailable: SSH is paused in the collection configuration"
+    );
 }

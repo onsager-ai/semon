@@ -2,7 +2,7 @@
 //! as metadata; this module never scans transcripts or contacts GitHub.
 
 use crate::{events::ModelTokens, model::Session};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -31,7 +31,7 @@ impl Default for BandThresholds {
 
 /// Optional facts from a PR join. Missing evidence remains unknown, including
 /// the difference between no negative review and a review that was not read.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkItemFacts {
     pub lines: Option<u64>,
@@ -84,17 +84,17 @@ impl ModelComparisonConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Observation {
     model: String,
     tokens: ModelTokens,
     usd: Option<f64>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Item {
     pub(crate) sid: String,
-    harness: &'static str,
-    band: &'static str,
+    harness: String,
+    band: String,
     observations: Vec<Observation>,
     facts: WorkItemFacts,
     model_ms: Option<u64>,
@@ -137,8 +137,8 @@ impl Item {
         };
         Some(Arc::new(Self {
             sid: sid.into(),
-            harness: session.harness,
-            band: config.band(&facts),
+            harness: session.harness.into(),
+            band: config.band(&facts).into(),
             observations,
             facts,
             model_ms,
@@ -188,7 +188,7 @@ pub(crate) fn summarize<'a>(items: impl Iterator<Item = (&'a str, &'a Item)>) ->
     for (machine, item) in items {
         for observation in &item.observations {
             groups
-                .entry((item.band, &observation.model))
+                .entry((item.band.as_str(), &observation.model))
                 .or_default()
                 .push((machine, item, observation));
         }
@@ -241,8 +241,8 @@ mod tests {
     fn item(models: usize, facts: WorkItemFacts) -> Item {
         Item {
             sid: "s".into(),
-            harness: "codex",
-            band: "unknown",
+            harness: "codex".into(),
+            band: "unknown".into(),
             observations: (0..models)
                 .map(|n| Observation {
                     model: format!("model-{n}"),

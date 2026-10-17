@@ -1,7 +1,7 @@
 //! Explicit native controller bootstrap, separate from mirror enrollment.
 //! The embedding owns execution consent, current authority, outbound policy,
 //! artifact selection and durable launch claims before invoking installation.
-use crate::{Credential, Error, HostKey, PrivateFiles, Target, run};
+use crate::{Credential, Error, HostKey, PrivateFiles, Target, require_collection_ssh, run};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -75,6 +75,7 @@ pub async fn install(
     key: &Credential,
     setup: Install<'_>,
 ) -> Result<Launch, Error> {
+    require_collection_ssh()?;
     target.validate()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -133,6 +134,7 @@ pub async fn observe(
     launch: &str,
     binding: &Binding,
 ) -> Result<Launch, Error> {
+    require_collection_ssh()?;
     observe_inner(target, pin, key, enrollment, launch, binding, false).await
 }
 /// Permanently stop the exact installed launch. This cannot install, authorize
@@ -145,6 +147,7 @@ pub async fn stop(
     launch: &str,
     binding: &Binding,
 ) -> Result<Launch, Error> {
+    require_collection_ssh()?;
     observe_inner(target, pin, key, enrollment, launch, binding, true).await
 }
 async fn observe_inner(

@@ -486,6 +486,63 @@ for (const width of [390, 1280])
               assert(chrome.drawerOpen === phone, 'responsive drawer');
               chrome.closeDrawer();
               assert(!chrome.drawerOpen, 'drawer close');
+              const phoneTrigger = container.querySelector('#account-drawer .account-trigger');
+              phoneTrigger.focus();
+              chrome.drawerAccount({
+                account: AccountExample.parsed,
+                compact: true,
+                wide: false,
+                onWideChange() {},
+              });
+              assert(
+                container.querySelector('#account-drawer .account-trigger') === phoneTrigger &&
+                  document.activeElement === phoneTrigger,
+                'published chrome replaced the focused drawer account trigger',
+              );
+              trigger.focus();
+              chrome.topbar({
+                titleSlot: instance.title,
+                actions: [instance.action],
+                account: {
+                  account: AccountExample.parsed,
+                  compact: false,
+                  wide: false,
+                  onWideChange() {},
+                },
+              });
+              assert(
+                container.querySelector('.account-widget-desktop .account-trigger') === trigger &&
+                  document.activeElement === trigger,
+                'published chrome replaced the focused desktop account trigger',
+              );
+              const findMode = document.createElement('div'),
+                accountTarget = document.createElement('div');
+              findMode.append(accountTarget);
+              const findProps = {
+                mode: [findMode],
+                accountTarget,
+                account: {
+                  account: AccountExample.parsed,
+                  compact: false,
+                  wide: false,
+                  onWideChange() {},
+                },
+              };
+              chrome.topbar(findProps);
+              trigger.focus();
+              chrome.topbar(findProps);
+              assert(
+                trigger.closest('.account-widget-desktop').parentElement === accountTarget &&
+                  accountTarget.parentElement === findMode &&
+                  document.activeElement === trigger,
+                'repeated Find publication moved the focused account out of its host slot',
+              );
+              // Return the host's action slot from Find mode before focusing it.
+              chrome.topbar({
+                titleSlot: instance.title,
+                actions: [instance.action],
+                account: findProps.account,
+              });
               trigger.click();
               assert(chrome.account.open, 'account did not open');
               const action = instance.action;

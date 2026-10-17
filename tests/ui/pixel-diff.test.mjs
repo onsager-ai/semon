@@ -16,6 +16,7 @@ test('identical dark content at different heights has no pixel regression but re
   const result = compare(solid(20, 10, 20), solid(20, 30, 20), 0.1);
   assert.equal(result.ratio, 0);
   assert.equal(result.pixels, 0);
+  assert.deepEqual(result.difference, { bounds: null, bands: [] });
   assert.deepEqual(result.size, ['20×10', '20×30']);
   assert.equal(result.A.height, 10);
   assert.equal(result.B.height, 30);
@@ -25,6 +26,10 @@ test('extra height cannot dilute a difference in shared content', () => {
   const result = compare(solid(20, 10, 20), solid(20, 30, 240), 0.1);
   assert.equal(result.ratio, 1);
   assert.equal(result.pixels, 200);
+  assert.deepEqual(result.difference, {
+    bounds: [0, 0, 20, 10],
+    bands: [{ y: 0, height: 10, pixels: 200 }],
+  });
 });
 
 test('different widths remain a size regression even when shared pixels agree', () => {

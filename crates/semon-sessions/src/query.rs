@@ -1,19 +1,18 @@
 //! The agent read surface (#14): `semon query <tool>` and `semon mcp` answer
-//! the same tools, as JSON, from the session model `--model-json` and
-//! `/api/model` serve, so a field means the same thing in all of them.
+//! the same tools, as JSON, from native session evidence. Hosted callers reuse
+//! their admitted native source cache and configured output window.
 //!
 //! - **Facts, not verdicts.** Every field is something a log line, a process
 //!   or a lock says. A field Semon can't know exactly is `null`, or the state
 //!   `unknown`; it is never inferred. `stalls` is a convenience: it names its
 //!   rule and gives closed reason codes, never prose.
-//! - **One model.** Sessions, turns and handoffs are the model's; the few
-//!   facts the model holds but doesn't serve (a session's process, its parent
-//!   and exact token counts) come from the same build.
+//! - **One evidence generation.** Sessions, turns, handoffs, process facts and
+//!   source-backed transcript offsets come from the same native build.
 //! - **Read-only.** No listener and no network. Nothing is written but the
 //!   metadata cache the viewer keeps too.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt, io,
     sync::Arc,
     time::Duration,
@@ -23,10 +22,10 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Options,
-    model::{SessionFacts, SlotKind, now_ms, one_line},
+    model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
+    native_evidence::SessionSources,
     tx,
-    union::{Owner, ViewerCore},
-    viewer::Reading,
+    union::{Owner, QueryRead},
 };
 
 /// A session's state: a closed set.
@@ -118,7 +117,7 @@ const CONTEXT: usize = 80;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryError {
     /// `unknown_tool`, `invalid_arguments`, `unknown_session`,
-    /// `unknown_turn`, `outside_window`, `id_conflict` or `io`.
+    /// `unknown_turn`, `outside_window`, `id_conflict`, `capability_unavailable` or `io`.
     pub code: &'static str,
     pub message: String,
     /// With `outside_window`: where the window starts (epoch ms).
@@ -188,8 +187,17 @@ fn id_property(what: &str) -> Value {
     json!({"type": "string", "minLength": 1, "description": what})
 }
 
-/// Every tool, with its input schema.
+/// Active collection tools, with their input schemas.
 pub fn query_tools() -> Vec<QueryTool> {
+    retained_query_tools()
+        .into_iter()
+        .filter(|tool| tool.name != "find")
+        .collect()
+}
+
+// Preserve the optional matcher contract and independent semantic fixtures.
+// Public dispatch must pass validate_query_call before preparing any evidence.
+fn retained_query_tools() -> Vec<QueryTool> {
     vec![
         QueryTool {
             name: "list_sessions",
@@ -401,7 +409,164 @@ struct View {
     children: BTreeMap<String, Vec<String>>,
 }
 
+enum ReadShape<'a> {
+    Summaries,
+    Session(&'a str),
+    Search,
+}
+
 impl View {
+    fn native(
+        read: &QueryRead,
+        now: i64,
+        shape: ReadShape<'_>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Self, QueryError> {
+        let mut conflicts = read.conflicts();
+        let multiple = read.parts.len() > 1;
+        let mut sessions = BTreeMap::new();
+        let mut facts = BTreeMap::new();
+        let mut handoffs = Vec::new();
+        let mut turns = Vec::new();
+        let mut handoff_ids = BTreeSet::new();
+        let mut turn_ids = BTreeSet::new();
+        for part in &read.parts {
+            let records = part.data.sources.reader_with(provider);
+            for (id, session) in &part.data.sessions {
+                if part.dropped.contains(id) {
+                    continue;
+                }
+                // The tools expose only these session fields. Pricing tables,
+                // workspace transport and per-transcript growth marks stay out.
+                let row = session_fields(session, part.machine.as_deref());
+                sessions.insert(part.served(id), row);
+            }
+            for (id, own) in &part.data.facts {
+                let mut own = own.clone();
+                own.parent = own.parent.map(|parent| part.served(&parent));
+                facts.insert(part.served(id), own);
+            }
+            for handoff in &part.data.handoffs {
+                if part.dropped.contains(&handoff.from)
+                    || handoff
+                        .to
+                        .as_ref()
+                        .is_some_and(|to| part.dropped.contains(to))
+                    || (part.droppable && handoff_ids.contains(&handoff.id))
+                {
+                    continue;
+                }
+                if !handoff_ids.insert(handoff.id.clone()) && multiple {
+                    conflicts.insert(handoff.id.clone());
+                }
+                let question = handoff.kind == "toyou"
+                    && handoff.ask == Some("question")
+                    && handoff.status == "wait";
+                let requested = match shape {
+                    ReadShape::Session(id) => {
+                        part.served(&handoff.from) == id
+                            || handoff.to.as_ref().is_some_and(|to| part.served(to) == id)
+                    }
+                    ReadShape::Search => true,
+                    ReadShape::Summaries => false,
+                };
+                if !requested && !question {
+                    continue;
+                }
+                let mut handoff = handoff.clone();
+                if matches!(shape, ReadShape::Session(_))
+                    && let Some(brief) = part.data.ask_briefs.get(&handoff.id)
+                {
+                    handoff.brief = brief
+                        .read(&records)
+                        .map_err(|error| QueryError::io(&error))?;
+                }
+                handoff.from = part.served(&handoff.from);
+                handoff.to = handoff.to.map(|to| part.served(&to));
+                handoffs.push(json!(handoff));
+            }
+            for turn in &part.data.turns {
+                if part.dropped.contains(&turn.sid)
+                    || (part.droppable && turn_ids.contains(&turn.id))
+                {
+                    continue;
+                }
+                if !turn_ids.insert(turn.id.clone()) && multiple {
+                    conflicts.insert(turn.id.clone());
+                }
+                if !matches!(shape, ReadShape::Session(id) if part.served(&turn.sid) == id) {
+                    continue;
+                }
+                let mut turn = turn.clone();
+                turn.sid = part.served(&turn.sid);
+                turns.push(json!(turn));
+            }
+            records.finish().map_err(|error| QueryError::io(&error))?;
+        }
+        if !conflicts.is_empty() {
+            return Err(QueryError::new(
+                "id_conflict",
+                format!(
+                    "two machines both have {}",
+                    conflicts.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        Ok(Self::from_evidence(
+            now,
+            sessions.into_iter().collect(),
+            handoffs,
+            turns,
+            facts,
+        ))
+    }
+
+    fn from_evidence(
+        now: i64,
+        sessions: Vec<(String, Value)>,
+        handoffs: Vec<Value>,
+        turns: Vec<Value>,
+        facts: BTreeMap<String, SessionFacts>,
+    ) -> Self {
+        let mut open = HashMap::new();
+        for handoff in &handoffs {
+            if handoff["kind"] == "toyou"
+                && handoff["ask"] == "question"
+                && handoff["status"] == "wait"
+                && let Some(from) = handoff["from"].as_str()
+            {
+                open.insert(
+                    from.to_owned(),
+                    json!({"text": handoff["brief"], "asked_at": handoff["at"], "handoff": handoff["id"]}),
+                );
+            }
+        }
+        let index = sessions
+            .iter()
+            .enumerate()
+            .map(|(position, (id, _))| (id.clone(), position))
+            .collect();
+        let mut children = BTreeMap::<String, Vec<String>>::new();
+        for (id, _) in &sessions {
+            if let Some(parent) = facts.get(id).and_then(|facts| facts.parent.clone()) {
+                children.entry(parent).or_default().push(id.clone());
+            }
+        }
+        Self {
+            now,
+            sessions,
+            index,
+            handoffs,
+            turns,
+            facts,
+            open,
+            children,
+        }
+    }
+
     fn session(&self, id: &str) -> Option<&Value> {
         self.index
             .get(id)
@@ -478,6 +643,68 @@ impl View {
     }
 }
 
+fn session_fields(session: &crate::model::Session, machine: Option<&str>) -> Value {
+    let mut row = json!({"name":session.name,"harness":session.harness,
+        "model":session.model,"repo":session.repo,"branch":session.branch,
+        "state":session.state,"last":session.last,"machine":machine.unwrap_or(&session.machine),"busy":session.busy});
+    if let Some(evidence) = &session.copilot {
+        row["copilot"] = json!(evidence);
+    }
+    if let Some(evidence) = &session.claude_usage {
+        row["claude_usage"] = json!(evidence);
+    }
+    if !session.signals.is_empty() {
+        row["signals"] = json!(session.signals);
+    }
+    row
+}
+
+/// The native producer records exact five-tool facts alongside its existing
+/// relationship header. Readers do not reconstruct those facts from rounded UI
+/// totals or decode transcript event rows to list sessions.
+pub(crate) fn catalog_summaries<'a>(
+    sessions: impl Iterator<Item = (&'a str, &'a crate::model::Session)>,
+    handoffs: &[crate::model::Handoff],
+    facts: &BTreeMap<String, SessionFacts>,
+    transcripts: &BTreeMap<String, Arc<Transcript>>,
+    now: i64,
+) -> BTreeMap<String, Value> {
+    let sessions: Vec<_> = sessions
+        .map(|(id, session)| {
+            let mut fields = session_fields(session, None);
+            if let Some(tx) = transcripts.get(id)
+                && !tx.signals.is_empty()
+            {
+                fields["signals"] = json!(tx.signals);
+            }
+            (id.to_owned(), fields)
+        })
+        .collect();
+    let view = View::from_evidence(
+        now,
+        sessions,
+        handoffs.iter().map(|h| json!(h)).collect(),
+        Vec::new(),
+        facts.clone(),
+    );
+    view.sessions
+        .iter()
+        .map(|(id, session)| {
+            let mut summary = view.summary(id, session);
+            if !summary["open_question"].is_null() {
+                summary["open_question"]["text"] = Value::Null;
+            }
+            (
+                id.clone(),
+                json!({"summary":summary,
+                    "recorded_status":facts.get(id).and_then(|f| f.recorded_status.as_deref()),
+                    "state":session["state"], "last":session["last"],
+                }),
+            )
+        })
+        .collect()
+}
+
 /// Orders summaries by their last log line, newest first, then by id.
 fn newest_first(a: &Value, b: &Value) -> std::cmp::Ordering {
     b["last_activity"]
@@ -513,15 +740,69 @@ fn snippet(text: &str, at: usize, length: usize) -> String {
     out
 }
 
-/// The agent read surface over one machine's homes or several: the tools
-/// `semon query` and `semon mcp` answer. It keeps the viewer's model and
-/// caches between calls, rebuilding only what changed.
-pub struct Query {
-    core: Arc<ViewerCore>,
-    cached: bool,
-    /// The current call's window start (epoch ms), as the model was built.
-    start: Option<i64>,
+/// Validate the active collection contract before admitting source/archive work.
+/// This performs no I/O and grants no source authority. Window membership and
+/// generation checks still belong to the actual Query call.
+pub fn validate_query_call(tool: &str, args: &Value) -> Result<(), QueryError> {
+    if tool == "find" {
+        return Err(QueryError::new(
+            "capability_unavailable",
+            "Full-text find is paused in the collection configuration",
+        ));
+    }
+    validate_tool_call(&query_tools(), tool, args)
 }
+
+fn validate_tool_call(tools: &[QueryTool], tool: &str, args: &Value) -> Result<(), QueryError> {
+    let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
+        let names: Vec<&str> = tools.iter().map(|spec| spec.name).collect();
+        return Err(QueryError::new(
+            "unknown_tool",
+            format!("no tool {tool:?}; the tools are {}", names.join(", ")),
+        ));
+    };
+    let empty = json!({});
+    let args = if args.is_null() { &empty } else { args };
+    validate(&spec.input_schema, args)?;
+    since_ms(args, now_ms())?;
+    Ok(())
+}
+
+/// Request-scoped native reader admission for a selected Catalog owner.
+/// The embedding host retains authorization and cancellation policy.
+pub type CatalogReaderFactory =
+    dyn Fn(&str, &str) -> io::Result<Box<dyn crate::SessionSourceReader>>;
+
+fn selected_error(error: &io::Error) -> QueryError {
+    let terminal = crate::selected_read::check().err();
+    let error = terminal.as_ref().unwrap_or(error);
+    if matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        QueryError::new("unavailable", error.to_string())
+    } else {
+        QueryError::io(error)
+    }
+}
+
+/// The agent read surface over one machine's homes or several: the tools
+/// `semon query` and `semon mcp` answer. Local calls share the native source
+/// index and snapshots between calls, rebuilding only what changed. Hosted
+/// calls reuse admitted native sources and their configured output windows.
+pub struct Query {
+    sources: Arc<SessionSources>,
+    /// Keeps embedding window-error text; source scope comes from the options.
+    embedded: bool,
+    /// The current call's window start (epoch ms), from its native cohort.
+    start: Option<i64>,
+    /// One native evidence cohort supplies the entire call.
+    native: Option<QueryRead>,
+}
+
+mod catalog;
+mod search;
+mod transcript;
 
 impl Query {
     /// The tools over the agent homes, `/proc` and cache `options` name.
@@ -529,8 +810,8 @@ impl Query {
         Self::with_machines(vec![(String::new(), options)])
     }
 
-    /// The tools over several machines' homes, as one model: the union
-    /// [`ViewerCore::with_machines`] serves.
+    /// The tools over several machines' native evidence, using the same
+    /// identity and ownership rules as [`SessionSources::with_machines`].
     ///
     /// Each machine keeps its own window: its `since`, or every file with
     /// `all`. Only log files modified within it are read
@@ -539,7 +820,7 @@ impl Query {
     /// tool's `since` before it would be cut short on some machine, so it is
     /// refused.
     pub fn with_machines(machines: Vec<(String, Options)>) -> Self {
-        let machines = machines
+        let machines: Vec<_> = machines
             .into_iter()
             .map(|(key, options)| {
                 (
@@ -553,42 +834,45 @@ impl Query {
             })
             .collect();
         Self {
-            core: Arc::new(ViewerCore::with_machines(machines)),
-            cached: false,
+            sources: Arc::new(SessionSources::with_machines(machines)),
+            embedded: false,
             start: None,
+            native: None,
         }
     }
 
-    /// Reads an embedding server's existing core, following its refresh and
-    /// window policy. Calls share its cached models; no second builder or
-    /// cache is created. Each request should own its own Query.
-    pub fn from_core(core: Arc<ViewerCore>) -> Self {
+    /// Query admitted native sources with their configured windows unchanged.
+    /// The host holds authorization and custody until the blocking call ends.
+    /// No Viewer or background refresh producer is constructed here.
+    pub fn from_sources(sources: Arc<SessionSources>) -> Self {
         Self {
-            core,
-            cached: true,
+            sources,
+            embedded: true,
             start: None,
+            native: None,
         }
     }
 
-    fn reading(&self, now: i64) -> Reading {
-        if self.cached {
-            Reading::Served
-        } else {
-            Reading::At(now)
-        }
-    }
-
-    /// Where the window starts, as the current models were built with it
-    /// (epoch ms): the latest machine's start; `None` when every machine
-    /// has an unbounded model.
+    /// The latest machine's output or scan window start, from this call's
+    /// exact native source snapshots. `None` means every part is unbounded.
     fn window_start(&mut self, now: i64) -> Result<Option<i64>, QueryError> {
-        Ok(self
-            .core
-            .served(self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
+        let native = self
+            .sources
+            .query_at(now)
+            .map_err(|error| QueryError::io(&error))?;
+        let start = native
+            .parts
             .iter()
-            .filter_map(|part| part.built.window_start)
-            .max())
+            .filter_map(|part| part.data.window_start)
+            .max();
+        self.native = Some(native);
+        Ok(start)
+    }
+
+    fn evidence(&self) -> &QueryRead {
+        self.native
+            .as_ref()
+            .expect("call prepares one native evidence cohort")
     }
 
     /// A tool's `since`, which must not reach before the window's start.
@@ -601,7 +885,7 @@ impl Query {
                 window_start: Some(start),
                 ..QueryError::new(
                     "outside_window",
-                    if self.cached {
+                    if self.embedded {
                         format!(
                             "since reaches before the cached model window, which starts at {start} (epoch ms)"
                         )
@@ -624,156 +908,423 @@ impl Query {
     /// [`Query::call`] at a fixed `now` (epoch ms), for fixtures.
     #[doc(hidden)]
     pub fn call_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let tools = query_tools();
-        let Some(spec) = tools.iter().find(|spec| spec.name == tool) else {
-            let names: Vec<&str> = tools.iter().map(|spec| spec.name).collect();
-            return Err(QueryError::new(
-                "unknown_tool",
-                format!("no tool {tool:?}; the tools are {}", names.join(", ")),
-            ));
-        };
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
-        validate(&spec.input_schema, args)?;
-        // Once per call: the answer's window and the check of `since` are
-        // the models' own.
+        validate_query_call(tool, args)?;
+        self.execute_at(tool, args, now)
+    }
+
+    // Only unit fixtures can enter the retained optional search engine.
+    #[cfg(test)]
+    fn call_optional_at(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let empty = json!({});
+        let args = if args.is_null() { &empty } else { args };
+        validate_tool_call(&retained_query_tools(), tool, args)?;
+        self.execute_at(tool, args, now)
+    }
+
+    fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        if !self.embedded
+            && self.sources.machines.len() == 1
+            && !self.sources.is_retired()
+            && matches!(tool, "get_session" | "read_transcript")
+        {
+            let id = args["id"].as_str().expect("validated focused id");
+            let (source_key, evidence) = &self.sources.machines[0];
+            if let Some(catalog_key) = evidence
+                .local_query_target(id, now)
+                .map_err(|error| QueryError::io(&error))?
+            {
+                let source_key = if source_key.is_empty() {
+                    "local"
+                } else {
+                    source_key
+                }
+                .to_owned();
+                return self.execute_selected_at(
+                    &source_key,
+                    &catalog_key,
+                    tool,
+                    args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    now,
+                );
+            }
+        }
+        if !self.embedded
+            && self.sources.machines.len() > 1
+            && !self.sources.is_retired()
+            && matches!(tool, "get_session" | "read_transcript")
+        {
+            let id = args["id"].as_str().expect("validated focused id");
+            let mut selected = None;
+            let mut ready = true;
+            for (source_key, evidence) in &self.sources.machines {
+                let key = if source_key.is_empty() {
+                    "local"
+                } else {
+                    source_key
+                };
+                // Resolve ownership from every admitted source's published
+                // Catalog. Do not decode another machine's event rows merely
+                // to rule out a duplicate global session ID.
+                match crate::catalog::qualified_history_identity(&evidence.options, key, id) {
+                    Ok(Some(identity)) => {
+                        let target = evidence
+                            .local_query_target(&identity.catalog_key, now)
+                            .map_err(|error| QueryError::io(&error))?;
+                        if target.is_none() {
+                            ready = false;
+                            continue;
+                        }
+                        if selected.is_some() {
+                            return Err(QueryError::new(
+                                "id_conflict",
+                                format!("two machines both have {id}"),
+                            ));
+                        }
+                        selected = Some((key.to_owned(), identity.catalog_key));
+                    }
+                    Ok(None) => {}
+                    Err(_) => ready = false,
+                }
+            }
+            if ready && let Some((source_key, catalog_key)) = selected {
+                return self.execute_selected_at(
+                    &source_key,
+                    &catalog_key,
+                    tool,
+                    args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    now,
+                );
+            }
+        }
+        // Once per call: the answer's window and the check of `since` belong
+        // to the same native evidence cohort.
         self.start = self.window_start(now)?;
         let mut answer = match tool {
-            "list_sessions" => self.list_sessions(args, now),
-            "get_session" => self.get_session(args, now),
-            "read_transcript" => self.read_transcript(args, now),
-            "find" => self.find(args, now),
-            "stalls" => self.stalls(args, now),
+            "list_sessions" => self.list_sessions(args, now, None),
+            "get_session" => self.get_session(args, now, None),
+            "read_transcript" => self.read_transcript(args, now, None),
+            "find" => self.find(args, now, None),
+            "stalls" => self.stalls(args, now, None),
             _ => unreachable!("every tool is handled"),
         }?;
         answer["window_start"] = json!(self.start);
         Ok(answer)
     }
 
-    fn view(&mut self, now: i64) -> Result<View, QueryError> {
-        let model = match self
-            .core
-            .model_at(now, self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-        {
-            Ok(model) => model,
-            Err(ids) => {
-                return Err(QueryError::new(
-                    "id_conflict",
-                    format!("two machines both have {}", ids.join(", ")),
-                ));
-            }
-        };
-        let mut model: Value = serde_json::from_str(&model)
-            .map_err(|error| QueryError::new("io", error.to_string()))?;
-        let mut facts = BTreeMap::new();
-        for part in self
-            .core
-            .served(self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-        {
-            for (id, own) in &part.built.facts {
-                let mut own = own.clone();
-                own.parent = own.parent.map(|parent| part.served(&parent));
-                facts.insert(part.served(id), own);
-            }
-        }
-        let sessions: Vec<(String, Value)> = match model["sessions"].take() {
-            Value::Object(sessions) => sessions.into_iter().collect(),
-            _ => Vec::new(),
-        };
-        let handoffs = match model["handoffs"].take() {
-            Value::Array(handoffs) => handoffs,
-            _ => Vec::new(),
-        };
-        let turns = match model["turns"].take() {
-            Value::Array(turns) => turns,
-            _ => Vec::new(),
-        };
-        let mut open = HashMap::new();
-        for handoff in &handoffs {
-            if handoff["kind"] == "toyou"
-                && handoff["ask"] == "question"
-                && handoff["status"] == "wait"
-                && let Some(from) = handoff["from"].as_str()
-            {
-                // Handoffs are in time order: the latest open question wins.
-                open.insert(
-                    from.to_owned(),
-                    json!({"text": handoff["brief"], "asked_at": handoff["at"], "handoff": handoff["id"]}),
-                );
-            }
-        }
-        let index = sessions
-            .iter()
-            .enumerate()
-            .map(|(position, (id, _))| (id.clone(), position))
-            .collect();
-        let mut children = BTreeMap::<String, Vec<String>>::new();
-        for (id, _) in &sessions {
-            if let Some(parent) = facts.get(id).and_then(|facts| facts.parent.clone()) {
-                children.entry(parent).or_default().push(id.clone());
-            }
-        }
-        Ok(View {
-            now,
-            sessions,
-            index,
-            handoffs,
-            turns,
-            facts,
-            open,
-            children,
-        })
+    /// Execute a focused tool over one host-selected native Catalog identity.
+    /// The host admits the source and lends a request-owned reader; Query never
+    /// restores a workspace or retains its credentials. Listings and workspace
+    /// search use their own native selection and cannot call this API.
+    pub fn call_selected(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+    ) -> Result<Value, QueryError> {
+        self.call_selected_at(
+            source_key,
+            catalog_key,
+            tool,
+            args,
+            provider,
+            mode,
+            now_ms(),
+        )
     }
 
-    fn list_sessions(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now)?;
-        let since = self.since(args, now)?;
-        let state = string(args, "state");
-        let repo = string(args, "repo");
-        let parent = string(args, "parent");
-        let harness = string(args, "harness");
-        let limit = integer(args, "limit").unwrap_or(LIST_LIMIT) as usize;
-        if let Some(parent) = &parent
-            && view.session(parent).is_none()
+    /// Selected read with the host's whole-request deadline/cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_selected_with_control(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        control: &crate::SelectedReadControl,
+    ) -> Result<Value, QueryError> {
+        // Paused tools refuse before cancellation/admission, including stale callers.
+        validate_query_call(tool, args)?;
+        let _scope = crate::selected_read::Scope::enter(control);
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
+        let result = self.call_selected_at(
+            source_key,
+            catalog_key,
+            tool,
+            args,
+            provider,
+            mode,
+            now_ms(),
+        );
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
+        result
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_selected_at(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let empty = json!({});
+        let args = if args.is_null() { &empty } else { args };
+        validate_query_call(tool, args)?;
+        if !matches!(tool, "get_session" | "read_transcript")
+            || !args["id"].as_str().is_some_and(|id| {
+                id == catalog_key
+                    || id
+                        .rsplit_once('@')
+                        .is_some_and(|(own, _)| own == catalog_key)
+            })
         {
-            return Err(QueryError::unknown_session(parent));
+            return Err(QueryError::invalid(
+                "A focused tool requires the selected Catalog id",
+            ));
         }
-        let mut rows: Vec<Value> = view
+        self.execute_selected_at(source_key, catalog_key, tool, args, provider, mode, now)
+    }
+
+    // Public selected reads validate the exact host-selected Catalog ID above.
+    // Ordinary local reads may resolve a raw native ID whose spelling changes
+    // under the file window; their admitted native Catalogs resolve ownership
+    // before entering here. Derivation still resolves args.id.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_selected_at(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let _scope = crate::selected_read::Scope::ensure();
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
+        let evidence = self
+            .sources
+            .machines
+            .iter()
+            .find(|(key, _)| key == source_key || (key.is_empty() && source_key == "local"))
+            .map(|(_, evidence)| evidence.clone())
+            .ok_or_else(|| QueryError::unknown_session(catalog_key))?;
+        if self.sources.is_retired() {
+            return Err(QueryError::new("io", "native query source is closed"));
+        }
+        let mut focused_args = args.clone();
+        if self.sources.machines.len() > 1 {
+            let labels = self.source_labels();
+            if let Some((_, label)) = labels
+                .iter()
+                .find(|(key, _)| key == source_key || (key.is_empty() && source_key == "local"))
+            {
+                focused_args["_machine_alias"] = json!(label);
+            }
+        }
+        // One bounded request budget spans semantic derivation, transcript or
+        // search bytes, and the final authorization/generation recheck.
+        let bounded =
+            provider.map(|reader| crate::source_reader::BudgetedReader::new(reader, 1024));
+        let provider = bounded
+            .as_ref()
+            .map(|reader| reader as &dyn crate::SessionSourceReader);
+        let rendering = provider.map(|reader| (reader, mode));
+        if tool == "get_session"
+            && let Some(mut answer) = transcript::session(
+                &evidence.options,
+                catalog_key,
+                &focused_args,
+                provider,
+                mode,
+                now,
+            )?
+        {
+            if self.sources.is_retired() {
+                return Err(QueryError::new("io", "native query source is closed"));
+            }
+            self.start = self
+                .sources
+                .machines
+                .iter()
+                .filter_map(|(_, source)| {
+                    crate::model::QueryData::identity(&source.options, now).window_start
+                })
+                .max();
+            if self.sources.machines.len() > 1 {
+                let labels = self.source_labels();
+                if let Some((_, label)) = labels
+                    .iter()
+                    .find(|(key, _)| key == source_key || (key.is_empty() && source_key == "local"))
+                {
+                    answer["session"]["machine"] = json!(label);
+                }
+            }
+            answer["window_start"] = json!(self.start);
+            return Ok(answer);
+        }
+        if tool == "read_transcript"
+            && let Some(mut answer) = transcript::read(
+                &evidence.options,
+                catalog_key,
+                &focused_args,
+                provider,
+                mode,
+                now,
+            )?
+        {
+            self.start = self
+                .sources
+                .machines
+                .iter()
+                .filter_map(|(_, source)| {
+                    crate::model::QueryData::identity(&source.options, now).window_start
+                })
+                .max();
+            if self.sources.is_retired() {
+                return Err(QueryError::new("io", "native query source is closed"));
+            }
+            answer["window_start"] = json!(self.start);
+            return Ok(answer);
+        }
+        let result = crate::overview_repair::with_query(
+            &evidence.options,
+            catalog_key,
+            provider,
+            mode,
+            now,
+            |data| {
+                let data = Arc::new(data);
+                let witness = data.sources.reader_with(rendering);
+                witness
+                    .verify_all()
+                    .map_err(|error| QueryError::io(&error))?;
+                let parts = self
+                    .sources
+                    .machines
+                    .iter()
+                    .map(|(key, source)| {
+                        let part = if Arc::ptr_eq(source, &evidence) {
+                            data.clone()
+                        } else {
+                            Arc::new(crate::model::QueryData::identity(&source.options, now))
+                        };
+                        (key.clone(), part)
+                    })
+                    .collect();
+                let native = QueryRead::new(parts, usize::MAX);
+                self.start = native
+                    .parts
+                    .iter()
+                    .filter_map(|part| part.data.window_start)
+                    .max();
+                self.native = Some(native);
+                let answer = match tool {
+                    "get_session" => self.get_session(args, now, rendering),
+                    "read_transcript" => self.read_transcript(args, now, rendering),
+                    _ => unreachable!("focused tools were checked"),
+                }?;
+                witness.finish().map_err(|error| QueryError::io(&error))?;
+                Ok(answer)
+            },
+        )
+        .map_err(|error| selected_error(&error))?;
+        let mut answer: Value = result?;
+        crate::selected_read::check().map_err(|error| selected_error(&error))?;
+        answer["window_start"] = json!(self.start);
+        Ok(answer)
+    }
+
+    /// Configured presentation labels, including duplicate-hostname aliases.
+    /// This reads machine identity metadata without preparing native sources.
+    pub fn source_labels(&self) -> Vec<(String, String)> {
+        let identities = self
+            .sources
+            .machines
+            .iter()
+            .map(|(key, source)| {
+                (
+                    key.clone(),
+                    Arc::new(crate::model::QueryData::identity(&source.options, now_ms())),
+                )
+            })
+            .collect();
+        let read = QueryRead::new(identities, usize::MAX);
+        self.sources
+            .machines
+            .iter()
+            .zip(read.parts)
+            .map(|((key, _), part)| {
+                (
+                    key.clone(),
+                    part.machine.unwrap_or_else(|| part.data.machine_id.clone()),
+                )
+            })
+            .collect()
+    }
+
+    fn view(
+        &self,
+        now: i64,
+        shape: ReadShape<'_>,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<View, QueryError> {
+        View::native(self.evidence(), now, shape, provider)
+    }
+
+    fn list_sessions(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
+        let view = self.view(now, ReadShape::Summaries, provider)?;
+        let since = self.since(args, now)?;
+        let rows = view
             .sessions
             .iter()
             .map(|(id, session)| view.summary(id, session))
-            .filter(|row| {
-                state.as_deref().is_none_or(|state| row["state"] == state)
-                    && repo.as_deref().is_none_or(|repo| row["repo"] == repo)
-                    && parent
-                        .as_deref()
-                        .is_none_or(|parent| row["parent"] == parent)
-                    && harness
-                        .as_deref()
-                        .is_none_or(|harness| row["harness"] == harness)
-                    && since.is_none_or(|since| {
-                        row["last_activity"]
-                            .as_i64()
-                            .is_some_and(|last| last >= since)
-                    })
-            })
             .collect();
-        rows.sort_by(newest_first);
-        let total = rows.len();
-        rows.truncate(limit);
-        Ok(json!({
-            "now": view.now,
-            "total": total,
-            "truncated": total > rows.len(),
-            "sessions": rows,
-        }))
+        catalog::list_response(rows, args, since, view.now)
     }
 
-    fn get_session(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now)?;
+    fn get_session(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
         let id = string(args, "id").unwrap_or_default();
+        let view = self.view(now, ReadShape::Session(&id), provider)?;
         let Some(session) = view.session(&id) else {
             return Err(QueryError::unknown_session(&id));
         };
@@ -796,17 +1347,22 @@ impl Query {
         Ok(json!({"now": view.now, "session": out}))
     }
 
-    fn read_transcript(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
+    fn read_transcript(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
         let id = string(args, "id").unwrap_or_default();
         let position = |key: &str| integer(args, key).map(|value| value.max(0) as usize);
         let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
             .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
         let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |limit| limit as usize);
-        let own = match self
-            .core
-            .owner(&id, self.reading(now))
-            .map_err(|error| QueryError::io(&error))?
-        {
+        let owner = self.evidence().owner(&id);
+        let (index, own) = match owner {
             Owner::At(index, own) => (index, own),
             Owner::Missing => return Err(QueryError::unknown_session(&id)),
             Owner::Conflict => {
@@ -816,235 +1372,108 @@ impl Query {
                 ));
             }
         };
-        let built = self
-            .core
-            .built_at(own.0, self.reading(now))
-            .map_err(|error| QueryError::io(&error))?;
-        if !built.tx.contains_key(&own.1) {
-            return Err(QueryError::unknown_session(&id));
-        }
-        let page =
-            tx::page_limited(&built, &own.1, &anchor, now, limit).map_err(|error| {
-                match (&anchor, error.kind()) {
-                    (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
-                        "unknown_turn",
-                        format!("session {id:?} has no turn {turn:?}"),
-                    ),
-                    _ => QueryError::io(&error),
-                }
-            })?;
+        let data = &self.evidence().parts[index].data;
+        let transcript = data
+            .tx
+            .get(&own)
+            .ok_or_else(|| QueryError::unknown_session(&id))?;
+        let records = data.sources.reader_with(provider);
+        let mut read = |path: &std::path::Path, offset| records.read(path, offset);
+        let mut prompts = |file: &crate::model::SlotFile, offset| records.prompt(file, offset);
+        let page = tx::page_from_lines(
+            &tx::RenderContext {
+                home: data.home.as_deref(),
+                harness: data.sessions.get(&own).map(|session| session.harness),
+                bounded: false,
+            },
+            transcript,
+            &own,
+            &anchor,
+            now,
+            limit,
+            &mut tx::Lines::provider_with_prompts(&mut read, &mut prompts),
+        )
+        .map_err(|error| match (&anchor, error.kind()) {
+            (tx::Anchor::Turn(turn), io::ErrorKind::NotFound) => QueryError::new(
+                "unknown_turn",
+                format!("session {id:?} has no turn {turn:?}"),
+            ),
+            _ => QueryError::io(&error),
+        })?;
+        records.finish().map_err(|error| QueryError::io(&error))?;
         serde_json::from_str(&page).map_err(|error| QueryError::new("io", error.to_string()))
     }
 
-    fn find(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let text = string(args, "text").unwrap_or_default();
-        let needle = text.to_ascii_lowercase();
+    fn find(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
         let since = self.since(args, now)?;
-        let limit = integer(args, "limit").unwrap_or(FIND_LIMIT) as usize;
-        let max_bytes = integer(args, "max_bytes").unwrap_or(FIND_BYTES) as u64;
-        let view = self.view(now)?;
-        let handoffs: HashMap<&str, &Value> = view
-            .handoffs
+        let view = self.view(now, ReadShape::Search, provider)?;
+        let rows = view
+            .sessions
             .iter()
-            .filter_map(|handoff| handoff["id"].as_str().map(|id| (id, handoff)))
-            .collect();
-        let recent =
-            |id: &str| since.is_none_or(|since| view.last(id).is_some_and(|last| last >= since));
-        // Sessions whose name, repo or branch holds the text.
-        let mut sessions: Vec<(String, Vec<&str>, usize)> = Vec::new();
-        for (id, session) in &view.sessions {
-            if view.facts.get(id).is_some_and(|facts| facts.kind == "stub") || !recent(id) {
-                continue;
-            }
-            let fields: Vec<&str> = ["name", "repo", "branch"]
-                .into_iter()
-                .filter(|field| {
-                    session[*field]
-                        .as_str()
-                        .is_some_and(|value| find_in(value, &needle).is_some())
-                })
-                .collect();
-            if !fields.is_empty() {
-                sessions.push((id.clone(), fields, 0));
-            }
-        }
-        // Every session's transcript, the most recently active first, each
-        // from its newest entry back. Stubs have no activity of their own.
-        let parts = self
-            .core
-            .served(self.reading(now))
-            .map_err(|error| QueryError::io(&error))?;
-        let mut order: Vec<(Option<i64>, String, usize, &str)> = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
-            for own in part.built.tx.keys() {
-                let served = part.served(own);
-                if view.session(&served).is_none()
-                    || view
-                        .facts
-                        .get(&served)
-                        .is_some_and(|facts| facts.kind == "stub")
-                    || !recent(&served)
-                {
-                    continue;
-                }
-                order.push((view.last(&served), served, index, own.as_str()));
-            }
-        }
-        order.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let mut lines = tx::Lines::default();
-        let mut matches = Vec::new();
-        let mut stopped = None;
-        'sessions: for (_, served, index, own) in &order {
-            let built = &*parts[*index].built;
-            let Some(transcript) = built.tx.get(*own) else {
-                continue;
-            };
-            for (position, slot) in transcript.slots.iter().enumerate().rev() {
-                if since.is_some_and(|since| !slot.t.is_some_and(|t| t >= since)) {
-                    continue;
-                }
-                if matches.len() >= limit {
-                    stopped = Some("limit");
-                    break 'sessions;
-                }
-                if lines.bytes >= max_bytes {
-                    stopped = Some("bytes");
-                    break 'sessions;
-                }
-                let (kind, texts) = match &slot.kind {
-                    SlotKind::H(id) => {
-                        let handoff: Option<&Value> = handoffs.get(id.as_str()).copied();
-                        let mut texts = Vec::new();
-                        for part in ["brief", "result"] {
-                            if let Some(text) = handoff.and_then(|handoff| handoff[part].as_str()) {
-                                texts.push((part, text.to_owned()));
-                            }
-                        }
-                        if let Some(answers) =
-                            handoff.and_then(|handoff| handoff["answer"].as_array())
-                        {
-                            let answer: Vec<&str> =
-                                answers.iter().filter_map(Value::as_str).collect();
-                            texts.push(("answer", answer.join("\n")));
-                        }
-                        ("h", texts)
-                    }
-                    SlotKind::U => ("u", tx::slot_texts(built, &mut lines, slot)),
-                    SlotKind::A => ("a", tx::slot_texts(built, &mut lines, slot)),
-                    SlotKind::Think => ("think", tx::slot_texts(built, &mut lines, slot)),
-                    SlotKind::Tool { .. }
-                    | SlotKind::Operation { .. }
-                    | SlotKind::Yielded { .. }
-                    | SlotKind::Sent { .. } => ("tool", tx::slot_texts(built, &mut lines, slot)),
-                    _ => continue,
-                };
-                let Some((part, text, at)) = texts
-                    .iter()
-                    .find_map(|(part, text)| find_in(text, &needle).map(|at| (*part, text, at)))
-                else {
-                    continue;
-                };
-                let mut entry = json!({
-                    "session": served,
-                    "position": position,
-                    "turn": slot.turn,
-                    "kind": kind,
-                    "part": part,
-                    "at": slot.t,
-                    "snippet": snippet(text, at, needle.len()),
-                });
-                match &slot.kind {
-                    SlotKind::H(id) => entry["handoff"] = json!(id),
-                    SlotKind::Tool { name, .. } => entry["name"] = json!(name),
-                    SlotKind::Yielded { .. } => entry["name"] = json!("exec_command"),
-                    SlotKind::Sent { .. } => entry["name"] = json!("write_stdin"),
-                    SlotKind::Operation { kind, .. } => {
-                        entry["name"] = json!(if kind == "CommandExecution" {
-                            "exec_command"
-                        } else {
-                            "apply_patch"
-                        })
-                    }
-                    _ => {}
-                }
-                matches.push(entry);
-                match sessions.iter_mut().find(|(id, _, _)| id == served) {
-                    Some((_, _, count)) => *count += 1,
-                    None => sessions.push((served.clone(), Vec::new(), 1)),
-                }
-            }
-        }
-        let mut sessions: Vec<Value> = sessions
-            .into_iter()
-            .filter_map(|(id, fields, count)| {
-                let session = view.session(&id)?;
-                Some(json!({
-                    "id": id,
-                    "name": session["name"],
-                    "repo": session.get("repo").cloned().unwrap_or(Value::Null),
-                    "last_activity": view.last(&id),
-                    "fields": fields,
-                    "entries": count,
-                }))
+            .map(|(id, row)| {
+                let mut row = row.clone();
+                row["id"] = json!(id);
+                row["kind"] = json!(view.facts.get(id).map(|facts| &facts.kind));
+                row["last_activity"] = json!(view.last(id));
+                (id.clone(), row)
             })
             .collect();
-        sessions.sort_by(newest_first);
-        Ok(json!({
-            "now": view.now,
-            "text": text,
-            "matches": matches,
-            "sessions": sessions,
-            "scanned_bytes": lines.bytes,
-            "truncated": stopped.is_some(),
-            "truncated_by": stopped,
-        }))
+        let mut search = search::Search::new(args, since, rows);
+        let transcripts: BTreeMap<_, _> = self
+            .evidence()
+            .parts
+            .iter()
+            .enumerate()
+            .flat_map(|(index, part)| {
+                part.data
+                    .tx
+                    .iter()
+                    .map(move |(own, tx)| (part.served(own), (index, tx)))
+            })
+            .collect();
+        for served in search.order() {
+            let Some((index, transcript)) = transcripts.get(&served) else {
+                continue;
+            };
+            let data = &self.evidence().parts[*index].data;
+            let records = data.sources.reader_with(provider);
+            search.scan(&served, transcript, data, &view.handoffs, &records)?;
+            records.finish().map_err(|error| QueryError::io(&error))?;
+            if search.stopped() {
+                break;
+            }
+        }
+        Ok(search.finish(now))
     }
 
-    fn stalls(&mut self, args: &Value, now: i64) -> Result<Value, QueryError> {
-        let view = self.view(now)?;
-        let idle_minutes = integer(args, "idle_minutes").unwrap_or(1);
+    fn stalls(
+        &mut self,
+        args: &Value,
+        now: i64,
+        provider: Option<(
+            &dyn crate::SessionSourceReader,
+            crate::SessionSourceReadMode,
+        )>,
+    ) -> Result<Value, QueryError> {
+        let view = self.view(now, ReadShape::Summaries, provider)?;
         let since = self.since(args, now)?;
-        let threshold = idle_minutes.saturating_mul(60_000);
-        let mut rows = Vec::new();
-        for (id, session) in &view.sessions {
-            let Some(facts) = view.facts.get(id) else {
-                continue;
-            };
-            // Without a log line, how long it has been quiet isn't known.
-            let Some(last) = facts.last else {
-                continue;
-            };
-            if since.is_some_and(|since| last < since) || now.saturating_sub(last) < threshold {
-                continue;
-            }
-            let reason =
-                if facts.alive == Some(false) && facts.recorded_status.as_deref() == Some("busy") {
-                    StallReason::ProcessGone
-                } else {
-                    match view.state(id, session) {
-                        State::WaitingQuestion => StallReason::WaitingQuestion,
-                        State::Working => StallReason::NoOutput,
-                        _ => continue,
-                    }
-                };
-            let mut row = view.summary(id, session);
-            row["stall_reason"] = json!(reason.name());
-            row["idle_ms"] = json!(now.saturating_sub(last));
-            rows.push(row);
-        }
-        // The longest quiet first.
-        rows.sort_by(|a, b| {
-            a["last_activity"]
-                .as_i64()
-                .cmp(&b["last_activity"].as_i64())
-                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
-        });
-        Ok(json!({
-            "now": view.now,
-            "idle_minutes": idle_minutes,
-            "rule": STALL_RULE,
-            "stalls": rows,
-        }))
+        let rows = view
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| {
+                let facts = view.facts.get(id)?;
+                Some((view.summary(id, session), facts.recorded_status.clone()))
+            })
+            .collect();
+        Ok(catalog::stall_response(rows, args, since, view.now))
     }
 }
 

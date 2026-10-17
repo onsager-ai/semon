@@ -1,5 +1,7 @@
 # Managed E2B guest transport
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](session-foundation-retirement.md#temporary-collection-scope).
+
 The companion Hub design owns configuration, product behavior, validation and
 release gates: [Managed E2B Codex slice](https://github.com/onsager-ai/semon-hub/blob/main/docs/managed-e2b.md).
 The merged #301 app-server driver is the interactive transport. This implementation

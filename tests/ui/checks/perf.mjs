@@ -13,10 +13,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { context, ENV, launch, wide } from '../lib.mjs';
 import { writeLong } from '../long.mjs';
+import { installRefreshTracing, armRefreshPaint, readRefreshTrace } from './perf-refresh.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BIN = process.env.SEMON_BIN ?? path.resolve(here, '../../../target/debug/semon');
-const BUCKETS = ['/api/model', '/api/tx', 'other'];
+const REFRESH_DIAGNOSTICS = process.env.SEMON_PERF_REFRESH_DIAGNOSTICS === '1';
+const BUCKETS = ['/api/sessions', '/api/session-transcript', 'other'];
 const SCREENS = [
   { name: 'phone', size: 'phone' },
   { name: 'desktop', size: 'desktop' },
@@ -29,13 +31,14 @@ const median = (values) => {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
 const round = (value) => (value == null ? null : Math.round(value * 10) / 10);
-const sessionUrl = (base, token, id) =>
-  `${base}/s/claude/${encodeURIComponent(id)}?t=${token}&compat=1`;
+const sessionUrl = (base, token, id) => `${base}/s/claude/${encodeURIComponent(id)}?t=${token}`;
 
 function bucket(url) {
   try {
     const pathname = new URL(url).pathname;
-    return pathname === '/api/model' || pathname === '/api/tx' ? pathname : 'other';
+    return pathname === '/api/sessions' || pathname === '/api/session-transcript'
+      ? pathname
+      : 'other';
   } catch {
     return 'other';
   }
@@ -63,9 +66,20 @@ function serve(dir, now) {
         '--cache',
         path.join(dir, 'index.json'),
       ],
-      { env: { ...process.env, SEMON_TEST_NOW: String(now) }, stdio: ['ignore', 'pipe', 'pipe'] },
+      {
+        env: {
+          ...process.env,
+          SEMON_TEST_NOW: String(now),
+          ...(REFRESH_DIAGNOSTICS ? { SEMON_BUILD_TIMING: '1' } : {}),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
     );
     let log = '';
+    let timingTail = '';
+    let timingBytes = 0;
+    let timingTruncated = false;
+    const timingEvents = [];
     let settled = false;
     const fail = (error) => {
       if (settled) return;
@@ -74,12 +88,18 @@ function serve(dir, now) {
       reject(error);
     };
     const read = (chunk) => {
-      log += chunk;
+      log = (log + chunk).slice(-65536);
       const match = /http:\/\/127\.0\.0\.1:(\d+)\/\?t=([0-9a-f]+)/.exec(log);
       if (!match || settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ proc, base: `http://127.0.0.1:${match[1]}`, token: match[2], log: () => log });
+      resolve({
+        proc,
+        base: `http://127.0.0.1:${match[1]}`,
+        token: match[2],
+        log: () => log,
+        diagnostics: () => ({ events: timingEvents, truncated: timingTruncated }),
+      });
     };
     const timer = setTimeout(
       () => fail(new Error(`semon printed no URL within 20 s: ${log}`)),
@@ -87,6 +107,31 @@ function serve(dir, now) {
     );
     proc.stdout.on('data', read);
     proc.stderr.on('data', read);
+    if (REFRESH_DIAGNOSTICS)
+      proc.stderr.on('data', (chunk) => {
+        const at = Date.now();
+        timingTail += chunk;
+        const lines = timingTail.split('\n');
+        timingTail = lines.pop();
+        for (const line of lines) {
+          if (
+            !/^semon sessions native: producer=[a-f0-9]+ (phase=|queue_late_us=|breakdown=|catalog_commit_boundary=)/.test(
+              line,
+            )
+          )
+            continue;
+          if (timingEvents.length >= 20000 || timingBytes + line.length > 4 * 1024 * 1024) {
+            timingTruncated = true;
+            continue;
+          }
+          timingBytes += line.length;
+          timingEvents.push({ at, line });
+        }
+        if (timingTail.length > 8192) {
+          timingTruncated = true;
+          timingTail = '';
+        }
+      });
     proc.on('error', (error) => fail(error));
     proc.on('exit', (code) =>
       fail(new Error(`semon exited ${code} before printing its URL: ${log}`)),
@@ -404,7 +449,9 @@ function liveRecords({ sid, cwd, branch, sample, now }) {
         content: blocks,
       },
     });
-  const start = now - 30_000 + (sample - 1) * 10_000;
+  // The optional eight diagnostic appends remain before the fixture's fixed now.
+  const start =
+    sample <= 3 ? now - 30_000 + (sample - 1) * 10_000 : now - 8000 + (sample - 4) * 1000;
   const time = (i) => start + i * 100;
   const names = ['Bash', 'Read', 'Grep'];
   for (let i = 0; i < names.length; i++) {
@@ -456,6 +503,9 @@ async function runScreen(browser, screen, server, fixture) {
     ttfb: Object.fromEntries(BUCKETS.map((key) => [key, []])),
   };
   const managedPages = new Set();
+  const requestTimeline = [];
+  const refreshSamples = [];
+  let nextPage = 0;
   const metrics = {
     coldOpen: { samplesMs: [], medianMs: null },
     openAtEnd: null,
@@ -503,9 +553,11 @@ async function runScreen(browser, screen, server, fixture) {
     ctx = await context(browser, { size: screen.size });
     const makePage = async () => {
       const page = await ctx.newPage();
+      const pageId = nextPage++;
       page.setDefaultTimeout(60_000);
       page.setDefaultNavigationTimeout(60_000);
       page.on('pageerror', (error) => errors.push(error.message.split('\n')[0]));
+      if (REFRESH_DIAGNOSTICS) await page.addInitScript(installRefreshTracing);
       await page.addInitScript(() => {
         window.__perfLongTasks = [];
         window.__perfLongTaskObserver = null;
@@ -539,7 +591,28 @@ async function runScreen(browser, screen, server, fixture) {
       });
       const cdp = await ctx.newCDPSession(page);
       const byRequest = new Map();
+      const traces = new Map();
+      let clockOffset = null;
       cdp.on('Network.requestWillBeSent', (event) => {
+        if (REFRESH_DIAGNOSTICS && new URL(event.request.url).pathname.startsWith('/api/')) {
+          clockOffset ??= event.wallTime * 1000 - event.timestamp * 1000;
+          const url = new URL(event.request.url);
+          const trace = {
+            page: pageId,
+            requestId: event.requestId,
+            endpoint: url.pathname,
+            query: Object.fromEntries(
+              [...url.searchParams].filter(([key]) =>
+                ['machine', 'sid', 'after', 'limit', 'generation', 'errors_generation'].includes(
+                  key,
+                ),
+              ),
+            ),
+            admittedAt: event.timestamp * 1000 + clockOffset,
+          };
+          traces.set(event.requestId, trace);
+          requestTimeline.push(trace);
+        }
         if (event.redirectResponse) {
           const previous = byRequest.get(event.requestId);
           if (previous)
@@ -556,8 +629,28 @@ async function runScreen(browser, screen, server, fixture) {
         const key = byRequest.get(event.requestId);
         if (key) network.bytes[key] += Math.max(0, Number(event.encodedDataLength ?? 0));
         byRequest.delete(event.requestId);
+        const trace = traces.get(event.requestId);
+        if (trace) {
+          trace.completedAt = event.timestamp * 1000 + clockOffset;
+          trace.encodedBytes = event.encodedDataLength;
+        }
       });
-      cdp.on('Network.loadingFailed', (event) => byRequest.delete(event.requestId));
+      cdp.on('Network.responseReceived', (event) => {
+        const trace = traces.get(event.requestId);
+        if (trace) {
+          trace.responseAt = event.timestamp * 1000 + clockOffset;
+          trace.status = event.response.status;
+        }
+      });
+      cdp.on('Network.loadingFailed', (event) => {
+        byRequest.delete(event.requestId);
+        const trace = traces.get(event.requestId);
+        if (trace) {
+          trace.failedAt = event.timestamp * 1000 + clockOffset;
+          trace.error = event.errorText;
+          trace.canceled = event.canceled ?? false;
+        }
+      });
       await cdp.send('Network.enable');
       await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
       await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
@@ -611,10 +704,13 @@ async function runScreen(browser, screen, server, fixture) {
     };
     const openMarathon = (managed) => openSession(managed.page, 'marathon');
     const prepareSidebarRow = async (page, id) => {
-      await page.waitForSelector(`.srow[data-id="${id}"]`, { state: 'attached', timeout: 60_000 });
+      await page.waitForSelector(
+        `.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}]`,
+        { state: 'attached', timeout: 60_000 },
+      );
       const mobile = await page.evaluate(() => matchMedia('(max-width: 760px)').matches);
       if (mobile && !(await page.evaluate(() => document.body.classList.contains('drawer-open')))) {
-        await page.locator('#lead-btn').click();
+        await page.locator('#topbar .lead').click();
       }
       await page.waitForFunction(
         (selector) => {
@@ -623,14 +719,18 @@ async function runScreen(browser, screen, server, fixture) {
             !!row && row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().height > 0
           );
         },
-        `.srow[data-id="${id}"]`,
+        `.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}]`,
         { timeout: 60_000 },
       );
     };
     // Click a session in the sidebar; `feedbackMs` is when the top bar names it, `paintMs` when its last message has painted.
     const clickAndPaint = async (page, id, marker = PAINT_MARKERS[id]) => {
       await prepareSidebarRow(page, id);
-      const name = (await page.locator(`.srow[data-id="${id}"] .nm`).textContent()).trim();
+      const name = (
+        await page
+          .locator(`.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}] .nm`)
+          .textContent()
+      ).trim();
       // The click is made in the page and everything is timed there, so none of this harness's own round trips (or the polling
       // of a wait started from here) is counted. `clickMs` is the click's own task. Feedback is the second animation frame after
       // the top bar names the session (the browser has drawn it by then). Paint is the second frame after the transcript's last
@@ -639,7 +739,7 @@ async function runScreen(browser, screen, server, fixture) {
         ([id, expected, marker]) =>
           new Promise((resolve, reject) => {
             const row = [...document.querySelectorAll('.srow[data-id]')].find(
-                (x) => x.dataset.id === id,
+                (x) => x.dataset.id === JSON.stringify(['local', id]),
               ),
               t0 = performance.now();
             row.click();
@@ -736,12 +836,14 @@ async function runScreen(browser, screen, server, fixture) {
       record(metrics.switch.relayToMarathon, await clickAndPaint(switchPage.page, 'marathon'));
     }
 
-    for (let i = 1; i <= 3; i++) {
+    const sampleLive = async (i, phase = null) => {
       const page = switchPage.page;
       await page.evaluate(() => {
         window.__perfPaintWait = null;
       });
+      if (REFRESH_DIAGNOSTICS) await page.evaluate(armRefreshPaint, `PERF_LIVE_${i}_LAST`);
       const started = await page.evaluate(() => performance.now());
+      const appendedAt = Date.now();
       fs.appendFileSync(
         fixture.marathonFile,
         liveRecords({
@@ -754,7 +856,19 @@ async function runScreen(browser, screen, server, fixture) {
           .map((record) => JSON.stringify(record) + '\n')
           .join(''),
       );
-      await waitPaint(page, `PERF_LIVE_${i}_LAST`);
+      try {
+        await waitPaint(page, `PERF_LIVE_${i}_LAST`);
+      } catch (error) {
+        if (REFRESH_DIAGNOSTICS)
+          refreshSamples.push({
+            sample: i,
+            phase,
+            appendedAt,
+            error: error.message,
+            ...(await page.evaluate(readRefreshTrace, appendedAt)),
+          });
+        throw error;
+      }
       const measured = await page.evaluate((start) => {
         const end = performance.now();
         const observer = window.__perfLongTaskObserver;
@@ -771,12 +885,20 @@ async function runScreen(browser, screen, server, fixture) {
           appendedJsonlEntries: 10,
         };
       }, started);
-      metrics.liveUpdate.samples.push({
+      const sample = {
         paintMs: round(measured.paintMs),
         longestTaskMs: round(measured.longestTaskMs),
         appendedJsonlEntries: measured.appendedJsonlEntries,
-      });
-    }
+      };
+      if (REFRESH_DIAGNOSTICS) {
+        const trace = await page.evaluate(readRefreshTrace, appendedAt);
+        if (trace.commitAt === null || trace.visibleAt === null)
+          throw new Error(`refresh sample ${i} has no commit/visible observation`);
+        refreshSamples.push({ sample: i, phase, appendedAt, ...sample, ...trace });
+      }
+      return sample;
+    };
+    for (let i = 1; i <= 3; i++) metrics.liveUpdate.samples.push(await sampleLive(i));
 
     for (let i = 0; i < 3; i++) {
       metrics.scroll.samples.push(
@@ -865,6 +987,45 @@ async function runScreen(browser, screen, server, fixture) {
       clearInterval(writer);
     }
 
+    // Keep the original three samples and all switch/scroll assertions unchanged.
+    // Sweep a full selected-observation period twice, anchored to naturally
+    // occurring metadata requests. These waits issue no product requests.
+    if (REFRESH_DIAGNOSTICS) {
+      for (let i = 0; i < 8; i++) {
+        const page = switchPage.page;
+        const previous = await page.evaluate(() => window.__perfFetchTrace.length);
+        await page.waitForFunction(
+          (after) =>
+            window.__perfFetchTrace.some(
+              (entry) =>
+                entry.id >= after &&
+                entry.endpoint === '/api/sessions' &&
+                entry.query.sid === 'marathon' &&
+                entry.query.limit === '1',
+            ),
+          previous,
+          { timeout: 60_000, polling: 50 },
+        );
+        const anchor = await page.evaluate(
+          (after) =>
+            window.__perfFetchTrace.find(
+              (entry) =>
+                entry.id >= after &&
+                entry.endpoint === '/api/sessions' &&
+                entry.query.sid === 'marathon' &&
+                entry.query.limit === '1',
+            ),
+          previous,
+        );
+        const offsetMs = (i % 4) * 750;
+        await page.waitForFunction(
+          ({ at, offset }) => performance.timeOrigin + performance.now() >= at + offset,
+          { at: anchor.admittedAt, offset: offsetMs },
+          { polling: 50 },
+        );
+        await sampleLive(i + 4, { cycle: Math.floor(i / 4), offsetMs, anchor });
+      }
+    }
     await finishPage(switchPage);
   } catch (error) {
     failures.push(error.stack ?? String(error));
@@ -922,7 +1083,33 @@ async function runScreen(browser, screen, server, fixture) {
       },
     ]),
   );
-  return { metrics, requests, pageErrors: errors, failures };
+  const endpoints = Object.fromEntries(
+    [...new Set(requestTimeline.map((entry) => entry.endpoint))].map((endpoint) => {
+      const entries = requestTimeline.filter((entry) => entry.endpoint === endpoint);
+      return [
+        endpoint,
+        {
+          admitted: entries.length,
+          responded: entries.filter((entry) => entry.responseAt != null).length,
+          completed: entries.filter((entry) => entry.completedAt != null).length,
+          failed: entries.filter((entry) => entry.failedAt != null).length,
+          canceled: entries.filter((entry) => entry.canceled).length,
+          outstanding: entries.filter(
+            (entry) => entry.completedAt == null && entry.failedAt == null,
+          ).length,
+        },
+      ];
+    }),
+  );
+  return {
+    metrics,
+    requests,
+    pageErrors: errors,
+    failures,
+    ...(REFRESH_DIAGNOSTICS
+      ? { refreshDiagnostics: { samples: refreshSamples, endpoints, requestTimeline } }
+      : {}),
+  };
 }
 
 function markdownTable(screens) {
@@ -930,7 +1117,7 @@ function markdownTable(screens) {
   const request = (entry) =>
     `${entry.count} / ${entry.encodedBytes} B / ${number(entry.ttfbMs.median)} / ${number(entry.ttfbMs.max)} ms`;
   const rows = [
-    '| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Click task marathon→relay ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/model`: req / bytes / TTFB median / max | `/api/tx`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |',
+    '| Screen | Cold open ms | Switch marathon→relay ms | Switch relay→marathon ms | Feedback marathon→relay ms | Feedback relay→marathon ms | Cached switch ms | Click task marathon→relay ms | Switching while writing: →relay / →marathon ms | Live paint ms | Live task ms | Scroll frames >20 ms | Longest frame ms | DOM elements | `/api/sessions`: req / bytes / TTFB median / max | `/api/session-transcript`: req / bytes / TTFB median / max | Other: req / bytes / TTFB median / max |',
     '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
   ];
   for (const name of ['phone', 'desktop']) {
@@ -945,7 +1132,7 @@ function markdownTable(screens) {
         ]),
       );
     rows.push(
-      `| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.switch.marathonToRelay.medianClickTaskMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r['/api/model'])} | ${request(r['/api/tx'])} | ${request(r.other)} |`,
+      `| ${name} | ${number(m?.coldOpen.medianMs)} | ${number(m?.switch.marathonToRelay.medianMs)} | ${number(m?.switch.relayToMarathon.medianMs)} | ${number(m?.switch.marathonToRelay.medianFeedbackMs)} | ${number(m?.switch.relayToMarathon.medianFeedbackMs)} | ${number(m?.switch.cached.medianMs)} | ${number(m?.switch.marathonToRelay.medianClickTaskMs)} | ${number(m?.switchWhileWriting.marathonToRelay.medianMs)} / ${number(m?.switchWhileWriting.relayToMarathon.medianMs)} | ${number(m?.liveUpdate.medianPaintMs)} | ${number(m?.liveUpdate.medianLongestTaskMs)} | ${number(m?.scroll.medianFramesOver20Ms)} | ${number(m?.scroll.medianLongestFrameMs)} | ${number(m?.domSize.medianElements)} | ${request(r['/api/sessions'])} | ${request(r['/api/session-transcript'])} | ${request(r.other)} |`,
     );
   }
   return rows.join('\n');
@@ -969,6 +1156,7 @@ async function main() {
       const server = await serve(fixtureDir, fixture.now);
       try {
         screens[screen.name] = await runScreen(browser, screen, server, fixture);
+        if (REFRESH_DIAGNOSTICS) screens[screen.name].serverDiagnostics = server.diagnostics();
       } finally {
         await stopServer(server.proc);
       }
@@ -987,6 +1175,8 @@ async function main() {
   }
 
   const report = {
+    source: process.env.SEMON_PERF_SOURCE ?? null,
+    browser: browser?.version() ?? null,
     fixture: fixtureSummary ?? null,
     cpuThrottlingRate: 4,
     screens,

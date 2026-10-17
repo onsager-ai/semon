@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { start } from './copied-usage.mjs';
+import { start, nativeRead, nativeSession } from './copied-usage.mjs';
 import { served, reporter } from '../lib.mjs';
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
 export default async function copilotCheck(browser) {
@@ -33,20 +33,19 @@ export default async function copilotCheck(browser) {
         families.push({ version, name, id, file });
       }
     server = await start(root);
-    const url = (route) =>
-      server.base + route + (route.includes('?') ? '&' : '?') + 't=' + server.token;
-    const model = await (await fetch(url('/api/model'))).json();
-    assert.equal(
-      Object.values(model.sessions).filter((s) => s.harness === 'copilot').length,
-      families.length,
+    const catalog = await nativeRead(server);
+    assert.equal(catalog.items.filter((s) => s.harness === 'copilot').length, families.length);
+    const sessions = await Promise.all(
+      families.map((fixture) => nativeSession(server, fixture.id)),
     );
+    assert.equal(sessions.filter((s) => s.harness === 'copilot').length, families.length);
     for (const fixture of families) {
-      const session = model.sessions[fixture.id];
+      const session = sessions.find((s) => s.key === fixture.id);
       assert.equal(session.copilot.version, fixture.version);
       assert.equal(session.cost.usd, null);
       assert.equal(session.copilot.logical_parent, null);
       assert.equal(session.copilot.approvals, null);
-      const tx = await (await fetch(url('/api/tx?sid=' + fixture.id))).json();
+      const tx = await nativeSession(server, fixture.id, { transcript: true });
       assert.ok(tx.entries.length);
       if (fixture.name === 'headless-tools.events.jsonl') {
         const calls = tx.entries.filter((e) => e.k === 'tool');
@@ -121,8 +120,8 @@ export default async function copilotCheck(browser) {
       path.join(repo, 'tests/fixtures/compatibility/copilot-1.0.91/lifecycle/resumed.events.jsonl'),
     );
     const updated = async () => {
-      const json = await (await fetch(url('/api/model'))).json();
-      return json.sessions[resumed.id].copilot.usage?.tokens.input === 22;
+      const session = await nativeSession(server, resumed.id);
+      return session.copilot.usage?.tokens.input === 22;
     };
     fs.writeFileSync(resumed.file, bytes);
     originals.set(resumed.file, bytes);

@@ -1,150 +1,163 @@
-# Viewer ownership and migration transactions
+# Canonical Viewer ownership
 
-Issue [#224](https://github.com/onsager-ai/semon/issues/224) tracks the completed five
-legacy-host removal slices and final consumer integration. The application
-host and native shell are composed from strict typed controllers. This record
-describes source boundaries and does not claim production acceptance.
+The hosted Viewer has one bounded, source-scoped application. A document mounts
+`createCatalogViewer` through `mountViewerApplication`; replacement destroys the
+previous mount first. Home, Analytics, Sessions, selected transcripts and Trace
+share that shell, navigation and effect lifetime. Query parameters do not choose
+an application architecture. Old compatibility markers are removed while
+preserving supported destinations, source selection and reading anchors.
 
-| Owner | Data and effects | Commit boundary |
+| Owner | State and effects | Acceptance boundary |
 | --- | --- | --- |
-| Domain modules | Validated session/handoff/turn shapes, normalization, ancestry, outcomes, trace traversal, costs, labels and formatting | Prepare copied normalized data before updating the raw delta baseline or host tables. No document/global state. |
-| Model owner | Raw validated delta baseline and normalized relationship indexes | Apply a validated model atomically; keep raw and normalized snapshots separate. |
-| Transcript owner | Entries, range identity, growth marks, bounded cache, paging admission and stale briefs | Abort/stale range checks precede page application. Entry keys follow turn placement; slot identity survives extension. |
-| Navigation owner | Current/rendered route, outgoing history, abortable destination loads | Save outgoing focus/scroll before native content teardown. Late/aborted native content is destroyed. |
-| Scroll owner | Input revision, anchors, focus, opening-end pin and paging restore | Capture, synchronous Preact commit, measurement, restore; deferred restoration yields to reader input and newer routes. |
-| Application owner | Chrome, screen roots, listeners, timers, frames, observers, requests and poller | Mount once per document; destroy invalidates pending work before releasing roots and effects. |
-| Native shell owner | Rust fallback drawer, copy, confirmation dialogs and readiness polling | Native forms remain native; no second viewer router/model poller. |
-| Destination projection | Shared core registry plus validated generic host paths/leading/trailing entries | No content reads or history ownership; native and focused shells release host subscriptions at teardown. |
+| `app/viewer` | Singleton mount and URL normalization | Destroy the previous mount before constructing the canonical reader. |
+| `app/catalogViewer` | Source selection, navigation, bounded selected roots, source lists, transport and refresh cadence | Check source, request epoch and route before accepting or painting. |
+| `CatalogSelectionStore` | Current-scope selected native identity | Historical identity never grants runtime or control authority. |
+| `CatalogTranscriptStore` | Issued requests, source-qualified ranges, stable entry identities and projection generations | Reject holes, inconsistent overlaps, stale selection and mixed generations before replacement. |
+| `app/overviewPages` | One accepted Home/Analytics response, facets, seen results and route panels | Adopt coherent metadata first; accept each visible preview only for its requested source generation. Reject changed publication versions. Pending Home/machine reads have one retry timer in the reader's EffectScope, with bounded backoff; navigation and teardown cancel it. |
+| `app/tracePresentation` and `domain/trace` | Validated requested causal closure and pure rail/chart calculations | No workspace graph, model stream, native authority or separate router. |
+| Shared `lib` components | Shell, Topbar, Recent, screens, panels, measured charts and transcript DOM | One owner per region; synchronous commits retain stable keys and native control roots. |
+| Scoped control/runtime observers | Status streams, recovery and selected custody observations | Exact source/native identity, independent authorization and teardown govern every delivery. |
+| `app/localControl` | Source-qualified drafts, pending operations and approvals | Preserve uncertain outcomes and edited drafts; do not replay writes. |
+| Native host content | Server forms, readiness and application destinations | Shared chrome does not render into native descendants or intercept native submission. |
 
-The domain slice removed superseded calculations from the handwritten host when switching
-callers to `ui/src/domain`. The raw wire snapshot never acquires failed-send
-stand-ins or resolved turn references. Derived child lists are cached per domain
-instance and invalidated by accepted model/transcript notifications. Cyclic ancestry
-and trace traversal terminate. Optional numeric and structural fields are checked
-before use, including costs, activity, wait edges and tool/signal counts.
+`EffectScope` owns requests, deadlines, listeners, timers and animation frames.
+Settled requests leave that scope. Route changes close contextual panels and
+abort superseded overview/causal work. Destroying the application invalidates
+callbacks before destroying stores, controls, native content and screen roots.
+Navigation's observable route is shared with scoped status observers; it has no
+native-page loader or independent destination request lifecycle.
+Native host documents retain their empty Recent slot and never select a reader
+source or fetch workspace publications for chrome. Their native links enter
+Home, Analytics and selected-session reader documents through browser navigation;
+mount, ordinary cadence, visibility and same-document history notifications keep
+the native content and its forms under the host's owner.
+An initial causal read marks its root busy until its selected metadata and
+preview work settles. Navigation clears that state, and a superseded read cannot
+clear a new route's readiness. Browser consumers wait for the requested native
+root rather than assuming that a changed toolbar title means content is ready.
+The native reader wrapper preserves the established 24px transcript-to-dock gap
+and 8px top inset across viewport sizes.
 
-All newly extracted TypeScript is included in strict type checking and the
-application security scan. Generated production assets remain checked in; Cargo
-requires no Node. Browser reference images, layout, URLs, event contracts, CSP
-and performance thresholds remain unchanged.
+Home and Analytics read compact producer publications across authorized sources.
+Machine details borrow that same producer with an exact source key, validated
+before source admission, observation scheduling and preview reads. The canonical
+reader retains machine bookmarks and shell headers; shared Machine rows use the
+accepted sixty-row Recent publication and generation-fenced previews. A scoped
+machine response cannot supply global Home counters or the Machines inventory.
+The shared Machine screen owns its route-specific geometry class and removes it
+when released; section and row styles must not leak into another route.
+Home retains the established Needs You, Working Now, Answered and Recent
+presentation. Native text is absent from persistent metadata: visible previews
+use the qualified selected-session reader with bounded record and byte budgets.
+Analytics uses timing, costs, waits and model observations captured before source
+window trimming. Causal queries follow recorded starts, spawns and relays through
+indexed metadata, with explicit limits and further branch navigation. Missing or
+ambiguous observations remain visible rather than becoming inferred joins.
 
-The model owner is `ViewerModelStore`. It validates a prepared normalized graph
-before committing the raw delta baseline, then updates its stable table/index
-objects. `TranscriptStore` owns entries, ranges, the existing bounded cache and
-paging store. Every request has an owned abort controller; destroying the store
-aborts all requests and rejects late page commits. Each directional load checks
-the range object's identity and requested boundary before applying its page.
-Loaded entries are distributed into the latest model's turns, including when a
-model update arrives during loading. An explicit transcript-wire parser validates
-entry variants and ranges at the response boundary.
+The producer publishes overview and causal metadata in the existing catalog
+source-revision transaction. Native generation references remain original
+provenance, never authority. Reading these publications neither admits a
+workspace ViewerCore nor restores a workspace archive. Selected native reads
+reauthorize their exact original generation and remain request-local.
 
-The document entry calls `mountViewerApplication`; it returns a teardown owner
-that invalidates callbacks before releasing navigation, model/transcript, poller,
-pager, scroll, chrome, screen and dialog owners. `EffectScope` owns document and
-media-query listeners, timers, animation frames and outstanding requests. Settled
-requests leave the scope so long-lived polling does not retain old controllers.
-Application controllers consume explicit typed ports instead of importing a
-second router/model/poller. Late boot responses cannot notify the host or recreate
-a root after teardown; replacing a mount first destroys the previous owner.
+Session-to-machine control binding resolves literal IDs against complete current
+Catalog publications across every configured source, with current role and
+sidecar proofs. An invalidated source or running observation cannot prove
+absence or uniqueness from an older complete publication. Retained history never
+selects a writable destination. Current role qualification reads generation-bound
+ledgers and independently indexed sidecars in the Catalog transaction; it does
+not load complete event indexes, transcript slots or byte-proof pages. Every
+physical ledger field and sidecar observation remains fenced. A partial publication cannot prove unique
+ownership. Cold, provisional, invalidated and virtual-only identities cannot select
+controls and never trigger a native cohort to infer ownership. Qualified aliases
+use indexed native bindings and the same generation/role checks; literal IDs win
+before presentation suffixes. Received copies retain the existing earlier-owner
+policy. Ordinary native publication supplies the missing evidence independently.
 
-The native shell owner is `mountNativeShell()` in `ui/src/app/native-shell.ts`.
-It retains Rust markup and native forms, owns each enhancement listener/timer and
-aborts readiness requests before removing effects. Replacement mounts destroy
-the previous owner. Full-viewer pages continue to use their existing drawer
-owner; sidebar-only and native pages consume this separately served entry.
+Sessions retain source-scoped catalog pages, metadata search, native resolution,
+transcript pagination, qualified field expansion and live revalidation. Hosts
+advertise machine selection through native capabilities; a single
+local source does not add a machine chooser to the Sessions topbar. Capability
+reads perform no native evidence preparation. Hidden Thinking keeps one quiet
+placeholder per qualified native turn while preserving readable/pending thoughts
+and every accepted source record.
+A final empty Thinking entry is pending only under the qualified current-work
+observation used by native tool rendering. Retained custody grants no live state.
 
-`mountViewerApplication` replaces the previous owner and constructs a typed service
-composition. It carries no model, navigation or rendering algorithms. Focused
-factories own transport/adoption, boot, paging, layout preferences, history and
-focus, account controls, held ordering, navigation markup, native dialogs/tool
-views, screen commits, session lists, document events, live updates and clocks.
-Feature-specific mutable values stay behind their owners' typed accessors. Composition
-passes service owners directly; consumers select only the capabilities they need. The source scan rejects explicit `any` and
-type-check suppression directives throughout the application and consumer code.
+A closing reply remains an independently rendered message with its native DOM
+address. A recorded result event may also preview that reply when the same owner
+and turn explicitly sent the handoff. The event never consumes the message;
+clipping, attachments and text equality do not change message visibility.
 
-## Maintainability boundaries (#277)
+Lists have 60-row pages and retain at most 300 metadata rows per Source. Five selected
+roots and five Source views are retained. Each selected transcript keeps at most
+five recently used ranges and 300 unique entries; revisiting a range updates its
+retention order. Discarding a range also releases its presentation and field state.
 
-Before this change, screens, session chrome and document rendering each selected
-many independent fields/callbacks from a universal composition surface. Model
-and transcript tables had uppercase aliases, while composition forwarded domain,
-transport, paging, navigation and presentation methods. Screen rendering also
-owned control slots and performed state preparation around its DOM commit.
+The selected-session cadence observes body-free Catalog projection and error
+membership generations and the entry count. Unchanged observations do not reread
+native content. A changed projection revalidates accepted ranges through the
+selected reader. Error membership uses the same qualified live/unfinished rule
+as transcript rendering; ending a process or moving a session to retained custody
+invalidates error paging even when no source line changed.
+A reader rejection of a native source generation returns a stale response before
+accepting transcript or expansion content. It cannot replace existing entries
+with blank text under their previous projection proof. Malformed records,
+request budgets and unavailable archive bytes retain explicit incomplete states.
+Home and Analytics versions bind their qualified source publications, including
+stable machine keys; presentation hostnames never supply read authority.
+One application ResizeObserver keeps an opening session at its tail while layout
+settles; user input ends that initial hold. Listener/frame cleanup belongs to the
+application effect lifetime.
 
-The composition now constructs owners, connects lifecycle effects and tears them
-down. It no longer forwards those feature methods or duplicates table aliases.
-`modelStore` and `transcripts` are the authoritative data owners. Named imported
-types and `Pick` capability ports expose exactly the service members required by
-each consumer; feature modules never import `ViewerComposition`. Registry
-constants are imported directly. Remaining shared services are the document
-query helper, presentation clock/formatting, media query, dialog registry, domain
-indexes and route/filter preferences; these belong to this one document mount.
+Failure and signal navigation reads at most 100 indexed slot addresses per page,
+then requests only the selected transcript range. Its close transaction restores
+accepted ranges, expansion, focus and scroll. It never loads a complete transcript
+or workspace failure model. Plain full-output chunks bind to their published
+native result anchor, which can differ from the tool call's provenance. Structured
+Codex output expands one qualified entry with a 64 KiB text cap and retains actual
+recorded gaps; script and image reads remain independently qualified.
 
-| Consumer | Cohesive dependencies |
-| --- | --- |
-| Screen projections | Model/domain relationships, held ordering, transcript projection, destination commands, tool/paging commands |
-| Session chrome | Validated account/model data, layout preferences, navigation/error controller, overlay lifetime and viewport commands |
-| Document renderer | Page/native root adapter, route control lifetime, screen owners, bar presentation, render transaction |
-| Live updates | Validated model adoption, transcript requests/ranges, dirty-turn calculation, live/refresh owners |
-| Composition | Construction and disposal of the above; no replacement proxy/getter table |
+Home sections have 100-row pages. Recent uses a 60-row publication and eight
+ancestry roots, borrowing at most 32 ancestors, 99 runs and the current selected
+session from its verified family when it is outside that publication. The selected
+path remains visible. Approval-review roles use presentation metadata without
+changing native harness/kind or cost identity; hidden reviews forward descendants
+and current selections retain their ancestors. Ordering holds belong to the same
+application owner during pointer, focus, scroll and open-menu interactions.
 
-Runtime imports between feature factories remain acyclic. Type-only capability
-imports describe intentional interaction cycles: destination → render → screen
-callbacks → destination; session chrome ↔ viewport; live updates ↔ error
-navigation/refresh; analytics ↔ render/filters. Callbacks crossing construction
-boundaries resolve the service when invoked, never capture an unconstructed
-owner. Stable model tables remain borrowed; replacing a normalized graph updates
-those tables in place. Error navigation reads the current growth marks through
-its transport owner, rather than retaining the boot-time marks object.
+Old failed-send bookmarks resolve through a private indexed target-to-owner table.
+The lookup returns only authorized, source-qualified real session identities;
+ordinary causal metadata does not expose native target labels. Ambiguous matches
+require a Source choice. Explicit expansion remains separate from background
+publication and native authority.
 
-## Accepted state and view transactions
+The session composer is owned by the existing session/local-control components.
+Its Topbar trigger opens shared contextual Panel chrome on desktop and a bottom
+sheet on mobile. Closing or changing route releases panel effects and restores
+focus without replacing the control root or losing its draft. Connection status,
+read-only behavior, native controls and pending approvals keep their existing
+owners. Jump to Bottom belongs to the reading dock and is independent of that
+panel. The New Session native creation composer is a separate product flow.
 
-1. Prepare the wire model and all auxiliary fields (growth marks, admin, account,
-   native navigation). Normalize/validate the entire graph and machine data
-   before changing the raw delta baseline or stable normalized tables.
-2. Commit tables, clock, account/navigation fields and transcript placement into
-   the latest graph synchronously. Publish one `ViewUpdates` model revision only
-   after that state is coherent. Host account callbacks run after publication.
-3. Transcript replacement/directional loads retain their abort/range/boundary
-   guards. Accepted pages spread entries into the latest turns, then publish one
-   session notification. Cache adoption also spreads before publication.
-   Live tail/watch metadata publish after their range/identity checks.
-4. The domain's one subscription invalidates derived relationships on accepted
-   updates. Session-filtered subscribers receive model changes and only their
-   own transcript changes. `TranscriptStore.view` borrows entries/range with a
-   revision; it does not deep-copy the transcript. Invalid/stale input publishes
-   nothing. Teardown disposes subscriptions before aborting owners.
-5. Live update generation guards suppress superseded asynchronous refreshes.
-   Held ordering, dirty-turn selection and pending overlay refresh remain with
-   their existing owners. Notifications invalidate data, not whole DOM trees.
-   The single poller still drives refresh; no second store/router is introduced.
+Local CLI and stdio MCP share native Session Query. Hosted focused MCP admits
+authorized native selections with bounded worker/custody lifetime; broad hosted
+queries still require archive-cohort retirement. ViewerCore owns standalone
+native routing and refresh coordination, the supported CLI tree, and request
+chrome. It owns no full workspace model, model preparation, transcript body
+cache, raw file lookup cache or compatibility read fallback. `/api/model` and
+the former raw transcript/expansion routes are removed. Hosted browser content
+does not consume model deltas or the retired Hub compatibility/control endpoints.
+The former composition, complete-model store, model poller, parallel transcript
+owner and compatibility bootstrap are removed. Pure shared presentation,
+formatting and causal calculations remain where the canonical reader needs them.
 
-`renderTransaction.begin` resets paging input, holds programmatic scroll, closes
-account controls, ends the opening pin, captures ordering and advances the clock.
-The renderer commits page before bar (counts/metadata depend on page projections).
-`complete` applies layout, bar, navigation, retained Recent lanes, drawer account
-and jump controls, then releases temporary ordering state. Scroll owners still
-capture before commit, synchronously measure afterward and restore only while
-the input/navigation revision permits it. Back/Forward and opening-end pins keep
-their reader-input guards; no asynchronous hook timing is assumed.
+Qualified persisted reads can register update interest without cold preparation;
+missing evidence and invalidation still queue the same bounded native producer.
 
-## Preact and native ownership map
+## Temporary collection configuration
 
-| Region | Owner / lifetime |
-| --- | --- |
-| Viewer frame/navigation/drawer | Existing declarative `createShellChrome`; one shell per mount |
-| Viewer `#page` | One `ApplicationView` tree; Home/Machines/Machine have typed view components, Sessions/Analytics/Trace/Transcript use the same synchronous commit boundary |
-| Page transitions | `pageRoot` releases previous screen effects/root when the screen kind changes; same-kind updates retain keys and controls |
-| Native Machines/native pages | Host `ViewerContent` descendants; `pageRoot.native` releases the viewer root before connection and never renders inside host content |
-| Native facet widgets | `routeControls` explicitly retains/destroys route-scoped independent controls; no slot map in document rendering |
-| Topbar host slots/Recent | Existing independent owners retained for host geometry and embeddings |
-| Trace edges/charts/dialog bodies | Measured or independently embedded subroots; explicit cleanup before their containers are removed |
-| Sidebar-only pages | Independent navigation/Recent roots; host retains frame and page |
-
-`clearBox` and the obsolete manual placement path are removed. Preact controls
-page descendants, while the small page adapter handles only Rust fallback/native
-transitions. Native POST forms, CSP, safe links and the public mount/destroy API
-are unchanged. All page commits remain synchronous. See the validation record
-in `viewer-maintainability-validation.md` for equivalent size and gate evidence.
+The canonical collection reader supplies no control owner, live control stream, launch snapshot or Composer action. New Session navigation is removed. Independent runtime observation and passive recorded asks/outcomes retain their existing owners. Shared optional control components and their direct fixtures retain drafts, unknown outcomes and lifecycle semantics; no optional fixture grants active collection authority. Broad full-text retrieval is paused; metadata navigation and selected-text navigation remain active. The retained control behavior described elsewhere in this contract applies only to those optional consumers. See the [temporary collection scope](session-foundation-retirement.md#temporary-collection-scope).
 
 ## Refactoring contract
 
@@ -155,15 +168,15 @@ when an intentional architectural change requires different ownership.
 
 | Rule | Reason and evidence |
 | --- | --- |
-| Composition constructs, connects and disposes owners; feature modules do not import or re-export it, even for types. Only the application mount imports composition. | A universal context recreates hidden coupling. Declare named types and narrow capabilities of actual feature owners. The architecture check rejects composition imports, including aliases and literal dynamic imports. |
+| The application mount constructs the canonical reader; feature modules do not import that reader, even for types. | A universal context recreates hidden coupling. Declare named types and narrow capabilities of actual feature owners. The architecture check rejects canonical reader imports, including aliases and literal dynamic imports. |
 | Keep one authoritative owner for each mutable value. Borrow its tables or coherent projections instead of adding aliases, forwarding tables or another store/router/poller. | Replacement references must remain current. Review ownership changes and test interactions after replacement; strict types alone cannot prove that a port is appropriately narrow. |
 | Runtime module imports remain acyclic; intentional type-only interaction cycles are permitted. Use literal module paths. | Construction callbacks must resolve owners when invoked rather than capture unconstructed services. The architecture check uses TypeScript resolution and emitted imports, including re-exports and literal dynamic loads. |
-| Validate the entire model and auxiliary input before writing the raw baseline or normalized state; publish once after the accepted transaction is coherent. | Invalid input must not expose partial state. Keep rejection/coherence regression tests. Transcript projections borrow entries/ranges; avoid full transcript copies on updates. |
+| Validate complete catalog, range, overview and causal responses before replacing accepted state; publish once after the transaction is coherent. | Invalid input must not expose partial state. Keep rejection/coherence regression tests. Transcript projections borrow entries/ranges; avoid full transcript copies on updates. |
 | Check request, range, input and navigation identity before accepting asynchronous work. Dispose subscriptions and invalidate pending work during teardown. | Aborted, superseded or destroyed owners must not commit or notify. Retain late-response, paging and remount coverage. |
 | Assign exactly one owner to each DOM region. Viewer pages use the synchronous application commit boundary; native descendants stay host-owned. | Keyed controls, focus and scroll must survive ordinary updates. Measured geometry, native forms and independent embeddings retain documented adapters and explicit disposal. |
-| Keep state preparation, synchronous commit, measurement and guarded restoration in their named owners and documented order. | Async hook timing cannot replace focus/scroll guarantees. Retain held ordering, reader-input, opening-end and Back/Forward tests. |
+| Keep state preparation, synchronous commit, measurement and guarded restoration in their named owners and documented order. | Async hook timing cannot replace focus/scroll guarantees. Retain reader-input, opening-end and Back/Forward tests. |
 | Separate formatting from behavior, edit canonical sources and regenerate assets explicitly. Keep strict types, security, freshness, visuals and performance gates. | Readability changes should be reviewable independently. Preserve pinned tooling and blame exclusions; compare equivalent bundle costs rather than relaxing budgets. |
-| Verify consumers independently when shared contracts change. Final gitlink/revision pins must identify the same merged, verified source. | A passing source build does not establish independent consumer security, runtime uniqueness, native behavior or asset freshness. Record exact source/consumer revisions and applicable gate results. |
+| Verify consumers independently when shared contracts change. Final gitlink/revision pins must identify the same reviewed, verified source; coordinated draft PRs pin the exact proposed source commit. | A passing source build does not establish independent consumer security, runtime uniqueness, native behavior or asset freshness. Record exact source/consumer revisions and applicable gate results. |
 
 `npm --prefix ui run check:architecture` checks authored TypeScript and JavaScript modules
 under `ui/src`, using the UI TypeScript configuration. Dependencies outside that
@@ -215,40 +228,52 @@ navigation root; shared safe-path validation and native links apply. It creates
 no additional router, model store or poller. The compact gallery covers geometry,
 Escape/focus return and remount; Hub provides the real server/form adoption checks.
 
-## Selected model observation
+The native relationship view resolves peer names from at most 128 exact recorded
+handoff participants, qualified against the same Catalog/source generation as
+the selected branch. Participant versions enter its response generation. The
+selected session's bounded family metadata also supplies exact ancestor names.
+Qualified participant summaries contribute once to the original agent count and
+session-cost total, even when their receiving turn is unavailable. Unknown or
+unpriced costs remain qualified. These summaries never add turns, activity,
+duration, waits or critical edges to the causal cohort or timeline.
+An incoming root retains its handoff identity and kind; absent, ambiguous or
+stale related metadata stays explicitly unavailable.
 
-Opt-in selected model reads borrow the current native session and projected
-machine from navigation/model owners. Navigation publishes route changes through
-`subscribeRoute`; it retains ownership of the route and cleans subscribers on
-destroy. The existing live owner scopes its sole stream and snapshot recovery
-reads, cancels superseded reads and rejects late/queued deliveries from a previous
-selection. A changed accepted machine projection resubscribes under the new scope.
-This adds no model store, router, poller or rendering owner. Hosts resolve the
-authoritative native source binding and authorization; the projected machine id
-is only a consistency guard. Initial boot is unselected until its model supplies
-route context. Controls cannot carry authority merely because a client supplied
-a session or machine candidate.
+The canonical Sessions screen preserves the complete reader's flat, two-line
+rows, including child sessions, harness marks, recorded duration and delegation.
+Recent/Project/Machine/Harness grouping uses only loaded Catalog metadata and
+performs no source or transcript reads. Child counts follow exact loaded parent
+keys with cycle protection; they do not claim complete workspace counts. Metadata
+filters use the existing shared Filter/Select sheet. The source-qualified Machine
+field names the selected source rather than advertising an unavailable global
+union. The reader retains filter requests, cursor generations, row focus and
+scroll; `catalogBrowser` owns only the bounded filter choices and shared sheet
+lifetime. Native completeness/retry notices remain explicit. The list's ordinary
+count/scope explanation follows its rows so it does not displace their reading
+geometry. The independent compact Catalog component retains its optional grouped
+snapshot contract; no route selects another application or transport.
 
-An embedding host may opt into a separate `controlStream`. The composition owns
-one navigation-scoped status observer and disposes it with the Viewer. Its
-snapshots update the existing local control owner and cached Session screen;
-they never adopt a model or prepare transcript blocks. Native status, transport
-freshness and content revisions remain distinct. Selection changes invalidate
-queued status callbacks and clear authority from the previous selection.
+## Selected observation
 
-Catalog status consumes the accepted selection owner's narrow typed identity
-accessor and subscription. The host contributes only a static
-`catalogControlStream` path. An unresolved, superseded or multi-native catalog
-selection cannot enter the legacy observer or select a native destination.
-Returning to the same native thread invalidates handles from a previous
-selection epoch, even when the native generation remains unchanged.
+Catalog list rows carry a compact recorded status observation. They reuse the
+producer's exact native Query fields only when the source generation, source
+stats, facts custody and shared runtime fence still match; a changed fence
+returns an unavailable status. Current and retained observations remain distinct,
+and retained Working/Needs you states become recorded history. This metadata
+read loads no transcript rows and grants no control authority. Selected control
+and runtime observers retain their independent authorization checks.
 
-Compatibility embedding navigation preserves `compat=1` in native Home,
-Sessions, Analytics and Machines destinations. These links retain the explicitly
-selected complete-model reader across navigation; omitting the marker selects
-the focused reader. Complete-model embedding and storage-failure tests must
-enter that reader explicitly rather than waiting for its DOM on a focused page.
+Navigation publishes route changes through `subscribeRoute`. Catalog status
+borrows the accepted selection owner's narrow identity accessor and subscription.
+A missing, superseded, ambiguous or multi-native selection opens no native status
+stream and grants no control authority. The host authorizes exact current source
+custody independently; historical transcript identity cannot enter that selection
+store. Returning to a native thread invalidates previous selection epochs.
 
+One navigation-scoped control observer and one runtime observer update the
+existing local control owner and cached Session root. Their snapshots do not
+adopt content, reconstruct a model or replace transcript blocks. Transport
+freshness, content publication and native runtime facts remain distinct.
 
 ## Staging reader ownership
 
@@ -286,3 +311,19 @@ files. Only validated name observations are carried in machine facts, with nativ
 harness/ID, metadata source, observation time and explicit current/stale freshness.
 Received sources use their own facts and never the viewer host's native database.
 Metadata changes invalidate the model snapshot but preserve transcript marks.
+
+## Empty local native launch
+
+Before the first rollout exists, Home can render the existing local input
+component from the isolated launcher's empty-thread witness. This is creation
+authority, not a provisional Catalog identity. The same local control owner holds
+its source-qualified draft and exact operation receipt; the existing Home refresh
+and EffectScope own observation and teardown. Only initial input is exposed.
+Recorded native turns/intents retire that witness. Subsequent session control
+selection still requires qualified native Catalog ownership, and archive
+readiness is unchanged. The host never constructs a transcript or synthetic row.
+
+A host may supply `initialHome.title` with its onboarding content. The canonical
+reader uses that heading only while the same content element occupies its root;
+ordinary Home and other routes retain their shared titles. Domain wording stays
+with the host and introduces no additional routing or observation owner.

@@ -99,3 +99,22 @@ test('native field chunks bind source, canonical session, projection, slot, fiel
     assert.throws(() => parseCatalogField(p, request));
   }
 });
+
+test('tool result chunks bind the observed result anchor rather than the call record', () => {
+  const selected = structuredClone(request);
+  selected.entry.provenance.native_event_id = 'native-call';
+  selected.entry.field.provenance = {
+    ...structuredClone(provenance),
+    offset: 900,
+    block: 1,
+    native_event_id: 'native-result',
+  };
+  const response = body();
+  response.provenance = structuredClone(selected.entry.field.provenance);
+  assert.equal(parseCatalogField(response, selected).text, response.text);
+  response.provenance = structuredClone(selected.entry.provenance);
+  assert.throws(() => parseCatalogField(response, selected));
+  response.provenance = structuredClone(selected.entry.field.provenance);
+  response.provenance.native_event_id = 'other-result';
+  assert.throws(() => parseCatalogField(response, selected));
+});

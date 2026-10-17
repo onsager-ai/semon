@@ -1,7 +1,9 @@
-import { safePath, type Account, type ShellNavigation, type ShellDestination } from './lib';
-/** Narrow document host port; the viewer remains the sole router/model poller. */
+import { safePath, type ShellNavigation, type ShellDestination } from './lib';
+/** Narrow document host port; the viewer remains the sole router and read lifecycle owner. */
 export interface ViewerContent {
   element: HTMLElement;
+  /** Host-owned heading while this initial content occupies the canonical reader. */
+  title?: string;
   destroy(): void;
 }
 export interface ViewerHost {
@@ -17,22 +19,13 @@ export interface ViewerHost {
   /** Advertise source inventory so an unselected reader can choose without a failing probe. */
   catalogSources?: boolean;
   account?: unknown;
-  modelAccount?(account: Account | null): void;
-  /** Host SSE models enter the existing validated model transaction. */
-  modelStream?: string;
-  /** Bind hosted model/control reads to the selected native session and model machine. */
-  selectedModel?: boolean;
-  /** Separate bounded status snapshots, independent of content model revisions. */
-  controlStream?: string;
   /** Exact catalog/source status; identity comes from the accepted Viewer selection owner. */
   catalogControlStream?: string;
   /** Readonly selected phase/status by source/catalog intent, independent of native identity. */
   catalogRuntimeStream?: string;
-  modelNavigation?(model: unknown): void;
-  /** Return true when the host has taken native recovery for a model failure. */
-  modelFailed?(status: number): boolean;
   initialMachines?: ViewerContent;
-  loadMachines(signal: AbortSignal): Promise<ViewerContent>;
+  /** Optional native onboarding content inside canonical Home; no reader or router. */
+  initialHome?: ViewerContent;
 }
 let host: ViewerHost | null = null;
 export function configureViewerHost(value: ViewerHost) {

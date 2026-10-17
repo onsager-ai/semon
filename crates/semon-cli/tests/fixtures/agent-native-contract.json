@@ -1,0 +1,93 @@
+{
+  "turns": [
+    {
+      "id": "a64aab7ddcb5d3428",
+      "sid": "asker",
+      "start": "a64aab7ddcb5d3428",
+      "at": 1790215200000,
+      "end": {
+        "st": "wait",
+        "why": "toyou",
+        "h": "q602bd307189788d9"
+      },
+      "sent": [
+        "q602bd307189788d9"
+      ],
+      "file": "asker",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "a81740026d86728d2",
+      "sid": "done",
+      "start": "a81740026d86728d2",
+      "at": 1790222400000,
+      "end": {
+        "at": 1790222460000,
+        "st": "done",
+        "why": "replied"
+      },
+      "sent": [],
+      "file": "done",
+      "offset": 0,
+      "last": true
+    },
+    {
+      "id": "cx:cx:153",
+      "sid": "cx",
+      "start": null,
+      "u": true,
+      "text": "Implement the lexer fix",
+      "at": 1790226060000,
+      "end": {
+        "at": 1790226120000,
+        "st": "done",
+        "why": "replied"
+      },
+      "sent": [],
+      "file": "cx",
+      "offset": 153,
+      "last": true
+    }
+  ],
+  "handoffs": [
+    {
+      "id": "a64aab7ddcb5d3428",
+      "kind": "ask",
+      "from": "you",
+      "to": "asker",
+      "at": 1790215200000,
+      "status": "done",
+      "brief": "Pick a name"
+    },
+    {
+      "id": "q602bd307189788d9",
+      "kind": "toyou",
+      "ask": "question",
+      "from": "asker",
+      "to": "you",
+      "at": 1790215260000,
+      "status": "wait",
+      "brief": "Which name?"
+    },
+    {
+      "id": "a81740026d86728d2",
+      "kind": "ask",
+      "from": "you",
+      "to": "done",
+      "at": 1790222400000,
+      "status": "done",
+      "brief": "Summarize the design doc"
+    },
+    {
+      "id": "q7c6883313e93fe5d",
+      "kind": "toyou",
+      "ask": "result",
+      "from": "cx",
+      "to": "you",
+      "at": 1790226120000,
+      "status": "new",
+      "brief": "Fixed the lexer panic"
+    }
+  ]
+}

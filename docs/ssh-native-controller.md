@@ -1,5 +1,9 @@
 # Native Codex controller on SSH
 
+Current collection scope: all SSH capabilities are paused, including onboarding/testing, remote installation/bootstrap/update, tunnels and SSH-mediated collection/execution. Public Rust transport APIs and the fixture installer return `capability_unavailable` before credentials, temporary files, sockets or SSH processes. Execution capabilities are all false; pure identity and saved-receipt handling remain available. Existing accepted history, credentials, known-host custody, installations and sessions are preserved. Local native collection and non-SSH Push/receive remain active. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
+The implementation and protocol contracts below describe retained private engines and historical qualification, not active product setup. Real-SSH fixture scripts refuse immediately, and OpenSSH/native-controller CI jobs are explicitly deferred. Offline security, receipt identity, supervisor lifetime and non-SSH checkpoint custody tests remain active. Deferred jobs are not passes; reactivation requires a future scope decision and isolated fixture adaptation, without a product bypass.
+
 This explicit opt-in controller builds on the private receipt broker. It does not
 run during host discovery, connection tests or mirrored-history setup. The
 embedding must persist a fresh native launch claim and separately authorize
@@ -44,7 +48,10 @@ An independent Linux subreaper supervisor owns a maximum five-minute lifetime.
 Both controller and supervisor use monotonic bounds; a stalled IPC peer cannot
 extend the lease. The supervisor adopts the exclusively started native descendants
 after controller loss and signals only processes matching its descendant/start
-identity. Writer exclusion is published only after that process tree is reaped.
+identity. Descendant discovery reads the Linux task child lists in that tree,
+including children spawned by other threads and adopted or detached descendants;
+it does not scan unrelated VM processes or assume a maximum tree depth. Writer
+exclusion is published only after that process tree is reaped.
 A native end acknowledgement begins shutdown; it does not skip that proof.
 Expiry alone, a revoked grant, mirrored history or an unreachable host never proves
 exclusion. Embeddings retain shutdown obligations until qualified evidence arrives.
@@ -64,7 +71,7 @@ explicitly authorizes its one expected shell command through owner-only IPC.
 Hosted approval/question/interrupt capabilities stay unadvertised; existence of
 this controller does not grant permission to expose those operations.
 
-Current capabilities: separately authorized native launch, initial input,
+Retained engine capabilities (inactive product): separately authorized native launch, initial input,
 read-only observation/reconciliation, same-thread transport reconnect, idle
 API-key repair and permanent execution revocation with shutdown proof. Restarting
 a lost controller currently confirms shutdown and preserves receipt/history
@@ -73,7 +80,7 @@ would create a new native session. Compute pause/snapshot/restore/replacement/
 deletion, automatic native resume after expiry and environment recovery are absent.
 Mirrored history remains viewable independently of those execution capabilities.
 
-## Qualification
+## Historical qualification (real-SSH command currently refuses)
 
 ```sh
 cargo build -p semon-control --bin semon-ssh-controller -p semon-ssh --example controller-install --locked
