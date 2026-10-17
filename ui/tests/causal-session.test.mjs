@@ -151,10 +151,7 @@ test('trace root metadata does not invent time and restores the harness chip', (
       at: 120,
     };
   assert.equal(traceRootTime(unstarted, formatTime), undefined);
-  assert.equal(
-    traceRootTime(started, formatTime),
-    'at:110',
-  );
+  assert.equal(traceRootTime(started, formatTime), 'at:110');
   assert.deepEqual(traceSessionChip({ harness: 'claude' }), {
     chip: 'Claude Code',
     chipClass: 'claude',
@@ -165,7 +162,7 @@ test('trace root metadata does not invent time and restores the harness chip', (
   });
 });
 
-test('trace outcomes retain recorded state and event time without inventing a read receipt', () => {
+test('trace outcomes retain recorded time and distinguish locally viewed results', () => {
   const result = relationship('result', 'toyou', 'atlas', 'you', { ask: 'result' }),
     end = { st: 'done', why: 'toyou', h: 'result' },
     formatTime = (at) => `at:${at}`;
@@ -177,7 +174,17 @@ test('trace outcomes retain recorded state and event time without inventing a re
       (id) => id,
       formatTime,
     ),
-    { state: 'done', text: 'Sent you a result · delivered · at:110' },
+    { state: 'done', text: 'Sent you a result · new · at:110' },
+  );
+  assert.deepEqual(
+    traceTurnOutcome(
+      { id: 'turn', sid: 'atlas', end, sent: [result] },
+      new Map([['result', result]]),
+      (id) => id,
+      formatTime,
+      new Set(['result']),
+    ),
+    { state: 'done', text: 'Sent you a result · read · at:110' },
   );
   assert.deepEqual(
     traceTurnOutcome(
@@ -197,7 +204,12 @@ test('trace outcomes retain recorded state and event time without inventing a re
     ),
     { state: 'wait', text: 'Waiting for your input' },
   );
-  assert.deepEqual(traceHandoffOutcome(result), { state: 'done', text: 'delivered' });
+  assert.deepEqual(traceHandoffOutcome(result), { state: 'new', text: 'new' });
+  assert.deepEqual(traceHandoffOutcome(result, new Set(['other'])), { state: 'new', text: 'new' });
+  assert.deepEqual(traceHandoffOutcome(result, new Set(['result'])), {
+    state: 'read',
+    text: 'read',
+  });
   assert.deepEqual(traceHandoffOutcome(relationship('move', 'move', 'atlas', 'atlas')), {
     state: 'done',
     text: 'Moved',
