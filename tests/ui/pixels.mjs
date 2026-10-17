@@ -530,6 +530,7 @@ async function regionEvidence(page, region) {
       historyState: history.state,
       pathname: location.pathname,
       viewport: [window.innerWidth, window.innerHeight],
+      scroll: { window: window.scrollY, main: document.querySelector('#main')?.scrollTop ?? null },
       selector,
       count: roots.length,
       openSelector: open ?? null,
@@ -602,6 +603,30 @@ async function closeRegionPanel(page, region, key) {
 }
 
 async function resetTopScroll(page) {
+  // End the application's opening tail transaction through real reader input,
+  // as the complete-reading protocol does. A programmatic scroll alone can be
+  // repinned by its pending ResizeObserver (the Quill capture moved 23px).
+  const point = await page.evaluate(() => {
+    window.__regionTopWheelObserved = false;
+    document.addEventListener(
+      'wheel',
+      (event) => {
+        window.__regionTopWheelObserved = event.isTrusted;
+      },
+      { once: true, capture: true, passive: true },
+    );
+    const bar = document.querySelector('#topbar'),
+      rect = bar.getBoundingClientRect(),
+      x = Math.min(rect.right - 1, innerWidth - 1),
+      y = Math.max(rect.top + 1, 1),
+      target = document.elementFromPoint(x, y);
+    if (!bar.contains(target) || target.closest('button, a, input, [role="button"]'))
+      throw Error('Region reading input requires inert topbar padding');
+    return { x, y };
+  });
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.wheel(0, -100000);
+  await page.waitForFunction(() => window.__regionTopWheelObserved, null, { timeout: 8000 });
   await page.evaluate(() => {
     window.scrollTo(0, 0);
     const main = document.querySelector('#main');
@@ -611,6 +636,11 @@ async function resetTopScroll(page) {
     () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
   );
   await waitForCaptureReady(page, 'region top scroll');
+  await page.waitForFunction(
+    () => scrollY <= 1 && document.querySelector('#main').scrollTop <= 1,
+    null,
+    { timeout: 8000 },
+  );
 }
 
 async function sharedTranscriptViewport(candidate, reference, region) {

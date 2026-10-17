@@ -413,8 +413,10 @@ for (const width of [390, 1280])
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !history.state?.sheet);
-        await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
-        await page.getByRole('menuitem', { name: 'Choose a machine', exact: true }).click();
+        await page
+          .locator('#topbar')
+          .getByRole('button', { name: 'Choose a machine', exact: true })
+          .click();
         await page.locator('[data-source-key="source"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         if (process.env.SEMON_CATALOG_OUT)
