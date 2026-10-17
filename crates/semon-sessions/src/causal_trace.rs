@@ -649,8 +649,36 @@ struct TraceParticipantCost {
     unpriced_models: Vec<String>,
 }
 
-/// Deliberately limited to catalog identity and recorded aggregate metrics.
-/// This never becomes a Session and cannot imply a joined turn or activity.
+/// Qualified whole-session observation, never a receiving-turn interval.
+#[derive(Serialize)]
+struct TraceParticipantExtent {
+    scope: &'static str,
+    last: Option<i64>,
+    status: Value,
+}
+
+#[derive(Default)]
+struct TraceMissing {
+    absent_receiving_join: bool,
+    other: bool,
+}
+impl TraceMissing {
+    fn receiving_join(&mut self, matches: usize) {
+        if matches == 0 {
+            self.absent_receiving_join = true;
+        } else if matches != 1 {
+            self.other = true;
+        }
+    }
+    fn incomplete(&self) -> bool {
+        self.absent_receiving_join || self.other
+    }
+    fn locally_covered(&self, frontier_empty: bool, previews_complete: bool) -> bool {
+        self.absent_receiving_join && !self.other && frontier_empty && previews_complete
+    }
+}
+
+/// Allowlisted Catalog facts never become a joined Session or causal activity.
 #[derive(Serialize)]
 struct TraceParticipantSummary {
     name: String,
@@ -659,9 +687,13 @@ struct TraceParticipantSummary {
     model: String,
     tokens: [f64; 3],
     cost: TraceParticipantCost,
+    observed_extent: TraceParticipantExtent,
 }
 
-fn trace_participant_summary(row: &crate::model::summary::CatalogRow) -> TraceParticipantSummary {
+fn trace_participant_summary(
+    row: &crate::model::summary::CatalogRow,
+    status: Value,
+) -> TraceParticipantSummary {
     TraceParticipantSummary {
         name: row.name.clone(),
         harness: row.harness.clone(),
@@ -671,6 +703,13 @@ fn trace_participant_summary(row: &crate::model::summary::CatalogRow) -> TracePa
         cost: TraceParticipantCost {
             usd: row.cost.usd,
             unpriced_models: row.cost.unpriced_models.clone(),
+        },
+        observed_extent: TraceParticipantExtent {
+            scope: "whole_session",
+            last: row
+                .last
+                .filter(|value| (0..=9_007_199_254_740_991).contains(value)),
+            status,
         },
     }
 }
@@ -704,6 +743,14 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         let identity = crate::session_catalog_history_identity(options, source_key, key)
             .map_err(|_| 503u16)?
             .ok_or(404u16)?;
+        // One bounded status capture for every peer, using the Catalog owner's
+        // source/facts/PID/runtime qualification. These are observations only.
+        let runtime_generation = crate::native_evidence::query_runtime_generation(options).ok();
+        let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
+        let recorded = options
+            .facts
+            .as_ref()
+            .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
         let mut db = Connection::open_with_flags(
             EventCache::path(&options.cache),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -729,7 +776,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         let mut edges = BTreeMap::new();
         let mut frontier = Vec::new();
         let mut versions = Vec::new();
-        let mut missing = false;
+        let mut missing = TraceMissing::default();
         let mut bytes_left = 4 * 1024 * 1024;
         let mut decode = |text: String| -> Result<Value, u16> {
             if text.len() > bytes_left {
@@ -748,7 +795,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             }
             let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2",params![sid,tid],|row|row.get(0)).optional().map_err(|_|503u16)?;
             let Some(encoded) = encoded else {
-                missing = true;
+                missing.other = true;
                 continue;
             };
             let turn = decode(encoded)?;
@@ -783,7 +830,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                     .optional()
                     .map_err(|_| 503u16)?;
                 let mut header = decode(text)?;
-                missing |= header["relationships_incomplete"].as_bool() == Some(true);
+                missing.other |= header["relationships_incomplete"].as_bool() == Some(true);
                 header["live_observation"] = json!(current.as_deref() == Some("current"));
                 sessions.insert(sid.clone(), header);
             }
@@ -794,7 +841,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 if let Some(text) = incoming {
                     edges.insert(start.to_string(), decode(text)?);
                 } else {
-                    missing = true;
+                    missing.other = true;
                 }
             }
             let ids = turn["sent"].as_array().ok_or(503u16)?;
@@ -814,10 +861,9 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                         .map_err(|_| 503u16)?
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|_| 503u16)?;
+                    missing.receiving_join(found.len());
                     if found.len() == 1 {
                         queue.push_back((target.into(), found[0].clone()));
-                    } else {
-                        missing = true;
                     }
                 }
                 edges.insert(id.to_string(), edge);
@@ -846,7 +892,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             .collect();
         let mut participants = BTreeMap::new();
         let mut participant_summaries = BTreeMap::new();
-        missing |= related.len() > 128;
+        missing.other |= related.len() > 128;
         for sid in related.into_iter().take(128) {
             let header: Option<(String, String)> = tx
                 .query_row(
@@ -857,7 +903,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 .optional()
                 .map_err(|_| 503u16)?;
             let Some((version, source)) = header else {
-                missing = true;
+                missing.other = true;
                 continue;
             };
             let metadata = crate::history_projection::catalog(&tx, &sid)
@@ -872,7 +918,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                     .map_err(|_| 503u16)?
                     .flatten());
             let Some(metadata) = metadata else {
-                missing = true;
+                missing.other = true;
                 continue;
             };
             let row: crate::model::summary::CatalogRow =
@@ -880,12 +926,19 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             if row.key != sid
                 || crate::retention::source_generation(&row.sources).map_err(|_| 503u16)? != source
             {
-                missing = true;
+                missing.other = true;
                 continue;
             }
             versions.push(json!([sid, version]));
             if relay_peers.contains(&sid) {
-                participant_summaries.insert(sid.clone(), trace_participant_summary(&row));
+                let status = crate::catalog::relative_status(
+                    options,
+                    &runtime_observations,
+                    recorded.as_ref(),
+                    &row,
+                );
+                missing.other |= status["observation"] == "unavailable";
+                participant_summaries.insert(sid.clone(), trace_participant_summary(&row, status));
             }
             participants.insert(sid, row.name);
         }
@@ -932,13 +985,37 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             }
             previews.insert(sid, content);
         }
+        // A changed runtime cannot advertise a current observation from the
+        // earlier capture. Custody drift rejects the response, as in Catalog.
+        if runtime_generation.as_ref().is_none_or(|before| {
+            crate::native_evidence::query_runtime_generation(options)
+                .ok()
+                .as_ref()
+                != Some(before)
+        }) {
+            for summary in participant_summaries.values_mut() {
+                if summary.observed_extent.status["observation"] == "current" {
+                    summary.observed_extent.status =
+                        json!({"state":null,"observation":"unavailable"});
+                    missing.other = true;
+                }
+            }
+        }
+        if recorded
+            .as_ref()
+            .is_some_and(|source| source.validate().is_err())
+        {
+            return Err(503);
+        }
+        let incomplete_only_missing_receiving_turns =
+            missing.locally_covered(frontier.is_empty(), !previews_incomplete);
         let version = format!(
             "{:x}",
             Sha256::digest(json!([generation, versions]).to_string().as_bytes())
         );
         tx.commit().map_err(|_| 503u16)?;
         Ok(
-            json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"participant_summaries":participant_summaries,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing,"previews_incomplete":previews_incomplete}),
+            json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"participant_summaries":participant_summaries,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing.incomplete(),"incomplete_only_missing_receiving_turns":incomplete_only_missing_receiving_turns,"previews_incomplete":previews_incomplete}),
         )
     };
     match read() {
@@ -1132,7 +1209,7 @@ mod generation_tests {
     }
 
     #[test]
-    fn passive_trace_participant_contains_only_identity_and_recorded_totals() {
+    fn passive_trace_participant_has_only_identity_totals_and_qualified_whole_session_extent() {
         let row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
             "lifecycle":"retained",
             "key":"harbor",
@@ -1161,7 +1238,11 @@ mod generation_tests {
         }))
         .unwrap();
 
-        let summary = serde_json::to_value(trace_participant_summary(&row)).unwrap();
+        let summary = serde_json::to_value(trace_participant_summary(
+            &row,
+            json!({"state":"off","observation":"retained"}),
+        ))
+        .unwrap();
         assert_eq!(summary["name"], "Harbor");
         assert_eq!(summary["harness"], "codex");
         assert_eq!(summary["kind"], "Subagent");
@@ -1170,13 +1251,25 @@ mod generation_tests {
         assert_eq!(summary["cost"]["usd"], 2.25);
         assert_eq!(summary["cost"]["unpriced_models"], json!(["unknown-model"]));
         assert_eq!(
+            summary["observed_extent"],
+            json!({"scope":"whole_session","last":20,"status":{"state":"off","observation":"retained"}})
+        );
+        assert_eq!(
             summary
                 .as_object()
                 .unwrap()
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["name", "harness", "kind", "model", "tokens", "cost"])
+            BTreeSet::from([
+                "name",
+                "harness",
+                "kind",
+                "model",
+                "tokens",
+                "cost",
+                "observed_extent"
+            ])
         );
         assert_eq!(
             summary["cost"]
@@ -1187,6 +1280,27 @@ mod generation_tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["usd", "unpriced_models"])
         );
+    }
+
+    #[test]
+    fn only_absent_receiving_joins_can_be_covered_by_local_missing_turn_notices() {
+        let mut missing = super::TraceMissing::default();
+        assert!(!missing.incomplete());
+        assert!(!missing.locally_covered(true, true));
+        missing.receiving_join(1);
+        assert!(!missing.incomplete());
+        missing.receiving_join(0);
+        assert!(missing.incomplete());
+        assert!(missing.locally_covered(true, true));
+        assert!(!missing.locally_covered(false, true));
+        assert!(!missing.locally_covered(true, false));
+        missing.receiving_join(2);
+        assert!(!missing.locally_covered(true, true));
+        let missing = super::TraceMissing {
+            absent_receiving_join: true,
+            other: true,
+        };
+        assert!(!missing.locally_covered(true, true));
     }
 }
 

@@ -37,6 +37,27 @@ interface AgentTree {
 }
 const finite = (value: number | undefined): value is number =>
   typeof value === 'number' && Number.isFinite(value);
+/** A whole-session observation never joins the peer's receiving turn. */
+export function traceParticipantObservedEnd(
+  summary: TraceParticipantSummary,
+  now: number,
+): number | undefined {
+  const extent = summary.observedExtent,
+    status = extent?.status;
+  if (
+    extent?.scope !== 'whole_session' ||
+    !status ||
+    status.state == null ||
+    (status.observation !== 'current' && status.observation !== 'retained') ||
+    (status.observation === 'retained' && (status.state === 'work' || status.state === 'wait'))
+  )
+    return undefined;
+  if (status.state === 'work' && status.observation === 'current')
+    return Number.isFinite(now) ? now : undefined;
+  return extent.last !== null && Number.isSafeInteger(extent.last) && extent.last >= 0
+    ? extent.last
+    : undefined;
+}
 export function createTraceCalculations(
   state: {
     sessions: Record<string, Session>;
@@ -83,6 +104,10 @@ export function createTraceCalculations(
     walk(model.rootNode);
     model.peers.forEach(walk);
     return rows;
+  };
+  const observedPeerEnd = (peer: AgentTree['passivePeers'][number]) => {
+    const end = traceParticipantObservedEnd(peer.summary, now());
+    return finite(end) && end >= peer.handoff.at ? end : undefined;
   };
   // Walk only the turns connected by recorded spawns and relays; the relay rows remain peers in the view.
   function traceAgentTree(root: Turn): AgentTree {
@@ -165,6 +190,7 @@ export function createTraceCalculations(
       start,
       upper,
       ...model.handoffs.map((h) => h.done).filter(finite),
+      ...model.passivePeers.map(observedPeerEnd).filter(finite),
       ...allRunNodes(model)
         .filter((n) => n.kind !== 'root')
         .map((n) =>
@@ -354,7 +380,10 @@ export function createTraceCalculations(
       rows.push({ kind: 'heading', id: 'relayed-heading', depth: 0, label: '', name: '' });
       for (const peer of model.peers) add(peer, 0);
       for (const peer of model.passivePeers) {
-        const recordedCost = peer.summary.cost,
+        const observedEnd = observedPeerEnd(peer),
+          knownExtent = finite(observedEnd),
+          observedStatus = knownExtent ? peer.summary.observedExtent?.status : undefined,
+          recordedCost = peer.summary.cost,
           peerModel = [
             peer.summary.kind || HARNESS[peer.summary.harness],
             shortModel(peer.summary.model),
@@ -383,7 +412,19 @@ export function createTraceCalculations(
             .filter(Boolean)
             .join(', '),
           name: peer.summary.name,
+          harnessClass: hcls(peer.sid),
+          relay: true,
           model: peerModel,
+          ...(knownExtent
+            ? {
+                duration: dur(peer.handoff.at, observedEnd),
+                extentTip:
+                  'Whole-session observed extent after the recorded relay; its receiving turn is not in these logs · ' +
+                  observedStatus!.observation,
+                state: observedStatus!.state!,
+                stateLabel: STATE[observedStatus!.state!] ?? observedStatus!.state!,
+              }
+            : {}),
           qualification: "Its turn isn't in these logs",
           tokens,
           cost,
@@ -393,6 +434,12 @@ export function createTraceCalculations(
     }
     return {
       summary,
+      ...(model.passivePeers.some((peer) => finite(observedPeerEnd(peer)))
+        ? {
+            extentTip:
+              'Includes qualified whole-session observations for peers whose receiving turn is not in these logs; these do not add causal activity',
+          }
+        : {}),
       start: clock(start),
       end: clock(end),
       ticks: ticks.map((offset) => ({
