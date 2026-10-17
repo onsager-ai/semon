@@ -304,10 +304,10 @@ test(
               name: 'Run view for feat/offline-sync',
               exact: true,
             });
-            await runView.waitFor({ state: 'attached' });
             await page
               .getByRole('button', { name: 'Expand feat/offline-sync details', exact: true })
               .click();
+            await runView.waitFor();
             const parentSession = new URL(page.url()).pathname.split('/').at(-1);
             await runView.click();
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
