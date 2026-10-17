@@ -2,6 +2,13 @@
 const TREE_ACTIVE = 8,
   TREE_ROWS = 3;
 
+export function recentOrderSource(
+  source: string | undefined,
+  machines: readonly { key: string }[],
+): string | undefined {
+  return source ?? (machines.length === 1 ? machines[0]!.key : undefined);
+}
+
 export function selectRecentChildren<Row extends { id: string }>(
   items: readonly Row[],
   rank: (row: Row) => number,

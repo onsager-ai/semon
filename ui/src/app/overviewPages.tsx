@@ -22,9 +22,10 @@ import { createSeenResults } from './seenResults';
 import { HARNESSES, I, STATE } from './registry';
 import { selectedSessionState } from './sessionPresentation';
 import { ago, clock, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
-import { selectRecentChildren } from '../domain/recent';
+import { recentOrderSource, selectRecentChildren } from '../domain/recent';
 import type { EffectScope } from './effects';
 import type { ControlView } from '../lib/control';
+import type { ViewerRoute } from '../lib/routes';
 
 interface Selection {
   source_key: string;
@@ -204,6 +205,7 @@ interface OverviewHost {
   nativeContent?: boolean;
   api(path: string, body?: unknown): Promise<unknown>;
   route(): string;
+  navigationRoute(): Readonly<ViewerRoute>;
   selectedMachine(): string | null;
   admin(): { label: string; href: string } | null;
   observeLaunchControl?(value: unknown): void;
@@ -262,6 +264,10 @@ export function createOverviewPages(host: OverviewHost) {
     recentNow = 0;
   const recentOpen = new Map<string, boolean>();
   const recentAll = new Set<string>();
+  let recentNavigationRoute: Readonly<ViewerRoute> | null = null,
+    recentExpandedPath = new Set<string>();
+  const forcedRecentOpen = new Set<string>(),
+    collapsedRecentThisRoute = new Set<string>();
   try {
     const preferences = object(JSON.parse(localStorage.getItem('semon.tree') ?? '{}'));
     for (const [id, value] of Object.entries(preferences).slice(-200)) {
@@ -407,12 +413,23 @@ export function createOverviewPages(host: OverviewHost) {
         const parent = idOf(row);
         canonical.set(parent, [...(canonical.get(parent) ?? []), row]);
       }
-    const path = new Set<string>();
-    let selected = rows.find((row) => row.source_key === source && row.catalog_key === current);
+    const path = new Set<string>(),
+      currentRow = rows.find((row) => row.source_key === source && row.catalog_key === current),
+      currentRowId = currentRow?.id;
+    let selected = currentRow;
     while (selected && !path.has(selected.id)) {
       path.add(selected.id);
       selected = byId.get(idOf(selected));
     }
+    const route = host.navigationRoute();
+    if (recentNavigationRoute !== route) {
+      recentNavigationRoute = route;
+      forcedRecentOpen.clear();
+      collapsedRecentThisRoute.clear();
+      recentExpandedPath.clear();
+    }
+    for (const id of path)
+      if (id !== currentRowId && !collapsedRecentThisRoute.has(id)) forcedRecentOpen.add(id);
     const children = new Map<string, HomeRow[]>(),
       roots: HomeRow[] = [],
       reachable = new Set<string>();
@@ -452,8 +469,12 @@ export function createOverviewPages(host: OverviewHost) {
       };
       visitExpanded(id);
     }
+    recentExpandedPath = new Set(expandedPath);
     const requiredPath = new Set([...path, ...expandedPath]);
-    const order = host.orderScope('recent', JSON.stringify([source, host.reviews(), rail]));
+    const order = host.orderScope(
+      'recent',
+      JSON.stringify([recentOrderSource(source, home?.machines ?? []), host.reviews(), rail]),
+    );
     const visibleParents = new Set(
       [...document.querySelectorAll<HTMLElement>('#lanes .treeitem')]
         .filter((node) => node.querySelector(':scope > .tree-row .srow')?.getClientRects().length)
@@ -485,20 +506,16 @@ export function createOverviewPages(host: OverviewHost) {
       const showAll = recentAll.has(row.id) || expandedUnder.has(row.id),
         visible = selectRecentChildren(kids, rank, requiredPath, showAll);
       const open =
-        path.has(row.id) ||
+        forcedRecentOpen.has(row.id) ||
         expandedPath.has(row.id) ||
-        expandedUnder.has(row.id) ||
         (recentOpen.get(row.id) ??
           (home?.machines.length === 1 ? recentOpen.get(row.catalog_key) : undefined) ??
-          kids.some((child) => rank(child) < 2));
+          (expandedUnder.has(row.id) || kids.some((child) => rank(child) < 2)));
       const shown = orderRows(
         order,
         (showAll ? 'all:' : 'kids:') + row.id,
         visible,
-        (a, b) =>
-          Number(requiredPath.has(b.id)) - Number(requiredPath.has(a.id)) ||
-          rank(a) - rank(b) ||
-          b.session.last - a.session.last,
+        (a, b) => rank(a) - rank(b) || b.session.last - a.session.last,
         {
           must: requiredPath,
           quiet: !open,
@@ -1518,6 +1535,12 @@ export function createOverviewPages(host: OverviewHost) {
       return true;
     },
     toggleRecent(id: string, value: boolean) {
+      if (value) collapsedRecentThisRoute.delete(id);
+      else {
+        forcedRecentOpen.delete(id);
+        collapsedRecentThisRoute.add(id);
+        if (recentAll.has(id) || recentExpandedPath.has(id)) recentAll.clear();
+      }
       recentOpen.set(id, value);
       while (recentOpen.size > 200) recentOpen.delete(recentOpen.keys().next().value!);
       try {
@@ -1599,8 +1622,10 @@ export function createOverviewPages(host: OverviewHost) {
         sheet.show();
         return;
       }
-      if (value) recentAll.add(id);
-      else recentAll.delete(id);
+      if (value) {
+        recentAll.clear();
+        recentAll.add(id);
+      } else recentAll.clear();
       host.chrome();
     },
     draw,

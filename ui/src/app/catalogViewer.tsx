@@ -696,6 +696,7 @@ export function createCatalogViewer(
     panelOpened,
     panelClosed,
     route: () => (viewerHost?.nativePage ? 'home' : navigation.route.v),
+    navigationRoute: () => navigation.route,
     selectedMachine: () => (navigation.route.v === 'machine' ? navigation.route.id : null),
     admin: () => standaloneAdmin,
     machine(key) {
