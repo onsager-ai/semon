@@ -1019,11 +1019,25 @@ for (const width of [390, 1280])
         await select.locator('.sh-select-trigger').click();
         await select.locator(`[role="option"][data-value="${value}"]`).click();
       }
+      const committed = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === '/api/sessions' &&
+          url.searchParams.get('harness') === 'claude' &&
+          url.searchParams.get('repo') === '/repo'
+        );
+      });
       await page.locator('.filters-sheet .fdone').click();
+      await committed;
       await page.waitForFunction(() => !history.state?.sheet);
       assert.equal(reads.length, 2);
       await query.fill('Session');
+      const searched = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname === '/api/sessions' && url.searchParams.get('q') === 'Session';
+      });
       await query.press('Enter');
+      await searched;
       await page.getByRole('button', { name: 'Clear filters', exact: true }).waitFor();
       await page.waitForFunction(() => new URLSearchParams(location.search).get('q') === 'Session');
       assert.equal(reads.length, 3);
