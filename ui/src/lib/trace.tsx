@@ -339,7 +339,7 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                         key={row.id}
                         class="agent-row agent-peer"
                         type="button"
-                        aria-label={'Open recorded ' + row.name + '; ' + row.qualification}
+                        aria-label={'Open recorded ' + row.label}
                         onClick={() => active(() => host.session(row.id, row.turn))}
                       >
                         <span class="agent-label">
