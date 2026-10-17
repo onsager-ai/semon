@@ -37,8 +37,9 @@ its completion witness is the native-publication success message in the CI log.
   `SEMON_UI_COVERAGE=exhaustive` restores every session and trace.
 - Visual authority is the selected complete application, independently built
   from Source `263a02da278716ab2309b8e34a463419e5c781e5` and selected with Hub
-  `503fbe0`. The 62-state preservation gate remains required on every run. The
-  historical actual-frame manifest also retains all 113 full screenshots and
+  `503fbe0`. The required preservation gate now compares 68 states: the original
+  62 plus an open Sessions Filter at 390/820/1280px in both themes. The historical
+  actual-frame manifest remains unchanged with all 113 full screenshots and
   162 strict region captures, plus 12 full frames/20 regions for the two-machine
   viewer and 15 full frames/24 regions for pushed-data parity. The actual UI
   reference runs through its original `compat=1` route and history states; the
@@ -70,10 +71,11 @@ its completion witness is the native-publication success message in the CI log.
   the old mapping, and `historical-pixel-ratchet.json` retains its per-case
   ratios and dimensions. These preserve the original data but never act as an
   active renderer or acceptance baseline.
-- `preservation-contract.mjs` pins the selected actual reference and all 62 cases
-  at 390/820/1280px, both themes, including open Thinking/tools/output, a
+- `preservation-contract.mjs` pins the selected actual reference and all 68 cases
+  at 390/820/1280px, both themes, including open Filter, Thinking/tools/output, a
   completed child and phone drawers. Only the exact pinned historical before
-  candidate may use `--historical-before`; its raw differences remain reported.
+  candidate may use `--historical-before`, which remains limited to the original
+  62 cases; its raw differences remain reported.
 - Request-budget measurements remain informational above their ceilings. They run
   alongside required performance/error checks; measurement infrastructure failures
   still fail. Turning them into hard limits requires calibrating the budgets.

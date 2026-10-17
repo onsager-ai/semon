@@ -27,9 +27,17 @@ export const STATES = [
   'session-h-failed',
   'analytics',
 ];
-export const EXPECTED = WIDTHS.flatMap((width) =>
+export const FILTER_STATE = 'sessions-filter-open';
+export const HISTORICAL_EXPECTED = WIDTHS.flatMap((width) =>
   SCHEMES.flatMap((scheme) =>
     [...STATES, ...(width === 390 ? ['drawer'] : [])].map((state) => `${width}-${scheme}-${state}`),
+  ),
+);
+export const EXPECTED = WIDTHS.flatMap((width) =>
+  SCHEMES.flatMap((scheme) =>
+    [...STATES, FILTER_STATE, ...(width === 390 ? ['drawer'] : [])].map(
+      (state) => `${width}-${scheme}-${state}`,
+    ),
   ),
 );
 const PIXEL_COVERAGE = JSON.parse(
@@ -307,7 +315,9 @@ export function assessVisualAcceptances(
 export function assessPreservation(report) {
   const coverage = [],
     visual = [],
-    seen = new Set();
+    seen = new Set(),
+    historical = report.mode === 'historical-before' && report.candidate === BEFORE,
+    expected = historical ? HISTORICAL_EXPECTED : EXPECTED;
   if (report.reference !== REFERENCE.source) coverage.push('Wrong selected Source reference');
   if (report.referenceHub !== REFERENCE.hub) coverage.push('Wrong selected Hub provenance');
   if (!/^[a-f0-9]{40}$/.test(report.candidate ?? '')) coverage.push('Missing candidate commit SHA');
@@ -315,6 +325,8 @@ export function assessPreservation(report) {
     coverage.push('Missing candidate runtime fingerprint');
   if (!['required', 'historical-before'].includes(report.mode))
     coverage.push('Unknown preservation mode');
+  if (report.mode === 'historical-before' && report.candidate !== BEFORE)
+    coverage.push('Historical preservation mode requires the pinned before candidate');
   if (report.threshold !== THRESHOLD || report.maxRatio !== MAX_RATIO)
     coverage.push('Changed visual thresholds');
   if (!Array.isArray(report.errors) || report.errors.length)
@@ -328,7 +340,7 @@ export function assessPreservation(report) {
       coverage.push('Invalid visual comparison row');
       continue;
     }
-    if (!EXPECTED.includes(row.key)) coverage.push('Unknown visual case: ' + row.key);
+    if (!expected.includes(row.key)) coverage.push('Unknown visual case: ' + row.key);
     if (seen.has(row.key)) coverage.push('Duplicate visual case: ' + row.key);
     seen.add(row.key);
     if (
@@ -347,6 +359,6 @@ export function assessPreservation(report) {
     if (row.size !== null || row.ratio > MAX_RATIO)
       visual.push(`${row.key}: ${row.size ? 'size ' + row.size : 'pixel mismatch ' + row.ratio}`);
   }
-  for (const key of EXPECTED) if (!seen.has(key)) coverage.push('Missing visual case: ' + key);
+  for (const key of expected) if (!seen.has(key)) coverage.push('Missing visual case: ' + key);
   return { coverage, visual };
 }
