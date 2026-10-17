@@ -119,10 +119,24 @@ test(
             page.setDefaultTimeout(60000);
             await page.clock.setFixedTime(Number(fixture.stdout.trim()));
             const requests = [],
-              errors = [];
+              errors = [],
+              apiResponses = [];
             page.on('request', (request) => {
               const url = new URL(request.url());
               if (url.pathname.startsWith('/api/')) requests.push(url.pathname);
+            });
+            page.on('response', (response) => {
+              const url = new URL(response.url());
+              if (!url.pathname.startsWith('/api/')) return;
+              apiResponses.push({
+                path: url.pathname,
+                status: response.status(),
+                machine: url.searchParams.get('machine'),
+                sid: url.searchParams.get('sid'),
+                scope: url.searchParams.get('scope'),
+                response,
+              });
+              if (apiResponses.length > 32) apiResponses.shift();
             });
             page.on('pageerror', (error) => errors.push(error.message));
             const screenshot = async (name) => {
@@ -142,6 +156,147 @@ test(
                   path: join(captures, `${name}-${width}-${colorScheme}.png`),
                   fullPage: name !== 'session-menu',
                 });
+            };
+            const captureOpenInHarborFailure = async () => {
+              const ui = await page.evaluate(() => {
+                const text = (node, limit = 500) =>
+                  (node?.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, limit);
+                const buttons = [...document.querySelectorAll('#page button, #page [role="button"]')]
+                  .slice(0, 48)
+                  .map((node) => ({
+                    tag: node.tagName.toLowerCase(),
+                    text: text(node, 140),
+                    ariaLabel: node.getAttribute('aria-label'),
+                    title: node.getAttribute('title'),
+                    disabled: node.matches(':disabled'),
+                    hidden: node.hidden || getComputedStyle(node).display === 'none',
+                  }));
+                const recent = [...document.querySelectorAll('#lanes .treeitem')]
+                  .slice(0, 32)
+                  .map((node) => ({ id: node.getAttribute('data-id'), text: text(node, 100) }));
+                const cards = [...document.querySelectorAll('#page .child-card')]
+                  .slice(0, 12)
+                  .map((node) => ({
+                    tag: node.tagName.toLowerCase(),
+                    className: node.getAttribute('class'),
+                    id: node.getAttribute('data-id'),
+                    text: text(node, 160),
+                  }));
+                const foot = document.querySelector('#page .session-foot');
+                return {
+                  path: location.pathname,
+                  route: history.state?.v ?? null,
+                  readyState: document.readyState,
+                  visibilityState: document.visibilityState,
+                  title: document.title.slice(0, 160),
+                  heading: text(document.querySelector('#page h1'), 200),
+                  topbar: text(document.querySelector('#topbar'), 500),
+                  footer: text(foot, 1000),
+                  footerClass: foot?.getAttribute('class') ?? null,
+                  pageText: text(document.querySelector('#page'), 6000),
+                  buttons,
+                  recent,
+                  cards,
+                };
+              });
+              const safeFields = new Set([
+                'identity',
+                'session',
+                'key',
+                'id',
+                'name',
+                'machine',
+                'source_key',
+                'catalog_key',
+                'read_scope',
+                'generation',
+                'content_generation',
+                'errors_generation',
+                'status',
+                'state',
+                'kind',
+                'ask',
+                'source_turn',
+                'parent_turn',
+                'parent_session',
+                'source_session',
+                'session_key',
+                'session_id',
+                'origin',
+                'relationship_context',
+                'selected',
+                'parent',
+                'events',
+                'entries',
+                'turns',
+                'children',
+                'relationships',
+              ]);
+              const summarize = (value, depth = 0) => {
+                if (depth > 3) return '[depth limit]';
+                if (value === null || ['string', 'number', 'boolean'].includes(typeof value))
+                  return typeof value === 'string' ? value.slice(0, 100) : value;
+                if (Array.isArray(value))
+                  return {
+                    length: value.length,
+                    sample: value.slice(0, 8).map((item) => summarize(item, depth + 1)),
+                  };
+                if (typeof value !== 'object') return typeof value;
+                const fields = {};
+                for (const [key, item] of Object.entries(value)) {
+                  if (!safeFields.has(key)) continue;
+                  if (['events', 'entries', 'turns', 'children', 'relationships'].includes(key)) {
+                    const values = Array.isArray(item)
+                      ? item.slice(0, 8).map((entry) => summarize(entry, depth + 1))
+                      : item && typeof item === 'object'
+                        ? Object.entries(item)
+                            .slice(0, 8)
+                            .map(([id, entry]) => ({
+                              id: id.slice(0, 80),
+                              value: summarize(entry, depth + 1),
+                            }))
+                        : summarize(item, depth + 1);
+                    fields[key] =
+                      Array.isArray(item) || (item && typeof item === 'object')
+                        ? {
+                            length: Array.isArray(item) ? item.length : Object.keys(item).length,
+                            sample: values,
+                          }
+                        : values;
+                  } else fields[key] = summarize(item, depth + 1);
+                }
+                return { keys: Object.keys(value).slice(0, 40), fields };
+              };
+              const relevant = apiResponses
+                .filter((item) =>
+                  ['/api/session-home', '/api/session-transcript', '/api/session-identity'].includes(
+                    item.path,
+                  ),
+                )
+                .slice(-4);
+              let timer;
+              const api = await Promise.race([
+                Promise.all(
+                  relevant.map(async ({ response, ...item }) => {
+                    try {
+                      return { ...item, metadata: summarize(await response.json()) };
+                    } catch {
+                      return { ...item, metadata: '[body unavailable]' };
+                    }
+                  }),
+                ),
+                new Promise((resolve) => {
+                  timer = setTimeout(() => resolve('[metadata deadline]'), 500);
+                }),
+              ]);
+              clearTimeout(timer);
+              console.error(
+                `[open-in-harbor diagnostic ${width} ${colorScheme}] ${JSON.stringify({
+                  ui,
+                  api,
+                  pageErrors: errors.slice(-12),
+                })}`,
+              );
             };
             const navigate = async (destination) => {
               if (width === 390 && (await page.locator('#topbar .trace-back').count())) {
@@ -492,7 +647,12 @@ test(
             await page
               .getByRole('button', { name: 'Open Check retry safety', exact: true })
               .click();
-            await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
+            try {
+              await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
+            } catch (error) {
+              await captureOpenInHarborFailure();
+              throw error;
+            }
             assert.match(
               await page.locator('#page .session-foot').textContent(),
               /Returned to harbor.*Failed/,
