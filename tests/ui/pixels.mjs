@@ -896,8 +896,12 @@ function saveMismatch(row, name, scheme, p) {
               path.join(evidenceDir, name + '.json'),
               J(
                 {
-                  served: await regionEvidence(page, region.selector),
-                  reference: await regionEvidence(port, region.selector),
+                  served: await regionEvidence(page, region.selector).catch((error) => ({
+                    unavailableAfterCapture: String(error.message).split('\n')[0],
+                  })),
+                  reference: await regionEvidence(port, region.selector).catch((error) => ({
+                    unavailableAfterCapture: String(error.message).split('\n')[0],
+                  })),
                 },
                 null,
                 2,
