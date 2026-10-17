@@ -1037,7 +1037,7 @@ export function renderSessionScreen(
           <h1>{screenText(view.name)}</h1>
         </div>
         <section class="transcript" aria-label="Transcript">
-          {view.observation && (
+          {view.observation && view.observation !== 'Cached history' && (
             <p class="empty" role="status" data-transcript-observation="">
               {screenText(view.observation)}
             </p>
@@ -1061,6 +1061,11 @@ export function renderSessionScreen(
               ),
             )}
             <SessionPager owner={state} where="after" />
+            {view.observation === 'Cached history' && (
+              <p class="empty" role="status" data-transcript-observation="">
+                {view.observation}
+              </p>
+            )}
             {view.empty && (
               <p class="empty">
                 {screenText(view.empty)}{' '}
