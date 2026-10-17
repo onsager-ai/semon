@@ -1303,7 +1303,12 @@ for (const width of [390, 1280])
         releasePreview = resolve;
       });
       try {
-        const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+        const page = await browser.newPage({
+          viewport: { width, height: 900 },
+          colorScheme,
+          isMobile: width === 390,
+          hasTouch: width === 390,
+        });
         let signalPreview;
         const previewStarted = new Promise((resolve) => {
           signalPreview = resolve;
