@@ -439,3 +439,35 @@ Claude availability explanation, while the assertion expects a run state word.
 The test now targets the visible run state dot explicitly, preserving its hover
 allowance, exact state-word and both Escape assertions. No production status or
 tooltip change is justified by those fixture failures. Final checks remain pending.
+
+### Matching actual-application capture readiness
+
+Fresh embedded run39062263341 passes all91 lifecycle cases, both served cases
+and all12 interaction checks. Its shell fixture still expected Recent rows on
+an unselected native Devices document. The fixture now requires empty Recent
+and no native API reads through document exit, preserving all six native
+captures, drawer/focus checks and source-qualified Recent navigation in the
+actual reader after the explicit Sessions link.
+
+The expanded comparison stopped at Atlas Ingest's scroll-zero assertion. An
+earlier capture recorded reference scrollTop418 and a44px jump-slot difference.
+The reference fixture waited only for a transcript container before sending its
+wheel/Home/reset, while the candidate already waited for a loaded entry and
+stable reading state. In original263 destination.ts, done() ends loading and
+synchronously starts the opening-end pin; viewport.ts keeps it until user input
+or its existing two-second limit. Early fixture input could precede that pin.
+Both sides now require the same loaded route, fonts and existing API/DOM
+stability before the same input. The post-reset deadline/assertion, all62 states,
+screenshots, reference commits and thresholds remain unchanged. Failure-only
+diagnostics retain bounded side/scroll/layout flags with no query or body text.
+CI must validate these fixture corrections; missing captures remain failures.
+
+That run's162 strict regions are exact, but a Home POST cancellation leaves one
+of113 frames missing. Temporary ownership diagnostics preserve raw failures and
+report unknown attribution when network timing cannot establish an owner. No
+abort waiver is adopted. Rust run39062263316 also fails an offline Codex process
+case with expectedProtocol/actualUnavailable. Instrumented supporting39063659770
+passes the original six cases once without emitting an unavailable stage/errno;
+the historical cause remains unproven and no runtime fix is claimed. Temporary
+instrumentation/workflows stay outside the PR. Final exact-pair checks and any
+evidence-bound visual decisions remain required.
