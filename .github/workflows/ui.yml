@@ -54,6 +54,17 @@ jobs:
           npm --prefix ui run check:bundle
           npm --prefix ui run sizes
 
+      - name: Prepare generated assets for thermal-restricted review
+        if: failure() && github.event.pull_request.number == 438
+        run: npm --prefix ui run build
+      - name: Retain generated assets without bypassing freshness
+        if: failure() && github.event.pull_request.number == 438
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ui-generated-review
+          path: crates/semon-sessions/src/*.generated.js
+          if-no-files-found: error
+
   build:
     name: viewer test binaries
     needs: foundation
@@ -115,6 +126,24 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Build the selected complete UI reference
+        if: github.event.pull_request.number == 438
+        env:
+          UI_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
+        run: |
+          git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
+          git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
+          strip --strip-debug target/debug/semon
+      - name: Retain selected UI reference binary
+        if: github.event.pull_request.number == 438
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: viewer-ui-reference-binary
+          path: target/debug/semon
+          if-no-files-found: error
+          retention-days: 1
+
   checks:
     name: viewer / ${{ matrix.suite }}
     needs: build
@@ -140,6 +169,12 @@ jobs:
         with:
           name: viewer-test-binaries
           path: target/debug
+      - name: Download selected UI reference
+        if: matrix.suite == 'visual' && github.event.pull_request.number == 438
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: viewer-ui-reference-binary
+          path: target/ui-reference
       - name: Restore executable permissions
         run: chmod +x target/debug/semon target/debug/examples/ui-account-server
       - name: Restore baseline executable permissions
@@ -246,6 +281,22 @@ jobs:
         if: ${{ !cancelled() && matrix.suite == 'visual' }}
         working-directory: tests/ui
         run: node pixels.mjs
+
+      - name: Compare actual native and selected complete reading UI
+        if: ${{ !cancelled() && matrix.suite == 'visual' && github.event.pull_request.number == 438 }}
+        run: |
+          chmod +x target/ui-reference/semon
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-reference/semon sessions --serve --listen 127.0.0.1:8770 \
+            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-reference-index.json" \
+            < /dev/null > "$RUNNER_TEMP/ui-reference.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-reference.log"; exit 1; }
+          cd tests/ui
+          SEMON_PRESERVATION_BASE="${url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${url##*t=}" node preservation.mjs
 
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
