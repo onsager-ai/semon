@@ -2,7 +2,7 @@
 // sheet scroll preservation and trace navigation.
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { ENV, launch, served, data, goto } from '../lib.mjs';
+import { ENV, launch, served, data, goto, pickFilter } from '../lib.mjs';
 
 const ready = (page, view) =>
   page.waitForFunction(
@@ -39,7 +39,7 @@ export default async function viewerBacklog(browser) {
       await ready(page, 'sessions');
       assert.equal(await page.locator('#sq').inputValue(), '');
       await page.waitForTimeout(100);
-      const rows = await page.locator('[data-session-row="list"]:not(.child)').evaluateAll((rows) =>
+      const rows = await page.locator('[data-session-row="list"]').evaluateAll((rows) =>
         rows.map((row) => {
           const meta = row.querySelector('.session-row-meta');
           return {
@@ -57,17 +57,19 @@ export default async function viewerBacklog(browser) {
           rows.every((x) => x.main && x.model && x.fits && x.items.every((v) => !v.cut)),
         size + ': metadata must drop complete values',
       );
-      const children = await page.locator('[data-session-row="list"].child').evaluateAll((rows) =>
-        rows.map((row) => ({
-          main: !!row.querySelector('.session-row-main'),
-          name: row.querySelector('.nm')?.textContent,
-          status: row.querySelector('.dot')?.getAttribute('aria-label'),
-          identity: row.getAttribute('data-id'),
-          parent: !!row.closest('.kids-wrap')?.querySelector(':scope > .nrow:not(.child)'),
-          metadata: !!row.querySelector('.session-row-meta'),
-          fits: row.scrollWidth <= row.clientWidth + 1,
-        })),
-      );
+      const children = await page
+        .locator('[data-session-row="list"]:has(.row-delegation)')
+        .evaluateAll((rows) =>
+          rows.map((row) => ({
+            main: !!row.querySelector('.session-row-main'),
+            name: row.querySelector('.nm')?.textContent,
+            status: row.querySelector('.dot')?.getAttribute('aria-label'),
+            identity: row.getAttribute('data-id'),
+            delegation: row.querySelectorAll('.row-delegation').length === 1,
+            metadata: !!row.querySelector('.session-row-meta'),
+            fits: row.scrollWidth <= row.clientWidth + 1,
+          })),
+        );
       assert(
         children.length > 0 &&
           children.every(
@@ -76,11 +78,11 @@ export default async function viewerBacklog(browser) {
               row.name &&
               row.status &&
               row.identity &&
-              row.parent &&
-              !row.metadata &&
+              row.delegation &&
+              row.metadata &&
               row.fits,
           ),
-        size + ': compact native children retain names, status and canonical navigation',
+        size + ': complete child rows retain names, status, metadata and canonical navigation',
       );
       assert(
         (await page.locator('#lanes [data-session-row="compact"] .session-row-main').count()) > 0,
@@ -125,16 +127,14 @@ export default async function viewerBacklog(browser) {
         ['harness', 'claude'],
         ['repo', 'harbor'],
       ]) {
-        await page.locator('input[name="' + name + '"]').fill(value);
-        await page.locator('.catalog-apply').click();
+        await pickFilter(page, name === 'harness' ? 'Harness' : 'Repo', value);
         await ready(page, 'sessions');
         assert.equal(
           new URL(page.url()).searchParams.get(name),
           value,
           'source filters are bookmarked in the canonical URL',
         );
-        await page.locator('input[name="' + name + '"]').fill('');
-        await page.locator('.catalog-apply').click();
+        await pickFilter(page, name === 'harness' ? 'Harness' : 'Repo', '');
         await ready(page, 'sessions');
       }
       const sid = Object.keys(D.TX).find((sid) => D.TX[sid].length > 20) ?? Object.keys(D.SESS)[0];
