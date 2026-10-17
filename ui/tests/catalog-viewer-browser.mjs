@@ -171,12 +171,22 @@ for (const width of [390, 1280])
                 next_cursor: null,
               },
             });
+          if (u.pathname === '/api/session-source-candidates')
+            return route.fulfill({
+              json: {
+                api: 1,
+                source_key: u.searchParams.get('machine') ?? 'source',
+                items: [],
+                next_cursor: null,
+              },
+            });
           if (u.pathname === '/api/session-capabilities')
             return route.fulfill({
               json: {
                 ...capabilities(true),
                 source_key: u.searchParams.get('machine') ?? 'source',
                 selected_entry: true,
+                source_candidates: true,
               },
             });
           if (u.pathname === '/api/session-entry') {
