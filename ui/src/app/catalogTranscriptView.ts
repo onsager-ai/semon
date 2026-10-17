@@ -403,17 +403,22 @@ export function catalogTranscriptBlocks(
     if (block.kind !== 'turn') continue;
     const descriptor = context?.turns.find((turn) => turn.id === block.turn.id);
     if (!descriptor) continue;
-    const start = context?.handoffs.find((row) => row.edge.id === descriptor.start)?.edge;
-    block.turn.label = descriptor.u || start?.kind === 'ask' ? 'Your message' : 'Recorded turn';
+    const relationship = context?.handoffs.find((row) => row.edge.id === descriptor.start),
+      start = relationship?.edge;
+    block.turn.label =
+      descriptor.u || start?.kind === 'ask'
+        ? 'Your message' + (start ? ' at ' + clock(start.at, Date.now()) : '')
+        : 'Recorded turn';
     block.turn.trace = descriptor.sent.length ? descriptor.id : undefined;
     if (
       descriptor.end.st === 'err' &&
       !(descriptor.end.why === 'failed' && returnedFailures.has(block.turn.id))
     )
       block.turn.error = descriptor.end.why === 'failed' ? 'Failed' : descriptor.end.why;
-    if (start && start.kind !== 'ask') {
+    if (start && start.kind !== 'ask' && !descriptor.u) {
       const sender = context?.sessions[start.from],
-        harness = sender && HARNESSES[sender.harness];
+        harness = sender && HARNESSES[sender.harness],
+        linked = sender && start.from !== sessionKey && start.from !== 'you';
       block.turn.header = {
         mark: harness
           ? {
@@ -426,13 +431,18 @@ export function catalogTranscriptBlocks(
           : undefined,
         parts: [
           {
-            className: 'soft',
+            className: 'verb',
             text: start.kind === 'spawn' ? 'Brief from ' : 'Relay from ',
           },
           {
-            className: 'who who-link',
+            className: linked ? 'who-link' : 'who',
             text: sender?.name ?? 'Recorded session',
-            action: sender ? { kind: 'session', id: start.from } : undefined,
+            action: linked
+              ? { kind: 'session', id: start.from, turn: relationship?.sourceTurn }
+              : undefined,
+            label: linked
+              ? 'Open ' + sender.name + (relationship?.sourceTurn ? ' where it sent this' : '')
+              : undefined,
           },
         ],
         time: clock(start.at, Date.now()),
@@ -548,32 +558,41 @@ export function recordedRelationshipViews(
           ]
         : []),
     ];
-  const parts = [
-    {
-      className: 'who who-link',
-      text: name(edge.from),
-      action:
-        source && edge.from !== selected ? { kind: 'session' as const, id: edge.from } : undefined,
-    },
-    {
-      className: 'soft',
-      text:
-        edge.kind === 'toyou'
-          ? edge.ask === 'result'
-            ? ' sent '
-            : ' asked '
-          : edge.kind === 'relay'
-            ? ' relayed to '
-            : ' asked ',
-    },
-    {
-      className: 'who who-link',
-      text: name(edge.to),
-      action: target
-        ? { kind: 'session' as const, id: edge.to, turn: relationship.targetTurn }
-        : undefined,
-    },
-  ];
+  const sourceLinked = source && edge.from !== selected && edge.from !== 'you',
+    targetLinked = target && edge.to !== selected && edge.to !== 'you',
+    parts = [
+      {
+        className: 'who who-link',
+        text: name(edge.from),
+        action: sourceLinked
+          ? { kind: 'session' as const, id: edge.from, turn: relationship.sourceTurn }
+          : undefined,
+        label: sourceLinked
+          ? 'Open ' + source.name + (relationship.sourceTurn ? ' where it sent this' : '')
+          : undefined,
+      },
+      {
+        className: 'soft',
+        text:
+          edge.kind === 'toyou'
+            ? edge.ask === 'result'
+              ? ' sent '
+              : ' asked '
+            : edge.kind === 'relay'
+              ? ' relayed to '
+              : ' asked ',
+      },
+      {
+        className: 'who who-link',
+        text: name(edge.to),
+        action: targetLinked
+          ? { kind: 'session' as const, id: edge.to, turn: relationship.targetTurn }
+          : undefined,
+        label: targetLinked
+          ? 'Open ' + target.name + (relationship.targetTurn ? ' at the turn this started' : '')
+          : undefined,
+      },
+    ];
   if (edge.kind === 'toyou')
     parts.splice(1, 2, {
       className: 'soft',
