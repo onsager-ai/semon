@@ -38,6 +38,18 @@ its completion witness is the native-publication success message in the CI log.
 - Visual checks retain all existing full-screen mismatch ratchets, strict region
   comparisons, and pushed-data pixel parity. A `pending` reference still enforces
   its ratchet; it is not a reason to delete the check or loosen the baseline.
+- The required actual-application comparison uses the independently built Source
+  `263a02da278716ab2309b8e34a463419e5c781e5` selected with Hub `503fbe0`.
+  `preservation-contract.mjs` owns that provenance and all 62 required cases at
+  390/820/1280px, both themes, including open Thinking/tools/output, a completed
+  child and phone drawers. Pixel differences fail at the existing 0.1/0.0001
+  thresholds; missing/duplicate/unknown cases, geometry and execution errors fail
+  independently. Every PR, main and manual visual run builds this reference.
+  Only the exact pinned historical before candidate may use `--historical-before`;
+  its differences remain reported, with structural/execution failures enforced.
+  The mockup adapter preserves the selected application's responsive header and
+  does not inject Composer, extra lineage or a leading Cached history row. Native
+  qualification is compared on the candidate, without implicit pixel exemptions.
 - Comparison against the older sample mockup is historical reporting and has no
   pass/fail assertion. It is off by default. `SEMON_PIXEL_SAMPLE_REPORT=1` restores
   those images and report columns without changing the required comparisons.

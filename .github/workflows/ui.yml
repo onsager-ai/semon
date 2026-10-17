@@ -127,23 +127,27 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Build the selected complete UI reference
+      - name: Build the pinned before candidate for historical comparison
         if: github.event.pull_request.number == 438
-        env:
-          UI_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
         run: |
-          git fetch --no-tags --depth=1 origin eb535ff8920fe9aa54e78babc9649cf6c9400ad6
-          git worktree add --detach "$RUNNER_TEMP/ui-before" eb535ff8920fe9aa54e78babc9649cf6c9400ad6
+          BEFORE=$(node --input-type=module -e 'import { BEFORE } from "./tests/ui/preservation-contract.mjs"; console.log(BEFORE)')
+          git fetch --no-tags --depth=1 origin "$BEFORE"
+          git worktree add --detach "$RUNNER_TEMP/ui-before" "$BEFORE"
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-before/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
           strip --strip-debug target/debug/semon
           mkdir -p target/ui-before
           cp target/debug/semon target/ui-before/semon
+
+      # The selected application is a required reference for every candidate,
+      # including main/manual runs; it is not a PR-number-specific diagnostic.
+      - name: Build the selected complete UI reference
+        run: |
+          UI_REFERENCE=$(node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; console.log(REFERENCE.source)')
           git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
           git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-store --bin semon --features semon-sessions/test-clock
           strip --strip-debug target/debug/semon
       - name: Retain selected UI reference binary
-        if: github.event.pull_request.number == 438
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: viewer-ui-reference-binary
@@ -185,7 +189,7 @@ jobs:
           name: viewer-test-binaries
           path: target/debug
       - name: Download selected UI reference
-        if: matrix.suite == 'visual' && github.event.pull_request.number == 438
+        if: matrix.suite == 'visual'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-ui-reference-binary
@@ -223,7 +227,7 @@ jobs:
       - name: Browser-check infrastructure regression tests
         run: |
           npm --prefix ui ci --no-audit --no-fund
-          node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs
+          node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/overhaul-port.test.mjs
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
@@ -304,7 +308,7 @@ jobs:
         run: node pixels.mjs
 
       - name: Compare actual native and selected complete reading UI
-        if: ${{ !cancelled() && matrix.suite == 'visual' && github.event.pull_request.number == 438 }}
+        if: ${{ !cancelled() && matrix.suite == 'visual' }}
         run: |
           chmod +x target/ui-reference/semon
           SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-reference/semon sessions --serve --listen 127.0.0.1:8770 \
@@ -334,9 +338,10 @@ jobs:
           done
           [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-before.log"; exit 1; }
           cd tests/ui
+          BEFORE=$(node --input-type=module -e 'import { BEFORE } from "./preservation-contract.mjs"; console.log(BEFORE)')
           SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" SEMON_UI_OUT="$SEMON_UI_OUT/before" \
-            SEMON_PRESERVATION_CANDIDATE=eb535ff8920fe9aa54e78babc9649cf6c9400ad6 \
-            SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" node preservation.mjs
+            SEMON_PRESERVATION_CANDIDATE="$BEFORE" \
+            SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" node preservation.mjs --historical-before
 
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
