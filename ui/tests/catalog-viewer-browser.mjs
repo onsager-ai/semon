@@ -1430,8 +1430,8 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
       await page.locator(`#page [data-entry-key="one:${first}"]`).waitFor();
     }
     const field = page.locator('#page [data-entry-key="one:400"]');
-    await field.getByRole('button', { name: 'Load recorded text', exact: true }).click();
-    await field.getByRole('button', { name: 'Load more text', exact: true }).click();
+    await page.getByRole('button', { name: 'Load recorded text', exact: true }).click();
+    await page.getByRole('button', { name: 'Load more text', exact: true }).click();
     await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Load earlier records' }).click();
     await page.locator('#page [data-entry-key="one:240"]').waitFor();
