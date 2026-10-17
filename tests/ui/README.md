@@ -35,32 +35,49 @@ its completion witness is the native-publication success message in the CI log.
   sample and extras fixtures. `TAP_SESSIONS` records those examples. Missing examples
   fail. Add a representative session whenever a new control shape is introduced.
   `SEMON_UI_COVERAGE=exhaustive` restores every session and trace.
-- Visual checks retain all existing full-screen mismatch ratchets, strict region
-  comparisons, and pushed-data pixel parity. A `pending` reference still enforces
-  its ratchet; it is not a reason to delete the check or loosen the baseline.
-- The required actual-application comparison uses the independently built Source
-  `263a02da278716ab2309b8e34a463419e5c781e5` selected with Hub `503fbe0`.
-  `preservation-contract.mjs` owns that provenance and all 62 required cases at
-  390/820/1280px, both themes, including open Thinking/tools/output, a completed
-  child and phone drawers. Pixel differences fail at the existing 0.1/0.0001
-  thresholds; missing/duplicate/unknown cases, geometry and execution errors fail
-  independently. Every PR, main and manual visual run builds this reference.
-  Only the exact pinned historical before candidate may use `--historical-before`;
-  its differences remain reported, with structural/execution failures enforced.
-  The mockup adapter preserves the selected application's responsive header and
-  does not inject Composer, extra lineage or a leading Cached history row. Native
-  qualification is compared on the candidate, without implicit pixel exemptions.
-- Comparison against the older sample mockup is historical reporting and has no
-  pass/fail assertion. It is off by default. `SEMON_PIXEL_SAMPLE_REPORT=1` restores
-  those images and report columns without changing the required comparisons.
+- Visual authority is the selected complete application, independently built
+  from Source `263a02da278716ab2309b8e34a463419e5c781e5` and selected with Hub
+  `503fbe0`. The 62-state preservation gate remains required on every run. The
+  historical actual-frame manifest also retains all 113 full screenshots and
+  162 strict region captures, plus 12 full frames/20 regions for the two-machine
+  viewer and 15 full frames/24 regions for pushed-data parity. The actual UI
+  reference runs through its original `compat=1` route and history states; the
+  pushed-data comparison is served against the machine's own viewer.
+- Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
+  Missing, duplicate, unknown or unmapped frames, selector failures, geometry
+  changes, retired API requests, and execution errors fail independently. Raw
+  pixel findings remain in the reports. `visual-acceptance.json` starts empty;
+  a reviewed entry can accept only one exact comparator, scope, state, candidate
+  runtime-binary fingerprint, reference pins, screenshot/diff hashes and bounded
+  text/geometry evidence hashes. The reviewed candidate commit is recorded as
+  provenance; CI matches the runtime binary and exact captures so adding the
+  registry does not create a self-referential commit hash or imply ancestry.
+  Stale, unreviewed or incomplete records fail closed. No broad waiver, mask,
+  auto-approval or threshold change can turn a mismatch green.
+- The `overhaul.html` and `semon-sample.html` HTML renderers and their screenshot
+  workflow are retired from the active tree. The historical fixture values stay
+  in `fixture-data/*.json`; CI compares them deeply with extraction from pinned
+  source commit `bf9190ef2b80fcd56726f61dc480346b698039a2`. The HTML source and
+  prior adapter remain in Git history; `historical-reference-map.json` retains
+  the old mapping, and `historical-pixel-ratchet.json` retains its per-case
+  ratios and dimensions. These preserve the original data but never act as an
+  active renderer or acceptance baseline.
+- `preservation-contract.mjs` pins the selected actual reference and all 62 cases
+  at 390/820/1280px, both themes, including open Thinking/tools/output, a
+  completed child and phone drawers. Only the exact pinned historical before
+  candidate may use `--historical-before`; its raw differences remain reported.
 - Request-budget measurements remain informational above their ceilings. They run
   alongside required performance/error checks; measurement infrastructure failures
   still fail. Turning them into hard limits requires calibrating the budgets.
 
-Workflow dispatch exposes `exhaustive` and `sample_report` for deeper audits.
+Workflow dispatch exposes `exhaustive` for deeper touch audits.
 `refresh_diagnostics` also runs the candidate harness against pinned recovery baseline `c402e481dbe23bcf03841e47b5f7eccd14c0e426`; recovery PR #438 enables this comparison automatically. Both binaries use the same runner, locked browser, long fixture, viewports and 4× CPU throttle. The original three append samples and assertions remain; eight additional appends sweep 0/750/1500/2250 ms after naturally occurring selected-metadata requests twice. Each still appends ten records. `perf.json` and `refresh-baseline/perf.json` retain per-endpoint CDP admission/response/completion/failure/cancellation, observed JSON generation/refresh state, and marker DOM-commit/two-frame-visible times. These are browser observations, not server worker-admission or index-publication timestamps; returned generations bound when changed evidence first becomes observable. No extra product polling or timer changes are introduced. Timing remains report-only; missing markers, instrumentation and page errors fail as before.
 The infrastructure tests (`suite-plan`, pixel diff, tap hit-testing, catalog cache,
-and catalog wire validation) guard coverage selection and the comparison machinery.
+catalog wire validation, bounded DOM evidence, and preservation contracts) guard
+coverage selection, exact artifact approval bindings and the actual comparison
+machinery. The visual artifacts include a cross-state selector summary of changed
+text, boxes, and computed styles, with bounded examples linked to the per-state
+screenshots and evidence JSON.
 
 The diagnostic comparison also enables the existing `SEMON_BUILD_TIMING` observer
 on both fixture servers. Each screen retains at most 20,000 sanitized phase,

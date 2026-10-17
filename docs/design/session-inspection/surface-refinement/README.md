@@ -35,8 +35,11 @@ comparison against the disposable viewer. The operation record
 against the final canvas. Future changes edit the existing native component.
 
 The reviewed reference change is limited to the same child-session perimeter and
-hover paint in `tests/ui/reference/overhaul.html`. Message layout, visual mismatch
-thresholds, required cases and generic touch checks remain unchanged. Composer
-dropdown density is a separate user-requested 40px touch exception, documented
-in the shared contract and covered by the compact gallery. See validation.json
-for actual checks and limits; passing local checks is not aggregate CI approval.
+hover paint recorded in the historical `tests/ui/reference/overhaul.html` source
+at the baseline revision above. The active visual authority is now the selected
+complete application: its 62-state preservation gate and the retained 113-frame /
+162-region manifest are documented in [the UI checks](../../../../tests/ui/README.md).
+The strict thresholds and generic touch checks remain unchanged. Composer dropdown
+density is a separate user-requested 40px touch exception, documented in the shared
+contract and covered by the compact gallery. See validation.json for the original
+check limits and provenance; passing local checks is not aggregate CI approval.

@@ -1,7 +1,7 @@
 {
   "name": "semon-viewer-ui-checks",
   "private": true,
-  "description": "CI-only browser checks for semon sessions --serve: the sample fixture, the ported mockup check scripts, and the pixel comparison against the mockup. Not part of the Rust build.",
+  "description": "CI-only browser checks for semon sessions --serve: retained historical fixture data, actual-application visual comparisons, and functional browser checks. Not part of the Rust build.",
   "type": "module",
   "engines": {
     "node": ">=22"
