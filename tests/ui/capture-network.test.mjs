@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { failedSelectedApiEvents } from './lib.mjs';
+import { captureRequestOwnership, failedSelectedApiEvents } from './lib.mjs';
 import {
   SESSION_TRACE_EVIDENCE_LIMITS,
   summarizeSessionTraceResponse,
@@ -102,6 +102,111 @@ test('initial selected failures are retained until initial readiness completes',
   const error = aborted({ path: '/api/session-entry', routeKey: 'initial' });
   assert.deepEqual(failures([error], 'candidate', 'initial'), [error]);
   assert.deepEqual(failures([error], 'candidate', 'later-selection'), []);
+});
+
+const previousTrace = {
+  ...request,
+  path: '/api/session-trace',
+  routeKey: 'quill',
+  queryDigest: 'exact-quill-query-with-machine-and-options',
+  status: 200,
+  ok: true,
+};
+function traceTransition(
+  events = [
+    { ...previousTrace, event: 'response' },
+    { ...previousTrace, event: 'finished' },
+  ],
+) {
+  return {
+    captureRole: 'candidate',
+    captureRouteKey: 'sentinel',
+    captureRouteTransition: {
+      from: 'quill',
+      to: 'sentinel',
+      expectedQueryDigest: 'exact-sentinel-query-with-machine-and-options',
+    },
+    captureApiEvents: events,
+  };
+}
+const latePreviousTrace = {
+  ...previousTrace,
+  id: 2,
+  routeKey: 'sentinel',
+};
+
+test('an exact completed previous Trace poll retains its owner during navigation handoff', () => {
+  const page = traceTransition();
+  const owner = captureRequestOwnership(page, latePreviousTrace);
+  assert.equal(owner.routeKey, 'quill');
+  assert.equal(owner.captureRouteKeyAtStart, 'sentinel');
+  assert.deepEqual(owner.ownerAttribution, {
+    kind: 'completed-prior-trace-during-navigation',
+    responseId: 1,
+    expectedQueryDigest: 'exact-sentinel-query-with-machine-and-options',
+  });
+  const error = { ...latePreviousTrace, ...owner, event: 'failed', error: 'net::ERR_ABORTED' };
+  page.captureApiEvents.push(error);
+  assert.deepEqual(failedSelectedApiEvents(page), []);
+  assert.ok(page.captureApiEvents.includes(error));
+  assert.equal(error.error, 'net::ERR_ABORTED');
+});
+
+test('previous Trace ownership requires the complete exact prior request evidence', () => {
+  for (const change of [
+    { id: 2 },
+    { method: 'POST' },
+    { path: '/api/session-home' },
+    { routeKey: 'unrelated' },
+    { queryDigest: 'other-machine-turn-or-options' },
+    { status: 409, ok: false },
+    { status: 500, ok: false },
+  ]) {
+    const page = traceTransition([
+      { ...previousTrace, event: 'response', ...change },
+      { ...previousTrace, event: 'finished', ...change },
+    ]);
+    assert.deepEqual(captureRequestOwnership(page, latePreviousTrace), { routeKey: 'sentinel' });
+  }
+  for (const events of [
+    [],
+    [{ ...previousTrace, event: 'response' }],
+    [
+      { ...previousTrace, event: 'response' },
+      { ...previousTrace, event: 'finished', error: 'net::ERR_ABORTED' },
+    ],
+  ])
+    assert.deepEqual(captureRequestOwnership(traceTransition(events), latePreviousTrace), {
+      routeKey: 'sentinel',
+    });
+});
+
+test('current, unmatched, non-Trace and post-handoff aborts remain fatal', () => {
+  for (const change of [
+    { queryDigest: 'exact-sentinel-query-with-machine-and-options' },
+    { queryDigest: 'unknown-query' },
+    { method: 'POST' },
+    { path: '/api/session-entry' },
+  ]) {
+    const page = traceTransition(),
+      tracked = { ...latePreviousTrace, ...change },
+      error = {
+        ...tracked,
+        ...captureRequestOwnership(page, tracked),
+        event: 'failed',
+        error: 'net::ERR_ABORTED',
+      };
+    page.captureApiEvents.push(error);
+    assert.deepEqual(failedSelectedApiEvents(page), [error]);
+  }
+  const page = traceTransition();
+  page.captureRouteTransition.expectedQueryDigest = latePreviousTrace.queryDigest;
+  assert.deepEqual(captureRequestOwnership(page, latePreviousTrace), { routeKey: 'sentinel' });
+  page.captureRouteTransition = null;
+  assert.deepEqual(captureRequestOwnership(page, latePreviousTrace), { routeKey: 'sentinel' });
+  page.captureRouteTransition = traceTransition().captureRouteTransition;
+  page.captureRole = 'reference';
+  assert.deepEqual(captureRequestOwnership(page, latePreviousTrace), { routeKey: 'sentinel' });
 });
 
 test('session trace evidence hashes exact bytes and retains only bounded graph identities', () => {
