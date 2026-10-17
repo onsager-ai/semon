@@ -370,3 +370,37 @@ its own visible accepted-publication witness before checking the unchanged
 selected inclusion, unavailable-status and three-row cap assertions. No product
 status logic or timing changed. The earlier interpretation as a selected-status
 application bug is superseded by this request/publication evidence.
+
+### Workspace fixture receipts and exact-pair evidence — 2026-10-18
+
+The full e361 UI run `39058724365` validates the original expansion clicks,
+accessibility and selected-approval navigation. Its transport comparison is
+27/27 frames and 44/44 regions pixel-exact; accessibility covers 473 screens
+and 19,294 controls with no failures. Foundation, generated freshness and nine
+of ten functional suites pass. The interaction job reaches its existing
+15-minute job limit without reporting the new workspace cases; its exact
+stalled stage is unproven. These partial results are not final acceptance.
+
+The four new workspace fixtures pause the browser clock to preserve deliberate
+eight-second polling advances. Their readiness checks now poll actual state
+through the existing bounded Node deadline rather than depending on a paused
+animation frame. Supporting run `39059912038` then identifies an independent
+fixture wait: all four cases reach the unavailable publication and wait for the
+completion of an unread 503 body that the application intentionally cancels.
+The fixture now requires the exact 503 HTTP receipt and unchanged rendered
+saved-row/qualification/badge assertions; successful 200 receipts still require
+body completion. Supporting run `39060191323` passes all four phone/desktop
+light/dark cases against unchanged e361 application code. No product deadline,
+poll cadence, cancellation, HTTP assertion or fixture state is relaxed. The
+failure and temporary diagnostic workflow remain historical evidence; the
+workflow is not included in the PR. Full final interaction checks remain required.
+
+The same e361 visual run is incomplete: two aborted Home POSTs prevent three
+captures, so 60 exact expanded captures do not establish 62-state acceptance.
+Failure-only request ownership diagnostics retain those failures without an
+abort waiver. Strict regions are 162/162 exact; only 112/113 frames are captured,
+with 108 threshold passes and four raw differences. The preceding d383 complete
+comparison remains historical rather than inherited evidence. Performance has
+52 report-only budget overages and no warnings/failures; this debt is not fixed.
+The current pair, required checks, original artifacts and unresolved visual
+decisions are maintained in the #380 evidence continuation linked from both PRs.
