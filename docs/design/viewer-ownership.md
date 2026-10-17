@@ -227,7 +227,10 @@ The native relationship view resolves peer names from at most 128 exact recorded
 handoff participants, qualified against the same Catalog/source generation as
 the selected branch. Participant versions enter its response generation. The
 selected session's bounded family metadata also supplies exact ancestor names.
-These names never add sessions or turns to the causal cohort or timeline totals.
+Qualified participant summaries contribute once to the original agent count and
+session-cost total, even when their receiving turn is unavailable. Unknown or
+unpriced costs remain qualified. These summaries never add turns, activity,
+duration, waits or critical edges to the causal cohort or timeline.
 An incoming root retains its handoff identity and kind; absent, ambiguous or
 stale related metadata stays explicitly unavailable.
 
