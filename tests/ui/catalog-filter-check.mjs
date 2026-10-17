@@ -115,18 +115,27 @@ export async function catalogFilterCheck(browser, name) {
         await page.reload();
         await page.locator('#sq').waitFor();
         await filterSheet(page);
-        assert.equal(
-          await page
-            .locator('.sh-select[data-label="Harness"] [role="option"][aria-selected="true"]')
-            .getAttribute('data-value'),
-          row.harness,
-        );
-        assert.equal(
-          await page
-            .locator('.sh-select[data-label="Repo"] [role="option"][aria-selected="true"]')
-            .getAttribute('data-value'),
-          row.repo,
-        );
+        for (const [label, value] of [
+          ['Harness', row.harness],
+          ['Repo', row.repo],
+        ]) {
+          const select = page.locator(`.sh-select[data-label="${label}"]`);
+          await select.locator('.sh-select-trigger').press('Enter');
+          assert.equal(
+            await select
+              .locator('[role="option"][aria-selected="true"]')
+              .getAttribute('data-value'),
+            value,
+          );
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(
+            (label) =>
+              document
+                .querySelector(`.sh-select[data-label="${label}"] .sh-select-trigger`)
+                ?.getAttribute('aria-expanded') === 'false',
+            label,
+          );
+        }
         await doneFilterSheet(page);
         await pickFilter(page, 'Repo', '');
         await page.waitForFunction(() => !new URLSearchParams(location.search).has('repo'));
