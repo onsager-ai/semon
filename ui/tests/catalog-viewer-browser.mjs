@@ -730,14 +730,15 @@ for (const width of [390, 1280])
     }
   });
 
-test('partial catalog discovery completes while retaining uncommitted filter focus', async () => {
+test('partial catalog discovery completes while retaining uncommitted search focus', async () => {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
     let reads = 0;
     await page.route('http://catalog.test/**', (route) => {
       const path = new URL(route.request().url()).pathname;
-      if (path === '/api/session-capabilities') return route.fulfill({ json: capabilities(false) });
+      if (path === '/api/session-capabilities')
+        return route.fulfill({ json: { ...capabilities(false), metadata_search: true } });
       if (path === '/api/sessions') {
         reads++;
         return route.fulfill({
@@ -773,7 +774,7 @@ test('partial catalog discovery completes while retaining uncommitted filter foc
     await page.addScriptTag({ content: outputFiles[0].text });
     await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
     await page.getByText('More sessions are being discovered. This list is incomplete.').waitFor();
-    const harness = page.getByRole('textbox', { name: 'Harness', exact: true });
+    const harness = page.getByRole('searchbox', { name: 'Search session details', exact: true });
     await harness.fill('uncommitted');
     await harness.evaluate((node) => node.setSelectionRange(2, 7));
     await page
@@ -921,7 +922,7 @@ test('bounded metadata search preserves literal query and exposes empty partial 
     await page.goto('http://catalog.test/sessions');
     await page.addScriptTag({ content: outputFiles[0].text });
     await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
-    const input = page.getByRole('textbox', { name: 'Search session details', exact: true });
+    const input = page.getByRole('searchbox', { name: 'Search session details', exact: true });
     await input.waitFor();
     await input.fill(query);
     await input.press('Tab');
@@ -997,20 +998,29 @@ for (const width of [390, 1280])
       await page.goto('http://catalog.test/sessions');
       await page.addScriptTag({ content: outputFiles[0].text });
       await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
-      const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      const query = page.getByRole('searchbox', { name: 'Search session details', exact: true });
       await query.waitFor();
-      // One submit reads the whole form, including fields that have not blurred.
-      await page.locator('.catalog-filters').evaluate((form) => {
-        form.elements.namedItem('q').value = 'Session';
-        form.elements.namedItem('harness').value = 'claude';
-        form.elements.namedItem('repo').value = '/repo';
-      });
+      // Filter choices commit together when the existing shared sheet closes.
+      await page.locator('.facet-btn').click();
+      for (const [label, value] of [
+        ['Harness', 'claude'],
+        ['Project', '/repo'],
+      ]) {
+        const select = page.locator(`.sh-select[data-label="${label}"]`);
+        await select.locator('.sh-select-trigger').click();
+        await select.locator(`[role="option"][data-value="${value}"]`).click();
+      }
+      await page.locator('.filters-sheet .fdone').click();
+      await page.waitForFunction(() => !history.state?.sheet);
+      assert.equal(reads.length, 2);
+      await query.fill('Session');
       await query.press('Enter');
       await page.getByRole('button', { name: 'Clear filters', exact: true }).waitFor();
-      assert.equal(reads.length, 2);
-      assert.equal(reads[1].q, 'Session');
-      assert.equal(reads[1].harness, 'claude');
-      assert.equal(reads[1].repo, '/repo');
+      await page.waitForFunction(() => new URLSearchParams(location.search).get('q') === 'Session');
+      assert.equal(reads.length, 3);
+      assert.equal(reads[2].q, 'Session');
+      assert.equal(reads[2].harness, 'claude');
+      assert.equal(reads[2].repo, '/repo');
       const row = page.locator('#page [data-id="row-18"]');
       await row.scrollIntoViewIfNeeded();
       const listScroll = await page.evaluate(() =>
@@ -1021,7 +1031,8 @@ for (const width of [390, 1280])
       assert.ok(listScroll > 100);
       await row.press('Enter');
       await page.locator('[data-entry-key]').first().waitFor();
-      await page.getByRole('button', { name: 'Back to sessions', exact: false }).press('Enter');
+      if (width < 761) await page.locator('#lead-btn').click();
+      await page.getByRole('link', { name: 'Sessions', exact: true }).press('Enter');
       await row.waitFor();
       assert.equal(await query.inputValue(), 'Session');
       assert.equal(await row.evaluate((node) => document.activeElement === node), true);
@@ -1130,7 +1141,8 @@ for (const width of [390, 1280])
       await page.clock.runFor(3100);
       assert.equal(await page.locator('#topbar .l1 .t').textContent(), 'Meaningful later name');
       assert.equal(await page.evaluate(() => body === document.querySelector('.turns')), true);
-      await page.getByRole('button', { name: 'Back to sessions' }).click();
+      if (width < 761) await page.locator('#lead-btn').click();
+      await page.getByRole('link', { name: 'Sessions', exact: true }).click();
       assert.match(
         await page.locator('[data-session-row="list"][data-id="one"] .nm').innerText(),
         /Meaningful later name/,
@@ -1142,7 +1154,7 @@ for (const width of [390, 1280])
 
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
-    test(`loaded Catalog parent navigation and expansion stay focused at ${width}px ${colorScheme}`, async () => {
+    test(`complete Catalog rows and grouping stay focused at ${width}px ${colorScheme}`, async () => {
       const browser = await chromium.launch();
       try {
         const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
@@ -1177,32 +1189,32 @@ for (const width of [390, 1280])
             get: () => 'hidden',
           });
         });
-        const parent = page.locator('.kids-wrap > [data-id="parent"]');
+        const parent = page.locator('[data-session-row="list"][data-id="parent"]');
         await parent.waitFor();
-        assert.equal(await page.locator('.kids .nrow.child').count(), 5);
+        assert.equal(await page.locator('[data-session-row="list"]').count(), 9);
         assert.equal(await page.locator('[data-id="orphan"][data-session-row="list"]').count(), 1);
         await parent.evaluate((node) => {
           window.parentRow = node;
         });
-        const more = page.getByRole('button', { name: 'Show 2 more', exact: true });
+        const group = page.getByRole('button', { name: 'Project', exact: true });
         const before = requests.length;
-        await more.focus();
-        await more.press('Enter');
-        assert.equal(await page.locator('.kids .nrow.child').count(), 7);
-        const fewer = page.getByRole('button', { name: 'Show fewer', exact: true });
-        assert.equal(await fewer.getAttribute('aria-expanded'), 'true');
-        assert.equal(await fewer.evaluate((node) => node === document.activeElement), true);
-        await fewer.press('Enter');
-        assert.equal(await page.locator('.kids .nrow.child').count(), 5);
+        await group.focus();
+        await group.press('Enter');
+        assert.equal(await group.getAttribute('aria-pressed'), 'true');
+        assert.equal(await group.evaluate((node) => node === document.activeElement), true);
+        assert.equal(await page.locator('[data-session-row="list"]').count(), 9);
+        await page.getByRole('button', { name: 'Recent', exact: true }).press('Enter');
         assert.equal(
           await page.evaluate(
-            () => parentRow === document.querySelector('.kids-wrap > [data-id="parent"]'),
+            () =>
+              parentRow === document.querySelector('[data-session-row="list"][data-id="parent"]'),
           ),
           true,
         );
-        assert.equal(requests.length, before, 'local expansion requested source preparation');
-        const child = page.locator('.kids .nrow.child[data-id="child-0"]');
-        assert.match(await child.innerText(), /Subagent/);
+        assert.equal(requests.length, before, 'local grouping requested source preparation');
+        const child = page.locator('[data-session-row="list"][data-id="child-0"]');
+        assert.equal(await child.locator('.session-row-meta').count(), 1);
+        assert.equal(await child.locator('.row-delegation').count(), 1);
         assert.ok(
           await child.evaluate(
             (node, minimum) => node.getBoundingClientRect().height >= minimum,

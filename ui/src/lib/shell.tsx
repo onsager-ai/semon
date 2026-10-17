@@ -421,9 +421,10 @@ export function createShellChrome(host: ShellHost): ShellChrome {
       if (props.account) {
         if (desktopAccount) account.update(desktopAccount, props.account);
         else desktopAccount = account.mount(props.account);
-        if (props.accountTarget && desktopAccount.parentElement !== props.accountTarget)
-          props.accountTarget.append(desktopAccount);
-        else nodes.push(desktopAccount);
+        if (props.accountTarget) {
+          if (desktopAccount.parentElement !== props.accountTarget)
+            props.accountTarget.append(desktopAccount);
+        } else nodes.push(desktopAccount);
       }
       bar.classList.remove('scrolled');
       bar.classList.toggle('session-bar', !!props.session);

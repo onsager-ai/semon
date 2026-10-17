@@ -133,7 +133,7 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
           git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-store --bin semon --features semon-sessions/test-clock
           strip --strip-debug target/debug/semon
       - name: Retain selected UI reference binary
         if: github.event.pull_request.number == 438

@@ -83,7 +83,7 @@ export function renderCatalogList(
   }
   render(
     <>
-      <div class="ph">
+      <div class="ph" data-catalog-observation={snapshot.observation ?? 'Cached history'}>
         <h1>Sessions</h1>
         {snapshot.browser ? (
           <div class="sub">
