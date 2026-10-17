@@ -57,6 +57,8 @@ const CAPTURE_TIMEOUT_MS = 8000;
 const CAPTURE_API_EVENT_LIMIT = 2000;
 const CAPTURE_HOME_POST_EVENT_LIMIT = 48;
 const CAPTURE_HOME_POST_BODY_LIMIT = 64 * 1024;
+// One same-origin Home POST record per request; the last capture emitted 50.
+const CAPTURE_HOME_POST_REQUEST_LIMIT = 64;
 const CAPTURE_GENERATION_QUERY_KEYS = new Set(['generation', 'errors_generation']);
 // Fail only selected content reads. Optional observations and native controls
 // remain in the raw event log and retain their own existing suite assertions.
@@ -141,6 +143,100 @@ function recordHomePostEvent(page, event) {
   }
 }
 
+function recordHomePostStart(page, context) {
+  page.captureHomePostStarts.push(context);
+  if (page.captureHomePostStarts.length > CAPTURE_HOME_POST_REQUEST_LIMIT) {
+    const dropped = page.captureHomePostStarts.length - CAPTURE_HOME_POST_REQUEST_LIMIT;
+    page.captureHomePostStarts.splice(0, dropped);
+    page.captureHomePostStartsTruncated += dropped;
+  }
+}
+
+function recordHomePostCdpRequest(page, request) {
+  page.captureHomePostCdpRequests.push(request);
+  if (page.captureHomePostCdpRequests.length > CAPTURE_HOME_POST_REQUEST_LIMIT) {
+    const dropped = page.captureHomePostCdpRequests.length - CAPTURE_HOME_POST_REQUEST_LIMIT;
+    page.captureHomePostCdpRequests.splice(0, dropped);
+    page.captureHomePostCdpRequestsTruncated += dropped;
+  }
+}
+
+function matchHomePostRequestsToCdp(nodeStarts, cdpRequests, truncated) {
+  return nodeStarts.map((start) => {
+    if (truncated) {
+      return { nodeRequestId: start.nodeRequestId, association: 'unknown-cdp-ring-truncated' };
+    }
+    if (
+      start.postBodyDigestState !== 'complete' ||
+      !start.postBodyDigest ||
+      !Number.isFinite(start.requestTimingStartTime) ||
+      start.requestTimingStartTime <= 0 ||
+      typeof start.queryDigest !== 'string'
+    ) {
+      return { nodeRequestId: start.nodeRequestId, association: 'unknown-node-network-timing-or-digest' };
+    }
+    const startTimeMs = Math.round(start.requestTimingStartTime);
+    const candidates = cdpRequests.filter(
+      (request) =>
+        Number.isFinite(request.wallTime) &&
+        Math.round(request.wallTime * 1000) === startTimeMs &&
+        request.method === start.method &&
+        request.path === start.path &&
+        request.queryDigest === start.queryDigest &&
+        request.postBodyDigestState === 'complete' &&
+        request.postBodyDigest === start.postBodyDigest,
+    );
+    const matchingNodeStarts = nodeStarts.filter(
+      (other) =>
+        Number.isFinite(other.requestTimingStartTime) &&
+        other.requestTimingStartTime > 0 &&
+        Math.round(other.requestTimingStartTime) === startTimeMs &&
+        other.method === start.method &&
+        other.path === start.path &&
+        other.queryDigest === start.queryDigest &&
+        other.postBodyDigest === start.postBodyDigest,
+    );
+    if (candidates.length !== 1 || matchingNodeStarts.length !== 1) {
+      return {
+        nodeRequestId: start.nodeRequestId,
+        association:
+          candidates.length > 1 || matchingNodeStarts.length > 1
+            ? 'ambiguous-cdp-network-time-and-signature'
+            : 'unknown-no-exact-cdp-network-time-and-signature',
+        cdpRequestIds: candidates.map((request) => request.cdpRequestId),
+        nodeRequestIds: matchingNodeStarts.map((request) => request.nodeRequestId),
+      };
+    }
+    return {
+      nodeRequestId: start.nodeRequestId,
+      nodeSequence: start.nodeSequence,
+      cdpRequestId: candidates[0].cdpRequestId,
+      cdpSequence: candidates[0].cdpSequence,
+      requestTimingStartTime: start.requestTimingStartTime,
+      requestTimingStartTimeInitial: start.requestTimingStartTimeInitial,
+      requestTimingObservations: start.requestTimingObservations,
+      cdpWallTime: candidates[0].wallTime,
+      association: 'unique-exact-cdp-network-time-and-request-signature',
+      documentURL: candidates[0].documentURL,
+      refererHeader: start.refererHeaderAtNodeStart,
+      refererMatchesDocumentURL:
+        start.refererHeaderAtNodeStart !== null &&
+        start.refererHeaderAtNodeStart === candidates[0].documentURL,
+      loadingFailure: candidates[0].loadingFailure ?? null,
+    };
+  });
+}
+
+function refreshHomePostTiming(context, request, stage) {
+  let startTime = null;
+  try {
+    const timing = request.timing();
+    startTime = Number.isFinite(timing.startTime) ? timing.startTime : null;
+  } catch {}
+  context.requestTimingObservations[stage] = startTime;
+  if (Number.isFinite(startTime) && startTime > 0) context.requestTimingStartTime = startTime;
+}
+
 function recordHomePostInvocation(page, invocation) {
   const keyMatches = (event) =>
     event.documentEpoch === invocation.documentEpoch && event.sequence === invocation.sequence;
@@ -173,6 +269,15 @@ function nodeHomePostContext(page, request, tracked) {
   try {
     frameURL = request.frame().url();
   } catch {}
+  let refererHeader = null;
+  try {
+    refererHeader = sanitizedDocumentURL(request.headers().referer ?? null);
+  } catch {}
+  let requestTimingStartTime = null;
+  try {
+    const timing = request.timing();
+    requestTimingStartTime = Number.isFinite(timing.startTime) ? timing.startTime : null;
+  } catch {}
   const postBytes = postBodyAvailable ? (body ?? Buffer.alloc(0)) : null;
   const postBodyBytes = postBytes?.byteLength ?? null;
   const postBodyDigestState = !postBodyAvailable
@@ -190,6 +295,10 @@ function nodeHomePostContext(page, request, tracked) {
     navigationRouteMarker: tracked.routeKey,
     routeTransitionAtNodeStart: captureRouteTransitionMarker(page.captureRouteTransition),
     documentURLAtNodeStart: sanitizedDocumentURL(frameURL),
+    refererHeaderAtNodeStart: refererHeader,
+    requestTimingStartTime: requestTimingStartTime > 0 ? requestTimingStartTime : null,
+    requestTimingStartTimeInitial: requestTimingStartTime,
+    requestTimingObservations: { started: requestTimingStartTime },
     postBodyBytes,
     postBodyDigest:
       postBytes && postBodyDigestState === 'complete'
@@ -546,9 +655,17 @@ export async function waitForCaptureReady(page, label = 'actual UI capture') {
               (pageInvocations.documentInvocationRingTruncated ?? 0),
           };
           const nodeEvents = page.captureHomePostEvents.slice(-CAPTURE_HOME_POST_EVENT_LIMIT);
-          const failedNodeStarts = nodeEvents.filter(
-            (event) => event.event === 'started' && homePostFailures.some((failure) => failure.id === event.nodeRequestId),
+          const nodeStarts = page.captureHomePostStarts.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT);
+          const failedNodeContexts = nodeStarts.filter((event) =>
+            homePostFailures.some((failure) => failure.id === event.nodeRequestId),
           );
+          const failedNodeIds = new Set(homePostFailures.map((failure) => failure.id));
+          const cdpRequests = page.captureHomePostCdpRequests.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT);
+          const cdpAssociations = matchHomePostRequestsToCdp(
+            nodeStarts,
+            cdpRequests,
+            page.captureHomePostCdpRequestsTruncated > 0 || page.captureHomePostStartsTruncated > 0,
+          ).filter((association) => failedNodeIds.has(association.nodeRequestId));
           homePostTrace = {
             documentURLAtFailure: pageInvocations.documentURLAtFailure ?? sanitizedDocumentURL(page.url()),
             documentEpoch: pageInvocations.documentEpoch ?? null,
@@ -557,6 +674,12 @@ export async function waitForCaptureReady(page, label = 'actual UI capture') {
             pageInvocations,
             nodeEvents,
             nodeEventsTruncated: page.captureHomePostEventsTruncated,
+            nodeStarts,
+            nodeStartsTruncated: page.captureHomePostStartsTruncated,
+            failedNodeContexts,
+            cdpRequests,
+            cdpRequestsTruncated: page.captureHomePostCdpRequestsTruncated,
+            cdpAssociations,
             documentInvocationRingTruncated:
               pageInvocations.documentInvocationRingTruncated ?? null,
             associations: matchHomePostInvocations(
@@ -564,7 +687,7 @@ export async function waitForCaptureReady(page, label = 'actual UI capture') {
               nodeEvents,
               page.captureHomePostEventsTruncated > 0,
             ),
-            priorSuccessfulSameBodyResponses: failedNodeStarts.map((failure) => ({
+            priorSuccessfulSameBodyResponses: failedNodeContexts.map((failure) => ({
               nodeRequestId: failure.nodeRequestId,
               responses: nodeEvents
                 .filter(
@@ -693,8 +816,72 @@ export async function served(browser, opts = {}) {
     page.captureHomePostEventsTruncated = 0;
     page.captureHomePostRequestSequence = 0;
     page.captureHomePostContexts = new WeakMap();
+    page.captureHomePostStarts = [];
+    page.captureHomePostStartsTruncated = 0;
     page.captureHomePostInvocations = [];
     page.captureHomePostInvocationsTruncated = 0;
+    page.captureHomePostCdpRequests = [];
+    page.captureHomePostCdpRequestsTruncated = 0;
+    page.captureHomePostCdpRequestSequence = 0;
+    const cdp = await ctx.newCDPSession(page);
+    await cdp.send('Network.enable', { maxPostDataSize: CAPTURE_HOME_POST_BODY_LIMIT });
+    cdp.on('Network.requestWillBeSent', (event) => {
+      let url;
+      try {
+        url = new URL(event.request.url);
+      } catch {
+        return;
+      }
+      if (
+        url.origin !== origin ||
+        url.pathname !== '/api/viewer/home' ||
+        event.request.method !== 'POST'
+      )
+        return;
+      const postData = event.request.postData;
+      const postBytes = typeof postData === 'string' ? Buffer.from(postData, 'utf8') : null;
+      const hasPostData = event.request.hasPostData === true;
+      const postBodyBytes = postBytes?.byteLength ?? (hasPostData ? null : 0);
+      const postBodyDigestState =
+        !hasPostData && !postBytes
+          ? 'complete'
+          : !postBytes
+            ? 'unavailable'
+            : postBodyBytes > CAPTURE_HOME_POST_BODY_LIMIT
+              ? 'oversize'
+              : 'complete';
+      const postBodyDigest =
+        postBodyDigestState === 'complete'
+          ? createHash('sha256').update(postBytes ?? Buffer.alloc(0)).digest('hex')
+          : null;
+      recordHomePostCdpRequest(page, {
+        event: 'requestWillBeSent',
+        cdpRequestId: event.requestId,
+        cdpSequence: ++page.captureHomePostCdpRequestSequence,
+        method: event.request.method,
+        path: url.pathname,
+        queryDigest: selectedApiQueryDigest(event.request.url, origin),
+        documentURL: sanitizedDocumentURL(event.documentURL),
+        wallTime: Number.isFinite(event.wallTime) ? event.wallTime : null,
+        timestamp: Number.isFinite(event.timestamp) ? event.timestamp : null,
+        postBodyBytes,
+        postBodyDigest,
+        postBodyDigestState,
+        hasPostData,
+      });
+    });
+    cdp.on('Network.loadingFailed', (event) => {
+      const request = page.captureHomePostCdpRequests.findLast(
+        (candidate) => candidate.cdpRequestId === event.requestId,
+      );
+      if (request)
+        request.loadingFailure = {
+          timestamp: Number.isFinite(event.timestamp) ? event.timestamp : null,
+          errorText: event.errorText ?? null,
+          canceled: event.canceled ?? false,
+          blockedReason: event.blockedReason ?? null,
+        };
+    });
     page.on('request', (request) => {
       const apiPath = selectedApiPath(request.url(), origin);
       if (page.requests) page.requests.push(request.url());
@@ -715,6 +902,7 @@ export async function served(browser, opts = {}) {
         if (tracked.method === 'POST' && tracked.path === '/api/viewer/home') {
           const context = nodeHomePostContext(page, request, tracked);
           page.captureHomePostContexts.set(request, context);
+          recordHomePostStart(page, context);
           recordHomePostEvent(page, { event: 'started', ...context, at: tracked.startedAt });
         }
       }
@@ -740,6 +928,7 @@ export async function served(browser, opts = {}) {
         });
         const homePost = page.captureHomePostContexts.get(request);
         if (homePost) {
+          refreshHomePostTiming(homePost, request, 'finished');
           recordHomePostEvent(page, {
             event: 'finished',
             ...homePost,
@@ -760,8 +949,10 @@ export async function served(browser, opts = {}) {
         const error = request.failure()?.errorText ?? 'network error';
         recordCaptureApiEvent(page, { event: 'failed', ...tracked, error, at: Date.now() });
         const homePost = page.captureHomePostContexts.get(request);
-        if (homePost)
+        if (homePost) {
+          refreshHomePostTiming(homePost, request, 'failure');
           recordHomePostEvent(page, { event: 'failed', ...homePost, error, at: Date.now() });
+        }
         completed(request, null, { error });
       }
     });
@@ -778,7 +969,8 @@ export async function served(browser, opts = {}) {
         });
       if (tracked?.method === 'POST' && tracked.path === '/api/viewer/home') {
         const homePost = page.captureHomePostContexts.get(response.request());
-        if (homePost)
+        if (homePost) {
+          refreshHomePostTiming(homePost, response.request(), 'response');
           recordHomePostEvent(page, {
             event: 'response',
             ...homePost,
@@ -786,6 +978,7 @@ export async function served(browser, opts = {}) {
             ok: response.ok(),
             at: Date.now(),
           });
+        }
       }
     });
     await page.exposeFunction('__semonRecordHomePostInvocation', (invocation) => {
