@@ -1118,13 +1118,20 @@ for (const width of [390, 1280])
     });
 test('temporary boot failure and pending projection recover without starting global content', async () => {
   const browser = await chromium.launch();
+  let releaseFirstRange,
+    page,
+    capabilityReads = 0,
+    ready = false,
+    rangeReads = 0,
+    stage = 'create fixture';
+  const requests = [];
+  const firstRangeHeld = new Promise((resolve) => {
+      releaseFirstRange = resolve;
+    }),
+    firstRangeStarted = Promise.withResolvers();
   try {
-    const page = await browser.newPage(),
-      requests = [];
-    let capabilityReads = 0,
-      ready = false,
-      rangeReads = 0;
-    await page.route('http://catalog.test/**', (route) => {
+    page = await browser.newPage();
+    await page.route('http://catalog.test/**', async (route) => {
       const url = new URL(route.request().url()),
         p = url.pathname;
       requests.push(p);
@@ -1135,7 +1142,11 @@ test('temporary boot failure and pending projection recover without starting glo
       if (p === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
       if (p === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
       if (p === '/api/session-transcript') {
-        if (++rangeReads === 1) return route.fulfill({ status: 503, body: '' });
+        if (++rangeReads === 1) {
+          firstRangeStarted.resolve();
+          await firstRangeHeld;
+          return route.fulfill({ status: 503, body: '' });
+        }
         return route.fulfill({ json: transcript('one', url.searchParams) });
       }
       return route.fulfill({
@@ -1185,9 +1196,11 @@ test('temporary boot failure and pending projection recover without starting glo
         },
       });
     });
+    stage = 'observe unavailable boot';
     await page
       .getByText('The source is updating or temporarily unavailable.', { exact: false })
       .waitFor();
+    stage = 'recover boot and select pending projection';
     await page.clock.runFor(1100);
     await page.locator('#page [data-id="one"]').click();
     assert.equal(await page.getByRole('button', { name: 'Open Composer' }).count(), 0);
@@ -1204,12 +1217,34 @@ test('temporary boot failure and pending projection recover without starting glo
       requests.some((p) => p === '/api/model' || p === '/api/session-transcript'),
       false,
     );
+    stage = 'refresh pending projection';
     await page.keyboard.press('Escape');
     ready = true;
     await page.clock.runFor(8100);
+    await withDeadline(firstRangeStarted.promise, 'first unavailable selected range request');
+    assert.equal(rangeReads, 1);
+    // Deliver the temporary error while the product clock is paused. Advancing
+    // across the recheck and retry together can otherwise miss this transient UI.
+    const unavailableResponse = withDeadline(
+      page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === '/api/session-transcript' &&
+          url.searchParams.get('machine') === 'source' &&
+          url.searchParams.get('sid') === 'one' &&
+          response.request().method() === 'GET'
+        );
+      }),
+      'first unavailable selected range response headers',
+    );
+    stage = 'deliver unavailable selected range';
+    releaseFirstRange();
+    assert.equal((await unavailableResponse).status(), 503);
+    stage = 'observe unavailable selected range';
     await page
       .getByText('The source is updating or temporarily unavailable.', { exact: false })
       .waitFor();
+    stage = 'recover selected range after original retry interval';
     await page.clock.runFor(1100);
     await page.locator('#page [data-entry-key="one:5"]').waitFor();
     assert.equal(await page.getByRole('button', { name: 'Open Composer' }).count(), 0);
@@ -1218,12 +1253,61 @@ test('temporary boot failure and pending projection recover without starting glo
       .getByText('This session has ended.', { exact: true })
       .waitFor();
     assert.equal(requests.includes('/api/model'), false);
+    stage = 'destroy fixture';
     await page.evaluate(() => app.destroy());
     const afterDestroy = requests.length;
     await page.clock.runFor(30000);
     assert.equal(requests.length, afterDestroy);
     assert.equal(await page.evaluate(() => runtimeStreams.every((stream) => stream.closed)), true);
+  } catch (error) {
+    let dom;
+    try {
+      dom = await withDeadline(
+        page.evaluate(() => {
+          const known = [
+            'The source is updating or temporarily unavailable.',
+            'Current native session selection is unavailable.',
+            'Loading',
+            'No native records',
+            'Cached history',
+            'Recorded history',
+          ];
+          return {
+            clock: Date.now(),
+            path: location.pathname,
+            historyKeys: Object.keys(history.state ?? {}).slice(0, 12),
+            entries: document.querySelectorAll('#page [data-entry-key]').length,
+            notes: [...document.querySelectorAll('#page [role="status"], #page .catalog-note')]
+              .slice(0, 12)
+              .map((node) => {
+                const text = node.textContent.trim();
+                return {
+                  known: known.find((prefix) => text.startsWith(prefix)) ?? null,
+                  length: text.length,
+                  visible: node.getBoundingClientRect().height > 0,
+                };
+              }),
+          };
+        }),
+        'unavailable projection failure evidence',
+      );
+    } catch {
+      dom = { diagnosticUnavailable: true };
+    }
+    console.error(
+      'unavailable projection fixture failure: ' +
+        JSON.stringify({
+          stage,
+          capabilityReads,
+          rangeReads,
+          ready,
+          requests: requests.slice(-20),
+          dom,
+        }),
+    );
+    throw error;
   } finally {
+    releaseFirstRange();
     await browser.close();
   }
 });
