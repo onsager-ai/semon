@@ -25,7 +25,133 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  home-capture-owner-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'review/380-home-terminal-capture-diagnostic-20261018'
+    name: exact ebad Home request terminal diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+      SEMON_VISUAL_CANDIDATE_BIN: ${{ github.workspace }}/target/debug/semon
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify the diagnostic retains exact ebad application source
+        run: |
+          git fetch --no-tags --depth=1 origin ebad83b98bfec760128a03755b744e485f6f8338
+          git fetch --no-tags --depth=1 origin beb801eecf9da922441f9fbcb25b93e3dae54056
+          git diff --exit-code beb801eecf9da922441f9fbcb25b93e3dae54056 ebad83b98bfec760128a03755b744e485f6f8338 -- Cargo.toml Cargo.lock ui/build.mjs ui/package.json ui/package-lock.json ui/src crates tests/ui/preservation-contract.mjs tests/ui/visual-contract.mjs tests/ui/visual-coverage.json tests/ui/visual-acceptance.json tests/ui/pixel-diff.mjs
+          git diff --exit-code ebad83b98bfec760128a03755b744e485f6f8338 -- Cargo.toml Cargo.lock ui/build.mjs ui/package.json ui/package-lock.json ui/src crates tests/ui/preservation-contract.mjs tests/ui/visual-contract.mjs tests/ui/visual-coverage.json tests/ui/visual-acceptance.json tests/ui/pixel-diff.mjs
+          mkdir -p tests/ui/out
+          git rev-parse HEAD > tests/ui/out/terminal-diagnostic-provenance.txt
+          printf '%s\n' 'Diagnostic-only: observing fetch rejections can suppress native unhandledrejection reporting; this is not page-error or visual acceptance. Signature-only candidate records do not establish exact request ownership.' >> tests/ui/out/terminal-diagnostic-provenance.txt
+      - name: Download verified beb binaries for the unchanged ebad application
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39062263341
+          name: viewer-test-binaries
+          path: target/debug
+      - name: Download the selected compat reference binary from the same run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39062263341
+          name: viewer-ui-reference-binary
+          path: target/ui-reference
+      - name: Verify exact runtime fingerprint and restore executable bits
+        run: |
+          printf '%s\n' '1ed43c3c4755afe3a5f5b5efb7b0e51383355737a83411ac3af21e45262cc4cb  target/debug/semon' | sha256sum --check
+          chmod +x target/debug/semon target/debug/examples/ui-account-server target/ui-reference/semon
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+      - name: Install locked browser tooling
+        run: |
+          npm --prefix tests/ui ci --no-audit --no-fund
+          npm --prefix ui ci --no-audit --no-fund
+          node ui/node_modules/prettier/bin/prettier.cjs --check tests/ui/lib.mjs tests/ui/pixels.mjs tests/ui/preservation.mjs
+          node --test tests/ui/capture-network.test.mjs
+          npm --prefix tests/ui exec -- playwright install --with-deps chromium
+      - name: Write the sample fixtures
+        run: |
+          echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")" >> "$GITHUB_ENV"
+          node tests/ui/fixture.mjs "$RUNNER_TEMP/sample-extras" --extras > /dev/null
+
+      - name: Serve the fixtures
+        run: |
+          serve() { # name port dir
+            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
+              --claude-home "$3/claude" --claude-json "$3/.claude.json" --codex-home "$3/codex" --copilot-home "$3/copilot" --proc-root "$3/proc" --cache "$3/index.json" \
+              < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
+            for _ in $(seq 1 100); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
+              [ -n "$url" ] && break
+              sleep 0.2
+            done
+            [ -n "$url" ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }
+            echo "${url%%/?t=*} ${url##*t=}"
+          }
+          read -r base token < <(serve sample 8765 "$RUNNER_TEMP/sample")
+          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
+          echo "SEMON_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_TOKEN=$token" >> "$GITHUB_ENV"
+          read -r base token < <(serve sample-extras 8766 "$RUNNER_TEMP/sample-extras")
+          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
+          echo "SEMON_EXTRA_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_EXTRA_TOKEN=$token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$base/?t=$token"
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/examples/ui-account-server \
+            127.0.0.1:8768 "$RUNNER_TEMP/sample-extras/claude" "$RUNNER_TEMP/sample-extras/codex" \
+            "$RUNNER_TEMP/sample-extras/proc" "$RUNNER_TEMP/sample-extras/account-index.json" \
+            < /dev/null > "$RUNNER_TEMP/account-menu.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/account-menu.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/account-menu.log"; exit 1; }
+          base="${url%%/?t=*}"; token="${url##*t=}"
+          echo "SEMON_ACCOUNT_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_ACCOUNT_TOKEN=$token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$base/?t=$token"
+
+      - name: Compare actual native and selected complete reading UI
+        run: |
+          chmod +x target/ui-reference/semon
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-reference/semon sessions --serve --listen 127.0.0.1:8770 \
+            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-reference-index.json" \
+            < /dev/null > "$RUNNER_TEMP/ui-reference.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-reference.log"; exit 1; }
+          cd tests/ui
+          export SEMON_PRESERVATION_BASE="${url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${url##*t=}"
+          failed=0
+          node preservation.mjs || failed=1
+          SEMON_PIXEL_SCOPE=main node pixels.mjs || failed=1
+          exit "$failed"
+
+      - name: Preserve every diagnostic result without accepting failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ebad-home-request-terminal-diagnostic
+          path: tests/ui/out
+          if-no-files-found: error
+
   foundation:
+    if: github.ref_name != 'review/380-home-terminal-capture-diagnostic-20261018'
     name: UI types and generated assets
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -508,7 +634,7 @@ jobs:
 
   browser:
     name: viewer browser checks
-    if: ${{ always() }}
+    if: ${{ always() && github.ref_name != 'review/380-home-terminal-capture-diagnostic-20261018' }}
     needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
