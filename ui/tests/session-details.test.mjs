@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionState, catalogSessionRow, catalogSessionGroups} from './src/app/sessionPresentation';",
+      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionLabels, selectedSessionState, catalogSessionRow, catalogSessionGroups} from './src/app/sessionPresentation';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -15,6 +15,7 @@ const { outputFiles } = await build({
 const {
   parseSessionDetails,
   selectedSessionMenu,
+  selectedSessionLabels,
   selectedSessionState,
   catalogSessionRow,
   catalogSessionGroups,
@@ -84,6 +85,57 @@ test('malformed selected metadata and excessive model breakdowns cannot replace 
     Array.from({ length: 257 }, (_, i) => [String(i), { usd: null }]),
   );
   assert.throws(() => parseSessionDetails(huge), /bound/);
+});
+
+test('failed-step navigation stays in the desktop bar and the phone menu', () => {
+  const raw = { ...details(), errors: 2 },
+    session = {
+      key: 'selected',
+      name: 'Selected',
+      harness: 'claude',
+      native_ids: ['native'],
+      model: 'native-model',
+      cost: raw.cost,
+      details: parseSessionDetails(raw),
+    },
+    previousMatchMedia = globalThis.matchMedia;
+  try {
+    for (const phone of [false, true]) {
+      globalThis.matchMedia = (query) => {
+        assert.equal(query, '(max-width: 760px)');
+        return { matches: phone };
+      };
+      const menu = selectedSessionMenu(session, 'machine', false, true),
+        errorAction = menu.actions.find(({ key }) => key === 'errors'),
+        barAction = selectedSessionLabels(session, 'machine').find(({ key }) => key === 'errors');
+      assert.equal(barAction.action, 'errors');
+      assert.equal(barAction.text, '2 failed');
+      assert.equal(barAction.tip, 'Recorded failed steps');
+      assert.equal(menu.details.find(({ label }) => label === 'Errors').value, '2');
+      if (phone)
+        assert.deepEqual(errorAction, {
+          key: 'errors',
+          text: '2 failed',
+          dot: 'err',
+          note: 'Step through',
+          className: 'menu-errors',
+        });
+      else assert.equal(errorAction, undefined);
+      assert.equal(
+        menu.actions.some(({ key }) => key === 'wide'),
+        !phone,
+      );
+    }
+    session.details = parseSessionDetails({ ...raw, errors: 0 });
+    assert.equal(
+      selectedSessionMenu(session, 'machine', false, true).actions.some(
+        ({ key }) => key === 'errors',
+      ),
+      false,
+    );
+  } finally {
+    globalThis.matchMedia = previousMatchMedia;
+  }
 });
 
 test('selected family costs, ancestry and mismatches remain bounded and unknown totals stay unknown', () => {

@@ -359,6 +359,7 @@ export function selectedSessionMenu(
     ownCost: Cost = metadata?.cost ?? session.cost,
     cost = familyCost(session),
     state = selectedSessionState(session),
+    phone = matchMedia('(max-width: 760px)').matches,
     now = Date.now(),
     native = session.native_ids.length === 1 ? session.native_ids[0] : undefined,
     command = native
@@ -368,7 +369,7 @@ export function selectedSessionMenu(
   if (trace)
     actions.push({ key: 'trace', text: 'Trace this turn', icon: I.trace, className: 'menu-trace' });
   if (command) actions.push({ key: 'copy', text: 'Copy resume command', icon: I.copy });
-  if (metadata?.errors)
+  if (phone && metadata?.errors)
     actions.push({
       key: 'errors',
       text: metadata.errors + ' failed',
@@ -376,8 +377,7 @@ export function selectedSessionMenu(
       note: 'Step through',
       className: 'menu-errors',
     });
-  if (!matchMedia('(max-width: 760px)').matches)
-    actions.push({ key: 'wide', text: 'Wide transcript', icon: I.wide, checked: wide });
+  if (!phone) actions.push({ key: 'wide', text: 'Wide transcript', icon: I.wide, checked: wide });
   else if (metadata?.family?.runs.length)
     actions.push({
       key: 'runs',
