@@ -1738,6 +1738,7 @@ test('child activity reads stay separate from event previews and honor participa
               {
                 sid,
                 id: 'done-child-turn',
+                start: 'done',
                 u: false,
                 end: { st: 'done', why: 'complete' },
                 sent: [],
@@ -1882,6 +1883,9 @@ test('child activity reads stay separate from event previews and honor participa
       'the native edge named activity keeps its event read alongside the separate activity read',
     );
     await done.locator('.cc-name').click();
+    await page
+      .getByRole('button', { name: 'Open Parent run where it sent this', exact: true })
+      .waitFor();
     await page.getByRole('button', { name: 'Open in Parent run', exact: true }).waitFor();
     await page.getByRole('button', { name: 'Open in Parent run', exact: true }).click();
     await withDeadline(parentAnchorStarted, 'parent turn anchor request');
