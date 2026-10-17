@@ -332,6 +332,15 @@ export function traceSessionChip(session?: Pick<Session, 'kind' | 'harness'>) {
   };
 }
 
+/** Open a source-qualified relay participant without asserting it joined this trace. */
+export function traceQualifiedUnjoinedRelay(data: CausalTrace, edge: Handoff, hasChild: boolean) {
+  if (hasChild || edge.kind !== 'relay' || !Object.hasOwn(data.participants, edge.to)) return;
+  const summary = Object.hasOwn(data.participantSummaries, edge.to)
+    ? data.participantSummaries[edge.to]
+    : undefined;
+  return { session: edge.to, name: data.participants[edge.to], summary };
+}
+
 export function traceSentenceParts(
   edge: Handoff,
   session: (id: string, turn?: string) => Hop['parts'][number],
@@ -488,16 +497,22 @@ export function renderCausalTrace(
   const seen = new Set<string>();
   const sessionPart = (id: string, turn?: string) => causalSessionPart(data, id, turn);
   const harness = (sid: string) => {
-    const known = HARNESSES[data.sessions[sid]?.harness];
-    return known
-      ? {
-          name: known.name,
-          light: known.icon.light,
-          dark: known.icon.dark,
-          id: data.sessions[sid].harness,
-          darkTheme: matchMedia('(prefers-color-scheme: dark)').matches,
-        }
-      : undefined;
+    const sessionHarness = Object.hasOwn(data.sessions, sid)
+        ? data.sessions[sid]?.harness
+        : undefined,
+      peerHarness = Object.hasOwn(data.participantSummaries, sid)
+        ? data.participantSummaries[sid].harness
+        : undefined,
+      harnessId = sessionHarness ?? peerHarness,
+      known = HARNESSES[harnessId ?? ''];
+    if (!known || !harnessId) return undefined;
+    return {
+      name: known.name,
+      light: known.icon.light,
+      dark: known.icon.dark,
+      id: harnessId,
+      darkTheme: matchMedia('(prefers-color-scheme: dark)').matches,
+    };
   };
   const meta = (turn: Turn) => {
     const outcome = traceTurnOutcome(
@@ -562,6 +577,7 @@ export function renderCausalTrace(
     seen.add(turn.id);
     for (const edge of turn.sent) {
       const child = data.starts.get(edge.id),
+        unjoinedRelay = traceQualifiedUnjoinedRelay(data, edge, !!child),
         isResult = edge.kind === 'toyou' && edge.ask === 'result',
         edgeOutcome = traceHandoffOutcome(edge, data.readResults);
       hops.push({
@@ -597,6 +613,21 @@ export function renderCausalTrace(
                       (edge.kind === 'spawn' || edge.kind === 'relay') && !child
                         ? "Its turn isn't in these logs"
                         : undefined,
+                    ...(unjoinedRelay
+                      ? {
+                          session: unjoinedRelay.session,
+                          name: unjoinedRelay.name,
+                          harness: unjoinedRelay.summary
+                            ? harness(unjoinedRelay.session)
+                            : undefined,
+                          ...(unjoinedRelay.summary
+                            ? traceSessionChip({
+                                kind: unjoinedRelay.summary.kind || undefined,
+                                harness: unjoinedRelay.summary.harness,
+                              })
+                            : {}),
+                        }
+                      : {}),
                   },
             }),
       });
