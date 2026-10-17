@@ -366,7 +366,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 .out pre.in + .io { border-top: 1px solid var(--line); }
 .out .noout { padding: 4px 12px 10px; font-size: var(--fs-sm); color: var(--muted); }
 .out .io .link, .viewer-b .vs .link { min-height: 32px; margin: -6px 0; font-size: var(--fs-cap); }
-.out .viewall { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: var(--tap); border: 0; border-top: 1px solid var(--line); background: none; color: var(--accent); font-size: var(--fs-sm); }
+.out .viewall { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: var(--tap); border: 0; border-top: 1px solid var(--line); background: none; color: var(--accent); font-size: var(--fs-sm); scroll-margin-top: calc(var(--barh, 56px) + var(--s2)); }
 .out .viewall svg { width: 15px; height: 15px; }
 .diff { font: 12px/1.5 var(--mono); padding: 4px 0 8px; }
 .diff div { padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
