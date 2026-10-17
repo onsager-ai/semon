@@ -66,7 +66,10 @@ test('selected usage preserves unknown cost and copied usage while native resume
   assert.match(menu.cost.note, /Copied usage is excluded.*unknown/);
   assert.equal(menu.cost.models[0].rows[0].count, '7');
   assert.equal(menu.cost.models[0].rows[0].cost, '—');
-  assert.equal(menu.actions.some(({ key }) => key === 'source'), false);
+  assert.equal(
+    menu.actions.some(({ key }) => key === 'source'),
+    false,
+  );
 });
 test('malformed selected metadata and excessive model breakdowns cannot replace an accepted session', () => {
   for (const replacement of [
@@ -143,7 +146,10 @@ test('selected family costs, ancestry and mismatches remain bounded and unknown 
     menu.path.map((row) => row.id),
     ['parent', 'selected'],
   );
-  assert.equal(menu.details.some((row) => row.label === 'Directory'), false);
+  assert.equal(
+    menu.details.some((row) => row.label === 'Directory'),
+    false,
+  );
   const repoFallback = selectedSessionMenu(
     {
       ...session,
@@ -154,7 +160,10 @@ test('selected family costs, ancestry and mismatches remain bounded and unknown 
     false,
     false,
   );
-  assert.equal(repoFallback.details.some((row) => row.label === 'Directory'), false);
+  assert.equal(
+    repoFallback.details.some((row) => row.label === 'Directory'),
+    false,
+  );
   assert.match(menu.cost.mismatch, /50% above/);
   assert.equal(selectedSessionState(session), 'off');
   session.details.live_observation = true;
