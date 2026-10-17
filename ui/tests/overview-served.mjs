@@ -424,12 +424,33 @@ test(
             );
             if (width === 1280 && colorScheme === 'light') {
               // Leave selected-row discovery to transcript metadata, not Home or page summaries.
+              let sawUnavailableStatus = false,
+                sawSelectedRemovedFromHome = false,
+                sawAcceptedHomeWitness = false;
+              const homeWitnessName = 'Accepted filtered Home publication';
               const withoutHomeSelected = async (route) => {
                 const response = await route.fetch();
                 const body = await response.json();
+                let selectedSeen = false;
                 for (const field of ['recent', 'inbox', 'working', 'answered'])
-                  if (Array.isArray(body[field]))
+                  if (Array.isArray(body[field])) {
+                    selectedSeen ||= body[field].some((row) => row.catalog_key === 'a-docs');
+                    if (field === 'recent') {
+                      const witness = body[field].find((row) => row.catalog_key === 'atlas-ingest');
+                      if (witness?.session) {
+                        witness.session.name = homeWitnessName;
+                        sawAcceptedHomeWitness = true;
+                      }
+                    }
                     body[field] = body[field].filter((row) => row.catalog_key !== 'a-docs');
+                  }
+                sawSelectedRemovedFromHome ||=
+                  selectedSeen &&
+                  ['recent', 'inbox', 'working', 'answered'].every(
+                    (field) =>
+                      !Array.isArray(body[field]) ||
+                      body[field].every((row) => row.catalog_key !== 'a-docs'),
+                  );
                 await route.fulfill({ response, body: JSON.stringify(body) });
               };
               const withoutCatalogSelected = async (route) => {
@@ -467,8 +488,8 @@ test(
                 }
                 await route.fulfill({ response, body: JSON.stringify(body) });
               };
-              let sawUnavailableStatus = false;
-              await page.route('**/api/viewer/home?**', withoutHomeSelected);
+              // The sidebar also fetches the bare Home endpoint; query-only glob routes miss it.
+              await page.route(/\/api\/viewer\/home(?:\?.*)?$/, withoutHomeSelected);
               await page.route('**/api/sessions?**', withoutCatalogSelected);
               await page.route('**/api/session-transcript?**', unavailableTranscript);
               await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2] + '&compat=1');
@@ -479,6 +500,20 @@ test(
                 true,
                 'selected metadata reports unavailable status',
               );
+              assert.equal(
+                sawSelectedRemovedFromHome,
+                true,
+                'the accepted Home publication omits the selected child',
+              );
+              assert.equal(
+                sawAcceptedHomeWitness,
+                true,
+                'the filtered Home response includes a visible publication witness',
+              );
+              await page
+                .locator('#lanes .treeitem[data-id*="atlas-ingest"]')
+                .getByText(homeWitnessName, { exact: true })
+                .waitFor({ state: 'visible' });
               const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
               await selectedRecent.waitFor({ state: 'visible' });
               const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
