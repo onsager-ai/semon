@@ -81,6 +81,27 @@ export function renderCatalogList(
       repo: values.get('no_repo') === 'on' ? '__none__' : String(values.get('repo') ?? '').trim(),
     });
   }
+  const resultHeader = (
+    <div class="catalog-result-header">
+      <span>
+        {snapshot.items.length} {snapshot.items.length === 1 ? 'session loaded' : 'sessions loaded'}
+        <span class="catalog-sort"> · Latest recorded activity</span>
+      </span>
+      {filtered && (
+        <button class="link" type="button" onClick={() => host.clearFilters()}>
+          Clear filters
+        </button>
+      )}
+      <details class="catalog-scope">
+        <summary>Search scope</summary>
+        <p class="catalog-note">
+          {snapshot.metadataSearch
+            ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
+            : 'Text search and history across sources are unavailable.'}
+        </p>
+      </details>
+    </div>
+  );
   render(
     <>
       <div class="ph" data-catalog-observation={snapshot.observation ?? 'Cached history'}>
@@ -332,26 +353,7 @@ export function renderCatalogList(
           Show approval reviews
         </button>
       )}
-      <div class="catalog-result-header">
-        <span>
-          {snapshot.items.length}{' '}
-          {snapshot.items.length === 1 ? 'session loaded' : 'sessions loaded'}
-          <span class="catalog-sort"> · Latest recorded activity</span>
-        </span>
-        {filtered && (
-          <button class="link" type="button" onClick={() => host.clearFilters()}>
-            Clear filters
-          </button>
-        )}
-        <details class="catalog-scope">
-          <summary>Search scope</summary>
-          <p class="catalog-note">
-            {snapshot.metadataSearch
-              ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
-              : 'Text search and history across sources are unavailable.'}
-          </p>
-        </details>
-      </div>
+      {!snapshot.browser && resultHeader}
       {snapshot.browser ? (
         <div class="sess session-groups session-list" aria-label="Recorded sessions">
           {snapshot.browser.groups.map((group) => (
@@ -428,6 +430,7 @@ export function renderCatalogList(
           })}
         </div>
       )}
+      {snapshot.browser && resultHeader}
       {!snapshot.updating &&
         !snapshot.items.length &&
         !snapshot.note &&
