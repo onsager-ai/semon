@@ -102,8 +102,8 @@ test('failed-step navigation stays in the desktop bar and the phone menu', () =>
   try {
     for (const phone of [false, true]) {
       globalThis.matchMedia = (query) => {
-        assert.equal(query, '(max-width: 760px)');
-        return { matches: phone };
+        assert.ok(['(max-width: 760px)', '(prefers-color-scheme: dark)'].includes(query));
+        return { matches: query === '(max-width: 760px)' && phone };
       };
       const menu = selectedSessionMenu(session, 'machine', false, true),
         errorAction = menu.actions.find(({ key }) => key === 'errors'),
