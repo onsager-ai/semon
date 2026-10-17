@@ -298,9 +298,11 @@ group retains its loaded descendants and ancestor path without new reads.
 
 Trace navigation supplies its canonical selected session to Recent even when no
 transcript is active. The original eight-root cap is applied after required-path
-ordering; a selected root outside that cap does not replace another root. These
-restore the selected application's document order, rather than creating a new
-selection-priority policy.
+ordering; a selected root already present in the publication does not replace
+another root. Qualified selected metadata can supply a root missing from the
+bounded publication; only that off-page ancestor fallback may replace the eighth
+row. This retains native approval ancestry outside the first 60 rows while
+preserving the selected application's order for already-published roots.
 
 Bounded captured DOM also identified two reading geometry regressions. The catalog
 header added an empty Composer host slot despite its controller always being
@@ -326,3 +328,24 @@ original ranked ordering. A separate same-document route transition starts with
 the selected child absent and verifies its required-path promotion to the front
 of the retained ordering scope. This preserves both contracts without making a
 fresh page depend on response arrival order.
+
+Workspace Recent, machine labels and the Home waiting badge have a separate
+publication from focused Machine content. A focused response had overwritten
+that shared sidebar with one source's rows. The existing bounded Home POST read
+now refreshes workspace metadata within the same overview epoch, navigation
+cancellation and eight-second polling owner. Its 60 Recent rows and machine labels
+replace the workspace snapshot together; focused rows, section pages and versions
+remain source-specific. Sidebar refreshes do not hydrate transcript previews,
+repair selected records or add a polling owner. The exact bare Home request joins
+the existing request-abort set and retains its 15-second deadline. Already
+delivered JSON must still pass the navigation epoch before publication.
+
+The badge uses the accepted workspace waiting total only when that publication
+has no pending or unavailable observations. Preview hydration cannot turn an
+incomplete receipt into a qualified total. Unavailable refreshes retain saved
+Recent metadata with an availability description and withhold the badge.
+Source-qualified row identities prevent equal native keys on different machines
+from sharing selection or ancestry. Browser fixtures cover phone/desktop and both
+themes, transport cancellation independently from late JSON, focused content,
+partial/unavailable workspace metadata, selected reading and Trace. These changes
+require generated-asset freshness and exact-pair CI before acceptance.
