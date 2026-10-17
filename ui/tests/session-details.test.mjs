@@ -126,6 +126,18 @@ test('selected family costs, ancestry and mismatches remain bounded and unknown 
     { label: 'Its run', value: '$2.00' },
   ]);
   assert.equal(menu.cost.runs[0].id, 'child');
+  assert.equal(menu.cost.runs[0].state, 'off');
+  assert.equal(menu.cost.runs[0].stateLabel, 'Status unavailable');
+  assert.equal(menu.cost.runs[0].label, 'Open child, subagent, Status unavailable, $2.00');
+  raw.family.runs[0].status = { state: 'work', observation: 'current' };
+  session.details = parseSessionDetails(raw);
+  const currentRun = selectedSessionMenu(session, 'machine', false, false).cost.runs[0];
+  assert.equal(currentRun.state, 'work');
+  assert.equal(currentRun.stateLabel, 'Working');
+  assert.equal(currentRun.label, 'Open child, subagent, Working, $2.00');
+  raw.family.runs[0].status = { state: 'off', observation: 'retained' };
+  session.details = parseSessionDetails(raw);
+  assert.equal(selectedSessionMenu(session, 'machine', false, false).cost.runs[0].state, 'off');
   assert.deepEqual(
     menu.path.map((row) => row.id),
     ['parent', 'selected'],
