@@ -108,7 +108,7 @@ test('qualified relay participants contribute session totals without joining cau
       tokens: [1.5, 2, 0.5],
       cost,
     }),
-    snapshot = (participantSummaries, observedNow = 1000) => {
+    snapshot = (participantSummaries, observedNow = 1000, selectedRoot = root) => {
       const costForSessions = (rows) => ({
           usd: rows.some((row) => row.cost?.usd == null)
             ? null
@@ -139,8 +139,8 @@ test('qualified relay participants contribute session totals without joining cau
           { done: 'Finished', work: 'Working', wait: 'Waiting', idle: 'Idle', err: 'Failed' },
         );
       return {
-        ...calculations.agentSnapshot(root),
-        tree: calculations.traceAgentTree(root),
+        ...calculations.agentSnapshot(selectedRoot),
+        tree: calculations.traceAgentTree(selectedRoot),
       };
     },
     baseline = snapshot(undefined),
@@ -270,6 +270,77 @@ test('qualified relay participants contribute session totals without joining cau
   assert.equal(predatingRelay.end, baseline.end);
   assert.equal(predatingRelay.extentTip, undefined);
   assert.equal(predatingRelay.rows.find((row) => row.kind === 'peer').duration, undefined);
+  const activitySummary = (recordedActivity, status = current.observedExtent.status) => ({
+      ...current,
+      observedExtent: { ...current.observedExtent, status, recordedActivity },
+    }),
+    activity = {
+      state: 'available',
+      kind: 'timestamp_clusters',
+      intervals: [
+        [0, 150],
+        [180, 250],
+        [500, 120000],
+      ],
+    },
+    recorded = snapshot({ harbor: activitySummary(activity) }),
+    recordedPeer = recorded.rows.find((row) => row.kind === 'peer');
+  assert.deepEqual(
+    recordedPeer.recordedActivity.map((mark) => [Math.round(mark.left), Math.round(mark.width)]),
+    [
+      [3, 2],
+      [9, 8],
+      [44, 56],
+    ],
+  );
+  assert.equal(Object.hasOwn(recordedPeer, 'segments'), false);
+  assert.match(
+    recordedPeer.activityTip,
+    /whole-session timestamp clusters.*gaps are unknown.*not continuous CPU activity/,
+  );
+  assert.equal(recordedPeer.activityQualification, undefined);
+  assert.deepEqual(
+    snapshot({ harbor: activitySummary({ ...activity, intervals: [] }) }).rows.find(
+      (row) => row.kind === 'peer',
+    ).recordedActivity,
+    [],
+  );
+  const unavailableActivity = snapshot({
+    harbor: activitySummary({ state: 'unavailable' }),
+  }).rows.find((row) => row.kind === 'peer');
+  assert.equal(unavailableActivity.recordedActivity, undefined);
+  assert.equal(unavailableActivity.activityQualification, 'Recorded activity unavailable');
+  assert.equal(extentPeer.recordedActivity, undefined, 'legacy absent activity stays unknown');
+  assert.equal(
+    snapshot({
+      harbor: activitySummary(activity, { state: null, observation: 'unavailable' }),
+    }).rows.find((row) => row.kind === 'peer').recordedActivity,
+    undefined,
+  );
+  assert.deepEqual(recorded.tree.rootNode, knownPeer.tree.rootNode);
+  assert.deepEqual(recorded.tree.peers, knownPeer.tree.peers);
+  const earlyRelayRoot = {
+      ...root,
+      sent: root.sent.map((edge) => (edge.id === 'harbor-relay' ? { ...edge, at: 50 } : edge)),
+    },
+    outsideChart = snapshot(
+      {
+        harbor: activitySummary({
+          ...activity,
+          intervals: [
+            [0, 90],
+            [1001, 1200],
+          ],
+        }),
+      },
+      1000,
+      earlyRelayRoot,
+    ).rows.find((row) => row.kind === 'peer');
+  assert.deepEqual(
+    outsideChart.recordedActivity,
+    [],
+    'off-chart intervals cannot turn into minimum-width ghost bars',
+  );
   for (const absent of ['turn', 'segments', 'waits', 'critical', 'spawns', 'edge'])
     assert.equal(Object.hasOwn(extentPeer, absent), false, absent);
   assert.deepEqual(withExtent.tree.rootNode, knownPeer.tree.rootNode);
