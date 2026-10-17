@@ -67,8 +67,9 @@ a content model. Its unsubscribe belongs to the reader's document lifetime.
 Hosts validate unknown policy JSON with `parseShellNavigation` before rendering.
 The canonical reader keeps source selection in Sessions context and labels scoped
 Recent rows with their machine. Home and Analytics share that reader. A
-`nativePage` mounts the same chrome over server content, refreshes compact Recent
-metadata and preserves native forms and server navigation. Compatibility markers
+`nativePage` mounts the same chrome over server content, retains its empty Recent
+slot and preserves native forms and server navigation. It does not select a
+reader source or fetch workspace publications for chrome. Compatibility markers
 are normalized away without selecting another reader.
 
 `topbar(ShellBar)` commits host-owned `titleSlot` and `actions` nodes, or `mode`
@@ -91,8 +92,11 @@ consumer tests repeated mount/update/unmount/destroy in both device sizes/themes
 stale triggers, slot preservation, native link semantics and listener removal.
 
 Native pages mount the same canonical reader with `ViewerHost.nativePage` and
-`mountNativeShell({ chrome: false })`. The shared frame owns chrome and bounded
-Recent metadata; the native page retains its content, forms and native links.
+`mountNativeShell({ chrome: false })`. The shared frame owns chrome; the native
+page retains its content, forms and native links. Mount, capability cadence,
+visibility and history notifications do not admit reader or workspace metadata
+reads. Home, Analytics and selected-session links enter their reader documents
+through native browser navigation.
 Standalone navigation fragments may use pure `renderShellNavigation` under an
 explicit host owner, with no reader or poller. The former sidebar-only model
 application and its compatibility attributes are removed.
