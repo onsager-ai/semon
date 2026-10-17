@@ -467,13 +467,243 @@ export default async function turnsCheck(browser) {
       const hasHome = !!hid;
       D1.hadHome = hasHome;
       if (hasHome) {
+        const homeTurn = D.holds.get(JSON.parse(hid)[1])?.id;
+        await page.evaluate((turnId) => {
+          const started = performance.now();
+          const events = { writes: [], scrolls: [], resizes: [], mutations: [], fonts: [] };
+          const dropped = { writes: 0, scrolls: 0, resizes: 0, mutations: 0, fonts: 0 };
+          const limits = { writes: 8, scrolls: 8, resizes: 10, mutations: 8, fonts: 6 };
+          const restorers = [];
+          const watched = new WeakSet();
+          let resizeObserver;
+          let mutationObserver;
+          let finished = false;
+          const route = () => ({ v: history.state?.v ?? null, turn: history.state?.turn ?? null });
+          const turn = () =>
+            [...document.querySelectorAll('.turn')].find((el) => el.dataset.turn === turnId) ?? null;
+          const rect = (el) => {
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return Object.fromEntries(
+              ['top', 'bottom', 'height', 'width'].map((key) => [key, Math.round(r[key] * 10) / 10]),
+            );
+          };
+          const name = (el) =>
+            !el
+              ? null
+              : el.id
+                ? '#' + el.id
+                : el.matches?.('.turn')
+                  ? '.turn:' + el.dataset.turn
+                  : el.classList?.length
+                    ? el.tagName.toLowerCase() + '.' + [...el.classList].slice(0, 2).join('.')
+                    : el.tagName.toLowerCase();
+          const point = () => ({
+            ms: Math.round(performance.now() - started),
+            ...route(),
+            scrollY: Math.round(scrollY * 10) / 10,
+            barBottom: rect(document.querySelector('#topbar'))?.bottom ?? null,
+            targetTop: rect(turn())?.top ?? null,
+          });
+          const push = (kind, value) => {
+            if (events[kind].length < limits[kind]) events[kind].push(value);
+            else dropped[kind]++;
+          };
+          const box = (el) => {
+            if (!el) return null;
+            const r = rect(el);
+            return {
+              node: name(el),
+              top: r.top,
+              height: r.height,
+              clientHeight: el.clientHeight,
+              scrollHeight: el.scrollHeight,
+              scrollTop: Math.round(el.scrollTop * 10) / 10,
+              overflowY: getComputedStyle(el).overflowY,
+            };
+          };
+          const snapshot = () => {
+            const target = turn();
+            const bar = document.querySelector('#topbar');
+            const style = target ? getComputedStyle(target) : null;
+            const root = getComputedStyle(document.documentElement);
+            const body = document.body ? getComputedStyle(document.body) : null;
+            const family = style?.fontFamily ?? body?.fontFamily ?? '';
+            let fontCheck = null;
+            try {
+              fontCheck = !!family && document.fonts.check('16px ' + family);
+            } catch {}
+            const active = document.activeElement;
+            return {
+              ms: Math.round(performance.now() - started),
+              ...route(),
+              viewport: {
+                width: innerWidth,
+                height: innerHeight,
+                scrollY: Math.round(scrollY * 10) / 10,
+                visualTop: Math.round((visualViewport?.offsetTop ?? 0) * 10) / 10,
+                visualHeight: Math.round((visualViewport?.height ?? innerHeight) * 10) / 10,
+              },
+              theme: {
+                dark: document.body?.classList.contains('dark') ?? false,
+                barHidden: document.body?.classList.contains('bar-hidden') ?? false,
+                prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
+              },
+              css: {
+                barHeight: root.getPropertyValue('--barh').trim(),
+                viewerBar: root.getPropertyValue('--viewerbar').trim(),
+                scrollPaddingTop: root.scrollPaddingTop,
+                scrollBehavior: root.scrollBehavior,
+              },
+              bar: bar ? { ...rect(bar), position: getComputedStyle(bar).position } : null,
+              target: target
+                ? {
+                    ...rect(target),
+                    className: String(target.className).slice(0, 80),
+                    scrollMarginTop: style.scrollMarginTop,
+                    scrollMarginBlockStart: style.scrollMarginBlockStart,
+                    contentVisibility: style.contentVisibility,
+                    containIntrinsicSize: style.containIntrinsicSize,
+                    fontFamily: family,
+                  }
+                : null,
+              scrollports: [
+                document.scrollingElement,
+                document.querySelector('#main'),
+                document.querySelector('.catalog-session'),
+                document.querySelector('.turns'),
+              ]
+                .filter(Boolean)
+                .map(box),
+              fonts: { status: document.fonts.status, faces: document.fonts.size, family, check: fontCheck },
+              focus: active
+                ? { tag: active.tagName.toLowerCase(), id: active.id || null, className: String(active.className ?? '').slice(0, 60) }
+                : null,
+            };
+          };
+          const observe = (el) => {
+            if (!el || watched.has(el)) return;
+            watched.add(el);
+            try {
+              resizeObserver.observe(el);
+            } catch {}
+          };
+          const refreshObserved = () => {
+            const target = turn();
+            const nodes = [
+              document.documentElement,
+              document.body,
+              document.querySelector('#topbar'),
+              document.querySelector('#main'),
+              document.querySelector('.catalog-session'),
+              document.querySelector('.turns'),
+            ];
+            for (let el = target, i = 0; el && i < 5; el = el.parentElement, i++) nodes.push(el);
+            nodes.forEach(observe);
+          };
+          resizeObserver = new ResizeObserver((entries) =>
+            push('resizes', {
+              point: point(),
+              entries: entries.slice(0, 6).map((entry) => ({
+                node: name(entry.target),
+                width: Math.round(entry.contentRect.width * 10) / 10,
+                height: Math.round(entry.contentRect.height * 10) / 10,
+              })),
+            }),
+          );
+          refreshObserved();
+          mutationObserver = new MutationObserver((records) => {
+            refreshObserved();
+            const target = turn();
+            if (!target) return;
+            const parents = new Set();
+            for (let el = target, i = 0; el && i < 5; el = el.parentElement, i++) parents.add(el);
+            parents.add(document.querySelector('#topbar'));
+            parents.add(document.querySelector('#main'));
+            const relevant = records.filter((record) => parents.has(record.target));
+            if (relevant.length)
+              push('mutations', {
+                point: point(),
+                changes: relevant.slice(0, 5).map((record) => ({
+                  type: record.type,
+                  node: name(record.target),
+                  attribute: record.attributeName ?? null,
+                  added: record.addedNodes?.length ?? 0,
+                  removed: record.removedNodes?.length ?? 0,
+                })),
+              });
+          });
+          if (document.body)
+            mutationObserver.observe(document.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['class', 'style'],
+            });
+          const onScroll = () => push('scrolls', point());
+          window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+          const fonts = document.fonts;
+          const onFont = (event) => push('fonts', { event: event.type, status: fonts.status, faces: fonts.size, point: point() });
+          for (const type of ['loading', 'loadingdone', 'loadingerror']) fonts.addEventListener(type, onFont);
+          const wrap = (owner, key, method) => {
+            if (!owner || typeof owner[key] !== 'function') return;
+            const original = owner[key];
+            const hadOwn = Object.prototype.hasOwnProperty.call(owner, key);
+            const wrapped = function (...args) {
+              const options = args.map((arg) => {
+                if (arg == null || typeof arg !== 'object') return arg;
+                const out = {};
+                for (const key of ['top', 'left', 'behavior', 'block', 'inline']) if (key in arg) out[key] = arg[key];
+                return out;
+              });
+              push('writes', { method, target: method.startsWith('Element.') ? name(this) : null, options, point: point() });
+              return original.apply(this, args);
+            };
+            try {
+              owner[key] = wrapped;
+              if (owner[key] === wrapped)
+                restorers.push(() => {
+                  if (owner[key] !== wrapped) return;
+                  if (hadOwn) owner[key] = original;
+                  else delete owner[key];
+                });
+            } catch {}
+          };
+          wrap(window, 'scrollTo', 'window.scrollTo');
+          wrap(window, 'scrollBy', 'window.scrollBy');
+          wrap(window, 'scroll', 'window.scroll');
+          wrap(Element.prototype, 'scrollIntoView', 'Element.scrollIntoView');
+          wrap(Element.prototype, 'scrollTo', 'Element.scrollTo');
+          wrap(Element.prototype, 'scrollBy', 'Element.scrollBy');
+          const initial = snapshot();
+          window.__navAnchorDiag = {
+            finish(include) {
+              if (finished) return null;
+              finished = true;
+              resizeObserver.disconnect();
+              mutationObserver.disconnect();
+              window.removeEventListener('scroll', onScroll, true);
+              for (const type of ['loading', 'loadingdone', 'loadingerror']) fonts.removeEventListener(type, onFont);
+              for (const restore of restorers) restore();
+              const result = include ? { initial, final: snapshot(), events, dropped } : null;
+              delete window.__navAnchorDiag;
+              return result;
+            },
+          };
+        }, homeTurn);
         await page.click('.ib .q');
         await page.waitForTimeout(250);
-        D1.fromHome = {
+        const fromHome = {
           h: hid,
-          expectTurn: D.holds.get(JSON.parse(hid)[1])?.id,
+          expectTurn: homeTurn,
           ...(await landed()),
         };
+        const navigationDiagnostics = await page.evaluate((include) => {
+          const diagnostic = window.__navAnchorDiag;
+          return diagnostic ? diagnostic.finish(include) : null;
+        }, !fromHome.inView);
+        if (navigationDiagnostics) fromHome.navigationDiagnostics = navigationDiagnostics;
+        D1.fromHome = fromHome;
         await page.goBack();
         await page.waitForTimeout(200);
         D1.fromHome.backTo = await page.evaluate(
