@@ -6,6 +6,22 @@ use crate::model::relation_stage::{
 };
 use std::collections::BTreeSet;
 
+const RECIPE: &str = "recorded-origin-turn-v1";
+fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
+    let stored: Option<String> = c
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_semantic_recipe'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(stored.as_deref() == Some(RECIPE))
+}
+fn record_recipe(c: &Connection) -> rusqlite::Result<()> {
+    c.execute("INSERT INTO meta(key,value) VALUES('catalog_semantic_recipe',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [RECIPE])?;
+    Ok(())
+}
+
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS catalog_semantic_stage (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL,
@@ -1301,7 +1317,7 @@ impl SqliteStore {
                     r.get(0)
                 })
                 .map_err(failure)?;
-            if old != runtime {
+            if old != runtime || !recipe_current(&tx).map_err(failure)? {
                 reset(&tx, runtime).map_err(failure)?;
             }
         } else {
@@ -1311,6 +1327,7 @@ impl SqliteStore {
             tx.execute("INSERT INTO meta(key,value) VALUES('semantic_epoch','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[]).map_err(failure)?;
             tx.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE key='semantic_epoch'",params![generation(&tx).map_err(failure)?,runtime,revision(&tx).map_err(failure)?]).map_err(failure)?;
         }
+        record_recipe(&tx).map_err(failure)?;
         for path in paths {
             enqueue(&tx, path).map_err(failure)?;
         }
@@ -1362,8 +1379,12 @@ impl SqliteStore {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(failure)?;
-        if generation(&tx).map_err(failure)? != base || !witnesses(&tx).map_err(failure)? {
+        if !recipe_current(&tx).map_err(failure)?
+            || generation(&tx).map_err(failure)? != base
+            || !witnesses(&tx).map_err(failure)?
+        {
             reset(&tx, &runtime).map_err(failure)?;
+            record_recipe(&tx).map_err(failure)?;
             epoch = tx
                 .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
                 .map_err(failure)?;
@@ -1863,12 +1884,6 @@ impl SqliteStore {
                 }) {
                     continue;
                 }
-                let encoded = json(relation).map_err(failure)?;
-                if encoded.len() > MAX_CONTEXT {
-                    return Err(StoreError::Data(
-                        "semantic relation metadata budget exceeded".into(),
-                    ));
-                }
                 let old: Option<String> = tx
                     .query_row(
                         "SELECT metadata FROM catalog_semantic_relations WHERE relation_id=?1",
@@ -1877,13 +1892,36 @@ impl SqliteStore {
                     )
                     .optional()
                     .map_err(failure)?;
-                if old.as_ref().is_some_and(|old| old != &encoded) {
+                let mut merged = relation.clone();
+                if let Some(old) = old {
+                    if old.len() > MAX_CONTEXT {
+                        return Err(StoreError::Data(
+                            "semantic relation metadata budget exceeded".into(),
+                        ));
+                    }
+                    let mut prior: Relation = serde_json::from_str(&old)
+                        .map_err(|error| StoreError::Data(error.to_string()))?;
+                    let witness = prior
+                        .source_turn
+                        .merge(&merged.source_turn)
+                        .ok_or_else(|| StoreError::Data("conflicting staged parent turn".into()))?;
+                    prior.source_turn = Default::default();
+                    merged.source_turn = Default::default();
+                    if json(&prior).map_err(failure)? != json(&merged).map_err(failure)? {
+                        return Err(StoreError::Data(
+                            "conflicting staged native relationship".into(),
+                        ));
+                    }
+                    merged.source_turn = witness;
+                }
+                let encoded = json(&merged).map_err(failure)?;
+                if encoded.len() > MAX_CONTEXT {
                     return Err(StoreError::Data(
-                        "conflicting staged native relationship".into(),
+                        "semantic relation metadata budget exceeded".into(),
                     ));
                 }
                 tx.execute(
-                    "INSERT OR IGNORE INTO catalog_semantic_relations VALUES(?1,?2,?3,?4)",
+                    "INSERT INTO catalog_semantic_relations VALUES(?1,?2,?3,?4) ON CONFLICT(relation_id) DO UPDATE SET metadata=excluded.metadata",
                     params![relation.id, relation.from, relation.to, encoded],
                 )
                 .map_err(failure)?;
@@ -2375,6 +2413,57 @@ mod tests {
             .unwrap();
         assert_eq!(observed, (None, true));
         assert_eq!(claim(&store.connection, path).unwrap(), None);
+    }
+
+    #[test]
+    fn old_publication_recipe_resumes_through_bounded_reset_without_erasing_history() {
+        let (root, mut store, _) = header_repair_store("origin-recipe");
+        store
+            .connection
+            .execute(
+                "UPDATE catalog_semantic_stage SET phase='publication',keys_done=1",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
+            .unwrap();
+        let epoch: i64 = store
+            .connection
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+            .unwrap();
+        let batch = store
+            .semantic_next(64)
+            .unwrap()
+            .expect("bounded reset work");
+        assert!(batch.epoch > epoch);
+        assert!(batch.paths.is_empty());
+        assert!(matches!(batch.phase, Phase::Identity));
+        assert!(recipe_current(&store.connection).unwrap());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_catalog WHERE session_key='old'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_slot_projections WHERE session_key='old'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

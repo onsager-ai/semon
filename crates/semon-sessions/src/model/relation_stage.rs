@@ -185,12 +185,34 @@ pub(crate) struct Preview {
 
 /// Deliberately excludes Handoff brief/result/answer strings. Those remain
 /// native, request-local fields; only their recorded presence influences slots.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "turn", rename_all = "snake_case")]
+pub(crate) enum OriginTurn {
+    #[default]
+    Unknown,
+    Unavailable,
+    Known(String),
+}
+impl OriginTurn {
+    /// Only a physical sender observation may resolve an unknown witness.
+    /// Two resolved observations must agree, including explicit absence.
+    pub(crate) fn merge(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Unknown, witness) | (witness, Self::Unknown) => Some(witness.clone()),
+            (left, right) if left == right => Some(left.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Relation {
     pub(crate) id: String,
     pub(crate) kind: String,
     pub(crate) from: String,
+    #[serde(default)]
+    pub(crate) source_turn: OriginTurn,
     pub(crate) to: Option<String>,
     pub(crate) target: Option<String>,
     pub(crate) at: i64,
@@ -350,7 +372,21 @@ impl Context {
     pub(super) fn capture(
         builder: &Builder<'_>,
         observed: Option<&BTreeMap<String, SessionFacts>>,
+        turns: &[Turn],
     ) -> Self {
+        let mut holding: BTreeMap<&str, Option<&Turn>> = BTreeMap::new();
+        for turn in turns {
+            for edge in &turn.sent {
+                holding
+                    .entry(edge.as_str())
+                    .and_modify(|prior| {
+                        if prior.is_some_and(|prior| prior.sid != turn.sid || prior.id != turn.id) {
+                            *prior = None;
+                        }
+                    })
+                    .or_insert(Some(turn));
+            }
+        }
         let rows = summary::catalog(
             builder,
             &builder
@@ -453,6 +489,21 @@ impl Context {
                     id: h.out.id.clone(),
                     kind: h.out.kind.to_owned(),
                     from: h.out.from.clone(),
+                    source_turn: if builder
+                        .by_key
+                        .get(&h.out.from)
+                        .is_some_and(|at| !builder.sessions[*at].files.is_empty())
+                    {
+                        holding
+                            .get(h.out.id.as_str())
+                            .and_then(|turn| *turn)
+                            .filter(|turn| turn.sid == h.out.from)
+                            .map_or(OriginTurn::Unavailable, |turn| {
+                                OriginTurn::Known(turn.id.clone())
+                            })
+                    } else {
+                        OriginTurn::Unknown
+                    },
                     to: h.out.to.clone(),
                     target: h.out.target.clone(),
                     at: h.out.at,
@@ -797,5 +848,22 @@ impl Context {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod origin_turn_tests {
+    use super::OriginTurn;
+    #[test]
+    fn incomplete_owner_observation_cannot_replace_or_invent_a_recorded_parent_turn() {
+        use OriginTurn::{Known, Unavailable, Unknown};
+        let recorded = Known("parent-turn".into());
+        assert_eq!(Unknown.merge(&recorded), Some(recorded.clone()));
+        assert_eq!(recorded.merge(&Unknown), Some(recorded.clone()));
+        assert_eq!(Unavailable.merge(&Unknown), Some(Unavailable));
+        assert_eq!(recorded.merge(&Unavailable), None);
+        assert_eq!(Unavailable.merge(&recorded), None);
+        assert_eq!(recorded.merge(&Known("another-turn".into())), None);
+        assert_eq!(recorded.merge(&recorded), Some(recorded.clone()));
     }
 }

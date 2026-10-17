@@ -56,6 +56,50 @@ impl Projection {
         }
         self
     }
+    pub(crate) fn with_staged_origin_turns(
+        mut self,
+        context: Option<&crate::model::relation_stage::Context>,
+        physical_sender: impl Fn(&str) -> bool,
+    ) -> std::io::Result<Self> {
+        use crate::model::relation_stage::OriginTurn;
+        let Some(context) = context else {
+            return Ok(self);
+        };
+        for edge in &mut self.edges {
+            let Some(relation) = edge["id"].as_str().and_then(|id| context.relations.get(id))
+            else {
+                continue;
+            };
+            if edge["from"].as_str() != Some(relation.from.as_str())
+                || edge["kind"].as_str() != Some(relation.kind.as_str())
+                || edge["to"].as_str() != relation.to.as_deref()
+            {
+                return Err(std::io::Error::other("Staged parent turn owner changed"));
+            }
+            match &relation.source_turn {
+                OriginTurn::Unknown => {}
+                OriginTurn::Unavailable => {
+                    if edge.get("source_turn").is_some() {
+                        return Err(std::io::Error::other(
+                            "Staged parent turn observation changed",
+                        ));
+                    }
+                }
+                OriginTurn::Known(turn) => {
+                    let local = edge["source_turn"].as_str();
+                    if local.is_some_and(|local| local != turn)
+                        || (local.is_none() && physical_sender(&relation.from))
+                    {
+                        return Err(std::io::Error::other(
+                            "Staged parent turn observation changed",
+                        ));
+                    }
+                    edge["source_turn"] = json!(turn);
+                }
+            }
+        }
+        Ok(self)
+    }
     pub(crate) fn endpoints(&self) -> impl Iterator<Item = &str> {
         self.edges.iter().flat_map(|edge| {
             ["from", "to"]

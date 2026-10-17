@@ -858,6 +858,13 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
+        if work.events.as_ref().is_some_and(EventCache::is_scoped)
+            && crate::events::store::recover_unsupported_catalog(&self.options)?
+        {
+            work.cold_catalog = None;
+            work.catalog_snapshot = None;
+            work.pending_sources = true;
+        }
         if self.advance_semantic_stage(work, now, &mut before_build)? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
@@ -2004,6 +2011,97 @@ mod catalog_owner_tests {
             .open(input.full_path(options))
             .unwrap();
         writeln!(file, "{{\"type\":\"event_msg\",\"timestamp\":\"2026-10-01T00:01:00Z\",\"payload\":{{\"type\":\"user_message\",\"message\":\"shared publication\"}}}}").unwrap();
+    }
+
+    #[test]
+    fn old_publication_with_active_subset_rebuilds_unrelated_metadata_before_qualification() {
+        let (root, options, input) = audit_fixture();
+        let unrelated = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/10/01/rollout-unrelated.jsonl".into(),
+        };
+        fs::write(unrelated.full_path(&options), "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"unrelated\"}}\n").unwrap();
+        let evidence = NativeEvidence::new(options.clone());
+        drain_catalog(&evidence, &std::cell::Cell::new(0));
+        {
+            let mut work = lock(&evidence.work);
+            assert_eq!(
+                work.events
+                    .as_mut()
+                    .unwrap()
+                    .begin_semantic_stage(
+                        &[input.full_path(&options).to_string_lossy().into_owned()],
+                        &query_runtime_generation(&options).unwrap(),
+                    )
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+        }
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let unrelated_key: String = db.query_row("SELECT session_key FROM session_catalog_sources WHERE native_id='unrelated' LIMIT 1", [], |row| row.get(0)).unwrap();
+        db.execute(
+            "UPDATE meta SET value=?1 WHERE key='catalog_version'",
+            [(model::summary::CATALOG_VERSION - 1).to_string()],
+        )
+        .unwrap();
+        assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
+        db.execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
+            .unwrap();
+        let published: i64 = db
+            .query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row.get(0))
+            .unwrap();
+        {
+            let mut work = lock(&evidence.work);
+            assert!(
+                !evidence
+                    .refresh_catalog(&mut work, model::now_ms())
+                    .unwrap()
+            );
+            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
+        }
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            published,
+            "upgrade must retain published history"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_backfill_state'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "discovering"
+        );
+        let mut complete = false;
+        for _ in 0..128 {
+            let mut work = lock(&evidence.work);
+            if evidence
+                .refresh_catalog(&mut work, model::now_ms())
+                .unwrap()
+            {
+                assert!(work.events.as_ref().unwrap().qualified_catalog().unwrap());
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "bounded upgrade did not finish");
+        let name: String = db
+            .query_row(
+                "SELECT json_extract(metadata,'$.name') FROM session_catalog WHERE session_key=?1",
+                [&unrelated_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            name, "old derived metadata",
+            "subset publication qualified untouched old metadata"
+        );
+        drop(db);
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
