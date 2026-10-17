@@ -305,9 +305,18 @@ test(
               exact: true,
             });
             await runView.waitFor({ state: 'attached' });
+            await page
+              .getByRole('button', { name: 'Expand feat/offline-sync details', exact: true })
+              .click();
+            const parentSession = new URL(page.url()).pathname.split('/').at(-1);
             await runView.click();
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
             assert.match(new URL(page.url()).pathname, /^\/trace\/native\//);
+            assert.equal(
+              new URL(page.url()).pathname.split('/')[3],
+              parentSession,
+              'Run view retains the sending session as Trace root',
+            );
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
             await page.goBack();
             await page.locator('[aria-label="Transcript"]').waitFor();
