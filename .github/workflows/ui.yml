@@ -40,3 +40,152 @@ jobs:
           name: harbor-artifact-analysis
           path: ${{ runner.temp }}/harbor-analysis/report.json
           if-no-files-found: error
+
+  harbor-paint-protocol:
+    if: github.ref == 'refs/heads/diagnostic/380-harbor-artifact-20261018'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+
+      - name: Download and verify the immutable candidate and reference binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source_run=39074185832
+          source_head=0bea3be5131e2839779c47a0cec3693d3606742f
+          candidate_id=12116097303
+          candidate_name=viewer-test-binaries
+          candidate_digest=sha256:bc99ec4644ad9dbe31b38c72e1c96e82c12fd7e052a932824ab950e658ececab
+          reference_id=12116471070
+          reference_name=viewer-ui-reference-binary
+          reference_digest=sha256:1f5506feec49213c0e7d1eef9d27e0ddd640d9af5d3e66417184fbebd94ea10d
+          mkdir -p target/debug target/ui-reference
+
+          verify_download() { # artifact id name digest destination zip
+            artifact_id="$1"
+            artifact_name="$2"
+            artifact_digest="$3"
+            destination="$4"
+            archive="$5"
+            metadata="$RUNNER_TEMP/$artifact_id.json"
+            gh api "repos/onsager-ai/semon/actions/artifacts/$artifact_id" > "$metadata"
+            jq -e \
+              --arg name "$artifact_name" \
+              --arg head "$source_head" \
+              --arg digest "$artifact_digest" \
+              --argjson run "$source_run" \
+              '.name == $name and .digest == $digest and .workflow_run.id == $run and .workflow_run.head_sha == $head and .expired == false' \
+              "$metadata" > /dev/null
+            gh api "repos/onsager-ai/semon/actions/artifacts/$artifact_id/zip" > "$archive"
+            printf '%s  %s\n' "${artifact_digest#sha256:}" "$archive" | sha256sum --check --status
+            python3 - "$archive" "$destination" <<'PY'
+          import pathlib, sys, zipfile
+          archive_path = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(archive_path) as archive:
+              matches = [info for info in archive.infolist() if pathlib.PurePosixPath(info.filename).name == 'semon' and not info.is_dir()]
+              if len(matches) != 1 or matches[0].file_size > 100_000_000:
+                  raise RuntimeError('artifact must contain exactly one bounded semon binary')
+              contents = archive.read(matches[0])
+              if len(contents) != matches[0].file_size:
+                  raise RuntimeError('binary length did not match artifact metadata')
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_bytes(contents)
+          PY
+          }
+
+          verify_download "$candidate_id" "$candidate_name" "$candidate_digest" \
+            "$GITHUB_WORKSPACE/target/debug/semon" "$RUNNER_TEMP/candidate.zip"
+          verify_download "$reference_id" "$reference_name" "$reference_digest" \
+            "$GITHUB_WORKSPACE/target/ui-reference/semon" "$RUNNER_TEMP/reference.zip"
+          chmod +x target/debug/semon target/ui-reference/semon
+          candidate_sha=$(sha256sum target/debug/semon | cut -d ' ' -f 1)
+          reference_sha=$(sha256sum target/ui-reference/semon | cut -d ' ' -f 1)
+          test "$candidate_sha" = f8bac26d1c7736b3f72e19e6cbf9c0a818dc03c5e96ad7ddc09790d76848ca6a
+          reference_source=$(node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; console.log(REFERENCE.source)')
+          test "$reference_source" = 263a02da278716ab2309b8e34a463419e5c781e5
+          {
+            echo "SEMON_BIN=$GITHUB_WORKSPACE/target/debug/semon"
+            echo "SEMON_HARBOR_REFERENCE_BIN=$GITHUB_WORKSPACE/target/ui-reference/semon"
+            echo "SEMON_HARBOR_CANDIDATE_ARTIFACT_ID=$candidate_id"
+            echo "SEMON_HARBOR_CANDIDATE_ARTIFACT_DIGEST=$candidate_digest"
+            echo "SEMON_HARBOR_REFERENCE_ARTIFACT_ID=$reference_id"
+            echo "SEMON_HARBOR_REFERENCE_ARTIFACT_DIGEST=$reference_digest"
+            echo "SEMON_HARBOR_REFERENCE_BINARY_SHA=$reference_sha"
+          } >> "$GITHUB_ENV"
+          echo 'Verified the retained 0bea candidate and pinned 263 reference artifacts.'
+
+      - name: Verify the pinned reference and install browser dependencies
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; if (REFERENCE.source !== "263a02da278716ab2309b8e34a463419e5c781e5") process.exit(1)'
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+          npm --prefix tests/ui ci --no-audit --no-fund
+          npx --prefix tests/ui playwright install --with-deps chromium
+
+      - name: Write the shared fixture and pin both viewer clocks
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sample"
+          now=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")
+          echo "SEMON_NOW=$now" >> "$GITHUB_ENV"
+
+      - name: Serve both immutable binaries over the same fixture
+        run: |
+          set -euo pipefail
+          serve() { # name port binary cache
+            name="$1"
+            port="$2"
+            binary="$3"
+            cache="$4"
+            log="$RUNNER_TEMP/$name.log"
+            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup "$binary" sessions --serve --listen "127.0.0.1:$port" \
+              --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" \
+              --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" \
+              --proc-root "$RUNNER_TEMP/sample/proc" --cache "$cache" \
+              < /dev/null > "$log" 2>&1 &
+            url=''
+            for _ in $(seq 1 100); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$log" || true)
+              [ -n "$url" ] && break
+              sleep 0.2
+            done
+            [ -n "$url" ] || { echo "$name viewer failed to publish a local endpoint" >&2; return 1; }
+            printf '%s %s\n' "${url%%/?t=*}" "${url##*t=}"
+          }
+          read -r candidate_base candidate_token < <(serve candidate 8765 "$SEMON_BIN" "$RUNNER_TEMP/candidate-index.json")
+          read -r reference_base reference_token < <(serve reference 8770 "$SEMON_HARBOR_REFERENCE_BIN" "$RUNNER_TEMP/reference-index.json")
+          curl -fsS -o /dev/null "$candidate_base/?t=$candidate_token"
+          curl -fsS -o /dev/null "$reference_base/?t=$reference_token"
+          {
+            echo "SEMON_BASE=$candidate_base"
+            echo "SEMON_TOKEN=$candidate_token"
+            echo "SEMON_HARBOR_REFERENCE_BASE=$reference_base"
+            echo "SEMON_HARBOR_REFERENCE_TOKEN=$reference_token"
+          } >> "$GITHUB_ENV"
+
+      - name: Replay the exact main-scope prefix and capture the predeclared paint arms
+        run: |
+          set -euo pipefail
+          export SEMON_PRESERVATION_BASE="$SEMON_HARBOR_REFERENCE_BASE"
+          export SEMON_PRESERVATION_TOKEN="$SEMON_HARBOR_REFERENCE_TOKEN"
+          SEMON_HARBOR_PAINT_ARM=programmatic-end \
+            SEMON_UI_OUT="$GITHUB_WORKSPACE/tests/ui/out/harbor-paint-protocol/programmatic-end" \
+            node tests/ui/diagnostics/harbor-prefix.mjs
+          SEMON_HARBOR_PAINT_ARM=wheel-traversal \
+            SEMON_UI_OUT="$GITHUB_WORKSPACE/tests/ui/out/harbor-paint-protocol/wheel-traversal" \
+            node tests/ui/diagnostics/harbor-prefix.mjs
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: harbor-fullpage-paint-protocol
+          path: tests/ui/out/harbor-paint-protocol
+          if-no-files-found: warn
+          retention-days: 2
