@@ -26,6 +26,11 @@ async function snapshot(page) {
   return page.evaluate(() => {
     const selectors = [
       '#sidebar',
+      '#side-list .tree-row',
+      '#side-list .ag',
+      '#side-list .child-dot',
+      '#side-list .kid-flag',
+      '#side-list .tree-toggle',
       '#topbar',
       '#lanes',
       '#page',
@@ -43,6 +48,12 @@ async function snapshot(page) {
             css = getComputedStyle(node);
           return {
             text: node.textContent.slice(0, 12000),
+            html: node.outerHTML.slice(0, 12000),
+            color: css.color,
+            background: css.backgroundColor,
+            opacity: css.opacity,
+            display: css.display,
+            visibility: css.visibility,
             box: [box.x, box.y, box.width, box.height],
             font: css.font,
             padding: css.padding,
