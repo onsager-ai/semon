@@ -187,3 +187,42 @@ The first native replay check exposed a producer mismatch: a worker-only staged 
 The pause boundaries authorize keeping those features inactive. They do not, by themselves, approve every resulting pixel difference. Any remaining actual-application visual difference still needs the explicit evidence-bound approval required by the policy above.
 
 Expanded actual-application machine captures exposed a separate presentation regression: a Machine-only CSS variant changed phone padding/gaps and row geometry, suppressed the original detail while activity was present, moved ages into every row, and substituted harness/machine text for recorded ancestry. Machine pages now reuse the selected complete application's shared row and page styles, working-only harness/status placement, recorded parent names and bounded native prompt detail. The visually hidden machine heading is restored. The existing served tests verify those original phone/desktop dimensions and row semantics. These changes preserve native metadata qualification and do not adopt the deferred v6 layout.
+
+### Recorded reading restoration — 2026-10-17 continuation
+
+The active actual-application gate retains all 113 historical frame identities and
+162 strict regions. Its additional complete reading protocol retains 62 states
+at phone, tablet and desktop widths in both themes. Historical adapter results,
+reference identities and thresholds remain evidence; the obsolete mockup renderer
+and adapter are removed under the user's explicit bounded-removal decision. The
+data-only fixtures retain their exact contents, verified against the original
+extractor in CI. Empty approval registries do not approve today's differences.
+
+The selected-session footer now follows the original recorded role and child
+return rules. Cost menus retain known child subtotals, unknown incomplete totals,
+last-activity ordering, nested run depth and the original reported-cost wording.
+Family status uses the same Catalog source/runtime/PID/facts/native-selection
+qualification as the Sessions list. Its private published inputs count within
+the unchanged family byte limits and are stripped before serialization. Retained
+Working/Needs-you observations cannot advertise current activity. Individual
+source stamps are checked during the read; this does not claim an atomic
+filesystem snapshot after those checks.
+
+Trace restores root-reachable counts, original relationship wording, icons, kind
+chips, event timestamps, outcome labels and chart money precision. Missing native
+move endpoints remain unavailable rather than asserting a move between fabricated
+machine names. Viewing a result item in an accepted bounded Trace uses the same
+source-qualified, 2,000-entry local receipt owner as selected transcripts and
+Home; it grants no delivery or runtime authority. Only reachable spawn/relay
+turns contribute receipts. The cached-history qualification occupies the original
+bottom dock instead of extending the transcript's content region. It remains
+passive text; no controller or Composer is reinstated.
+
+Candidate Trace response diagnostics hash the exact already-received response
+and retain bounded graph/identity structure, excluding transcript/tool bodies.
+They are needed to locate the atlas-ingest/harbor relation discrepancy: prior DOM
+captures were truncated and did not establish whether the producer emitted that
+edge. Until final CI proves the resulting behavior, this remains open rather than
+an accepted reading limitation. CI failures for a newly added test's formatting,
+Trace union narrowing and a missing required fixture boolean are retained and
+corrected; their failed runs are not inherited as acceptance.
