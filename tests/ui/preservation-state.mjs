@@ -38,6 +38,7 @@ async function snapshot(page) {
       '.thought',
       '.tsum',
       '.session-dock',
+      '.session-foot',
       'dialog[open]',
     ];
     return Object.fromEntries(
@@ -184,6 +185,7 @@ try {
         { v: 'session', id: 'harbor' },
         { v: 'session', id: 'atlas-ingest' },
         { v: 'session', id: 'deps' },
+        { v: 'session', id: 'h-failed' },
         { v: 'analytics' },
       ]) {
         await goto(candidate, route, D);
@@ -244,4 +246,4 @@ try {
 console.log(JSON.stringify(report));
 // Exact matching is diagnostic because the explicit pause removes controls.
 // Missing captures and execution errors still fail; no reference or gate changes.
-if (report.results.length !== 56 || report.errors.length) process.exitCode = 1;
+if (report.results.length !== 62 || report.errors.length) process.exitCode = 1;
