@@ -180,6 +180,127 @@ async function snapshotChromeDiagnostics(page) {
     };
   });
 }
+async function readinessSnapshot(page) {
+  try {
+    return await page.evaluate(() => {
+      const rect = (node) => {
+          if (!node) return null;
+          const box = node.getBoundingClientRect();
+          return [box.x, box.y, box.width, box.height].map(
+            (value) => Math.round(value * 100) / 100,
+          );
+        },
+        flags = (node) =>
+          node
+            ? {
+                hidden: !!node.hidden,
+                ariaHidden: node.getAttribute('aria-hidden'),
+                disabled: node.matches(':disabled'),
+                box: rect(node),
+              }
+            : null,
+        state = history.state,
+        route = {};
+      if (state && typeof state === 'object')
+        for (const key of ['v', 'id', 'sid', 'turn', 'scrollTop']) {
+          const value = state[key];
+          if (typeof value === 'string' && value.length <= 128) route[key] = value;
+          else if (typeof value === 'number' && Number.isFinite(value)) route[key] = value;
+        }
+      const page = document.querySelector('#page'),
+        main = document.querySelector('#main'),
+        transcript = document.querySelector('.transcript');
+      return {
+        pathname: location.pathname,
+        route,
+        capturedAtUnixMs: Math.round(performance.timeOrigin + performance.now()),
+        fonts: document.fonts?.status ?? 'unavailable',
+        scroll: {
+          x: scrollX,
+          y: scrollY,
+          documentHeight: document.scrollingElement?.scrollHeight ?? null,
+          mainTop: main?.scrollTop ?? null,
+          mainClientHeight: main?.clientHeight ?? null,
+          mainScrollHeight: main?.scrollHeight ?? null,
+        },
+        page: page
+          ? {
+              box: rect(page),
+              ariaBusy: page.hasAttribute('aria-busy'),
+              busyDescendants: page.querySelectorAll(
+                '[aria-busy="true"], [data-loading="true"]',
+              ).length,
+              entryCount: page.querySelectorAll('[data-entry-key]').length,
+            }
+          : null,
+        transcript: transcript
+          ? {
+              box: rect(transcript),
+              scrollTop: transcript.scrollTop,
+              clientHeight: transcript.clientHeight,
+              scrollHeight: transcript.scrollHeight,
+            }
+          : null,
+        dock: flags(document.querySelector('.session-dock')),
+        jumpSlot: flags(document.querySelector('.session-jump-slot')),
+        jumpBottom: flags(document.querySelector('#jump-bottom')),
+      };
+    });
+  } catch (error) {
+    return { unavailable: error?.name ?? 'snapshot failed' };
+  }
+}
+function safeReadinessError(error) {
+  return String(error?.message ?? error)
+    .replace(/https?:\/\/[^\s"'<>]+/g, (value) => {
+      try {
+        const url = new URL(value);
+        return url.origin + url.pathname;
+      } catch {
+        return '[URL redacted]';
+      }
+    })
+    .replace(/\?[^\s"'<>]*/g, '?[redacted]')
+    .replace(/([?&](?:t|token|auth|secret|api[_-]?key)=)[^&\s"'<>]*/gi, '$1[redacted]')
+    .slice(0, 800);
+}
+async function waitForRouteCaptureReady(page, side, key) {
+  try {
+    await page.waitForFunction(() => {
+      const panel = document.querySelector('#page');
+      if (
+        !history.state?.v ||
+        !document.querySelector('#topbar .t, #topbar #find') ||
+        !panel ||
+        panel.hasAttribute('aria-busy') ||
+        panel.querySelector('[aria-busy="true"], [data-loading="true"]')
+      )
+        return false;
+      return (
+        history.state.v !== 'session' ||
+        (!!panel.querySelector("section[aria-label='Transcript']") &&
+          !!panel.querySelector('[data-entry-key]'))
+      );
+    });
+    await page.evaluate(() => document.fonts.ready);
+    await waitForCaptureReady(page, `${key} ${side} before scroll reset`);
+  } catch (error) {
+    const state = await readinessSnapshot(page);
+    throw new Error(
+      `${key} ${side} before scroll reset readiness failed: ${safeReadinessError(error)}; ` +
+        `snapshot=${JSON.stringify(state)}`,
+    );
+  }
+}
+function recordApiDiagnostics(pages, key) {
+  for (const [name, page] of pages) {
+    const from = page.captureApiEventsReported ?? 0;
+    report.apiDiagnostics.push(
+      ...page.captureApiEvents.slice(from).map((event) => ({ state: key, side: name, ...event })),
+    );
+    page.captureApiEventsReported = page.captureApiEvents.length;
+  }
+}
 async function capture(candidate, reference, key) {
   const images = [],
     artifactDigests = {},
@@ -196,6 +317,16 @@ async function capture(candidate, reference, key) {
       diffImage: `preservation/${key}-diff.png`,
       comparisonEvidence: `preservation/${key}-comparison.json`,
     };
+  const preflight = await Promise.allSettled(
+    pages.map(([name, page]) => waitForRouteCaptureReady(page, name, key)),
+  );
+  const preflightErrors = preflight
+    .filter((result) => result.status === 'rejected')
+    .map((result) => result.reason?.message ?? String(result.reason));
+  if (preflightErrors.length) {
+    recordApiDiagnostics(pages, key);
+    throw new Error(preflightErrors.join(' | '));
+  }
   const readiness = await Promise.allSettled(
     pages.map(async ([name, page]) => {
       // Both readers open at the latest record. Cancel that initial following
@@ -215,18 +346,22 @@ async function capture(candidate, reference, key) {
       await waitForCaptureReady(page, `${key} ${name}`);
     }),
   );
-  for (const [name, page] of pages) {
-    const from = page.captureApiEventsReported ?? 0;
-    report.apiDiagnostics.push(
-      ...page.captureApiEvents.slice(from).map((event) => ({ state: key, side: name, ...event })),
-    );
-    page.captureApiEventsReported = page.captureApiEvents.length;
-  }
-  const readinessErrors = readiness
-    .filter((result) => result.status === 'rejected')
-    .map((result) => result.reason?.message ?? String(result.reason));
+  recordApiDiagnostics(pages, key);
+  const readinessErrors = (
+    await Promise.all(
+      readiness.map(async (result, index) => {
+        if (result.status !== 'rejected') return null;
+        const [name, page] = pages[index],
+          state = await readinessSnapshot(page);
+        return (
+          `${key} ${name} after scroll reset readiness failed: ${safeReadinessError(result.reason)}; ` +
+          `snapshot=${JSON.stringify(state)}`
+        );
+      }),
+    )
+  ).filter(Boolean);
   if (readinessErrors.length)
-    throw new Error(`${key} capture readiness failed: ${readinessErrors.join(' | ')}`);
+    throw new Error(readinessErrors.join(' | '));
   for (const [name, page] of pages) {
     const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
