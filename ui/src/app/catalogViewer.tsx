@@ -2365,6 +2365,7 @@ export function createCatalogViewer(
                   id: origin.edge.from,
                   name: parent.name,
                   status: origin.edge.status,
+                  done: origin.edge.done,
                 }
               : undefined,
           )

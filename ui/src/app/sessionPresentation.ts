@@ -23,10 +23,36 @@ export function selectedSessionState(session: CatalogSession): string {
     ? 'off'
     : details.state;
 }
+function recordedCostTip(cost: Cost): string {
+  const groups = Object.entries(cost.by_model ?? {}).map(([id, model]) => {
+    const values = model.usd_by_kind ?? {},
+      kinds = [
+        ['Input', values.input],
+        ['Output', values.output],
+        ['Cache read', values.cache_read],
+        [
+          'Cache write',
+          (Number(values.cache_write_5m) || 0) + (Number(values.cache_write_1h) || 0),
+        ],
+      ];
+    if (Number(values.web_search) >= 0.005) kinds.push(['Web search', values.web_search]);
+    return {
+      id,
+      text: kinds.map(([label, usd]) => label + ' ' + money(Number(usd) || 0)).join(' · '),
+    };
+  });
+  return (
+    (groups.length > 1
+      ? groups.map((group) => group.id + ': ' + group.text).join('; ')
+      : groups.map((group) => group.text).join('')) +
+    (groups.length ? '. ' : '') +
+    "What these tokens would cost at API rates. Subscriptions (Claude Max, ChatGPT plans) aren't billed this way."
+  );
+}
 /** Recorded footer facts share the selected observation fence; they grant no control authority. */
 export function selectedSessionFooter(
   session: CatalogSession,
-  origin?: { id: string; name: string; status: string },
+  origin?: { id: string; name: string; status: string; done?: number },
 ): FooterView | undefined {
   const details = session.details;
   if (!details) return undefined;
@@ -39,29 +65,38 @@ export function selectedSessionFooter(
         ? 'err'
         : 'done'
       : recordedState,
+    finished = returned || ['done', 'err'].includes(recordedState),
+    now = Date.now(),
+    finishedAt = origin?.done ?? session.last,
     calls = details.calls,
     cost = details.cost,
-    items: FooterView['items'][number][] = [];
+    items: FooterView['items'][number][] = [],
+    callsTip = Object.entries(details.tool_calls)
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+      .map(([name, count]) => name + ' ' + count);
+  if (details.errors) callsTip.push(details.errors + ' failed');
   if (!returned)
     items.push({
       kind: 'calls',
       text: (calls ?? '—') + (calls === 1 ? ' tool call' : ' tool calls'),
-      tip:
-        Object.entries(details.tool_calls)
-          .map(([name, count]) => name + ' ' + count)
-          .join(' · ') || 'Recorded tool calls',
+      tip: callsTip.join(' · '),
     });
   if (session.start != null)
     items.push({
       kind: 'time',
       text: dur(session.start, state === 'work' ? null : session.last, Date.now()),
-      tip: 'Recorded session duration',
+      tip:
+        'Started ' +
+        clock(session.start, now) +
+        ' · last activity ' +
+        (session.last == null ? 'Unknown' : clock(session.last, now)) +
+        (finished && finishedAt != null ? ' · finished ' + clock(finishedAt, now) : ''),
     });
   if (cost.usd != null && cost.usd >= 0.005 && !cost.unpriced_models?.length)
     items.push({
       kind: 'cost',
       text: money(cost.usd),
-      tip: 'Recorded API-equivalent cost',
+      tip: recordedCostTip(cost),
     });
   return {
     state,
