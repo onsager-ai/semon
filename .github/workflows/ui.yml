@@ -27,7 +27,7 @@ concurrency:
 jobs:
   passive-diagnostic:
     if: github.event_name == 'workflow_dispatch' && github.ref_name == 'review/380-passive-notice-diagnostic-20261018'
-    name: bounded passive reading and served fixture diagnostic
+    name: bounded reading, route and dock diagnostic
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -49,7 +49,7 @@ jobs:
           npm --prefix tests/ui exec -- playwright install --with-deps chromium
       - name: Collect the unchanged passive component assertion
         run: node --test ui/tests/passive-reading-browser.mjs
-      - name: Retrieve the exact 1901f15e runtime for the child-return diagnostic
+      - name: Retrieve the exact d383c29a runtime for the reading diagnostic
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-test-binaries
@@ -62,6 +62,87 @@ jobs:
         run: |
           chmod +x "$SEMON_CATALOG_SERVED_BIN"
           node --test ui/tests/overview-served.mjs
+      - name: Prepare the unchanged dock interaction fixtures
+        if: ${{ !cancelled() }}
+        run: |
+          echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/dock-sample")" >> "$GITHUB_ENV"
+          node tests/ui/fixture.mjs "$RUNNER_TEMP/dock-extras" --extras > /dev/null
+      - name: Serve the exact reviewed runtime and native fixture hosts
+        if: ${{ !cancelled() }}
+        run: |
+          serve() {
+            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup "$RUNNER_TEMP/served-fixture-binaries/semon" sessions --serve --listen "127.0.0.1:$2" \
+              --claude-home "$3/claude" --claude-json "$3/.claude.json" --codex-home "$3/codex" --copilot-home "$3/copilot" --proc-root "$3/proc" --cache "$3/index.json" \
+              < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
+            for _ in $(seq 1 100); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
+              [ -n "$url" ] && break
+              sleep 0.2
+            done
+            [ -n "$url" ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }
+            echo "${url%%/?t=*} ${url##*t=}"
+          }
+          read -r base token < <(serve dock-sample 8765 "$RUNNER_TEMP/dock-sample")
+          echo "SEMON_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_TOKEN=$token" >> "$GITHUB_ENV"
+          read -r base token < <(serve dock-extras 8766 "$RUNNER_TEMP/dock-extras")
+          echo "SEMON_EXTRA_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_EXTRA_TOKEN=$token" >> "$GITHUB_ENV"
+          chmod +x "$RUNNER_TEMP/served-fixture-binaries/examples/ui-account-server"
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup "$RUNNER_TEMP/served-fixture-binaries/examples/ui-account-server" \
+            127.0.0.1:8768 "$RUNNER_TEMP/dock-extras/claude" "$RUNNER_TEMP/dock-extras/codex" \
+            "$RUNNER_TEMP/dock-extras/proc" "$RUNNER_TEMP/dock-extras/account-index.json" \
+            < /dev/null > "$RUNNER_TEMP/dock-account.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/dock-account.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/dock-account.log"; exit 1; }
+          echo "SEMON_ACCOUNT_BASE=${url%%/?t=*}" >> "$GITHUB_ENV"
+          echo "SEMON_ACCOUNT_TOKEN=${url##*t=}" >> "$GITHUB_ENV"
+      - name: Diagnose the original native dock interaction assertions
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        env:
+          SEMON_BIN: ${{ runner.temp }}/served-fixture-binaries/semon
+          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/dock-diagnostic
+        run: |
+          node --input-type=module <<'JS'
+          import extras from './checks/extras.mjs';
+          import { launch } from './lib.mjs';
+          const browser = await launch();
+          try {
+            if (!(await extras(browser))) process.exitCode = 1;
+          } finally {
+            await browser.close();
+          }
+          JS
+      - name: Diagnose original native touch-script assertions
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        env:
+          SEMON_BIN: ${{ runner.temp }}/served-fixture-binaries/semon
+          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/dock-diagnostic
+          SEMON_UI_COVERAGE: representative
+        run: |
+          node --input-type=module <<'JS'
+          import taps from './checks/taps.mjs';
+          import { launch } from './lib.mjs';
+          const browser = await launch();
+          try {
+            if (!(await taps(browser))) process.exitCode = 1;
+          } finally {
+            await browser.close();
+          }
+          JS
+      - name: Retain bounded reading diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bounded-reading-diagnostics
+          path: tests/ui/out/dock-diagnostic
+          if-no-files-found: warn
   foundation:
     name: UI types and generated assets
     runs-on: ubuntu-latest

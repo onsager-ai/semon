@@ -24,7 +24,15 @@
 //     (results.allowed), so a new allowed signature shows.
 //   - chart columns only when their panel also offers the equivalent time-slice button list.
 import { tapSessions } from '../suite-plan.mjs';
-import { ENV, served, goto, data, reporter, closePage } from '../lib.mjs';
+import {
+  ENV,
+  served,
+  goto,
+  data,
+  reporter,
+  closePage,
+  clickWithFailureDiagnostics,
+} from '../lib.mjs';
 
 const MIN = 44;
 // A control that a finger can hit, in the page's own terms.
@@ -561,7 +569,13 @@ export default async function tapsCheck(browser) {
         });
         if (await page.locator('.step > .out:not([hidden]) .viewscript').count())
           await attempt('open View script in ' + short, async () => {
-            await page.locator('.step > .out:not([hidden]) .viewscript').first().click();
+            const selector = '.step > .out:not([hidden]) .viewscript';
+            await clickWithFailureDiagnostics(
+              page,
+              selector,
+              'tap audit View script in ' + short,
+              () => page.locator(selector).first().click(),
+            );
             await page.waitForSelector('dialog.panel.full[open]');
             await tally(page, at('view script ' + short));
             await closeOverlays(page);

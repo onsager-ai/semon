@@ -552,6 +552,168 @@ export async function served(browser, opts = {}) {
   return page;
 }
 
+// Capture geometry only when a selected, real Playwright click fails. The
+// successful click path, timeout and scrolling remain unchanged.
+export async function clickWithFailureDiagnostics(page, selector, label, click) {
+  try {
+    await click();
+  } catch (error) {
+    let evidence;
+    try {
+      evidence = await page.evaluate(async (selector) => {
+        const round = (value) => Math.round(value * 10) / 10;
+        const box = (node) => {
+          if (!node) return null;
+          const rect = node.getBoundingClientRect();
+          return {
+            left: round(rect.left),
+            top: round(rect.top),
+            right: round(rect.right),
+            bottom: round(rect.bottom),
+            width: round(rect.width),
+            height: round(rect.height),
+          };
+        };
+        const identify = (node) =>
+          node instanceof Element
+            ? node.tagName.toLowerCase() +
+              (node.id ? '#' + node.id : '') +
+              [...node.classList]
+                .slice(0, 12)
+                .map((name) => '.' + name)
+                .join('')
+                .slice(0, 200)
+            : (node?.nodeName ?? String(node)).slice(0, 100);
+        const describe = (node) => {
+          if (!node) return null;
+          const style = getComputedStyle(node);
+          const rect = box(node);
+          return {
+            node: identify(node),
+            expanded: node.getAttribute?.('aria-expanded'),
+            disabled: node.matches?.(':disabled') ?? false,
+            box: rect,
+            display: style.display,
+            visibility: style.visibility,
+            position: style.position,
+            zIndex: style.zIndex,
+            pointerEvents: style.pointerEvents,
+            overflow: [style.overflowX, style.overflowY],
+            clipPath: style.clipPath,
+            readingClip: style.getPropertyValue('--reading-clip').trim(),
+            scrollMargin: [style.scrollMarginTop, style.scrollMarginBottom],
+            scrollPadding: [style.scrollPaddingTop, style.scrollPaddingBottom],
+            scroll: [
+              Math.round(node.scrollTop ?? 0),
+              node.scrollHeight ?? 0,
+              node.clientHeight ?? 0,
+            ],
+          };
+        };
+        const matches = document.querySelectorAll(selector);
+        const candidates = [...matches].slice(0, 16);
+        const target =
+          candidates.find((node) => {
+            const style = getComputedStyle(node);
+            return node.getClientRects().length && style.visibility !== 'hidden';
+          }) ??
+          candidates[0] ??
+          null;
+        const main = document.querySelector('#main');
+        const topbar = document.querySelector('#topbar');
+        const dock = document.querySelector('.session-dock');
+        const transcript = target?.closest('.transcript') ?? document.querySelector('.transcript');
+        const reader = matchMedia('(max-width: 760px)').matches ? document.documentElement : main;
+        const jump = document.querySelector('.session-jump-slot .jump, .jump');
+        const ancestors = [];
+        for (let node = target; node && ancestors.length < 12; node = node.parentElement) {
+          ancestors.push(describe(node));
+          if (node === main || node === document.documentElement) break;
+        }
+        const intersects = (left, right) =>
+          !!left &&
+          !!right &&
+          left.left < right.right &&
+          left.right > right.left &&
+          left.top < right.bottom &&
+          left.bottom > right.top;
+        const snapshot = () => {
+          const targetRect = box(target);
+          const topbarRect = box(topbar);
+          const dockRect = box(dock);
+          const transcriptRect = box(transcript);
+          const clip = transcript
+            ? parseFloat(getComputedStyle(transcript).getPropertyValue('--reading-clip')) || 0
+            : 0;
+          const readerGap = reader
+            ? Math.max(0, reader.scrollHeight - reader.clientHeight - reader.scrollTop)
+            : null;
+          const center = targetRect
+            ? {
+                x: (targetRect.left + targetRect.right) / 2,
+                y: (targetRect.top + targetRect.bottom) / 2,
+              }
+            : null;
+          return {
+            target: describe(target),
+            scroll: {
+              windowY: Math.round(window.scrollY),
+              readerGap: readerGap === null ? null : Math.round(readerGap),
+              nearEndByGap: readerGap === null ? null : readerGap <= 80,
+              jumpButton: describe(jump),
+              activeElement: identify(document.activeElement),
+              document: describe(document.scrollingElement),
+              main: describe(main),
+            },
+            topbar: describe(topbar),
+            dock: describe(dock),
+            transcript: describe(transcript),
+            targetAncestorChain: ancestors,
+            overlap: {
+              topbar: intersects(targetRect, topbarRect),
+              dock: intersects(targetRect, dockRect),
+              clippedByTranscriptBottom:
+                !!targetRect &&
+                !!transcriptRect &&
+                targetRect.bottom > transcriptRect.bottom - clip &&
+                targetRect.top < transcriptRect.bottom,
+            },
+            hitStack:
+              center &&
+              center.x >= 0 &&
+              center.x < innerWidth &&
+              center.y >= 0 &&
+              center.y < innerHeight
+                ? document.elementsFromPoint(center.x, center.y).slice(0, 8).map(identify)
+                : [],
+          };
+        };
+        const frames = [snapshot()];
+        for (let index = 0; index < 3; index++) {
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, 100);
+            requestAnimationFrame(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+          frames.push(snapshot());
+        }
+        return { selector, candidateCount: matches.length, frames };
+      }, selector);
+    } catch (diagnosticError) {
+      evidence = {
+        unavailable: String(diagnosticError?.message ?? diagnosticError).slice(0, 1000),
+      };
+    }
+    console.error(
+      '[served click geometry failure] ' +
+        JSON.stringify({ label, error: String(error.message ?? error).slice(0, 8000), evidence }),
+    );
+    throw error;
+  }
+}
+
 // The screen a route draws has its title in the bar, its transcript loaded, and its fonts in.
 export function titleOf(route, D) {
   return (
