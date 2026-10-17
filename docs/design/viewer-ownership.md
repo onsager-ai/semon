@@ -248,15 +248,16 @@ filters use the existing shared Filter/Select sheet. The source-qualified Machin
 field names the selected source rather than advertising an unavailable global
 union. The reader retains filter requests, cursor generations, row focus and
 scroll; `catalogBrowser` owns only the bounded filter choices and shared sheet
-lifetime. Native completeness/retry notices remain explicit. The list's ordinary
-count/scope explanation follows its rows so it does not displace their reading
-geometry. The independent compact Catalog component retains its optional grouped
+lifetime. Native completeness/retry notices remain explicit. The list retains a
+single qualified count summary; routine source/cache/search/order explanations
+use the existing Filter scroll body and shared tooltips. Nonroutine freshness and
+bounded-search warnings stay in the page flow. The independent compact Catalog component retains its optional grouped
 snapshot contract; no route selects another application or transport.
 
-The alternative Filter placement is an open proposal recorded in
+The Filter placement candidate and its pending visual acceptance are recorded in
 [sessions-filter-placement-proposal.md](sessions-filter-placement-proposal.md).
-The accepted layout above remains the review reference until that placement is
-explicitly selected; the proposal does not authorize changing its pixel baselines.
+It is part of the draft preservation implementation, not an approved visual
+exception. The pinned complete application remains the review reference.
 
 ## Selected observation
 
