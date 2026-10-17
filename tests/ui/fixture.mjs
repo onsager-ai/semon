@@ -1,8 +1,7 @@
-// Writes a synthetic ~/.claude, ~/.claude.json, ~/.codex and /proc whose session model reproduces the overhaul mockup's data
-// (reference/overhaul.html, a superset of the previous reference/semon-sample.html: it adds the atlas ingest fan-out and harbor's
-// reported cost): its sessions,
-// handoffs, turns, answers, busy intervals and transcripts, as Claude Code and Codex log lines. The sample's data is made up,
-// and every line here is made from it: the texts are read from the committed mockup, never from real logs.
+// Writes synthetic harness logs from the retained sample fixture data. The values were
+// extracted from the approved reference data blocks at source revision
+// bf9190ef2b80fcd56726f61dc480346b698039a2 and are kept as JSON in fixture-data/.
+// Every line here is synthetic; no real logs are used.
 //
 //   node fixture.mjs OUT_DIR [--extras]   writes OUT_DIR/{.claude.json,claude,codex,proc,work,roles} and prints the `now` to pin
 //   node fixture.mjs OUT_DIR --second     writes a second machine's home (`desktop`) for views across machines
@@ -17,35 +16,17 @@
 // What the model's rules can't reproduce is listed in gaps.json, and checked by gaps.mjs.
 import fs from 'node:fs';
 import path from 'node:path';
-import vm from 'node:vm';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// The sample's data block, evaluated as the mockup evaluates it.
-export function sample(file = 'overhaul.html') {
-  const html = fs.readFileSync(path.join(here, 'reference', file), 'utf8');
-  const start = html.indexOf('  const T = (h, m) => h * 60 + m;');
-  const end = html.indexOf(
-    '  // ====================================================================================\n  const $ = ',
-  );
-  if (start < 0 || end < start) throw new Error("the sample's data block moved");
-  const values = vm.runInNewContext(
-    '(() => {\n' +
-      html.slice(start, end) +
-      '\nreturn { NOW, MACHINE, MACHINE_UP, SESS, H, TX, API_PRICE };\n})()',
-  );
-  const historyStart = html.indexOf('  const ANALYTICS_HISTORY = {');
-  const historyEnd = html.indexOf('  function analyticsSessions()', historyStart);
-  if (historyStart < 0 || historyEnd < historyStart)
-    throw new Error("the sample's analytics history moved");
-  const history = vm.runInNewContext(
-    '(() => { const T = (h, m) => h * 60 + m;\n' +
-      html.slice(historyStart, historyEnd) +
-      '\nreturn { ANALYTICS_HISTORY, ANALYTICS_WAIT_SAMPLES };\n})()',
-  );
-  return { ...values, ...history };
+// Original data only; renderer HTML is retained in Git history for provenance.
+export function sample(file = 'overhaul.json') {
+  const name = path.basename(file).replace(/\.html$/, '.json');
+  if (!['overhaul.json', 'semon-sample.json'].includes(name))
+    throw new Error('unknown retained fixture data: ' + file);
+  return JSON.parse(fs.readFileSync(path.join(here, 'fixture-data', name), 'utf8'));
 }
 
 // Sample minutes since midnight map to 2026-09-28 UTC, the date pinned by the approved mockup's allowance sample.
