@@ -99,7 +99,7 @@ test('trace relationship sentences preserve recorded ask, subagent, relay and us
   );
 });
 
-test('Trace prose keeps its original static names while qualified navigation remains available', () => {
+test('Trace relationship names remain static prose', () => {
   const linkedName = (id, turn) => ({
       className: 'who',
       text: id,
@@ -113,7 +113,6 @@ test('Trace prose keeps its original static names while qualified navigation rem
     );
   assert.equal(parts.map((part) => part.text).join(''), 'atlas relayed to harbor');
   assert.ok(parts.every((part) => part.action === undefined && part.label === undefined));
-  assert.equal(linkedName('harbor').action.id, 'harbor');
 });
 
 test('trace hops preserve the recorded icons, generic move wording, and missing-child marker', () => {
