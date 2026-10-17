@@ -121,6 +121,10 @@ test('selected family costs, ancestry and mismatches remain bounded and unknown 
   assert.equal(menu.cost.figure, '$3.00');
   assert.equal(menu.cost.caption, 'this session and its 1 run');
   assert.equal(menu.cost.models[0].rows[0].count, '14');
+  assert.deepEqual(menu.cost.details.slice(0, 2), [
+    { label: 'This session', value: '$1.00' },
+    { label: 'Its run', value: '$2.00' },
+  ]);
   assert.equal(menu.cost.runs[0].id, 'child');
   assert.deepEqual(
     menu.path.map((row) => row.id),
@@ -134,12 +138,80 @@ test('selected family costs, ancestry and mismatches remain bounded and unknown 
   raw.family.state = 'incomplete';
   session.details = parseSessionDetails(raw);
   assert.equal(selectedSessionMenu(session, 'machine', false, false).cost.figure, '—');
+  assert.equal(selectedSessionMenu(session, 'machine', false, false).cost.details[1].value, '—');
   raw.family.state = 'complete';
   raw.family.runs[0].cost.usd = null;
   session.details = parseSessionDetails(raw);
   assert.equal(selectedSessionMenu(session, 'machine', false, false).cost.figure, '—');
+  assert.equal(selectedSessionMenu(session, 'machine', false, false).cost.details[1].value, '—');
   raw.family.runs.push(raw.family.runs[0]);
   assert.throws(() => parseSessionDetails(raw), /identity/);
+});
+
+test('selected run costs retain nested reading order, depth and original reported-cost copy', () => {
+  const relative = (key, parent, last) => ({
+    key,
+    parent,
+    last,
+    name: key,
+    harness: 'claude',
+    kind: 'subagent',
+    cost: { usd: 1 },
+  });
+  const raw = {
+    ...details(),
+    copied_usage: false,
+    cost: { usd: 2 },
+    family: {
+      state: 'complete',
+      ancestors: [],
+      runs: [
+        relative('second', 'selected', 1),
+        relative('first', 'selected', 3),
+        relative('nested', 'first', 4),
+        relative('deep', 'nested', 5),
+      ],
+    },
+    reported_runs: [{ start: 0, cost_usd: 1 }],
+    cost_check: [{ start: 0, computed_usd: 2, reported_usd: 1, ok: false }],
+  };
+  const session = {
+    key: 'selected',
+    name: 'Selected',
+    harness: 'claude',
+    native_ids: ['native'],
+    model: 'm',
+    cost: raw.cost,
+    details: parseSessionDetails(raw),
+  };
+  const menu = selectedSessionMenu(session, 'machine', false, false);
+  assert.deepEqual(
+    menu.cost.runs.map(({ id, depth }) => [id, depth]),
+    [
+      ['first', 0],
+      ['nested', 1],
+      ['deep', 2],
+      ['second', 0],
+    ],
+  );
+  assert.deepEqual(menu.cost.details.slice(0, 2), [
+    { label: 'This session', value: '$2.00' },
+    { label: 'Its 4 runs', value: '$4.00' },
+  ]);
+  assert.equal(menu.cost.details[2].value, '$1.00, last run');
+  assert.equal(
+    menu.cost.mismatch,
+    "Semon's estimate for that run is 100% above Claude Code's figure: API rates differ from what a plan is charged.",
+  );
+  raw.reported_runs.push({ start: 1, cost_usd: 2 });
+  session.details = parseSessionDetails(raw);
+  assert.equal(
+    selectedSessionMenu(session, 'machine', false, false).cost.details[2].value,
+    '$3.00, last 2 runs',
+  );
+  raw.cost_check = [{ start: 0, computed_usd: 2, reported_usd: 0, ok: false }];
+  session.details = parseSessionDetails(raw);
+  assert.match(selectedSessionMenu(session, 'machine', false, false).cost.mismatch, /100% above/);
 });
 
 test('list status labels preserve recorded observations without enabling controls', () => {

@@ -47,6 +47,30 @@ test('parent return preserves only an explicitly recorded holding turn', () => {
     turn: 'holding-turn',
   });
 });
+test('recorded footers retain the original role and returned-child visibility rules', () => {
+  const session = {
+    name: 'Principal',
+    start: 0,
+    last: 20,
+    details: { state: 'idle', calls: 0, tool_calls: {}, cost: { usd: null } },
+  };
+  assert.ok(selectedSessionFooter(session), 'a role is never inferred from the session name');
+  session.details.role = true;
+  assert.equal(selectedSessionFooter(session), undefined);
+  session.details.role = false;
+  const origin = { id: 'parent', name: 'Parent', status: 'work' };
+  assert.equal(selectedSessionFooter(session, origin), undefined);
+  session.details.state = 'wait';
+  assert.equal(selectedSessionFooter(session, origin), undefined);
+  session.details.state = 'work';
+  assert.ok(selectedSessionFooter(session, origin));
+  session.details.role = true;
+  assert.ok(selectedSessionFooter(session, origin), 'a known origin retains child footer rules');
+  session.details.role = false;
+  session.details.state = 'idle';
+  origin.status = 'done';
+  assert.equal(selectedSessionFooter(session, origin).text, 'Returned to Parent · Done');
+});
 test('incoming sender links use their recorded holding turn and describe unavailable anchors honestly', () => {
   const parent = { name: 'Parent', harness: 'claude' },
     item = { entry_id: 'brief', slot: 0, entry: { k: 'h', id: 'spawn', turn: 'child-turn' } };
