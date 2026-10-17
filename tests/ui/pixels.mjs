@@ -590,7 +590,8 @@ async function nav(page, route, D, mockup) {
 
 function catalogQualified() {
   return (
-    document.querySelector('#page .ph .sub')?.textContent.endsWith(' · Cached history') &&
+    document.querySelector('#page .ph')?.getAttribute('data-catalog-observation') ===
+      'Cached history' &&
     !document.querySelector('[data-session-row="list"] [aria-label="Status unavailable"]')
   );
 }

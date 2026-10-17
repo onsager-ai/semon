@@ -54,6 +54,7 @@ export function createCatalogBrowser(host: {
       const fields: FacetField[] = (['repo', 'harness', 'model'] as const).map((key) => {
         const address = source + '\u0000' + key,
           seen = options.get(address) ?? new Set<string>();
+        if (key === 'repo') seen.add('__none__');
         for (const row of rows) seen.add(row[key] ?? '__none__');
         if (filters[key]) seen.add(filters[key]);
         // Retain only bounded metadata choices while filters narrow the list.

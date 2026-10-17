@@ -1,7 +1,15 @@
 // Canonical Sessions use bounded source metadata and native query controls.
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { ENV, served, overflow, closePage } from './lib.mjs';
+import {
+  ENV,
+  served,
+  overflow,
+  closePage,
+  filterSheet,
+  doneFilterSheet,
+  pickFilter,
+} from './lib.mjs';
 
 export async function catalogFilterCheck(browser, name) {
   for (const width of [390, 820, 1280])
@@ -20,7 +28,7 @@ export async function catalogFilterCheck(browser, name) {
           if (url.pathname === '/api/sessions') requests.push(url);
           if (/^\/api\/(model|tx|events)(?:\/|$)/.test(url.pathname)) retired.push(url.pathname);
         });
-        await page.getByLabel('Harness', { exact: true }).waitFor();
+        await page.locator('#sq').waitFor();
         await page.locator('#page .nrow').first().waitFor();
         const capabilities = await (
           await page.request.get(ENV.base + '/api/session-capabilities')
@@ -68,9 +76,23 @@ export async function catalogFilterCheck(browser, name) {
         } finally {
           await page.unroute('**/api/sessions?*', pendingFacts);
         }
-        await page.getByLabel('Harness', { exact: true }).fill(row.harness);
-        await page.getByLabel('Repository', { exact: true }).fill(row.repo);
-        await page.getByRole('button', { name: 'Apply filters', exact: true }).press('Enter');
+        await filterSheet(page);
+        for (const [label, value] of [
+          ['Harness', row.harness],
+          ['Project', row.repo],
+        ]) {
+          const select = page.locator(`.filters-sheet .sh-select[data-label="${label}"]`);
+          await select.locator('.sh-select-trigger').click();
+          const index = await select
+            .locator('[role="option"]')
+            .evaluateAll(
+              (nodes, value) => nodes.findIndex((node) => node.dataset.value === value),
+              value,
+            );
+          assert.ok(index >= 0, 'recorded filter option is available');
+          await select.locator('[role="option"]').nth(index).click();
+        }
+        await doneFilterSheet(page);
         const expected = all.items
           .filter((item) => item.harness === row.harness && item.repo === row.repo)
           .map((item) => item.key)
@@ -91,22 +113,25 @@ export async function catalogFilterCheck(browser, name) {
           path: path.join(ENV.out, `${name}-sessions-${width}-${dark ? 'dark' : 'light'}.png`),
         });
         await page.reload();
-        await page.getByLabel('Harness', { exact: true }).waitFor();
-        assert.equal(await page.getByLabel('Harness', { exact: true }).inputValue(), row.harness);
-        assert.equal(await page.getByLabel('Repository', { exact: true }).inputValue(), row.repo);
-        await page.getByLabel('Repository', { exact: true }).fill('');
-        await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+        await page.locator('#sq').waitFor();
+        await filterSheet(page);
+        assert.equal(
+          await page
+            .locator('.sh-select[data-label="Harness"] [role="option"][aria-selected="true"]')
+            .getAttribute('data-value'),
+          row.harness,
+        );
+        assert.equal(
+          await page
+            .locator('.sh-select[data-label="Project"] [role="option"][aria-selected="true"]')
+            .getAttribute('data-value'),
+          row.repo,
+        );
+        await doneFilterSheet(page);
+        await pickFilter(page, 'Project', '');
         await page.waitForFunction(() => !new URLSearchParams(location.search).has('repo'));
         assert.equal(new URL(page.url()).searchParams.get('harness'), row.harness);
-        const noRepository = page.getByRole('checkbox', { name: 'No repository', exact: true });
-        const geometry = await noRepository.evaluate((checkbox) => {
-          const box = checkbox.getBoundingClientRect(),
-            label = checkbox.parentElement.querySelector('span').getBoundingClientRect();
-          return { width: box.width, gap: label.left - box.right };
-        });
-        assert.ok(geometry.width < 32, 'checkbox retains its native width');
-        assert.equal(geometry.gap, 8, 'checkbox stays beside its associated label');
-        await noRepository.check();
+        await pickFilter(page, 'Project', '__none__');
         await page.waitForFunction(
           () => new URLSearchParams(location.search).get('no_repo') === '1',
         );
@@ -123,7 +148,7 @@ export async function catalogFilterCheck(browser, name) {
             ) === JSON.stringify(ids),
           withoutRepository,
         );
-        await noRepository.uncheck();
+        await pickFilter(page, 'Project', '');
         await page.waitForFunction(() => !new URLSearchParams(location.search).has('no_repo'));
         assert.ok(requests.some((url) => url.searchParams.get('harness') === row.harness));
         assert.ok(
