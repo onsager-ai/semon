@@ -1004,7 +1004,7 @@ for (const width of [390, 1280])
       await page.locator('.facet-btn').click();
       for (const [label, value] of [
         ['Harness', 'claude'],
-        ['Project', '/repo'],
+        ['Repo', '/repo'],
       ]) {
         const select = page.locator(`.sh-select[data-label="${label}"]`);
         await select.locator('.sh-select-trigger').click();
