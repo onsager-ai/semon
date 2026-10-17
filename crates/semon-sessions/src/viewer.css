@@ -1340,7 +1340,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 @media (max-width: 760px) { .page:has(> .catalog-session > .transcript) { padding-top: 2px; } }
 /* Native turn anchors clear the fixed phone bar even when the footer permits more scrolling. */
 @media (max-width: 760px) { .catalog-session .turn { scroll-margin-top: calc(var(--barh, 56px) + var(--s5)); } }
-.catalog-session { display: flex; flex: 1; flex-direction: column; gap: var(--s5); }
+.catalog-session { display: flex; flex: 1; flex-direction: column; gap: inherit; }
 :is(.page, .catalog-session) > .transcript { flex: none; align-content: start; }
 .transcript { clip-path: inset(0 0 var(--reading-clip, 0px) 0); }
 .session-dock { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px) + var(--reading-bottom, 0px)); z-index: 7; margin-top: auto; padding-top: var(--s2); background: var(--ground); }
