@@ -537,6 +537,12 @@ for (const width of [390, 1280])
                   document.activeElement === trigger,
                 'repeated Find publication moved the focused account out of its host slot',
               );
+              // Return the host's action slot from Find mode before focusing it.
+              chrome.topbar({
+                titleSlot: instance.title,
+                actions: [instance.action],
+                account: findProps.account,
+              });
               trigger.click();
               assert(chrome.account.open, 'account did not open');
               const action = instance.action;

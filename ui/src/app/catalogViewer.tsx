@@ -1889,7 +1889,7 @@ export function createCatalogViewer(
       (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key),
     ).map((item) => ({
       ...item,
-      presentation: catalogSessionRow(item, descendants.get(item.key)),
+      presentation: catalogSessionRow(item, item.parent ? [] : descendants.get(item.key)),
     }));
     catalogBrowser.update(
       { harness, repo, model, q: query },

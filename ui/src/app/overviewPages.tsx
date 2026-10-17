@@ -450,7 +450,7 @@ export function createOverviewPages(host: OverviewHost) {
           current === row.catalog_key ? 'page' : rail && path.has(row.id) ? 'true' : undefined,
         state: row.session.state,
         stateLabel: STATE[row.session.state] ?? 'Status unavailable',
-        age: timeText(Math.max(0, recentNow - row.session.last)),
+        age: ago(row.session.last, recentNow),
         model: shortModel(row.session.model),
         modelTip: row.session.model,
         harness: mark(row.session.harness),
@@ -1495,7 +1495,7 @@ export function createOverviewPages(host: OverviewHost) {
                 : row.session.state === 'work'
                   ? 'Working'
                   : 'Recorded history',
-            age: timeText(Math.max(0, recentNow - row.session.last)),
+            age: ago(row.session.last, recentNow),
             under:
               row.session.parent === root.catalog_key
                 ? undefined

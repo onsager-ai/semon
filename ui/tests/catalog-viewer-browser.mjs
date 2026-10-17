@@ -22,7 +22,7 @@ const html = (
   .replace('<link rel="stylesheet" href="/shell.css">', '');
 const css = (
   await Promise.all(
-    ['viewer', 'shell'].map((name) =>
+    ['viewer', 'shell', 'select'].map((name) =>
       readFile(new URL(`../../crates/semon-sessions/src/${name}.css`, import.meta.url), 'utf8'),
     ),
   )
@@ -734,7 +734,8 @@ test('partial catalog discovery completes while retaining uncommitted search foc
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    let reads = 0;
+    let reads = 0,
+      complete = false;
     await page.route('http://catalog.test/**', (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path === '/api/session-capabilities')
@@ -749,8 +750,8 @@ test('partial catalog discovery completes while retaining uncommitted search foc
             machine_info: { key: 'source', label: 'Source', freshness: 'cached' },
             generation: 'a'.repeat(64),
             observed_at: null,
-            freshness: reads === 1 ? 'updating' : 'cached',
-            completeness: { state: reads === 1 ? 'partial' : 'complete' },
+            freshness: complete ? 'cached' : 'updating',
+            completeness: { state: complete ? 'complete' : 'partial' },
             capabilities: {
               pagination: true,
               filters: ['harness', 'repo'],
@@ -777,6 +778,7 @@ test('partial catalog discovery completes while retaining uncommitted search foc
     const harness = page.getByRole('searchbox', { name: 'Search session details', exact: true });
     await harness.fill('uncommitted');
     await harness.evaluate((node) => node.setSelectionRange(2, 7));
+    complete = true;
     await page
       .getByText('More sessions are being discovered. This list is incomplete.')
       .waitFor({ state: 'hidden' });
@@ -1167,7 +1169,7 @@ for (const width of [390, 1280])
           items = [meta('parent'), ...children, { ...meta('orphan'), parent: 'unloaded-parent' }];
         await page.route('http://catalog.test/**', (route) => {
           const u = new URL(route.request().url());
-          requests.push(u.pathname + u.search);
+          if (u.pathname.startsWith('/api/')) requests.push(u.pathname + u.search);
           if (u.pathname === '/api/session-capabilities')
             return route.fulfill({ json: capabilities(false) });
           if (u.pathname === '/api/sessions') return route.fulfill({ json: list(items) });

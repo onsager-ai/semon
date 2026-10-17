@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { ENV, served, data, reporter, goto, settled } from '../lib.mjs';
+import { ENV, served, data, reporter, goto, settled, pickFilter } from '../lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS = path.resolve(here, '../../../assets/harnesses');
@@ -385,8 +385,7 @@ export default async function hiconsCheck(browser) {
     await goto(page, { v: 'sessions' }, D);
     await loaded(page);
     judge('sessions-row', await read(page, PLACES['sessions-row'].selector), { need: 3 });
-    await page.getByLabel('Harness', { exact: true }).fill('claude');
-    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+    await pickFilter(page, 'Harness', 'claude');
     await page.waitForFunction(() => !document.querySelector('#page[aria-busy="true"]'));
     await page.waitForFunction(
       () =>
@@ -404,8 +403,7 @@ export default async function hiconsCheck(browser) {
       tag + ': source-scoped harness filter retains Claude marks',
     );
     await shot('sessions-by-harness');
-    await page.getByLabel('Harness', { exact: true }).fill('');
-    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+    await pickFilter(page, 'Harness', '');
     await page.waitForFunction(() => !document.querySelector('#page[aria-busy="true"]'));
     await shot('sessions');
 
