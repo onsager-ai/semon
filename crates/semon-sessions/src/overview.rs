@@ -131,6 +131,19 @@ pub(crate) fn publish_current(
     publish_current_measured(tx, row, &mut crate::native_timing::Measurements::default())
 }
 
+fn update_retained_observation(prior: &mut Value, current: &Value) {
+    // Retained source recipes cannot describe a different current call.
+    let same_activity = prior["activity"][0] == current["activity"][0]
+        && prior["activity"][3] == current["activity"][3];
+    for field in ["name", "state", "waiting_since", "waiting_for", "activity"] {
+        prior[field] = current[field].clone();
+    }
+    if !same_activity {
+        prior["activity"] = Value::Null;
+        prior["content"]["activity"] = Value::Null;
+    }
+}
+
 pub(crate) fn publish_current_measured(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
@@ -154,9 +167,7 @@ pub(crate) fn publish_current_measured(
             && prior.source_generation == expected
         {
             if let Some(current) = &row.overview {
-                for field in ["name", "state", "waiting_since", "waiting_for", "activity"] {
-                    prior.home[field] = current.home[field].clone();
-                }
+                update_retained_observation(&mut prior.home, &current.home);
                 if let Some(activity) = &mut prior.activity {
                     activity.working = current
                         .activity
@@ -360,7 +371,15 @@ pub(crate) fn session_home_details_inner(
             .split('&')
             .filter_map(|pair| pair.split_once('='))
             .collect();
-        for name in ["sid", "generation", "events", "turns", "scope", "machine"] {
+        for name in [
+            "sid",
+            "generation",
+            "events",
+            "turns",
+            "scope",
+            "machine",
+            "session_fields",
+        ] {
             if args.iter().filter(|(key, _)| *key == name).count() > 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -385,7 +404,13 @@ pub(crate) fn session_home_details_inner(
             || args.iter().any(|(name, _)| {
                 !matches!(
                     *name,
-                    "sid" | "generation" | "events" | "turns" | "scope" | "machine"
+                    "sid"
+                        | "generation"
+                        | "events"
+                        | "turns"
+                        | "scope"
+                        | "machine"
+                        | "session_fields"
                 )
             })
         {
@@ -398,6 +423,26 @@ pub(crate) fn session_home_details_inner(
             &value("events").unwrap_or_else(|| "[]".into()),
         )
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid event selection"))?;
+        let session_fields: Vec<String> = serde_json::from_str(
+            &value("session_fields").unwrap_or_else(|| "[\"detail\",\"activity\"]".into()),
+        )
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid session field selection",
+            )
+        })?;
+        if session_fields.len() > 2
+            || session_fields
+                .iter()
+                .any(|field| !matches!(field.as_str(), "detail" | "activity"))
+            || (session_fields.len() == 2 && session_fields[0] == session_fields[1])
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid session field selection",
+            ));
+        }
         let turns: Vec<String> =
             serde_json::from_str(&value("turns").unwrap_or_else(|| "[]".into())).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "Invalid turn selection")
@@ -596,10 +641,9 @@ pub(crate) fn session_home_details_inner(
                         _ => result["incomplete"] = json!(true),
                     }
                 }
-                for field in ["detail", "activity"]
-                    .into_iter()
-                    .filter(|_| include_session)
-                {
+                for field in ["detail", "activity"].into_iter().filter(|field| {
+                    include_session && session_fields.iter().any(|selected| selected == field)
+                }) {
                     let recipe = &content[field];
                     if recipe.is_null() {
                         continue;
@@ -1023,6 +1067,32 @@ pub fn session_overview_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_activity_never_joins_old_arguments_to_a_new_observation() {
+        let prior = json!({"name":"before","state":"work","activity":["Read","","1s",10],"content":{"activity":{"offset":42},"events":{"edge":{}}}});
+        for activity in [
+            json!(["Read", "", "2s", 11]),
+            json!(["Edit", "", "2s", 10]),
+            Value::Null,
+        ] {
+            let mut retained = prior.clone();
+            update_retained_observation(
+                &mut retained,
+                &json!({"name":"after","state":"work","activity":activity}),
+            );
+            assert!(retained["activity"].is_null());
+            assert!(retained["content"]["activity"].is_null());
+            assert_eq!(retained["name"], "after");
+            assert_eq!(retained["content"]["events"], prior["content"]["events"]);
+        }
+        let mut retained = prior.clone();
+        update_retained_observation(&mut retained, &json!({"activity":["Read","","2s",10]}));
+        assert_eq!(
+            retained["content"]["activity"],
+            prior["content"]["activity"]
+        );
+        assert_eq!(retained["activity"][2], "2s");
+    }
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     struct Fixture {
         source: OverviewSource,

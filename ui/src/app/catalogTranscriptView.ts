@@ -451,7 +451,13 @@ export function recordedRelationshipViews(
   relationship: RecordedRelationship,
   selected: string,
   participants: Record<string, RecordedSessionPresentation>,
-  native: { brief?: string; result?: string; answer?: string | string[]; trace?: string },
+  native: {
+    brief?: string;
+    result?: string;
+    answer?: string | string[];
+    trace?: string;
+    activity?: readonly [string, string];
+  },
 ): EntryView[] {
   const edge = relationship.edge,
     target = participants[edge.to],
@@ -503,6 +509,10 @@ export function recordedRelationshipViews(
         meta,
         brief: preview(native.brief ?? ''),
         result: native.result,
+        activity:
+          target.live_observation && status === 'work' && !native.result && native.activity
+            ? [runningToolLabel(native.activity[0]), native.activity[1]]
+            : undefined,
         failed: status === 'err',
         mark: mark
           ? {

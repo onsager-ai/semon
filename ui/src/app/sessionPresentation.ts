@@ -52,7 +52,7 @@ function recordedCostTip(cost: Cost): string {
 /** Recorded footer facts share the selected observation fence; they grant no control authority. */
 export function selectedSessionFooter(
   session: CatalogSession,
-  origin?: { id: string; name: string; status: string; done?: number },
+  origin?: { id: string; name: string; status: string; done?: number; turn?: string },
 ): FooterView | undefined {
   const details = session.details;
   if (!details) return undefined;
@@ -105,7 +105,7 @@ export function selectedSessionFooter(
       ? 'Returned to ' + origin!.name + ' · ' + STATE[state]
       : (STATE[state] ?? 'Recorded history'),
     items,
-    parent: returned ? { id: origin!.id, name: origin!.name } : undefined,
+    parent: returned ? { id: origin!.id, name: origin!.name, turn: origin!.turn } : undefined,
   };
 }
 function familyCost(session: CatalogSession): Cost {

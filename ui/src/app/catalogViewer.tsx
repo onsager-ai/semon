@@ -114,7 +114,15 @@ interface SelectedView {
   lastTotal: number | null;
   queuedAfter?: number | null;
   contextLoading?: boolean;
-  contextText?: Map<string, { brief?: string; result?: string; answer?: string | string[] }>;
+  contextText?: Map<
+    string,
+    {
+      brief?: string;
+      result?: string;
+      answer?: string | string[];
+      activity?: readonly [string, string];
+    }
+  >;
   find?: string;
   findOpen?: boolean;
   filter?: string;
@@ -123,6 +131,7 @@ interface SelectedView {
   annotations?: CatalogAnnotations;
   annotationsLoading?: boolean;
   annotationRange?: number;
+  navigationEpoch?: number;
   annotationsEpoch?: number;
   annotationsFocus?: boolean;
   errorRestore?: {
@@ -2368,6 +2377,7 @@ export function createCatalogViewer(
                   name: parent.name,
                   status: origin.edge.status,
                   done: origin.edge.done,
+                  turn: origin.sourceTurn,
                 }
               : undefined,
           )
@@ -2447,6 +2457,13 @@ export function createCatalogViewer(
                   )
                 : undefined;
             return recordedRelationshipViews(item, relationship, view.key, context.sessions, {
+              activity: view.contextText?.get(
+                JSON.stringify([
+                  relationship.edge.to,
+                  context.previews[relationship.edge.to],
+                  null,
+                ]),
+              )?.activity,
               brief: preview(relationship.briefOwner)?.brief,
               result: preview(relationship.resultOwner)?.result,
               answer: preview(relationship.briefOwner)?.answer,
@@ -2736,6 +2753,8 @@ export function createCatalogViewer(
     return pending.promise;
   }
   async function resynchronize(view: SelectedView) {
+    const previousStore = view.store,
+      navigationEpoch = view.navigationEpoch;
     const candidate = new CatalogTranscriptStore();
     candidate.select(
       { source_key: capabilities.source_key, catalog_key: view.key },
@@ -2759,7 +2778,7 @@ export function createCatalogViewer(
       for (const range of view.store.loadedRanges())
         for (let after = range.first; after < Math.min(range.end, tailFirst); after += 100)
           await read(after, Math.min(100, Math.min(range.end, tailFirst) - after));
-      if (disposed) {
+      if (disposed || view.store !== previousStore || view.navigationEpoch !== navigationEpoch) {
         candidate.destroy();
         return;
       }
@@ -2800,7 +2819,8 @@ export function createCatalogViewer(
     }
     if (after !== null) view.following = false;
     scope.clearTimeout(view.retry);
-    const request = view.store.request(after, after === null ? 60 : 100),
+    const store = view.store,
+      request = store.request(after, after === null ? 60 : 100),
       p = params();
     p.set('sid', view.key);
     p.set('limit', String(request.limit));
@@ -2813,7 +2833,7 @@ export function createCatalogViewer(
     drawSelected(view);
     try {
       const value = await api('/api/session-transcript?' + p);
-      if (disposed) return;
+      if (disposed || view.store !== store) return;
       if (view.store.accept(request, value)) {
         void hydrateContext(view);
         view.retryDelay = 1000;
@@ -2831,7 +2851,7 @@ export function createCatalogViewer(
         }
       }
     } catch (error) {
-      if (disposed) return;
+      if (disposed || view.store !== store) return;
       view.store.reject(request);
       if (error && typeof error === 'object' && 'status' in error && error.status === 409) {
         view.note = 'Recorded history changed. Resynchronizing…';
@@ -2920,13 +2940,30 @@ export function createCatalogViewer(
         if (!owners.has(owner)) owners.set(owner, new Set());
         owners.get(owner)!.add(relationship.edge.id);
       }
+    const activityOwners = new Set<string>();
+    for (const relationship of context.handoffs) {
+      const target = relationship.edge.to,
+        participant = context.sessions[target];
+      if (
+        relationship.edge.kind !== 'spawn' ||
+        participant?.state !== 'work' ||
+        !participant.live_observation ||
+        !participant.activity ||
+        !context.previews[target]
+      )
+        continue;
+      activityOwners.add(target);
+    }
     const jobs = [...owners].flatMap(([sid, ids]) => {
       const values = [...ids],
-        result: { sid: string; ids: string[] }[] = [];
+        result: { sid: string; ids: string[]; activity?: boolean }[] = [];
       for (let start = 0; start < values.length; start += 8)
         result.push({ sid, ids: values.slice(start, start + 8) });
       return result;
     });
+    for (const sid of activityOwners)
+      if (!cache.has(JSON.stringify([sid, context.previews[sid], null])))
+        jobs.push({ sid, ids: [], activity: true });
     if (!jobs.length) return;
     view.contextLoading = true;
     const current = () =>
@@ -2947,6 +2984,7 @@ export function createCatalogViewer(
                 sid: job.sid,
                 generation: context.previews[job.sid],
                 events: JSON.stringify(job.ids),
+                session_fields: JSON.stringify(job.activity ? ['activity'] : []),
               });
               const data = object(await api('/api/session-home?' + params));
               if (!current()) return;
@@ -2972,6 +3010,24 @@ export function createCatalogViewer(
               }
               for (const row of parsed)
                 cache.set(JSON.stringify([job.sid, context.previews[job.sid], row.id]), row);
+              if (job.activity) {
+                const activity = object(data.session).activity,
+                  expected = context.sessions[job.sid]?.activity;
+                if (
+                  activity != null &&
+                  (!Array.isArray(activity) ||
+                    activity.length !== 4 ||
+                    typeof activity[0] !== 'string' ||
+                    typeof activity[1] !== 'string' ||
+                    activity[1].length > 1000 ||
+                    activity[0] !== expected?.tool ||
+                    activity[3] !== expected?.since)
+                )
+                  throw Error('Recorded child activity changed');
+                cache.set(JSON.stringify([job.sid, context.previews[job.sid], null]), {
+                  activity: activity == null ? undefined : [activity[0], activity[1]],
+                });
+              }
               const allowed = new Set(
                 context.handoffs.flatMap((row) =>
                   [row.briefOwner, row.resultOwner]
@@ -2979,6 +3035,8 @@ export function createCatalogViewer(
                     .map((sid) => JSON.stringify([sid, context.previews[sid], row.edge.id])),
                 ),
               );
+              for (const sid of activityOwners)
+                allowed.add(JSON.stringify([sid, context.previews[sid], null]));
               for (const key of cache.keys()) if (!allowed.has(key)) cache.delete(key);
               view.renderedRevision = -1;
               drawSelected(view);
@@ -3050,6 +3108,7 @@ export function createCatalogViewer(
   }
   async function goSession(key: string, meta?: CatalogSession, push = true, anchor?: string) {
     if (disposed || !capabilities.source_key) return;
+    const navigationFocus = document.activeElement;
     cancelCandidate();
     preserveScroll();
     if (active) closeSessionComposer(active.root);
@@ -3141,6 +3200,21 @@ export function createCatalogViewer(
       );
     chrome();
     drawSelected(view);
+    const navigationEpoch = (view.navigationEpoch ?? 0) + 1;
+    view.navigationEpoch = navigationEpoch;
+    const focusHeading = () => {
+      if (disposed || active !== view || view.navigationEpoch !== navigationEpoch) return;
+      // Match the complete reader's navigation focus without stealing a focus
+      // the reader moved while the generation-bound transcript was loading.
+      if (document.activeElement !== document.body && document.activeElement !== navigationFocus)
+        return;
+      const heading = view.root.querySelector<HTMLElement>('.ph > h1');
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus({ preventScroll: true });
+      }
+    };
+    focusHeading();
     const turn = new URLSearchParams(location.hash.slice(1)).get('turn');
     view.anchorNote = undefined;
     if (turn) {
@@ -3150,31 +3224,126 @@ export function createCatalogViewer(
       const p = params();
       p.set('sid', key);
       p.set('turn', turn);
+      const currentAnchor = () =>
+        !disposed &&
+        active === view &&
+        view.navigationEpoch === navigationEpoch &&
+        capabilities.selected_transcript &&
+        sourceKey === capabilities.source_key &&
+        new URLSearchParams(location.hash.slice(1)).get('turn') === turn;
+      if (!capabilities.selected_transcript) {
+        view.anchorNote =
+          'Recorded transcript is updating. The source refresh will appear automatically.';
+        drawSelected(view);
+        return;
+      }
       try {
-        const anchor = object(await api('/api/session-anchor?' + p));
-        if (
-          disposed ||
-          active !== view ||
-          sourceKey !== capabilities.source_key ||
-          new URLSearchParams(location.hash.slice(1)).get('turn') !== turn
-        )
-          return;
-        if (
-          anchor.api !== 1 ||
-          anchor.source_key !== sourceKey ||
-          anchor.catalog_key !== key ||
-          anchor.turn !== turn ||
-          (anchor.slot !== null && (!Number.isSafeInteger(anchor.slot) || Number(anchor.slot) < 0))
-        )
-          throw Error('Invalid turn anchor');
-        if (anchor.slot === null) {
-          view.anchorNote = 'This recorded turn is unavailable in the retained history.';
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const anchor = object(await api('/api/session-anchor?' + p));
+          if (!currentAnchor()) return;
+          if (
+            anchor.api !== 1 ||
+            anchor.source_key !== sourceKey ||
+            anchor.catalog_key !== key ||
+            anchor.turn !== turn ||
+            !/^[a-f0-9]{64}$/.test(text(anchor.generation)) ||
+            (anchor.slot !== null &&
+              (!Number.isSafeInteger(anchor.slot) || Number(anchor.slot) < 0))
+          )
+            throw Error('Invalid turn anchor');
+          if (anchor.slot === null) {
+            view.anchorNote = 'This recorded turn is unavailable in the retained history.';
+            drawSelected(view);
+            break;
+          }
+          // Accept the anchored range as one replacement transaction. A cold
+          // read must bind to the anchor generation too; an old slot is never
+          // reinterpreted after a rewrite or silently replaced with the tail.
+          const previousStore = view.store,
+            sameProjection =
+              previousStore.selectedPage()?.projection.generation === anchor.generation,
+            retained = attempt === 0 && sameProjection,
+            anchored = retained ? previousStore : new CatalogTranscriptStore();
+          if (!retained)
+            anchored.select({ source_key: sourceKey, catalog_key: key }, 'retained_history');
+          const request = anchored.request(Number(anchor.slot), 100, text(anchor.generation)),
+            query = params();
+          query.set('sid', key);
+          query.set('after', String(anchor.slot));
+          query.set('limit', String(request.limit));
+          query.set('generation', text(anchor.generation));
+          if (request.errorsGeneration !== null)
+            query.set('errors_generation', request.errorsGeneration);
+          try {
+            const value = await api('/api/session-transcript?' + query);
+            if (!currentAnchor()) {
+              if (!retained) anchored.destroy();
+              else anchored.reject(request);
+              return;
+            }
+            if (view.store !== previousStore || !capabilities.selected_transcript)
+              throw Object.assign(Error('Anchor selection changed'), { status: 409 });
+            if (!anchored.accept(request, value)) throw Error('Retired turn anchor');
+            if (!retained && sameProjection) {
+              // A runtime observation may change without rewriting native
+              // content. Revalidate only the already retained bounded ranges
+              // under the new observation before committing their replacement.
+              for (const range of previousStore.loadedRanges()) {
+                if (range.first >= Number(anchor.slot) && range.end <= Number(anchor.slot) + 100)
+                  continue;
+                const retainedRequest = anchored.request(
+                    range.first,
+                    Math.min(100, range.end - range.first),
+                  ),
+                  retainedQuery = params();
+                retainedQuery.set('sid', key);
+                retainedQuery.set('after', String(range.first));
+                retainedQuery.set('limit', String(retainedRequest.limit));
+                retainedQuery.set('generation', text(anchor.generation));
+                retainedQuery.set('errors_generation', retainedRequest.errorsGeneration!);
+                if (!currentAnchor()) throw Error('Retired turn anchor');
+                const retainedValue = await api('/api/session-transcript?' + retainedQuery);
+                if (!currentAnchor() || view.store !== previousStore)
+                  throw Error('Retired turn anchor');
+                if (!anchored.accept(retainedRequest, retainedValue))
+                  throw Error('Retired turn anchor');
+              }
+            }
+          } catch (error) {
+            if (!retained) anchored.destroy();
+            else anchored.reject(request);
+            // A generation conflict proves this exact anchor needs resolving
+            // again. One bounded re-resolution retains the same turn identity.
+            if (
+              attempt === 0 &&
+              currentAnchor() &&
+              error &&
+              typeof error === 'object' &&
+              'status' in error &&
+              error.status === 409
+            )
+              continue;
+            throw error;
+          }
+          if (!retained) {
+            view.store.destroy();
+            view.store = anchored;
+          }
+          pruneSelectedFields(view);
+          view.meta = {
+            ...anchored.selectedPage()!.session,
+            ...(view.observedName === undefined ? {} : { name: view.observedName }),
+          };
+          view.renderedRevision = -1;
+          view.note = '';
+          chrome();
           drawSelected(view);
-        } else {
-          await loadSelected(view, Number(anchor.slot));
-          if (active === view && !disposed)
+          void hydrateContext(view);
+          void loadIdentity(view);
+          focusHeading();
+          if (currentAnchor())
             scope.timeout(() => {
-              if (disposed || active !== view) return;
+              if (!currentAnchor()) return;
               const target = [...view!.root.querySelectorAll<HTMLElement>('[data-turn]')].find(
                 (node) => node.dataset.turn === turn,
               );
@@ -3185,11 +3354,13 @@ export function createCatalogViewer(
           return;
         }
       } catch (error) {
-        if (active === view && !disposed) {
+        if (currentAnchor()) {
           view.anchorNote = readError(error);
           drawSelected(view);
         }
+        return;
       }
+      if (!currentAnchor()) return;
     }
     if (view.store.selectedPage()) {
       void loadIdentity(view);
@@ -3201,6 +3372,7 @@ export function createCatalogViewer(
       void loadIdentity(view);
       if (capabilities.selected_transcript) await loadSelected(view);
     }
+    focusHeading();
   }
   async function refreshMetadata(sourceKey: string, epoch: number) {
     const p = params();

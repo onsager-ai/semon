@@ -37,6 +37,25 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
+    /// Reuse the producer's recorded edge ownership; never infer a parent turn
+    /// from timing, session order or a body scan in a read request.
+    pub(crate) fn with_origin_turns(
+        mut self,
+        holding: &BTreeMap<&str, &Turn>,
+        ambiguous: &BTreeSet<&str>,
+    ) -> Self {
+        for edge in &mut self.edges {
+            let Some(id) = edge["id"].as_str() else {
+                continue;
+            };
+            if let Some(turn) = holding.get(id).filter(|turn| {
+                !ambiguous.contains(id) && edge["from"].as_str() == Some(turn.sid.as_str())
+            }) {
+                edge["source_turn"] = json!(turn.id);
+            }
+        }
+        self
+    }
     pub(crate) fn endpoints(&self) -> impl Iterator<Item = &str> {
         self.edges.iter().flat_map(|edge| {
             ["from", "to"]
@@ -496,7 +515,7 @@ pub(crate) fn range_context(
         missing = true;
     }
     for sid in participants.into_iter().take(201) {
-        let metadata:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_object('name',json_extract(metadata,'$.name'),'harness',json_extract(metadata,'$.harness'),'model',json_extract(metadata,'$.model'),'kind',json_extract(metadata,'$.kind'),'state',json_extract(metadata,'$.state'),'start',json_extract(metadata,'$.start'),'last',json_extract(metadata,'$.last'),'calls',json_extract(metadata,'$.details.calls'),'usd',json_extract(metadata,'$.family_usd'),'live_observation',EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')) ELSE NULL END FROM session_trace_headers WHERE session_key=?1",[&sid],|row|row.get(0)).optional()?.flatten();
+        let metadata:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_object('name',json_extract(metadata,'$.name'),'harness',json_extract(metadata,'$.harness'),'model',json_extract(metadata,'$.model'),'kind',json_extract(metadata,'$.kind'),'state',json_extract(metadata,'$.state'),'start',json_extract(metadata,'$.start'),'last',json_extract(metadata,'$.last'),'calls',json_extract(metadata,'$.details.calls'),'usd',json_extract(metadata,'$.family_usd'),'activity',json_extract(metadata,'$.details.activity'),'live_observation',EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')) ELSE NULL END FROM session_trace_headers WHERE session_key=?1",[&sid],|row|row.get(0)).optional()?.flatten();
         if let Some(metadata) = metadata {
             bytes += metadata.len();
             if metadata.len() > 65536 || bytes > 4 * 1024 * 1024 {
@@ -510,6 +529,17 @@ pub(crate) fn range_context(
             );
         } else {
             missing = true;
+        }
+    }
+    for edge in &edges {
+        if edge["kind"] == "spawn"
+            && let Some(target) = edge["to"].as_str()
+            && let Some(session) = sessions.get(target)
+            && session["state"] == "work"
+            && session["live_observation"] == 1
+            && !session["activity"].is_null()
+        {
+            owners.insert(target.to_owned());
         }
     }
     let mut previews = BTreeMap::new();
@@ -868,6 +898,43 @@ mod generation_tests {
                 ("a目标".into(), "edge".into()),
             ],
         }
+    }
+
+    #[test]
+    fn parent_anchor_requires_one_recorded_holding_turn_owned_by_the_sender() {
+        let turn = Turn {
+            id: "holding-turn".into(),
+            sid: "owner".into(),
+            start: None,
+            u: true,
+            text: None,
+            at: Some(1),
+            end: crate::model::End {
+                at: Some(2),
+                st: "done",
+                why: "replied",
+                h: None,
+            },
+            sent: vec!["edge".into()],
+            file: String::new(),
+            offset: 0,
+            last: false,
+        };
+        let holding = BTreeMap::from([("edge", &turn)]);
+        let projected = populated_projection().with_origin_turns(&holding, &BTreeSet::new());
+        assert_eq!(projected.edges[0]["source_turn"], "holding-turn");
+        let absent = populated_projection().with_origin_turns(&BTreeMap::new(), &BTreeSet::new());
+        assert!(absent.edges[0]["source_turn"].is_null());
+        let ambiguous =
+            populated_projection().with_origin_turns(&holding, &BTreeSet::from(["edge"]));
+        assert!(ambiguous.edges[0]["source_turn"].is_null());
+        let wrong_owner = Turn {
+            sid: "another-source-session".into(),
+            ..turn.clone()
+        };
+        let wrong = populated_projection()
+            .with_origin_turns(&BTreeMap::from([("edge", &wrong_owner)]), &BTreeSet::new());
+        assert!(wrong.edges[0]["source_turn"].is_null());
     }
 
     #[test]
