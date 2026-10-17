@@ -25,7 +25,85 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native_page_support:
+    name: supporting native-page isolation and reader lifecycle
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/review/380-native-page-support-20261018' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+    steps:
+      - name: Check out the actual diagnostic candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Prove authored UI and fixture producer identities
+        run: |
+          git fetch --no-tags --depth=1 origin 0199aa44321218aa68ebec87b433c8d3da1c5fdf e36113e69265e634b8b3490692e4065a991ccd61
+          git diff --exit-code 0199aa44321218aa68ebec87b433c8d3da1c5fdf -- ui/src
+          git diff --exit-code e36113e69265e634b8b3490692e4065a991ccd61 -- crates
+      - name: Download the unchanged native API fixture producer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 12109953497
+          run-id: 39058724365
+          github-token: ${{ github.token }}
+          path: target/debug
+          merge-multiple: true
+      - name: Verify fixture binary and record supporting identity
+        run: |
+          printf '%s  target/debug/semon\n' cf07fb246e1c590c6ddb0d00e9ca1a7200402d8e29ff9d4af0be6d45f69d29f0 | sha256sum -c -
+          chmod +x target/debug/semon
+          mkdir -p tests/ui/out
+          python3 - <<'PYIDENTITY'
+          import json, os
+          from pathlib import Path
+          Path('tests/ui/out/support-identity.json').write_text(json.dumps({
+            'kind': 'authored UI supporting diagnostic; not embedded-asset or final acceptance',
+            'candidate': os.environ['GITHUB_SHA'],
+            'authored_ui_source': '0199aa44321218aa68ebec87b433c8d3da1c5fdf',
+            'fixture_binary_source': 'e36113e69265e634b8b3490692e4065a991ccd61',
+            'fixture_binary_fingerprint': 'cf07fb246e1c590c6ddb0d00e9ca1a7200402d8e29ff9d4af0be6d45f69d29f0',
+            'binary_run': 39058724365,
+            'binary_artifact': 12109953497,
+          }, indent=2) + '\n')
+          PYIDENTITY
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: tests/ui/package-lock.json
+
+      # Keep signed Ubuntu packages; avoid the intermittently unreachable Azure mirror.
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+
+      - name: Install the check tooling and Chromium
+        working-directory: tests/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Install locked UI tooling
+        run: npm --prefix ui ci --no-audit --no-fund
+      - name: Native page mount, cadence, visibility, history and teardown
+        run: node --test --test-name-pattern='native host chrome stays isolated' ui/tests/catalog-viewer-browser.mjs
+      - name: Existing Home, selected-reader and native application lifetimes
+        run: node --test ui/tests/application-lifecycle.mjs
+      - name: Preserve supporting identity
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: viewer-ui-native-page-support
+          path: tests/ui/out
+          if-no-files-found: warn
+
   foundation:
+    if: ${{ github.ref != 'refs/heads/review/380-native-page-support-20261018' }}
     name: UI types and generated assets
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -68,6 +146,7 @@ jobs:
           if-no-files-found: error
 
   build:
+    if: ${{ github.ref != 'refs/heads/review/380-native-page-support-20261018' }}
     name: viewer test binaries
     needs: foundation
     runs-on: ubuntu-latest
@@ -166,6 +245,7 @@ jobs:
           retention-days: 1
 
   checks:
+    if: ${{ github.ref != 'refs/heads/review/380-native-page-support-20261018' }}
     name: viewer / ${{ matrix.suite }}
     needs: build
     runs-on: ubuntu-latest
@@ -508,7 +588,7 @@ jobs:
 
   browser:
     name: viewer browser checks
-    if: ${{ always() }}
+    if: ${{ always() && github.ref != 'refs/heads/review/380-native-page-support-20261018' }}
     needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
