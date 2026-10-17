@@ -20,7 +20,9 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   qualification follows the records; stale/incomplete/loading/error notices stay
   ahead of them. Qualification stays visible without shifting the normal opening.
 - Recent restores duration and machine/repository metadata, recorded state labels,
-  failed-descendant flags and the selected ancestry in rail mode. Recorded status
+  failed-descendant flags and the selected ancestry in rail mode. Child activity
+  dots are reserved for the collapsed rail; expanded rows retain their descendant
+  flag without shifting the age text. The All action counts nested descendants. Recorded status
   does not grant control authority. Home retains the original compact ages,
   plain-text previews and source-qualified parent names.
 - Session headers use the selected complete application's responsive lineage:

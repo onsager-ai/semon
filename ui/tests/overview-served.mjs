@@ -223,6 +223,18 @@ test(
                 (text) => text.trim().length,
               ),
             );
+            for (const row of home.working.filter((row) => row.session.activity)) {
+              const activity = row.session.activity;
+              assert.ok(
+                (
+                  await page
+                    .locator('#page .nrow')
+                    .filter({ hasText: row.session.name })
+                    .textContent()
+                ).includes(activity[0]),
+                'Home retains the recorded tool name in working activity',
+              );
+            }
             assert.ok((await page.locator('#lanes > .treeitem').count()) <= 8);
             assert.ok(
               (await page.locator('#lanes .tree-group .treeitem').count()) > 0,

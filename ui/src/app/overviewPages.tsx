@@ -732,13 +732,7 @@ export function createOverviewPages(host: OverviewHost) {
           ]
             .filter(Boolean)
             .join(' · '),
-          activity: row.session.activity
-            ? ([
-                runningToolLabel(row.session.activity[0]),
-                row.session.activity[1],
-                row.session.activity[2],
-              ] as const)
-            : undefined,
+          activity: row.session.activity,
           harness: mark(row.session.harness),
         })),
         answered: (allAnswered ? home.answered : home.answered.slice(0, 3)).map((row) =>
