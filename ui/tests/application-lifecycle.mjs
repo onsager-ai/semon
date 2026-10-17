@@ -328,12 +328,12 @@ for (const width of [390, 1280])
                   'paused creation was advertised by the native shell',
                 );
                 assert(
-                  document.querySelector('#lanes .srow') && requests === before + 1,
-                  'native chrome did not share the bounded Recent publication',
+                  !document.querySelector('#lanes .srow') && requests === before,
+                  'native chrome loaded workspace Recent instead of retaining its empty slot',
                 );
                 assert(
-                  requestPaths.every((path) => path === '/api/viewer/home'),
-                  'native chrome loaded session bodies or a workspace model',
+                  requestPaths.length === 0,
+                  'native chrome started a reader or workspace metadata request',
                 );
                 assert(count() > 0, 'native chrome owns no document effects');
                 owner.destroy();
@@ -343,10 +343,7 @@ for (const width of [390, 1280])
                 assert(!document.querySelector('#page input'), 'native content survived teardown');
                 window.dispatchEvent(new Event('semon:refresh'));
                 await settle();
-                assert(
-                  requests === before + 1,
-                  'disposed native shell started another overview read',
-                );
+                assert(requests === before, 'disposed native shell started an overview read');
               }
               const first = Application.mountViewerApplication(nativeHost());
               await settle();
@@ -362,8 +359,8 @@ for (const width of [390, 1280])
               second.destroy();
               await settle();
               assert(
-                count() === 0 && effects() === 0 && requests === 6,
-                'native replacement leaked effects or duplicated overview reads',
+                count() === 0 && effects() === 0 && requests === 0,
+                'native replacement leaked effects or admitted workspace reads',
               );
               return { requests, destroys };
             }

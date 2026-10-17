@@ -1329,7 +1329,7 @@ export function createOverviewPages(host: OverviewHost) {
     }
   }
   async function refresh(force = false) {
-    if (disposed) return;
+    if (disposed || host.nativeContent) return;
     if (!force && host.route() === 'analytics' && Date.now() < analyticsRetryAt) return;
     if (loading) {
       queued = true;
