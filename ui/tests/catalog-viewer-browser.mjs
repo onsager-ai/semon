@@ -441,7 +441,11 @@ for (const width of [390, 1280])
           );
           await page.clock.runFor(8100);
           stage = 'workspace response after ' + mode;
-          await withDeadline((async () => (await response).finished())(), stage);
+          const receipt = await withDeadline(response, stage);
+          assert.equal(receipt.status(), mode === 'unavailable' ? 503 : 200);
+          // Error reads intentionally release their unread body; the exact HTTP
+          // receipt and resulting chrome state are this fixture's witnesses.
+          if (mode !== 'unavailable') await withDeadline(receipt.finished(), stage + ' body');
           await ready(
             'workspace scope after ' + mode,
             (ready) =>
