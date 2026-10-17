@@ -55,10 +55,10 @@ jobs:
           npm --prefix ui run sizes
 
       - name: Prepare generated assets for thermal-restricted review
-        if: failure() && github.event.pull_request.number == 438
+        if: failure() && (github.event.pull_request.number == 438 || github.event_name == 'workflow_dispatch')
         run: npm --prefix ui run build
       - name: Retain generated assets without bypassing freshness
-        if: failure() && github.event.pull_request.number == 438
+        if: failure() && (github.event.pull_request.number == 438 || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ui-generated-review
