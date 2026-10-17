@@ -173,14 +173,36 @@ jobs:
       - name: Replay the exact main-scope prefix and capture the predeclared paint arms
         run: |
           set -euo pipefail
+          mkdir -p tests/ui/out/harbor-paint-protocol
           export SEMON_PRESERVATION_BASE="$SEMON_HARBOR_REFERENCE_BASE"
           export SEMON_PRESERVATION_TOKEN="$SEMON_HARBOR_REFERENCE_TOKEN"
+          programmatic_status=0
           SEMON_HARBOR_PAINT_ARM=programmatic-end \
             SEMON_UI_OUT="$GITHUB_WORKSPACE/tests/ui/out/harbor-paint-protocol/programmatic-end" \
-            node tests/ui/diagnostics/harbor-prefix.mjs
+            node tests/ui/diagnostics/harbor-prefix.mjs || programmatic_status=$?
+          wheel_status=0
           SEMON_HARBOR_PAINT_ARM=wheel-traversal \
             SEMON_UI_OUT="$GITHUB_WORKSPACE/tests/ui/out/harbor-paint-protocol/wheel-traversal" \
-            node tests/ui/diagnostics/harbor-prefix.mjs
+            node tests/ui/diagnostics/harbor-prefix.mjs || wheel_status=$?
+          printf '{"programmaticEnd":%s,"wheelTraversal":%s}\n' \
+            "$programmatic_status" "$wheel_status" \
+            > tests/ui/out/harbor-paint-protocol/arm-status.json
+          if [ "$programmatic_status" -ne 0 ] || [ "$wheel_status" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Preserve bounded server logs for failed capture diagnosis
+        if: always()
+        run: |
+          mkdir -p tests/ui/out/harbor-paint-protocol
+          for server in candidate reference; do
+            log="$RUNNER_TEMP/$server.log"
+            if [ -f "$log" ]; then
+              tail -n 200 "$log" \
+                | sed -E 's/([?&]t=)[0-9a-fA-F]+/\1[redacted]/g' \
+                > "tests/ui/out/harbor-paint-protocol/$server-server-tail.log"
+            fi
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -188,4 +210,4 @@ jobs:
           name: harbor-fullpage-paint-protocol
           path: tests/ui/out/harbor-paint-protocol
           if-no-files-found: warn
-          retention-days: 2
+          retention-days: 30
