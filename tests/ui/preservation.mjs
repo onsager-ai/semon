@@ -10,7 +10,7 @@ import { ENV, launch, served, goto, data } from './lib.mjs';
 const out = path.join(ENV.out, 'preservation');
 fs.mkdirSync(out, { recursive: true });
 const report = {
-  candidate: process.env.GITHUB_SHA,
+  candidate: process.env.SEMON_PRESERVATION_CANDIDATE ?? process.env.GITHUB_SHA,
   reference: '263a02da278716ab2309b8e34a463419e5c781e5',
   threshold: 0.1,
   maxRatio: 0.0001,
@@ -124,6 +124,8 @@ try {
             (route.v !== 'session' || !!document.querySelector('#page .transcript')),
           route,
         );
+        if (route.v === 'analytics')
+          await reference.waitForSelector('.analytics-metrics[data-analytics-ready]');
         await capture(
           candidate,
           reference,

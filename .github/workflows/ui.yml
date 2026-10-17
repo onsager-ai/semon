@@ -69,7 +69,8 @@ jobs:
     name: viewer test binaries
     needs: foundation
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Recovery UI review builds the candidate and three exact historical refs.
+    timeout-minutes: ${{ github.event.pull_request.number == 438 && 25 || 15 }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,6 +132,12 @@ jobs:
         env:
           UI_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
         run: |
+          git fetch --no-tags --depth=1 origin eb535ff8920fe9aa54e78babc9649cf6c9400ad6
+          git worktree add --detach "$RUNNER_TEMP/ui-before" eb535ff8920fe9aa54e78babc9649cf6c9400ad6
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-before/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
+          strip --strip-debug target/debug/semon
+          mkdir -p target/ui-before
+          cp target/debug/semon target/ui-before/semon
           git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
           git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-store --bin semon --features semon-sessions/test-clock
@@ -141,6 +148,14 @@ jobs:
         with:
           name: viewer-ui-reference-binary
           path: target/debug/semon
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain the exact before candidate binary
+        if: github.event.pull_request.number == 438
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: viewer-ui-before-binary
+          path: target/ui-before/semon
           if-no-files-found: error
           retention-days: 1
 
@@ -175,6 +190,12 @@ jobs:
         with:
           name: viewer-ui-reference-binary
           path: target/ui-reference
+      - name: Download the freshly verified before candidate
+        if: matrix.suite == 'visual' && github.event.pull_request.number == 438
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: viewer-ui-before-binary
+          path: target/ui-before
       - name: Restore executable permissions
         run: chmod +x target/debug/semon target/debug/examples/ui-account-server
       - name: Restore baseline executable permissions
@@ -297,6 +318,25 @@ jobs:
           [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-reference.log"; exit 1; }
           cd tests/ui
           SEMON_PRESERVATION_BASE="${url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${url##*t=}" node preservation.mjs
+
+      - name: Capture the before candidate under the same comparison protocol
+        if: ${{ !cancelled() && matrix.suite == 'visual' && github.event.pull_request.number == 438 }}
+        run: |
+          reference_url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log")
+          chmod +x target/ui-before/semon
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-before/semon sessions --serve --listen 127.0.0.1:8771 \
+            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-before-index.json" \
+            < /dev/null > "$RUNNER_TEMP/ui-before.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-before.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-before.log"; exit 1; }
+          cd tests/ui
+          SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" SEMON_UI_OUT="$SEMON_UI_OUT/before" \
+            SEMON_PRESERVATION_CANDIDATE=eb535ff8920fe9aa54e78babc9649cf6c9400ad6 \
+            SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" node preservation.mjs
 
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
