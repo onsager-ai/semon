@@ -315,7 +315,9 @@ test(
               rowGap: '10px',
               title: home.machines[0].label,
             });
-            const quill = page.locator('#page .nrow').filter({ hasText: 'quill' });
+            const quill = page.locator('#page .nrow').filter({
+              has: page.locator('.nm', { hasText: /^quill$/ }),
+            });
             assert.match(await quill.locator('.for').textContent(), /for you.*Add PDF export/);
             assert.equal(
               await quill.locator('.ag .hicon').count(),
@@ -323,7 +325,10 @@ test(
               'non-working rows retain their age without a harness icon',
             );
             assert.match(
-              await page.locator('#page .nrow').filter({ hasText: 'Principal' }).textContent(),
+              await page
+                .locator('#page .nrow')
+                .filter({ has: page.locator('.nm', { hasText: /^Principal$/ }) })
+                .textContent(),
               /Morning sweep/,
               'machine prompt preview uses selected native evidence',
             );

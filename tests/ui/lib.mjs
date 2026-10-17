@@ -105,10 +105,10 @@ function recordCaptureApiEvent(page, event) {
   else page.captureApiEventsTruncated++;
 }
 
-function failedSelectedApiEvents(page, routeKey = page.captureRouteKey) {
+export function failedSelectedApiEvents(page, routeKey = page.captureRouteKey) {
   const events = page.captureApiEvents.filter((event) => event.routeKey === routeKey),
     selected = SELECTED_READ_APIS[page.captureRole] ?? new Set();
-  return events.filter((event) => {
+  return events.filter((event, eventIndex) => {
     if (!selected.has(event.path)) return false;
     if (event.event === 'response') {
       if (event.ok || event.status === 304) return false;
@@ -126,6 +126,28 @@ function failedSelectedApiEvents(page, routeKey = page.captureRouteKey) {
       return true;
     }
     if (event.event !== 'failed') return false;
+    // Chromium can report the reference poll's bodyless 304 as ERR_ABORTED.
+    // The pinned transport explicitly accepts that status without reading a
+    // body. Require the same recorded request, never a later unrelated success.
+    if (
+      page.captureRole === 'reference' &&
+      event.method === 'GET' &&
+      event.path === '/api/model' &&
+      /ERR_ABORTED/.test(event.error ?? '') &&
+      events.some(
+        (response, responseIndex) =>
+          responseIndex < eventIndex &&
+          response.event === 'response' &&
+          response.id === event.id &&
+          response.method === event.method &&
+          response.path === event.path &&
+          response.routeKey === event.routeKey &&
+          response.queryDigest === event.queryDigest &&
+          response.status === 304 &&
+          response.at <= event.at,
+      )
+    )
+      return false;
     return !(
       /ERR_ABORTED|aborted|cancelled/i.test(event.error ?? '') &&
       event.routeKey !== page.captureRouteKey
