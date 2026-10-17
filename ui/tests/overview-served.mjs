@@ -161,7 +161,9 @@ test(
               const ui = await page.evaluate(() => {
                 const text = (node, limit = 500) =>
                   (node?.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, limit);
-                const buttons = [...document.querySelectorAll('#page button, #page [role="button"]')]
+                const buttons = [
+                  ...document.querySelectorAll('#page button, #page [role="button"]'),
+                ]
                   .slice(0, 48)
                   .map((node) => ({
                     tag: node.tagName.toLowerCase(),
@@ -269,9 +271,11 @@ test(
               };
               const relevant = apiResponses
                 .filter((item) =>
-                  ['/api/session-home', '/api/session-transcript', '/api/session-identity'].includes(
-                    item.path,
-                  ),
+                  [
+                    '/api/session-home',
+                    '/api/session-transcript',
+                    '/api/session-identity',
+                  ].includes(item.path),
                 )
                 .slice(-4);
               let timer;
@@ -650,7 +654,9 @@ test(
             try {
               await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
             } catch (error) {
-              await captureOpenInHarborFailure();
+              await captureOpenInHarborFailure().catch(() => {
+                console.error('[open-in-harbor diagnostic unavailable]');
+              });
               throw error;
             }
             assert.match(
