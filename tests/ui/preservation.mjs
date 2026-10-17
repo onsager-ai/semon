@@ -84,11 +84,7 @@ async function snapshotChromeDiagnostics(page) {
   return page.evaluate(() => {
     const pseudo = (node, which) => {
       const style = getComputedStyle(node, which);
-      if (
-        style.display === 'none' ||
-        style.content === 'none' ||
-        style.content === 'normal'
-      )
+      if (style.display === 'none' || style.content === 'none' || style.content === 'normal')
         return null;
       return {
         content: style.content.slice(0, 120),
