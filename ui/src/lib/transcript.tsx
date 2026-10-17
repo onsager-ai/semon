@@ -151,7 +151,7 @@ export interface TranscriptHost extends SentenceHost {
   committed(): void;
   composerOpened?(panel: { destroy(): void }): void;
   composerClosed?(panel: { destroy(): void }): void;
-  trace(id: string): void;
+  trace(id: string, session?: string): void;
   toolAll(key: string, label: string): void;
   script(key: string): void;
   image(url: string, label: string, trigger: HTMLButtonElement): void;
@@ -710,7 +710,7 @@ function Entry({ entry, owner }: { entry: EntryView; owner: SessionOwner }): Com
                 type="button"
                 aria-label={entry.traceLabel}
                 onClick={(event) => {
-                  if (event.currentTarget.isConnected) owner.host.trace(entry.trace!);
+                  if (event.currentTarget.isConnected) owner.host.trace(entry.trace!, entry.id);
                 }}
               >
                 Run view

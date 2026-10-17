@@ -495,6 +495,8 @@ export function recordedRelationshipViews(
         handoff: edge.id,
         id: edge.to,
         turn: relationship.targetTurn,
+        trace: relationship.targetTurn,
+        traceLabel: 'Run view for ' + target.name,
         name: target.name,
         state: status,
         stateLabel: STATE[status] ?? 'Recorded history',
