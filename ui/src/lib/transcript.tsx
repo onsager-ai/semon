@@ -991,9 +991,10 @@ export function renderSessionScreen(
     state.observer.disconnect();
     state.observer = new ResizeObserver(state.measure);
     const viewport = window.visualViewport;
-    const fitJump = () => {
+    let dockFrame = 0;
+    const fitDock = () => {
       const dock = root.querySelector<HTMLElement>('.session-dock');
-      if (state.disposed || !dock || !root.isConnected) return;
+      if (state.disposed || !dock || !root.isConnected || !root.getClientRects().length) return;
       const note = document.querySelector<HTMLElement>(
         'body > .livenote, body > .viewer-status-slot > .livenote',
       );
@@ -1002,19 +1003,48 @@ export function renderSessionScreen(
         'readingBottom',
         Math.max(
           viewport ? Math.max(0, innerHeight - viewport.height - viewport.offsetTop) : 0,
-          note ? Math.max(0, innerHeight - note.getBoundingClientRect().top) : 0,
+          note?.getClientRects().length ? innerHeight - note.getBoundingClientRect().top : 0,
         ),
       );
+      const transcript = root.querySelector<HTMLElement>('.transcript');
+      if (transcript) {
+        // Keep the transcript's scroll height and anchors while clipping content under the dock.
+        const clipped =
+          getComputedStyle(dock).position === 'sticky'
+            ? Math.max(
+                0,
+                transcript.getBoundingClientRect().bottom - dock.getBoundingClientRect().top,
+              )
+            : 0;
+        setGeometry(transcript, 'readingClip', clipped);
+      }
     };
-    const notices = new MutationObserver(fitJump);
+    const scheduleDock = () => {
+      if (state.disposed) return;
+      cancelAnimationFrame(dockFrame);
+      dockFrame = requestAnimationFrame(fitDock);
+    };
+    document.addEventListener('scroll', scheduleDock, { capture: true, passive: true });
+    const notices = new MutationObserver(fitDock);
     notices.observe(document.body, { childList: true });
-    viewport?.addEventListener('resize', fitJump);
-    viewport?.addEventListener('scroll', fitJump);
-    requestAnimationFrame(fitJump);
+    viewport?.addEventListener('resize', fitDock);
+    viewport?.addEventListener('scroll', fitDock);
+    const dockObserver = new ResizeObserver(fitDock);
+    requestAnimationFrame(() => {
+      if (state.disposed) return;
+      const dock = root.querySelector('.session-dock');
+      if (dock) dockObserver.observe(dock);
+      const transcript = root.querySelector('.transcript');
+      if (transcript) dockObserver.observe(transcript);
+      fitDock();
+    });
     claimScreen(root, 'session', () => {
+      cancelAnimationFrame(dockFrame);
+      document.removeEventListener('scroll', scheduleDock, true);
       notices.disconnect();
-      viewport?.removeEventListener('resize', fitJump);
-      viewport?.removeEventListener('scroll', fitJump);
+      viewport?.removeEventListener('resize', fitDock);
+      viewport?.removeEventListener('scroll', fitDock);
+      dockObserver.disconnect();
       state.disposed = true;
       state.composerPanel?.destroy();
       render(null, state.composer);
