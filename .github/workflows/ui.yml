@@ -13,10 +13,6 @@ on:
         description: Compare recovery live refresh with the pinned recovery baseline
         type: boolean
         default: false
-      reference_inventory:
-        description: Inventory tracked callers of the legacy visual reference adapter
-        type: boolean
-        default: false
   pull_request:
   push:
     branches: [main]
@@ -29,45 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  reference-inventory:
-    name: legacy visual reference dependency inventory
-    if: github.event_name == 'workflow_dispatch' && inputs.reference_inventory
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Inventory tracked adapter and fixture callers
-        run: |
-          set -euo pipefail
-          inventory="$RUNNER_TEMP/ui-reference-dependencies.txt"
-          git grep -n -E 'overhaul-port|reference-map|semon-sample\.html|overhaul\.html|fixture\.mjs|sample\(|shots\.json|shots\.mjs|mockup-shots\.yml|pixels\.mjs' -- . > "$inventory" || status=$?
-          if [ "${status:-0}" -gt 1 ]; then exit "$status"; fi
-          cat "$inventory"
-          test -s "$inventory"
-      - name: Retain the data-only fixture exports used by the migration
-        run: |
-          mkdir -p "$RUNNER_TEMP/legacy-reference-data"
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import { sample } from './tests/ui/fixture.mjs';
-
-          for (const name of ['overhaul', 'semon-sample']) {
-            const json = JSON.stringify(sample(name + '.json'), null, 2) + '\n';
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/legacy-reference-data/${name}.json`, json);
-          }
-          NODE
-      - name: Retain dependency inventory
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ui-reference-dependency-inventory
-          path: |
-            ${{ runner.temp }}/ui-reference-dependencies.txt
-            ${{ runner.temp }}/legacy-reference-data/*.json
-          if-no-files-found: error
-          retention-days: 7
-
   foundation:
-    if: github.event_name != 'workflow_dispatch' || !inputs.reference_inventory
     name: UI types and generated assets
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -110,7 +68,6 @@ jobs:
           if-no-files-found: error
 
   build:
-    if: github.event_name != 'workflow_dispatch' || !inputs.reference_inventory
     name: viewer test binaries
     needs: foundation
     runs-on: ubuntu-latest
@@ -209,7 +166,6 @@ jobs:
           retention-days: 1
 
   checks:
-    if: github.event_name != 'workflow_dispatch' || !inputs.reference_inventory
     name: viewer / ${{ matrix.suite }}
     needs: build
     runs-on: ubuntu-latest
@@ -552,7 +508,7 @@ jobs:
 
   browser:
     name: viewer browser checks
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || !inputs.reference_inventory) }}
+    if: ${{ always() }}
     needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
