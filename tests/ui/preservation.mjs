@@ -1,4 +1,4 @@
-// Required 62-state actual-application comparison, independent of the historical-frame gate.
+// Required candidates compare 68 states; historical-before stays at the original 62.
 // The reference binary is the exact gitlink of the captured compat=1 UI.
 // Pause removals are never painted back into either UI or silently exempted.
 import fs from 'node:fs';
@@ -19,6 +19,7 @@ import {
   assessPreservation,
   assessVisualAcceptances,
   BEFORE,
+  FILTER_STATE,
   REFERENCE,
   THRESHOLD,
   MAX_RATIO,
@@ -370,6 +371,13 @@ async function capture(candidate, reference, key) {
     )
   ).filter(Boolean);
   if (readinessErrors.length) throw new Error(readinessErrors.join(' | '));
+  if (key.endsWith('-' + FILTER_STATE)) {
+    for (const [name, page] of pages) {
+      const state = await filterCaptureState(page);
+      if (!state.open || !state.closeFocused || state.scrollTop !== 0)
+        throw new Error(`${key} ${name} lost the shared open/focus/top-scroll state`);
+    }
+  }
   for (const [name, page] of pages) {
     const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
@@ -425,6 +433,42 @@ async function capture(candidate, reference, key) {
     artifactDigests,
     artifactPaths,
   });
+}
+async function prepareFilterCapture(page) {
+  await page.locator('.facet-btn').click();
+  const dialog = page.locator('.filters-sheet'),
+    close = dialog.locator('.vclose'),
+    body = dialog.locator('.vb');
+  await page.waitForFunction(() => document.querySelector('.filters-sheet')?.open === true);
+  await close.focus();
+  await body.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  const state = await filterCaptureState(page);
+  if (!state.open || !state.closeFocused || state.scrollTop !== 0)
+    throw new Error('Filter capture did not reach the shared open/focus/top-scroll state');
+}
+async function filterCaptureState(page) {
+  return page.evaluate(() => {
+    const dialog = document.querySelector('.filters-sheet'),
+      close = dialog?.querySelector('.vclose'),
+      body = dialog?.querySelector('.vb');
+    return {
+      open: dialog?.open === true,
+      closeFocused: document.activeElement === close,
+      scrollTop: body?.scrollTop ?? null,
+    };
+  });
+}
+async function closeFilterCapture(page) {
+  await page.locator('.filters-sheet .vclose').click();
+  await page.waitForFunction(
+    () =>
+      !document.querySelector('.filters-sheet')?.open &&
+      !history.state?.sheet &&
+      history.state?.v === 'sessions' &&
+      document.activeElement === document.querySelector('.facet-btn'),
+  );
 }
 try {
   if (!ENV.base || !process.env.SEMON_PRESERVATION_BASE || !process.env.SEMON_PRESERVATION_TOKEN)
@@ -495,6 +539,11 @@ try {
           reference,
           prefix + '-' + route.v + (route.id ? '-' + route.id : ''),
         );
+        if (route.v === 'sessions' && !historical) {
+          for (const page of [candidate, reference]) await prepareFilterCapture(page);
+          await capture(candidate, reference, prefix + '-' + FILTER_STATE);
+          for (const page of [candidate, reference]) await closeFilterCapture(page);
+        }
         if (route.id === 'harbor') {
           for (const page of [candidate, reference])
             await page.locator('.think-disclosure').first().click();

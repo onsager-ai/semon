@@ -39,12 +39,16 @@ inline warning visibility, clearing, Back, retained focus and list scroll. At
 390px the fixture uses a short touch viewport and verifies the Filter context
 shares the existing `.vb` scroll owner. It also checks both the Filter action's
 focus return and browser Back behavior, plus clearing the query and facets. The
-browser screenshot artifacts are diagnostic review material. The required 113
-full screenshots, 162 strict regions and 62-state preservation comparisons keep
-their current cases, thresholds, references and approval rules. A passing fixture
-suite or request-budget run does not accept the visual change. Whether moving the
-routine explanation out of the always-visible footer is acceptable remains an
-open placement decision.
+browser screenshot artifacts are diagnostic review material. The six actual
+open-Filter comparisons extend the existing 62 states to 68; the historical
+before candidate remains limited to its original 62. The 68-state gate compares
+candidate and pinned selected-reference captures with the same dialog open,
+close button focused, and Filter scroll body at the top. The required 113 full
+screenshots and 162 strict regions, all thresholds, references and approval rules
+remain unchanged. Any resulting visual difference stays subject to explicit
+review and approval. A passing fixture suite or request-budget run does not accept
+the visual change. Whether moving the routine explanation out of the
+always-visible footer is acceptable remains an open placement decision.
 
 Asset preparation at `5ac406349f7a7a933e60fe097d92b8589d8db55a` ran in
 [CI 39074023198](https://github.com/onsager-ai/semon/actions/runs/39074023198).

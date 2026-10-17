@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import {
   assessPreservation,
   EXPECTED,
+  FILTER_STATE,
+  HISTORICAL_EXPECTED,
   assessPixelComparison,
   assessVisualAcceptances,
   expectedPixelCoverage,
@@ -13,6 +15,7 @@ import {
   REFERENCE_MODEL_SOURCE,
   THRESHOLD,
   MAX_RATIO,
+  BEFORE,
 } from './preservation-contract.mjs';
 
 const artifactDigests = () => ({
@@ -106,8 +109,8 @@ function assertHistoricalCoverageMap(coverage, historical, historicalMap) {
     );
 }
 
-test('complete application gate enforces all 62 states and pixel/geometry results', () => {
-  assert.equal(EXPECTED.length, 62);
+test('complete application gate enforces all 68 states and pixel/geometry results', () => {
+  assert.equal(EXPECTED.length, 68);
   assert.deepEqual(assessPreservation(report()), { coverage: [], visual: [] });
   for (const change of [{ pixels: 100, ratio: MAX_RATIO * 2 }, { size: ['390x844', '390x845'] }]) {
     const changed = report();
@@ -117,6 +120,43 @@ test('complete application gate enforces all 62 states and pixel/geometry result
     assert.deepEqual(result.coverage, []);
     assert.equal(result.visual.length, 1);
   }
+});
+
+test('only the pinned historical candidate can use the original 62-state contract', () => {
+  assert.equal(HISTORICAL_EXPECTED.length, 62);
+  assert.deepEqual(
+    EXPECTED.filter((key) => key.endsWith('-' + FILTER_STATE)),
+    [
+      '390-light-sessions-filter-open',
+      '390-dark-sessions-filter-open',
+      '820-light-sessions-filter-open',
+      '820-dark-sessions-filter-open',
+      '1280-light-sessions-filter-open',
+      '1280-dark-sessions-filter-open',
+    ],
+  );
+  const missingFilter = report();
+  missingFilter.results = missingFilter.results.filter(
+    (row) => row.key !== '390-light-sessions-filter-open',
+  );
+  assert.match(
+    assessPreservation(missingFilter).coverage.join(),
+    /Missing visual case: 390-light-sessions-filter-open/,
+  );
+  const historical = report();
+  historical.candidate = BEFORE;
+  historical.mode = 'historical-before';
+  historical.results = historical.results.filter((row) => !row.key.endsWith('-' + FILTER_STATE));
+  assert.deepEqual(
+    historical.results.map((row) => row.key).sort(),
+    HISTORICAL_EXPECTED.slice().sort(),
+  );
+  assert.deepEqual(assessPreservation(historical), { coverage: [], visual: [] });
+
+  const forged = { ...historical, candidate: 'a'.repeat(40) };
+  const errors = assessPreservation(forged).coverage.join('\n');
+  assert.match(errors, /requires the pinned before candidate/);
+  assert.match(errors, /Missing visual case: 390-light-sessions-filter-open/);
 });
 
 test('equal row counts cannot hide missing, duplicate or unexpected captures', () => {
