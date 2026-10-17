@@ -37,6 +37,7 @@ if (
   throw new Error('Only the pinned before candidate may use --historical-before');
 
 const out = path.join(ENV.out, 'preservation');
+const MAX_CAPTURE_SCROLL_EVIDENCE = 128;
 fs.mkdirSync(out, { recursive: true });
 const report = {
   candidate: process.env.SEMON_PRESERVATION_CANDIDATE ?? process.env.GITHUB_SHA,
@@ -49,6 +50,8 @@ const report = {
   results: [],
   errors: [],
   apiDiagnostics: [],
+  captureScrollEvidence: [],
+  captureScrollEvidenceTruncated: 0,
   homePostTagDiagnostics: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
@@ -311,7 +314,353 @@ function recordApiDiagnostics(pages, key) {
     page.captureApiEventsReported = page.captureApiEvents.length;
   }
 }
-async function capture(candidate, reference, key) {
+
+function recordCaptureScrollEvidence(evidence) {
+  if (report.captureScrollEvidence.length < MAX_CAPTURE_SCROLL_EVIDENCE)
+    report.captureScrollEvidence.push(evidence);
+  else report.captureScrollEvidenceTruncated++;
+}
+
+async function captureScrollGeometry(page) {
+  return page.evaluate(() => {
+    const round = (value) => Math.round(value * 100) / 100;
+    const box = (node) => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      return [rect.x, rect.y, rect.width, rect.height].map(round);
+    };
+    const flag = (selector) => {
+      const node = document.querySelector(selector);
+      if (!node) return { present: false };
+      return {
+        present: true,
+        hidden: !!node.hidden,
+        ariaHidden: node.getAttribute('aria-hidden'),
+        disabled: node.matches(':disabled'),
+        box: box(node),
+      };
+    };
+    const state = history.state,
+      route = {};
+    if (state && typeof state === 'object')
+      for (const key of ['v', 'id', 'sid', 'turn']) {
+        const value = state[key];
+        if (typeof value === 'string' && value.length <= 128) route[key] = value;
+      }
+    const root = document.scrollingElement,
+      main = document.querySelector('#main');
+    const mainClientHeight = main?.clientHeight ?? null;
+    const mainScrollHeight = main?.scrollHeight ?? null;
+    const windowClientHeight = root?.clientHeight ?? null;
+    const windowScrollHeight = root?.scrollHeight ?? null;
+    return {
+      pathname: location.pathname,
+      route,
+      viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+      scroll: {
+        windowX: round(scrollX),
+        windowY: round(scrollY),
+        mainTop: main ? round(main.scrollTop) : null,
+      },
+      main: {
+        present: !!main,
+        box: box(main),
+        clientHeight: mainClientHeight,
+        scrollHeight: mainScrollHeight,
+        max: main ? Math.max(0, mainScrollHeight - mainClientHeight) : null,
+      },
+      window: {
+        clientHeight: windowClientHeight,
+        scrollHeight: windowScrollHeight,
+        max: root ? Math.max(0, windowScrollHeight - windowClientHeight) : null,
+      },
+      fonts: document.fonts?.status ?? 'unavailable',
+      jumpSlot: flag('.session-jump-slot'),
+      jumpBottom: flag('#jump-bottom'),
+    };
+  });
+}
+
+function fixedCaptureWheelPoint(pages) {
+  const viewports = pages.map(([, page]) => page.viewportSize());
+  const viewport = viewports[0];
+  const width = viewport?.width ?? 0;
+  const height = viewport?.height ?? 0;
+  return {
+    x: Math.max(0, width - 48),
+    y: Math.max(0, Math.min(300, height - 48)),
+    viewports,
+  };
+}
+
+async function captureWheelPointValidation(page, point) {
+  return page.evaluate(({ x, y }) => {
+    const main = document.querySelector('#main');
+    const target = document.elementFromPoint(x, y);
+    const element = target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
+    const interactive = element?.closest(
+      'button, a, input, textarea, select, [role="button"], [contenteditable="true"]',
+    );
+    let nestedScroller = null;
+    for (let node = element; node && node !== main; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (
+        /^(auto|scroll|overlay)$/.test(style.overflowY) &&
+        node.scrollHeight > node.clientHeight + 1
+      ) {
+        nestedScroller = {
+          tag: node.tagName.toLowerCase(),
+          id: node.id || null,
+          className: (node.getAttribute('class') ?? '').slice(0, 120),
+        };
+        break;
+      }
+    }
+    return {
+      insideMain: !!main && !!element && main.contains(element),
+      inert: !!element && !interactive && !nestedScroller,
+      nestedScroller,
+      target: element
+        ? {
+            tag: element.tagName.toLowerCase(),
+            id: element.id || null,
+            className: (element.getAttribute('class') ?? '').slice(0, 120),
+          }
+        : null,
+    };
+  }, point);
+}
+
+async function armCaptureWheel(page, direction) {
+  await page.evaluate((wheelDirection) => {
+    window.__semonCaptureWheelReceipt = null;
+    document.addEventListener(
+      'wheel',
+      (event) => {
+        const target =
+          event.target?.nodeType === Node.ELEMENT_NODE ? event.target : event.target?.parentElement;
+        window.__semonCaptureWheelReceipt = {
+          trusted: event.isTrusted,
+          direction: wheelDirection,
+          deltaY: event.deltaY,
+          deltaMode: event.deltaMode,
+          target: target
+            ? {
+                tag: target.tagName.toLowerCase(),
+                id: target.id || null,
+                className: (target.getAttribute('class') ?? '').slice(0, 120),
+              }
+            : null,
+        };
+      },
+      { once: true, capture: true, passive: true },
+    );
+  }, direction);
+}
+
+async function waitForCaptureWheel(page, deadline, predicateLabel, predicate, arg = null) {
+  const timeout = deadline - Date.now();
+  if (timeout <= 0)
+    throw new Error(`capture wheel movement deadline exhausted before ${predicateLabel}`);
+  await page.waitForFunction(predicate, arg, { timeout });
+}
+
+async function normalizeDesktopSessionScroll(pages, key) {
+  const evidenceBySide = new Map();
+  const errors = [];
+  const point = fixedCaptureWheelPoint(pages);
+  const viewportMismatch = point.viewports.some(
+    (viewport) =>
+      !viewport ||
+      viewport.width !== point.viewports[0]?.width ||
+      viewport.height !== point.viewports[0]?.height,
+  );
+  const deadline = Date.now() + 8000;
+  await Promise.all(
+    pages.map(async ([side, page]) => {
+      const entry = { state: key, side, protocol: 'trusted +160 then -100000 in desktop #main' };
+      const sideErrors = [];
+      const fail = (message) => {
+        sideErrors.push(message);
+        errors.push(message);
+      };
+      evidenceBySide.set(side, entry);
+      entry.point = { x: point.x, y: point.y };
+      entry.viewport = page.viewportSize();
+      if (viewportMismatch)
+        fail(`${key} candidate/reference viewports differ before normalization`);
+      entry.pointValidation = await captureWheelPointValidation(page, point).catch((error) => {
+        entry.pointValidationError = safeReadinessError(error);
+        fail(`${key} ${side} capture wheel point inspection: ${entry.pointValidationError}`);
+        return null;
+      });
+      entry.before = await captureScrollGeometry(page).catch((error) => {
+        entry.beforeError = safeReadinessError(error);
+        fail(`${key} ${side} pre-wheel geometry: ${entry.beforeError}`);
+        return null;
+      });
+      const beforeMainTop = entry.before?.scroll?.mainTop;
+      const expectedMainFlow = (entry.before?.main?.max ?? 0) > 1;
+      entry.expectedMainFlow =
+        entry.before?.main?.max === null || entry.before?.main?.max === undefined
+          ? 'unknown'
+          : expectedMainFlow
+            ? 'overflow'
+            : 'no-overflow';
+      entry.noMainFlowAtStart = entry.expectedMainFlow === 'no-overflow';
+      if (entry.expectedMainFlow === 'unknown')
+        fail(`${key} ${side} cannot determine #main overflow before capture wheels`);
+      entry.windowAtTopBefore = Number.isFinite(entry.before?.scroll?.windowY)
+        ? entry.before.scroll.windowY <= 1
+        : null;
+
+      try {
+        await page.mouse.move(point.x, point.y);
+      } catch (error) {
+        entry.pointerMoveError = safeReadinessError(error);
+        fail(`${key} ${side} move to fixed capture wheel point: ${entry.pointerMoveError}`);
+      }
+      let positiveArmed = false;
+      try {
+        await armCaptureWheel(page, 'down');
+        positiveArmed = true;
+      } catch (error) {
+        entry.positiveArmError = safeReadinessError(error);
+        fail(`${key} ${side} arm positive capture wheel: ${entry.positiveArmError}`);
+      }
+      try {
+        await page.mouse.wheel(0, 160);
+      } catch (error) {
+        entry.positiveCommandError = safeReadinessError(error);
+        fail(`${key} ${side} send positive capture wheel: ${entry.positiveCommandError}`);
+      }
+      if (positiveArmed && !entry.positiveArmError && !entry.positiveCommandError) {
+        try {
+          await waitForCaptureWheel(
+            page,
+            deadline,
+            'positive movement',
+            ({ beforeMainTop, expectedFlow }) => {
+              const receipt = window.__semonCaptureWheelReceipt;
+              const mainTop = document.querySelector('#main')?.scrollTop ?? null;
+              return (
+                receipt?.trusted === true &&
+                receipt.direction === 'down' &&
+                (window.scrollY > 1 ||
+                  !expectedFlow ||
+                  (mainTop !== null && mainTop > beforeMainTop + 1))
+              );
+            },
+            {
+              beforeMainTop: beforeMainTop ?? 0,
+              expectedFlow,
+            },
+          );
+        } catch (error) {
+          entry.positiveWaitError = safeReadinessError(error);
+          fail(`${key} ${side} positive capture wheel: ${entry.positiveWaitError}`);
+        }
+      }
+      entry.positiveEvent = await page
+        .evaluate(() => window.__semonCaptureWheelReceipt)
+        .catch(() => null);
+      entry.advanced = await captureScrollGeometry(page).catch((error) => {
+        entry.advancedError = safeReadinessError(error);
+        fail(`${key} ${side} post-positive geometry: ${entry.advancedError}`);
+        return null;
+      });
+
+      let returnArmed = false;
+      try {
+        await armCaptureWheel(page, 'up');
+        returnArmed = true;
+      } catch (error) {
+        entry.returnArmError = safeReadinessError(error);
+        fail(`${key} ${side} arm return capture wheel: ${entry.returnArmError}`);
+      }
+      try {
+        await page.mouse.wheel(0, -100000);
+      } catch (error) {
+        entry.returnCommandError = safeReadinessError(error);
+        fail(`${key} ${side} send return capture wheel: ${entry.returnCommandError}`);
+      }
+      if (returnArmed && !entry.returnArmError && !entry.returnCommandError) {
+        try {
+          await waitForCaptureWheel(
+            page,
+            deadline,
+            'return to top',
+            () =>
+              window.__semonCaptureWheelReceipt?.trusted === true &&
+              window.__semonCaptureWheelReceipt?.direction === 'up' &&
+              scrollY <= 1 &&
+              (document.querySelector('#main')?.scrollTop ?? 0) <= 1,
+          );
+        } catch (error) {
+          entry.returnWaitError = safeReadinessError(error);
+          fail(`${key} ${side} return capture wheel: ${entry.returnWaitError}`);
+        }
+      }
+      entry.returnEvent = await page
+        .evaluate(() => window.__semonCaptureWheelReceipt)
+        .catch(() => null);
+      entry.returned = await captureScrollGeometry(page).catch((error) => {
+        entry.returnedError = safeReadinessError(error);
+        fail(`${key} ${side} post-return geometry: ${entry.returnedError}`);
+        return null;
+      });
+      try {
+        await page.mouse.move(Math.max(0, (entry.viewport?.width ?? 20) - 20), 300);
+      } catch (error) {
+        entry.pointerRestoreError = safeReadinessError(error);
+        fail(`${key} ${side} restore capture pointer: ${entry.pointerRestoreError}`);
+      }
+
+      const startMainTop = entry.before?.scroll?.mainTop;
+      const advancedMainTop = entry.advanced?.scroll?.mainTop;
+      const positiveMoved =
+        Number.isFinite(startMainTop) &&
+        Number.isFinite(advancedMainTop) &&
+        advancedMainTop > startMainTop + 1;
+      const positiveChainedToWindow = (entry.advanced?.scroll?.windowY ?? 0) > 1;
+      const returnedMainTop = entry.returned?.scroll?.mainTop;
+      const returnedWindowY = entry.returned?.scroll?.windowY;
+      const returnedToTop =
+        Number.isFinite(returnedMainTop) &&
+        Number.isFinite(returnedWindowY) &&
+        returnedMainTop <= 1 &&
+        returnedWindowY <= 1;
+      entry.flowObserved = positiveMoved;
+      entry.returnedToTop = returnedToTop;
+      if (entry.windowAtTopBefore !== true)
+        fail(`${key} ${side} window was not confirmed at top before capture wheels`);
+      if (!entry.pointValidation?.insideMain || !entry.pointValidation?.inert)
+        fail(`${key} ${side} fixed capture wheel point was not inert inside #main`);
+      if (entry.positiveEvent?.trusted !== true || entry.positiveEvent.deltaY <= 0)
+        fail(`${key} ${side} positive capture wheel was not a trusted downward event`);
+      if (entry.returnEvent?.trusted !== true || entry.returnEvent.deltaY >= 0)
+        fail(`${key} ${side} return capture wheel was not a trusted upward event`);
+      if (positiveChainedToWindow)
+        fail(`${key} ${side} positive capture wheel chained to window scroll`);
+      if (entry.expectedMainFlow === 'overflow' && !positiveMoved)
+        fail(`${key} ${side} expected #main overflow but +160 did not advance it`);
+      if (entry.expectedMainFlow === 'no-overflow' && positiveMoved)
+        fail(`${key} ${side} unexpected #main movement from a no-overflow start`);
+      if (!returnedToTop)
+        fail(`${key} ${side} capture wheel pair did not return both scrollers to top`);
+      entry.status = sideErrors.length
+        ? 'error'
+        : entry.expectedMainFlow === 'overflow'
+          ? 'main-flow-observed'
+          : entry.expectedMainFlow === 'no-overflow'
+            ? 'explicit-no-main-flow'
+            : 'main-flow-expectation-unknown';
+    }),
+  );
+  for (const entry of evidenceBySide.values()) recordCaptureScrollEvidence(entry);
+  return { errors };
+}
+async function capture(candidate, reference, key, routeHint) {
   const images = [],
     artifactDigests = {},
     evidenceBySide = {},
@@ -337,7 +686,10 @@ async function capture(candidate, reference, key) {
     recordApiDiagnostics(pages, key);
     throw new Error(preflightErrors.join(' | '));
   }
-  const readiness = await Promise.allSettled(
+  const desktopSessionCapture =
+    routeHint?.v === 'session' &&
+    pages.some(([, page]) => (page.viewportSize()?.width ?? 0) >= 761);
+  const reset = await Promise.allSettled(
     pages.map(async ([name, page]) => {
       // Both readers open at the latest record. Cancel that initial following
       // transaction with the same real reader input before comparing their heads.
@@ -353,24 +705,47 @@ async function capture(candidate, reference, key) {
       await page.waitForFunction(
         () => scrollY <= 1 && document.querySelector('#main').scrollTop <= 1,
       );
-      await waitForCaptureReady(page, `${key} ${name}`);
+      if (!desktopSessionCapture) await waitForCaptureReady(page, `${key} ${name}`);
     }),
   );
-  recordApiDiagnostics(pages, key);
-  const readinessErrors = (
+  const resetErrors = (
     await Promise.all(
-      readiness.map(async (result, index) => {
+      reset.map(async (result, index) => {
         if (result.status !== 'rejected') return null;
         const [name, page] = pages[index],
           state = await readinessSnapshot(page);
         return (
-          `${key} ${name} after scroll reset readiness failed: ${safeReadinessError(result.reason)}; ` +
+          `${key} ${name} after scroll reset failed: ${safeReadinessError(result.reason)}; ` +
           `snapshot=${JSON.stringify(state)}`
         );
       }),
     )
   ).filter(Boolean);
-  if (readinessErrors.length) throw new Error(readinessErrors.join(' | '));
+  if (desktopSessionCapture) {
+    const captureScrollErrors = (await normalizeDesktopSessionScroll(pages, key)).errors;
+    const readiness = await Promise.allSettled(
+      pages.map(async ([name, page]) => waitForCaptureReady(page, `${key} ${name}`)),
+    );
+    recordApiDiagnostics(pages, key);
+    const readinessErrors = (
+      await Promise.all(
+        readiness.map(async (result, index) => {
+          if (result.status !== 'rejected') return null;
+          const [name, page] = pages[index],
+            state = await readinessSnapshot(page);
+          return (
+            `${key} ${name} after scroll normalization readiness failed: ${safeReadinessError(result.reason)}; ` +
+            `snapshot=${JSON.stringify(state)}`
+          );
+        }),
+      )
+    ).filter(Boolean);
+    const errors = [...resetErrors, ...captureScrollErrors, ...readinessErrors];
+    if (errors.length) throw new Error(errors.join(' | '));
+  } else {
+    recordApiDiagnostics(pages, key);
+    if (resetErrors.length) throw new Error(resetErrors.join(' | '));
+  }
   if (key.endsWith('-' + FILTER_STATE)) {
     for (const [name, page] of pages) {
       const state = await filterCaptureState(page);
@@ -538,23 +913,24 @@ try {
           candidate,
           reference,
           prefix + '-' + route.v + (route.id ? '-' + route.id : ''),
+          route,
         );
         if (route.v === 'sessions' && !historical) {
           for (const page of [candidate, reference]) await prepareFilterCapture(page);
-          await capture(candidate, reference, prefix + '-' + FILTER_STATE);
+          await capture(candidate, reference, prefix + '-' + FILTER_STATE, { v: 'sessions' });
           for (const page of [candidate, reference]) await closeFilterCapture(page);
         }
         if (route.id === 'harbor') {
           for (const page of [candidate, reference])
             await page.locator('.think-disclosure').first().click();
-          await capture(candidate, reference, prefix + '-harbor-thinking-open');
+          await capture(candidate, reference, prefix + '-harbor-thinking-open', route);
           for (const page of [candidate, reference]) await page.locator('.tsum').first().click();
-          await capture(candidate, reference, prefix + '-harbor-tools-open');
+          await capture(candidate, reference, prefix + '-harbor-tools-open', route);
           for (const page of [candidate, reference]) {
             await page.locator('.tgroup .steps .step > button').first().click();
             await page.locator('.tgroup .steps .out:not([hidden])').first().waitFor();
           }
-          await capture(candidate, reference, prefix + '-harbor-tool-output-open');
+          await capture(candidate, reference, prefix + '-harbor-tool-output-open', route);
         }
       }
       if (width === 390) {
@@ -565,7 +941,7 @@ try {
           dispatchEvent(new PopStateEvent('popstate', { state: { v: 'home' } }));
         });
         for (const page of [candidate, reference]) await page.click('#lead-btn');
-        await capture(candidate, reference, prefix + '-drawer');
+        await capture(candidate, reference, prefix + '-drawer', { v: 'home' });
       }
       report.errors.push(
         ...candidate.errors.map((error) => prefix + ' candidate: ' + error),
@@ -601,6 +977,12 @@ try {
     ...homePostTagDiagnostics(page),
   }));
   await browser?.close();
+  report.captureScrollEvidenceEntries = report.captureScrollEvidence.length;
+  if (report.captureScrollEvidenceTruncated)
+    report.errors.push(
+      `capture scroll evidence truncated after ${MAX_CAPTURE_SCROLL_EVIDENCE} entries ` +
+        `(${report.captureScrollEvidenceTruncated} omitted)`,
+    );
   report.failures = assessPreservation(report);
   report.acceptance = assessVisualAcceptances(report, 'preservation', report.failures);
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
@@ -620,6 +1002,8 @@ console.log(
         event.event === 'failed' ||
         (event.event === 'response' && !event.ok && event.status !== 304),
     ).length,
+    captureScrollEvidenceEntries: report.captureScrollEvidenceEntries,
+    captureScrollEvidenceTruncated: report.captureScrollEvidenceTruncated,
     errors: report.errors.length,
   }),
 );
