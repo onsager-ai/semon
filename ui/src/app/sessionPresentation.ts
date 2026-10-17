@@ -24,22 +24,33 @@ export function selectedSessionState(session: CatalogSession): string {
     : details.state;
 }
 /** Recorded footer facts share the selected observation fence; they grant no control authority. */
-export function selectedSessionFooter(session: CatalogSession): FooterView | undefined {
+export function selectedSessionFooter(
+  session: CatalogSession,
+  origin?: { id: string; name: string; status: string },
+): FooterView | undefined {
   const details = session.details;
   if (!details) return undefined;
-  const state = selectedSessionState(session),
+  const recordedState = selectedSessionState(session),
+    returned =
+      !!origin &&
+      ['done', 'err'].some((state) => recordedState === state || origin.status === state),
+    state = returned
+      ? recordedState === 'err' || origin?.status === 'err'
+        ? 'err'
+        : 'done'
+      : recordedState,
     calls = details.calls,
     cost = details.cost,
-    items: FooterView['items'][number][] = [
-      {
-        kind: 'calls',
-        text: (calls ?? '—') + (calls === 1 ? ' tool call' : ' tool calls'),
-        tip:
-          Object.entries(details.tool_calls)
-            .map(([name, count]) => name + ' ' + count)
-            .join(' · ') || 'Recorded tool calls',
-      },
-    ];
+    items: FooterView['items'][number][] = [];
+  if (!returned)
+    items.push({
+      kind: 'calls',
+      text: (calls ?? '—') + (calls === 1 ? ' tool call' : ' tool calls'),
+      tip:
+        Object.entries(details.tool_calls)
+          .map(([name, count]) => name + ' ' + count)
+          .join(' · ') || 'Recorded tool calls',
+    });
   if (session.start != null)
     items.push({
       kind: 'time',
@@ -55,8 +66,11 @@ export function selectedSessionFooter(session: CatalogSession): FooterView | und
   return {
     state,
     stateLabel: STATE[state] ?? 'Recorded history',
-    text: STATE[state] ?? 'Recorded history',
+    text: returned
+      ? 'Returned to ' + origin!.name + ' · ' + STATE[state]
+      : (STATE[state] ?? 'Recorded history'),
     items,
+    parent: returned ? { id: origin!.id, name: origin!.name } : undefined,
   };
 }
 function familyCost(session: CatalogSession): Cost {

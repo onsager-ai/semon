@@ -2352,7 +2352,23 @@ export function createCatalogViewer(
         )
         .map((row) => row.edge.id),
     );
-    const footer = view.meta ? selectedSessionFooter(view.meta) : undefined,
+    const context = view.store.context(),
+      origin = context.handoffs.find(
+        (row) => row.edge.kind === 'spawn' && row.edge.to === view.key,
+      ),
+      parent = origin && context.sessions[origin.edge.from],
+      footer = view.meta
+        ? selectedSessionFooter(
+            view.meta,
+            origin && parent
+              ? {
+                  id: origin.edge.from,
+                  name: parent.name,
+                  status: origin.edge.status,
+                }
+              : undefined,
+          )
+        : undefined,
       footerKey = JSON.stringify(footer ?? null);
     if (
       view.renderedRevision === view.store.revision &&

@@ -32,7 +32,10 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   Child cards retain Run view as a passive native Trace link when the recorded
   relationship identifies its sending turn; it never invokes runtime control.
   The selected session footer retains fenced recorded status, calls, duration and
-  own-session cost. Passive facts are not treated as paused control actions.
+  own-session cost. Completed child footers retain their recorded return status
+  and native Open in parent action when loaded handoff context identifies the
+  parent. No parent turn is invented when it is absent from that bounded context.
+  Passive facts are not treated as paused control actions.
   Native turn anchors clear the measured fixed phone bar, including when the
   restored footer makes a short session scrollable.
 - Repeated Find publication keeps the focused account widget in its host's Find

@@ -333,6 +333,16 @@ test(
               await page.locator('#page .session-foot').textContent(),
               /Working.*5 tool calls.*1d 4h.*\$14\.04/,
             );
+            await page
+              .getByRole('button', { name: 'Open Check retry safety', exact: true })
+              .click();
+            await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
+            assert.match(
+              await page.locator('#page .session-foot').textContent(),
+              /Returned to harbor.*Failed/,
+            );
+            await page.getByRole('button', { name: 'Open in harbor', exact: true }).click();
+            await page.locator('#page .child-card').first().waitFor();
 
             assert.equal(
               await page.locator('#page [aria-label="Conversation controls"]').count(),
