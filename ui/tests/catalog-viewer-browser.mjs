@@ -107,6 +107,151 @@ const list = (items) => ({
 
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
+    test(`native host chrome stays isolated from reader publications at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch(),
+        page = await browser.newPage({
+          viewport: { width, height: 900 },
+          colorScheme,
+          isMobile: width === 390,
+          hasTouch: width === 390,
+        }),
+        requests = [],
+        errors = [];
+      try {
+        page.setDefaultTimeout(10000);
+        page.on('pageerror', (error) => errors.push(String(error)));
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname.startsWith('/api/')) {
+            requests.push(url.pathname + url.search);
+            return route.fulfill({ status: 503, json: { error: 'unexpected_native_chrome_read' } });
+          }
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/workspace/settings?machine=source-0');
+        await page.clock.install({ time: new Date('2026-10-18T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-18T00:00:00.001Z'));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          const element = document.createElement('section');
+          element.innerHTML =
+            '<form action="/native-save" method="post"><input name="task" value="Retained task"><button>Save native task</button></form>';
+          document.querySelector('#page').append(element);
+          window.nativeContent = element;
+          window.nativeInput = element.querySelector('input');
+          window.nativeDestroys = 0;
+          window.app = CatalogViewer.mountViewerApplication({
+            machinesPath: '/manage/machines',
+            nativePage: { title: 'Workspace settings', nav: 'machines' },
+            initialMachines: {
+              element,
+              destroy() {
+                window.nativeDestroys++;
+                element.remove();
+              },
+            },
+          });
+        });
+        const assertNative = async () => {
+          assert.equal(
+            await page.evaluate(() => nativeContent === document.querySelector('#page > section')),
+            true,
+          );
+          assert.equal(
+            await page.evaluate(() => nativeInput === document.querySelector('#page input')),
+            true,
+          );
+          assert.equal(await page.locator('#lanes .srow').count(), 0);
+          assert.equal(await page.locator('#page .catalog-session').count(), 0);
+          assert.deepEqual(
+            requests,
+            [],
+            'native chrome must not start a workspace or selected read',
+          );
+          assert.deepEqual(errors, []);
+        };
+        await assertNative();
+        assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
+        assert.equal(
+          await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
+          '/analytics',
+        );
+        assert.equal(
+          await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+          '/manage/machines',
+        );
+        if (width === 390) {
+          await page.getByRole('button', { name: 'Open menu', exact: true }).tap();
+          assert.equal(await page.locator('#lanes .srow').count(), 0);
+          await page.evaluate(() => {
+            window.nativeDrawerClosed = new Promise((resolve) =>
+              window.addEventListener('popstate', () => resolve(), { once: true }),
+            );
+          });
+          await page.keyboard.press('Escape');
+          await withDeadline(
+            page.evaluate(() => window.nativeDrawerClosed),
+            'native isolation drawer history close',
+          );
+          assert.equal(await page.evaluate(() => !!history.state?.drawer), false);
+        }
+        await page.locator('#page input').fill('Edited native task');
+        await page.locator('#page input').press('End');
+        await page.clock.runFor(8100);
+        await assertNative();
+        assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
+        assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
+        await page.evaluate(() => {
+          Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            get: () => 'visible',
+          });
+          document.dispatchEvent(new Event('visibilitychange'));
+          window.dispatchEvent(new Event('semon:refresh'));
+        });
+        await page.clock.runFor(8100);
+        await assertNative();
+        // Native links leave this document. A same-document history notification
+        // cannot turn the native host into a source-selected reader either.
+        for (const path of [
+          '/sessions?machine=source-1',
+          '/s/native/shared?machine=source-1',
+          '/analytics',
+          '/',
+        ]) {
+          await page.evaluate((path) => {
+            history.pushState(null, '', path);
+            dispatchEvent(new PopStateEvent('popstate'));
+          }, path);
+          await page.clock.runFor(32);
+          await assertNative();
+          assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
+          assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
+        }
+        await page.evaluate(() => {
+          app.destroy();
+          app.destroy();
+        });
+        assert.equal(await page.evaluate(() => nativeDestroys), 1);
+        assert.equal(await page.locator('#page form').count(), 0);
+        await page.clock.runFor(8100);
+        assert.deepEqual(requests, []);
+        assert.deepEqual(errors, []);
+      } finally {
+        try {
+          if (!page.isClosed()) await page.evaluate(() => window.app?.destroy());
+          await withDeadline(
+            page.unrouteAll({ behavior: 'wait' }),
+            'native isolation routes drain',
+          );
+        } finally {
+          await withDeadline(browser.close(), 'native isolation browser close');
+        }
+      }
+    });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
     test(`workspace Recent stays separate from focused Machine publications at ${width}px ${colorScheme}`, async () => {
       const browser = await chromium.launch(),
         page = await browser.newPage({

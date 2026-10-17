@@ -26,6 +26,11 @@ abort superseded overview/causal work. Destroying the application invalidates
 callbacks before destroying stores, controls, native content and screen roots.
 Navigation's observable route is shared with scoped status observers; it has no
 native-page loader or independent destination request lifecycle.
+Native host documents retain their empty Recent slot and never select a reader
+source or fetch workspace publications for chrome. Their native links enter
+Home, Analytics and selected-session reader documents through browser navigation;
+mount, ordinary cadence, visibility and same-document history notifications keep
+the native content and its forms under the host's owner.
 An initial causal read marks its root busy until its selected metadata and
 preview work settles. Navigation clears that state, and a superseded read cannot
 clear a new route's readiness. Browser consumers wait for the requested native
