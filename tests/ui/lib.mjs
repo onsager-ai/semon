@@ -60,7 +60,15 @@ const CAPTURE_GENERATION_QUERY_KEYS = new Set(['generation', 'errors_generation'
 // remain in the raw event log and retain their own existing suite assertions.
 const SELECTED_READ_APIS = {
   candidate: new Set([
+    '/api/session-anchor',
+    '/api/session-annotations',
+    '/api/session-capabilities',
+    '/api/session-entry',
     '/api/session-home',
+    '/api/session-identity',
+    '/api/session-locate',
+    '/api/session-source-candidate',
+    '/api/session-source-candidates',
     '/api/session-sources',
     '/api/session-trace',
     '/api/session-transcript',
@@ -86,10 +94,7 @@ function selectedApiQueryDigest(url, origin, { retryScope = false } = {}) {
   if (parsed.origin !== origin) return null;
   const query = new URLSearchParams(
     [...parsed.searchParams.entries()]
-      .filter(
-        ([key]) =>
-          key !== 't' && !(retryScope && CAPTURE_GENERATION_QUERY_KEYS.has(key)),
-      )
+      .filter(([key]) => key !== 't' && !(retryScope && CAPTURE_GENERATION_QUERY_KEYS.has(key)))
       .sort(([a], [b]) => a.localeCompare(b)),
   ).toString();
   return createHash('sha256').update(query).digest('hex');
@@ -116,7 +121,7 @@ function failedSelectedApiEvents(page, routeKey = page.captureRouteKey) {
             later.method === event.method &&
             later.retryScopeDigest === event.retryScopeDigest &&
             later.routeKey === event.routeKey &&
-            later.at > event.at,
+            later.id > event.id,
         );
       return true;
     }
@@ -464,15 +469,12 @@ export async function served(browser, opts = {}) {
     );
   }
   if (opts.captureReadiness) {
-    const initialFailures = failedSelectedApiEvents(page, 'initial');
-    if (initialFailures.length)
-      throw new Error(
-        `initial viewer load had selected API failures: ${JSON.stringify(initialFailures.slice(0, 20))}`,
-      );
+    // Keep pending initial reads in the same readiness transaction until they
+    // finish; changing its key early would lose late failures or valid recovery.
+    await waitForCaptureReady(page, 'initial viewer load');
     page.captureRouteKey = await page.evaluate(() =>
       JSON.stringify(history.state ?? { v: 'unknown' }),
     );
-    await waitForCaptureReady(page, 'initial viewer load');
   }
   return page;
 }

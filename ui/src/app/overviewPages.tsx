@@ -557,7 +557,9 @@ export function createOverviewPages(host: OverviewHost) {
       if (last >= 0) visibleRoots.splice(last, 1, row);
     }
     return {
-      empty: !rows.length,
+      // Host-owned pages preserve their empty Recent slot. No filter was run
+      // there, so the reader's "No sessions match" result does not apply.
+      empty: !rows.length && !host.nativeContent && !host.homeIntro,
       items: visibleRoots.map((row) => item(row, 0, new Set())),
     };
   }
