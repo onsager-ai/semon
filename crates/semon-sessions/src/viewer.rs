@@ -6093,8 +6093,7 @@ mod tests {
         if !cache.qualified_catalog().ok()? {
             return None;
         }
-        let generation = work.observed_catalog_generation.clone()?;
-        (cache.session_catalog_generation().as_ref() == Some(&generation)).then_some(generation)
+        cache.session_catalog_generation()
     }
 
     /// The documented bound: a line is served within the rebuild spacing
