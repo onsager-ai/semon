@@ -473,6 +473,7 @@ test(
               await page.route('**/api/session-transcript?**', unavailableTranscript);
               await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2] + '&compat=1');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
+              await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               assert.equal(
                 sawUnavailableStatus,
                 true,
@@ -521,6 +522,7 @@ test(
               await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/s/claude/a-review?t=' + address[2] + '&compat=1');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
+              await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
               assert.equal(
                 await page.locator(ingestSelector).getAttribute('aria-expanded'),
@@ -562,6 +564,7 @@ test(
                 '/s/claude/a-docs?t=' + address[2] + '&compat=1',
               );
               await page.locator('#page [aria-label="Transcript"]').waitFor();
+              await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               assert.equal(
                 sawUnavailableStatus,
                 true,
