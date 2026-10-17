@@ -912,14 +912,16 @@ export default async function tooltipCheck(browser) {
       await page.click('#more-btn');
       await page.waitForSelector('dialog.session-menu[open]');
       await page.waitForTimeout(200);
-      // The dialog's own tipped element: the first one the menu holds (a run's state dot).
-      await page.evaluate(() =>
-        document
-          .querySelector('dialog.session-menu [data-tip]')
-          ?.scrollIntoView({ block: 'center' }),
+      // Target the run state whose wording is asserted below. Earlier menu
+      // actions can also have their own availability explanations.
+      const runState = 'dialog.session-menu[open] .run-row:not([hidden]) .dot[data-tip]';
+      await page.waitForSelector(runState);
+      await page.evaluate(
+        (selector) => document.querySelector(selector)?.scrollIntoView({ block: 'center' }),
+        runState,
       );
       await page.waitForTimeout(150);
-      const shownAt = await hover(page, 'dialog.session-menu [data-tip]', 1500),
+      const shownAt = await hover(page, runState, 1500),
         open = await state(page);
       r.expect(
         shownAt != null &&
