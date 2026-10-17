@@ -92,6 +92,11 @@ export function renderCatalogList(
           Clear filters
         </button>
       )}
+      {snapshot.browser && (
+        <p class="catalog-note" role="status">
+          {screenText(snapshot.sourceLabel)} · {snapshot.observation ?? 'Cached history'}
+        </p>
+      )}
       <details class="catalog-scope">
         <summary>Search scope</summary>
         <p class="catalog-note">
