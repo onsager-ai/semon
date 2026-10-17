@@ -228,26 +228,25 @@ async function snapshot(page) {
                   strokeWidth: style.strokeWidth,
                 };
               },
-              vectorStyles =
-                traceStyleSelector
-                  ? [...node.querySelectorAll('svg, path, rect, circle, line, polyline, polygon')]
-                      .slice(0, 40)
-                      .map((item) => {
-                        const itemBox = item.getBoundingClientRect(),
-                          itemStyle = getComputedStyle(item);
-                        return {
-                          tag: item.tagName,
-                          class: item.getAttribute('class'),
-                          path: item.getAttribute('d'),
-                          fillAttribute: item.getAttribute('fill'),
-                          strokeAttribute: item.getAttribute('stroke'),
-                          strokeWidthAttribute: item.getAttribute('stroke-width'),
-                          box: [itemBox.x, itemBox.y, itemBox.width, itemBox.height],
-                          ...styleDetail(itemStyle),
-                          opacity: itemStyle.opacity,
-                        };
-                      })
-                  : undefined;
+              vectorStyles = traceStyleSelector
+                ? [...node.querySelectorAll('svg, path, rect, circle, line, polyline, polygon')]
+                    .slice(0, 40)
+                    .map((item) => {
+                      const itemBox = item.getBoundingClientRect(),
+                        itemStyle = getComputedStyle(item);
+                      return {
+                        tag: item.tagName,
+                        class: item.getAttribute('class'),
+                        path: item.getAttribute('d'),
+                        fillAttribute: item.getAttribute('fill'),
+                        strokeAttribute: item.getAttribute('stroke'),
+                        strokeWidthAttribute: item.getAttribute('stroke-width'),
+                        box: [itemBox.x, itemBox.y, itemBox.width, itemBox.height],
+                        ...styleDetail(itemStyle),
+                        opacity: itemStyle.opacity,
+                      };
+                    })
+                : undefined;
             return {
               text: node.textContent.slice(0, 2000),
               class: node.getAttribute('class'),
