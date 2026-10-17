@@ -1,4 +1,4 @@
-import type { Session, Handoff, Turn, Cost } from './types';
+import type { Session, Handoff, Turn, Cost, TraceParticipantSummary } from './types';
 import type { AgentRow, AgentChart } from '../lib/trace';
 import { clock as formatClock, dur as formatDuration, tok, shortModel } from './format';
 
@@ -31,6 +31,7 @@ interface AgentNode {
 interface AgentTree {
   rootNode: AgentNode;
   peers: AgentNode[];
+  passivePeers: { sid: string; handoff: Handoff; summary: TraceParticipantSummary }[];
   handoffs: Handoff[];
   spawns: Handoff[];
 }
@@ -39,6 +40,7 @@ const finite = (value: number | undefined): value is number =>
 export function createTraceCalculations(
   state: {
     sessions: Record<string, Session>;
+    participantSummaries?: Record<string, TraceParticipantSummary>;
     turns: Record<string, Turn[]>;
     starts: Map<string, Turn>;
   },
@@ -56,7 +58,12 @@ export function createTraceCalculations(
   HARNESS: Record<string, string>,
   STATE: Record<string, string>,
 ) {
-  const { sessions: SESS, turns: TURNS, starts: STARTS } = state;
+  const {
+    sessions: SESS,
+    participantSummaries: PARTICIPANT_SUMMARIES,
+    turns: TURNS,
+    starts: STARTS,
+  } = state;
   const workingEnd = (session: Session) =>
     session.state === 'work' && session.liveObservation !== false ? now() : session.last;
   const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } =
@@ -85,6 +92,7 @@ export function createTraceCalculations(
       children: [],
     };
     const peers: AgentNode[] = [],
+      passivePeers: AgentTree['passivePeers'] = [],
       handoffs: Handoff[] = [],
       spawns: Handoff[] = [],
       seenTurns = new Set(),
@@ -112,25 +120,37 @@ export function createTraceCalculations(
           };
           node.children.push(child);
           children.push(child);
-        } else if (h.kind === 'relay' && SESS[h.to] && !seenSessions.has(h.to)) {
-          const peerTurn = STARTS.get(h.id);
-          seenSessions.add(h.to);
-          const peer: AgentNode = {
-            sid: h.to,
-            turn: peerTurn ?? null,
-            handoff: h,
-            kind: 'relay',
-            depth: 0,
-            children: [],
-          };
-          peers.push(peer);
-          children.push(peer);
+        } else if (h.kind === 'relay' && !seenSessions.has(h.to)) {
+          const joined = Object.hasOwn(SESS, h.to) ? SESS[h.to] : undefined;
+          if (joined) {
+            const peerTurn = STARTS.get(h.id);
+            seenSessions.add(h.to);
+            const peer: AgentNode = {
+              sid: h.to,
+              turn: peerTurn ?? null,
+              handoff: h,
+              kind: 'relay',
+              depth: 0,
+              children: [],
+            };
+            peers.push(peer);
+            children.push(peer);
+          } else {
+            const summary =
+              PARTICIPANT_SUMMARIES && Object.hasOwn(PARTICIPANT_SUMMARIES, h.to)
+                ? PARTICIPANT_SUMMARIES[h.to]
+                : undefined;
+            if (summary) {
+              seenSessions.add(h.to);
+              passivePeers.push({ sid: h.to, handoff: h, summary });
+            }
+          }
         }
       }
       for (const child of children) walk(child);
     };
     walk(rootNode);
-    return { rootNode, peers, handoffs, spawns };
+    return { rootNode, peers, passivePeers, handoffs, spawns };
   }
   function agentSnapshot(root: Turn): AgentChart {
     const model = traceAgentTree(root),
@@ -214,6 +234,13 @@ export function createTraceCalculations(
       participantCount + (participantCount === 1 ? ' agent' : ' agents'),
       dur(start, end),
       costText(totalCost) + ' session totals',
+      ...(model.passivePeers.length
+        ? [
+            model.passivePeers.length +
+              (model.passivePeers.length === 1 ? ' relayed peer' : ' relayed peers') +
+              ' with catalog totals; no joined turn',
+          ]
+        : []),
       ...(spawned.length ? ['Recorded spawn overlap: ' + peak] : []),
       ...(missingSpawnEnds
         ? [missingSpawnEnds + ' spawn end' + (missingSpawnEnds === 1 ? '' : 's') + ' not recorded']
@@ -320,9 +347,43 @@ export function createTraceCalculations(
       }
     };
     add(model.rootNode, 0);
-    if (model.peers.length) {
+    if (model.peers.length || model.passivePeers.length) {
       rows.push({ kind: 'heading', id: 'relayed-heading', depth: 0, label: '', name: '' });
       for (const peer of model.peers) add(peer, 0);
+      for (const peer of model.passivePeers) {
+        const recordedCost = peer.summary.cost,
+          peerModel = [
+            peer.summary.kind || HARNESS[peer.summary.harness],
+            shortModel(peer.summary.model),
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          tokens = tok(peer.summary.tokens.reduce((sum, value) => sum + value, 0)) + ' tokens',
+          cost =
+            recordedCost.usd == null || recordedCost.unpriced_models?.length
+              ? '—'
+              : shortMoney(recordedCost.usd);
+        rows.push({
+          kind: 'peer',
+          id: peer.sid,
+          depth: 0,
+          label: [
+            peer.summary.name,
+            peerModel,
+            'No joined turn in this trace',
+            tokens,
+            costText(recordedCost) + ' recorded catalog session total',
+          ]
+            .filter(Boolean)
+            .join(', '),
+          name: peer.summary.name,
+          model: peerModel,
+          qualification: 'No joined turn in this trace',
+          tokens,
+          cost,
+          costTip: 'Recorded catalog session total: ' + costText(recordedCost),
+        });
+      }
     }
     return {
       summary,

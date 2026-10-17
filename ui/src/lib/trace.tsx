@@ -34,7 +34,7 @@ export interface Hop {
   };
 }
 export interface AgentRow {
-  kind: 'agent' | 'more' | 'heading';
+  kind: 'agent' | 'peer' | 'more' | 'heading';
   id: string;
   depth: number;
   label: string;
@@ -46,6 +46,7 @@ export interface AgentRow {
   state?: string;
   stateLabel?: string;
   tokens?: string;
+  qualification?: string;
   duration?: string;
   cost?: string;
   costTip?: string;
@@ -332,6 +333,36 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                           {row.cost}
                         </span>
                         <span class="agent-track" />
+                      </button>
+                    ) : row.kind === 'peer' ? (
+                      <button
+                        key={row.id}
+                        class="agent-row agent-peer"
+                        type="button"
+                        aria-label={'Open recorded ' + row.name + '; ' + row.qualification}
+                        onClick={() => active(() => host.session(row.id, row.turn))}
+                      >
+                        <span class="agent-label">
+                          <span class="agent-identity">
+                            <span class={'agent-indent ' + indent(row.depth)} />
+                            <span class="agent-name">{screenText(row.name)}</span>
+                          </span>
+                          <span class="agent-meta">
+                            <span class="agent-model">{screenText(row.model ?? '')}</span>
+                            <span class="agent-peer-qualification" data-tip={row.qualification}>
+                              {screenText(row.qualification ?? '')}
+                            </span>
+                            <span
+                              class="agent-tokens"
+                              data-tip="Recorded catalog token totals; this trace has no joined turn"
+                            >
+                              {row.tokens}
+                            </span>
+                          </span>
+                        </span>
+                        <span class="agent-cost" data-tip={row.costTip}>
+                          {row.cost}
+                        </span>
                       </button>
                     ) : (
                       <button

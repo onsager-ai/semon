@@ -1,6 +1,13 @@
 import { array, boolean, dictionary, number, object, text } from '../domain/validate';
 import { createTraceCalculations } from '../domain/trace';
-import type { Cost, Handoff, Session, SessionState, Turn } from '../domain/types';
+import type {
+  Cost,
+  Handoff,
+  Session,
+  SessionState,
+  TraceParticipantSummary,
+  Turn,
+} from '../domain/types';
 import { clock } from '../domain/format';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
@@ -14,6 +21,7 @@ export interface CausalTrace {
   generation: string;
   sessions: Record<string, Session>;
   participants: Record<string, string>;
+  participantSummaries: Record<string, TraceParticipantSummary>;
   turns: Record<string, Turn[]>;
   starts: Map<string, Turn>;
   handoffs: Map<string, Handoff>;
@@ -46,6 +54,32 @@ function parseCost(value: unknown): Cost {
   return {
     usd: cost.usd == null ? null : number(cost.usd),
     unpriced_models: cost.unpriced_models == null ? [] : array(cost.unpriced_models, text),
+  };
+}
+function parseTraceParticipantSummary(value: unknown): TraceParticipantSummary {
+  const row = object(value),
+    fields = ['name', 'harness', 'kind', 'model', 'tokens', 'cost'];
+  if (Object.keys(row).some((key) => !fields.includes(key)))
+    throw Error('Invalid causal participant summary fields');
+  const tokens = array(row.tokens, number),
+    cost = object(row.cost);
+  if (
+    tokens.length !== 3 ||
+    Object.keys(cost).some((key) => !['usd', 'unpriced_models'].includes(key)) ||
+    !Object.hasOwn(cost, 'usd') ||
+    !Object.hasOwn(cost, 'unpriced_models')
+  )
+    throw Error('Invalid causal participant summary metrics');
+  return {
+    name: text(row.name),
+    harness: text(row.harness),
+    kind: text(row.kind),
+    model: text(row.model),
+    tokens: tokens as [number, number, number],
+    cost: {
+      usd: cost.usd == null ? null : number(cost.usd),
+      unpriced_models: array(cost.unpriced_models, text),
+    },
   };
 }
 export function parseCausalTrace(
@@ -119,7 +153,10 @@ export function parseCausalTrace(
     });
   }
   const participants = dictionary(data.participants, text),
-    related = new Set([...handoffs.values()].flatMap((edge) => [edge.from, edge.to]));
+    related = new Set([...handoffs.values()].flatMap((edge) => [edge.from, edge.to])),
+    relayTargets = new Set(
+      [...handoffs.values()].filter((edge) => edge.kind === 'relay').map((edge) => edge.to),
+    );
   if (
     Object.keys(participants).length > 128 ||
     Object.keys(participants).some(
@@ -127,6 +164,20 @@ export function parseCausalTrace(
     )
   )
     throw Error('Invalid causal participant scope');
+  const participantSummaries: Record<string, TraceParticipantSummary> =
+    data.participant_summaries === undefined
+      ? Object.create(null)
+      : dictionary(data.participant_summaries, parseTraceParticipantSummary);
+  if (
+    Object.keys(participantSummaries).length > 128 ||
+    Object.entries(participantSummaries).some(
+      ([id, summary]) =>
+        !Object.hasOwn(participants, id) ||
+        !relayTargets.has(id) ||
+        participants[id] !== summary.name,
+    )
+  )
+    throw Error('Invalid causal participant summary scope');
   const turns: Record<string, Turn[]> = Object.create(null),
     starts = new Map<string, Turn>(),
     byId = new Map<string, Turn>();
@@ -182,6 +233,7 @@ export function parseCausalTrace(
     root: selected,
     sessions,
     participants,
+    participantSummaries,
     turns,
     starts,
     handoffs,

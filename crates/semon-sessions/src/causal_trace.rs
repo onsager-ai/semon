@@ -7,6 +7,7 @@ use crate::{
     viewer::ViewerReply,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -642,6 +643,38 @@ pub(crate) fn range_context(
     )
 }
 
+#[derive(Serialize)]
+struct TraceParticipantCost {
+    usd: Option<f64>,
+    unpriced_models: Vec<String>,
+}
+
+/// Deliberately limited to catalog identity and recorded aggregate metrics.
+/// This never becomes a Session and cannot imply a joined turn or activity.
+#[derive(Serialize)]
+struct TraceParticipantSummary {
+    name: String,
+    harness: String,
+    kind: String,
+    model: String,
+    tokens: [f64; 3],
+    cost: TraceParticipantCost,
+}
+
+fn trace_participant_summary(row: &crate::model::summary::CatalogRow) -> TraceParticipantSummary {
+    TraceParticipantSummary {
+        name: row.name.clone(),
+        harness: row.harness.clone(),
+        kind: row.presentation_kind.clone().unwrap_or_default(),
+        model: row.model.clone(),
+        tokens: row.tokens,
+        cost: TraceParticipantCost {
+            usd: row.cost.usd,
+            unpriced_models: row.cost.unpriced_models.clone(),
+        },
+    }
+}
+
 /// At most 100 connected turns and 1,000 edges. Frontiers support explicit
 /// further exploration; absent or ambiguous recorded joins remain absent.
 pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) -> ViewerReply {
@@ -806,7 +839,13 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
             })
             .filter(|sid| sid != "you" && !sessions.contains_key(sid))
             .collect();
+        let relay_peers: BTreeSet<_> = edges
+            .values()
+            .filter(|edge| edge["kind"] == "relay")
+            .filter_map(|edge| edge["to"].as_str().map(str::to_owned))
+            .collect();
         let mut participants = BTreeMap::new();
+        let mut participant_summaries = BTreeMap::new();
         missing |= related.len() > 128;
         for sid in related.into_iter().take(128) {
             let header: Option<(String, String)> = tx
@@ -845,6 +884,9 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 continue;
             }
             versions.push(json!([sid, version]));
+            if relay_peers.contains(&sid) {
+                participant_summaries.insert(sid.clone(), trace_participant_summary(&row));
+            }
             participants.insert(sid, row.name);
         }
         let mut owners: BTreeSet<_> = edges
@@ -896,7 +938,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         );
         tx.commit().map_err(|_| 503u16)?;
         Ok(
-            json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing,"previews_incomplete":previews_incomplete}),
+            json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"participant_summaries":participant_summaries,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing,"previews_incomplete":previews_incomplete}),
         )
     };
     match read() {
@@ -1086,6 +1128,64 @@ mod generation_tests {
                 .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             changes
+        );
+    }
+
+    #[test]
+    fn passive_trace_participant_contains_only_identity_and_recorded_totals() {
+        let row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
+            "lifecycle":"retained",
+            "key":"harbor",
+            "name":"Harbor",
+            "harness":"codex",
+            "kind":"subagent",
+            "presentation_kind":"Subagent",
+            "native_ids":["native-private-id"],
+            "parent":"private-parent",
+            "parent_source":"private-source",
+            "repo":"private-repo",
+            "branch":"private-branch",
+            "model":"model-fixture",
+            "effort":"high",
+            "start":10,
+            "last":20,
+            "tokens":[1.5,2.0,0.5],
+            "cost":{
+                "usd":2.25,
+                "unpriced_models":["unknown-model"],
+                "split_unknown_messages":1,
+                "by_model":{},
+                "by_day":{}
+            },
+            "sources":[]
+        }))
+        .unwrap();
+
+        let summary = serde_json::to_value(trace_participant_summary(&row)).unwrap();
+        assert_eq!(summary["name"], "Harbor");
+        assert_eq!(summary["harness"], "codex");
+        assert_eq!(summary["kind"], "Subagent");
+        assert_eq!(summary["model"], "model-fixture");
+        assert_eq!(summary["tokens"], json!([1.5, 2.0, 0.5]));
+        assert_eq!(summary["cost"]["usd"], 2.25);
+        assert_eq!(summary["cost"]["unpriced_models"], json!(["unknown-model"]));
+        assert_eq!(
+            summary
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["name", "harness", "kind", "model", "tokens", "cost"])
+        );
+        assert_eq!(
+            summary["cost"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["usd", "unpriced_models"])
         );
     }
 }
