@@ -355,9 +355,11 @@ test(
               };
               const withoutCatalogSelected = async (route) => {
                 const query = new URL(route.request().url()).searchParams;
+                // This mock only changes the catalog listing, never a selected-session lookup.
+                if (query.has('sid')) return route.continue();
                 const response = await route.fetch();
                 const body = await response.json();
-                if (!query.has('sid') && Array.isArray(body.items))
+                if (Array.isArray(body.items))
                   body.items = body.items.filter((row) => row.key !== 'a-docs');
                 await route.fulfill({ response, body: JSON.stringify(body) });
               };
