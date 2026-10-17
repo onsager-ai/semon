@@ -296,6 +296,21 @@ scope boundary. Canonical navigation identity resets forced ancestor opening;
 keyboard collapse stays effective until the next navigation. Expanding a complete
 group retains its loaded descendants and ancestor path without new reads.
 
+Trace navigation supplies its canonical selected session to Recent even when no
+transcript is active. The original eight-root cap is applied after required-path
+ordering; a selected root outside that cap does not replace another root. These
+restore the selected application's document order, rather than creating a new
+selection-priority policy.
+
+Bounded captured DOM also identified two reading geometry regressions. The catalog
+header added an empty Composer host slot despite its controller always being
+unavailable; its flex gap hid the tablet branch label. Removing that empty slot
+preserves the shared optional-controller API and all actual header actions. The
+transcript retained its original clip CSS but had lost the sticky-dock clip
+measurement. Restoring the original scroll/resize observation keeps content from
+painting beneath the dock without changing scroll height, anchors or transcript
+identity. Both corrections still require rendered exact-head comparison.
+
 The served overview regression drains its owned asynchronous Playwright routes
 before navigating Home. Individual route removal did not wait for in-flight
 handlers and produced a double-handled response during navigation. The correction
