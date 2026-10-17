@@ -67,8 +67,34 @@ test('selected role metadata preserves published booleans without inventing abse
   const raw = details(relative(1));
   assert.equal(parseSessionDetails(raw).role, null);
   assert.equal(parseSessionDetails({ ...raw, role: null }).role, null);
-  for (const role of [true, false])
-    assert.equal(parseSessionDetails({ ...raw, role }).role, role);
+  for (const role of [true, false]) assert.equal(parseSessionDetails({ ...raw, role }).role, role);
   for (const role of ['true', 'role', 1, {}])
     assert.throws(() => parseSessionDetails({ ...raw, role }), /Invalid boolean/);
+});
+
+test('relative status preserves qualified observations and keeps unknown history explicit', () => {
+  for (const section of ['ancestors', 'runs']) {
+    const parse = (status) =>
+      parseSessionDetails(
+        details({ ...relative(1), ...(status === undefined ? {} : { status }) }, section),
+      ).family[section][0].status;
+    assert.deepEqual(parse(undefined), { state: null, observation: 'unavailable' });
+    for (const state of ['work', 'wait', 'idle', 'done', 'err', 'new', 'read', 'off']) {
+      assert.deepEqual(parse({ state, observation: 'current' }), { state, observation: 'current' });
+      if (state !== 'work' && state !== 'wait')
+        assert.deepEqual(parse({ state, observation: 'retained' }), {
+          state,
+          observation: 'retained',
+        });
+    }
+    for (const status of [
+      { state: 'work', observation: 'retained' },
+      { state: 'wait', observation: 'retained' },
+      { state: 'done', observation: 'unavailable' },
+      { state: null, observation: 'current' },
+      { state: 'invented', observation: 'current' },
+      { state: 'done', observation: 'invented' },
+    ])
+      assert.throws(() => parse(status), /Invalid catalog status/);
+  }
 });

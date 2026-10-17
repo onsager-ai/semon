@@ -372,6 +372,7 @@ pub(crate) fn selected_details(
     tx: &Transaction<'_>,
     key: &str,
     sources: &[crate::model::summary::CatalogSource],
+    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
 ) -> rusqlite::Result<Option<Value>> {
     if !tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_trace_headers')",
@@ -392,7 +393,7 @@ pub(crate) fn selected_details(
             let mut value: Value = serde_json::from_str(&text)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             value["live_observation"] = json!(current);
-            value["family"] = selected_family(tx, key)?;
+            value["family"] = selected_family(tx, key, relative_status)?;
             Ok(value)
         })
         .transpose()
@@ -400,10 +401,14 @@ pub(crate) fn selected_details(
 
 /// Indexed, body-free relatives of the selected owner. This never walks an
 /// unrelated workspace. A truncated family retains an explicit unknown total.
-fn selected_family(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<Value> {
+fn selected_family(
+    tx: &Transaction<'_>,
+    key: &str,
+    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
+) -> rusqlite::Result<Value> {
     let mut bytes = 0;
     let incomplete = std::cell::Cell::new(false);
-    let mut compact = tx.prepare("SELECT CASE WHEN octet_length(COALESCE(h.metadata,c.metadata))<=1048576 THEN json_object('key',c.session_key,'name',json_extract(COALESCE(h.metadata,c.metadata),'$.name'),'harness',c.harness,'kind',COALESCE(json_extract(COALESCE(h.metadata,c.metadata),'$.presentation_kind'),json_extract(COALESCE(h.metadata,c.metadata),'$.kind')),'parent',json_extract(COALESCE(h.metadata,c.metadata),'$.parent'),'last',json_extract(COALESCE(h.metadata,c.metadata),'$.last'),'cost',json_extract(COALESCE(h.metadata,c.metadata),'$.cost')) ELSE NULL END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1")?;
+    let mut compact = tx.prepare("SELECT CASE WHEN octet_length(COALESCE(h.metadata,c.metadata))<=1048576 THEN json_object('key',c.session_key,'name',json_extract(COALESCE(h.metadata,c.metadata),'$.name'),'harness',c.harness,'kind',COALESCE(json_extract(COALESCE(h.metadata,c.metadata),'$.presentation_kind'),json_extract(COALESCE(h.metadata,c.metadata),'$.kind')),'parent',json_extract(COALESCE(h.metadata,c.metadata),'$.parent'),'last',json_extract(COALESCE(h.metadata,c.metadata),'$.last'),'cost',json_extract(COALESCE(h.metadata,c.metadata),'$.cost'),'_status_catalog',json_set(COALESCE(h.metadata,c.metadata),'$.lifecycle',c.lifecycle)) ELSE NULL END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1")?;
     let mut read = |sid: &str| -> rusqlite::Result<Option<Value>> {
         let text: Option<String> = compact
             .query_row([sid], |row| row.get(0))
@@ -418,9 +423,21 @@ fn selected_family(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<Value> {
             incomplete.set(true);
             return Ok(None);
         }
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        let mut row: Value = serde_json::from_str(&text)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        // Qualification uses the same bounded published scope as the relative.
+        // Private native paths and Query recipes never enter the UI response.
+        let scope = row
+            .as_object_mut()
+            .and_then(|row| row.remove("_status_catalog"))
+            .and_then(|value| {
+                serde_json::from_value::<crate::model::summary::CatalogRow>(value).ok()
+            });
+        row["status"] = scope
+            .filter(|scope| scope.key == sid && row["harness"] == scope.harness)
+            .map(|scope| relative_status(&scope))
+            .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
+        Ok(Some(row))
     };
     let mut ancestors = Vec::new();
     let mut seen = BTreeSet::from([key.to_owned()]);
@@ -1083,7 +1100,7 @@ mod relative_tests {
     fn selected_relatives_keep_activity_times_from_their_published_metadata() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,parent_key TEXT,harness TEXT,metadata TEXT);
+            "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,parent_key TEXT,harness TEXT,metadata TEXT,lifecycle TEXT DEFAULT 'current');
              CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);",
         )
         .unwrap();
@@ -1092,28 +1109,33 @@ mod relative_tests {
             ("child", Some("root"), Some(20)),
             ("grandchild", Some("child"), None),
         ] {
-            let metadata = json!({"name":key,"kind":"session","parent":parent,"last":last,"cost":{"usd":1}});
+            let metadata =
+                json!({"name":key,"kind":"session","parent":parent,"last":last,"cost":{"usd":1}});
             db.execute(
-                "INSERT INTO session_catalog VALUES(?1,?2,'claude',?3)",
+                "INSERT INTO session_catalog(session_key,parent_key,harness,metadata) VALUES(?1,?2,'claude',?3)",
                 params![key, parent, metadata.to_string()],
             )
             .unwrap();
         }
-        let saved = json!({"name":"child","kind":"session","parent":"root","last":25,"cost":{"usd":1}});
+        let saved =
+            json!({"name":"child","kind":"session","parent":"root","last":25,"cost":{"usd":1}});
         db.execute(
             "INSERT INTO session_history_catalog VALUES('child',?1)",
             [saved.to_string()],
         )
         .unwrap();
         let tx = db.transaction().unwrap();
-        let root = selected_family(&tx, "root").unwrap();
+        let unknown = &mut |_: &crate::model::summary::CatalogRow| json!({"state":null,"observation":"unavailable"});
+        let root = selected_family(&tx, "root", unknown).unwrap();
         assert_eq!(root["state"], "complete");
         let runs = root["runs"].as_array().unwrap();
         let child = runs.iter().find(|row| row["key"] == "child").unwrap();
         let grandchild = runs.iter().find(|row| row["key"] == "grandchild").unwrap();
         assert_eq!(child["last"], 25);
         assert!(grandchild["last"].is_null());
-        let grandchild = selected_family(&tx, "grandchild").unwrap();
+        assert!(root.to_string().find("_status_catalog").is_none());
+        assert_eq!(child["status"]["observation"], "unavailable");
+        let grandchild = selected_family(&tx, "grandchild", unknown).unwrap();
         assert_eq!(grandchild["ancestors"][0]["last"], 10);
         assert_eq!(grandchild["ancestors"][1]["last"], 25);
     }

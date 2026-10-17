@@ -1,5 +1,9 @@
 import { array, boolean, number, object, text } from '../domain/validate';
-import { parseSessionDetails, type SessionDetails } from '../domain/sessionDetails';
+import {
+  parseRecordedStatus,
+  parseSessionDetails,
+  type SessionDetails,
+} from '../domain/sessionDetails';
 
 import type {
   CatalogFreshness,
@@ -111,23 +115,6 @@ function observations(row: Record<string, unknown>) {
           : { state: nativeSelection(object(row.native_selection).state) },
   };
 }
-function recordedStatus(value: unknown): CatalogSession['status'] {
-  if (value === undefined) return undefined;
-  const row = object(value),
-    state = row.state,
-    observation = row.observation;
-  if (
-    !(
-      state === null ||
-      ['work', 'wait', 'idle', 'done', 'err', 'new', 'read', 'off'].includes(text(state))
-    ) ||
-    !(observation === 'current' || observation === 'retained' || observation === 'unavailable') ||
-    (observation === 'unavailable') !== (state === null) ||
-    (observation === 'retained' && (state === 'work' || state === 'wait'))
-  )
-    throw new Error('Invalid catalog status observation');
-  return { state: state as NonNullable<CatalogSession['status']>['state'], observation };
-}
 function digest(value: unknown) {
   const bytes = array(value, integer);
   if (bytes.length !== 32 || bytes.some((byte) => byte < 0 || byte > 255))
@@ -163,7 +150,7 @@ export function parseCatalogSession(value: unknown): CatalogSession {
   return {
     lifecycle: row.lifecycle,
     details: row.details == null ? undefined : parseSessionDetails(row.details),
-    status: recordedStatus(row.status),
+    status: parseRecordedStatus(row.status),
     transcript:
       row.transcript == null
         ? undefined

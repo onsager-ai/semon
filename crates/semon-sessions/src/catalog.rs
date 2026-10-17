@@ -815,6 +815,87 @@ pub(crate) fn source_state(source: &CatalogSource) -> &'static str {
     }
 }
 
+fn recorded_status(
+    row: &CatalogRow,
+    runtime: Option<&str>,
+    cached: bool,
+    facts_known: bool,
+    retired_native: bool,
+) -> Result<Value, serde_json::Error> {
+    let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+    if let Some(saved) = &row.query {
+        if crate::model::summary::query_observation_matches(saved, &row.sources, current, runtime)?
+            && cached
+            && (!current || (facts_known && !retired_native))
+        {
+            let status = match saved["state"].as_str() {
+                Some("work" | "wait") if !current => Some("off"),
+                Some("work" | "wait" | "idle" | "done" | "err" | "new" | "read" | "off") => {
+                    saved["state"].as_str()
+                }
+                _ => None,
+            };
+            if let Some(status) = status {
+                return Ok(
+                    json!({"state":status,"observation":if current {"current"} else {"retained"}}),
+                );
+            }
+        }
+    }
+    Ok(json!({"state":null,"observation":"unavailable"}))
+}
+
+/// Family rows reuse the Catalog request's runtime and custody observations.
+/// Only the bounded relative's published sources are checked; no bodies load.
+fn relative_status(
+    options: &Options,
+    runtime: &crate::native_evidence::RuntimeObservations,
+    recorded: Option<&crate::facts::source_authority::CurrentSources>,
+    row: &CatalogRow,
+) -> Value {
+    let unavailable = || json!({"state":null,"observation":"unavailable"});
+    if row.sources.is_empty() || row.sources.len() > 64 {
+        return unavailable();
+    }
+    let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+    let facts_known =
+        options.facts.is_none() || recorded.is_some_and(|source| source.facts_known());
+    if current
+        && (!facts_known
+            || (row.harness == "codex"
+                && options.facts.is_some()
+                && !recorded.is_some_and(|source| source.selection_known())))
+    {
+        return unavailable();
+    }
+    let mut retired_native = false;
+    for source in &row.sources {
+        let Some(relative) = source_relative(options, &row.harness, source) else {
+            return unavailable();
+        };
+        if row.harness == "codex" {
+            match recorded
+                .map(|snapshot| snapshot.codex_current(&relative))
+                .transpose()
+            {
+                Ok(selected) => retired_native |= selected.flatten() == Some(false),
+                Err(_) => return unavailable(),
+            }
+        }
+        if source_state(source) != "cached" {
+            return unavailable();
+        }
+    }
+    recorded_status(
+        row,
+        runtime.expected(row).as_deref(),
+        true,
+        facts_known,
+        retired_native,
+    )
+    .unwrap_or_else(|_| unavailable())
+}
+
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
     match read_page(options, machine, &request) {
         Ok(reply) => reply,
@@ -855,6 +936,18 @@ fn read_page(
     let transaction = connection.transaction()?;
     let runtime = crate::native_evidence::query_runtime_generation(options).ok();
     let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
+    // Share the same custody capture with selected family status qualification.
+    // Its existing final validation still fences the whole response.
+    let recorded = options
+        .facts
+        .as_ref()
+        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    let facts_known =
+        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
+    let codex_selection_known = options.facts.is_none()
+        || recorded
+            .as_ref()
+            .is_some_and(|source| source.selection_known());
     let meta = |key: &str| {
         transaction
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
@@ -1052,7 +1145,16 @@ fn read_page(
     let details = if request.sid.is_some() {
         selected
             .first()
-            .map(|row| crate::causal_trace::selected_details(&transaction, &row.key, &row.sources))
+            .map(|row| {
+                crate::causal_trace::selected_details(
+                    &transaction,
+                    &row.key,
+                    &row.sources,
+                    &mut |relative| {
+                        relative_status(options, &runtime_observations, recorded.as_ref(), relative)
+                    },
+                )
+            })
             .transpose()?
             .flatten()
     } else {
@@ -1077,16 +1179,6 @@ fn read_page(
     transaction.commit()?;
     // The legacy model tolerates absent facts/old source selection. Focused
     // observations must retain that absence rather than invent current facts.
-    let recorded = options
-        .facts
-        .as_ref()
-        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-    let facts_known =
-        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
-    let codex_selection_known = options.facts.is_none()
-        || recorded
-            .as_ref()
-            .is_some_and(|source| source.selection_known());
     let machine_label = match &options.facts {
         None => Some(crate::facts::MachineFacts::Local.hostname(options)),
         Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
@@ -1206,34 +1298,13 @@ fn read_page(
         if runtime_pending && page_state == "cached" {
             page_state = "stale";
         }
-        let observation = if let Some(saved) = &row.query {
-            if crate::model::summary::query_observation_matches(
-                saved,
-                &row.sources,
-                current,
-                runtime.as_deref(),
-            )? && state == "cached"
-                && (!current || (facts_known && !retired_native))
-            {
-                let observed = saved["state"].as_str();
-                let status = match observed {
-                    Some("work" | "wait") if !current => Some("off"),
-                    Some("work" | "wait" | "idle" | "done" | "err" | "new" | "read" | "off") => {
-                        observed
-                    }
-                    _ => None,
-                };
-                if let Some(status) = status {
-                    json!({"state":status,"observation":if current {"current"} else {"retained"}})
-                } else {
-                    json!({"state":null,"observation":"unavailable"})
-                }
-            } else {
-                json!({"state":null,"observation":"unavailable"})
-            }
-        } else {
-            json!({"state":null,"observation":"unavailable"})
-        };
+        let observation = recorded_status(
+            &row,
+            runtime.as_deref(),
+            state == "cached",
+            facts_known,
+            retired_native,
+        )?;
         let mut item = serde_json::to_value(row)?;
         item["status"] = observation;
         // Exact Query facts and runtime fences are internal publication data.
@@ -1283,6 +1354,20 @@ fn read_page(
             != Some(before)
     }) {
         for item in &mut items {
+            for section in ["ancestors", "runs"] {
+                if let Some(relatives) = item
+                    .get_mut("details")
+                    .and_then(|details| details.get_mut("family"))
+                    .and_then(|family| family.get_mut(section))
+                    .and_then(Value::as_array_mut)
+                {
+                    for relative in relatives {
+                        if relative["status"]["observation"] == "current" {
+                            relative["status"] = json!({"state":null,"observation":"unavailable"});
+                        }
+                    }
+                }
+            }
             if item["status"]["observation"] == "current" {
                 item["status"] = json!({"state":null,"observation":"unavailable"});
                 item["facts_observation"] = json!({"state":"stale"});
@@ -4637,6 +4722,165 @@ mod tests {
             json!({"state":null,"observation":"unavailable"})
         );
         // Each status read above checks that it loads no Event Index rows.
+    }
+
+    #[test]
+    fn selected_family_status_reuses_source_runtime_and_retained_qualification() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
+        fs::write(
+            fixture.options.claude_home.join("sessions/77.json"),
+            json!({"pid":77,"sessionId":"session-00001","procStart":777,"status":"busy","name":"Family child"}).to_string(),
+        )
+        .unwrap();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut initial_facts = crate::read_facts(facts_path).unwrap();
+        initial_facts.proc_starts.insert(77, 777);
+        crate::write_facts(facts_path, &initial_facts).unwrap();
+        fixture.publish(2);
+        native_refresh(&fixture);
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let text: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='session-00001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut original: Value = serde_json::from_str(&text).unwrap();
+        original["parent"] = json!("session-00000");
+        let save = |row: &Value| {
+            db.execute(
+                "UPDATE session_catalog SET parent_key='session-00000',lifecycle=?1,metadata=?2 WHERE session_key='session-00001'",
+                rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE session_history_catalog SET metadata=?1 WHERE session_key='session-00001'",
+                [row.to_string()],
+            )
+            .unwrap();
+        };
+        let status = || {
+            let reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
+            let (code, body) = fixture.body("sid=session-00000");
+            assert_eq!(code, 200);
+            let family = &body["items"][0]["details"]["family"];
+            assert_eq!(family["state"], "complete");
+            let child = family["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == "session-00001")
+                .unwrap();
+            for private in ["query", "sources", "_status_catalog"] {
+                assert!(child.get(private).is_none());
+            }
+            assert!(!body.to_string().contains("synthetic prompt"));
+            assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), reads);
+            child["status"].clone()
+        };
+        for state in ["work", "wait", "idle", "done", "err", "new", "read", "off"] {
+            let mut row = original.clone();
+            row["query"]["state"] = json!(state);
+            save(&row);
+            assert_eq!(status(), json!({"state":state,"observation":"current"}));
+            row["lifecycle"] = json!("retained");
+            save(&row);
+            let retained = if matches!(state, "work" | "wait") {
+                "off"
+            } else {
+                state
+            };
+            assert_eq!(status(), json!({"state":retained,"observation":"retained"}));
+        }
+        for (field, value) in [
+            ("source_generation", json!("old-source")),
+            ("runtime", json!("old-runtime")),
+            ("version", json!(0)),
+        ] {
+            let mut row = original.clone();
+            row["query"]["state"] = json!("work");
+            row["query"][field] = value;
+            save(&row);
+            assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+        }
+        original["query"]["state"] = json!("work");
+        save(&original);
+        let path = fixture.options.facts.as_ref().unwrap();
+        let facts = crate::read_facts(path).unwrap();
+        let mut changed = facts.clone();
+        changed.proc_starts.insert(77, 778);
+        crate::write_facts(path, &changed).unwrap();
+        assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+        crate::write_facts(path, &facts).unwrap();
+        assert_eq!(status(), json!({"state":"work","observation":"current"}));
+        let mut changed = facts.clone();
+        changed.hostname = "new-family-runtime".into();
+        crate::write_facts(path, &changed).unwrap();
+        assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+        crate::write_facts(path, &facts).unwrap();
+        assert_eq!(status(), json!({"state":"work","observation":"current"}));
+        fs::write(path, "{}").unwrap();
+        assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+        crate::write_facts(path, &facts).unwrap();
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(
+                    fixture
+                        .options
+                        .claude_home
+                        .join("projects/project/session-00001.jsonl")
+                )
+                .unwrap(),
+            "{{}}"
+        )
+        .unwrap();
+        assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+    }
+
+    #[test]
+    fn family_status_does_not_treat_a_retired_native_selection_as_current() {
+        let fixture = Fixture::new();
+        let parent = fixture.codex_source("family-parent", None, 1);
+        let child = fixture.codex_source("family-child", Some("family-parent"), 2);
+        let path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone(), child]));
+        crate::write_facts(path, &facts).unwrap();
+        fixture.publish_existing();
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let text: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='family-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut row: Value = serde_json::from_str(&text).unwrap();
+        row["query"]["state"] = json!("work");
+        let save = |row: &Value| {
+            db.execute(
+                "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='family-child'",
+                rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
+            )
+            .unwrap();
+        };
+        save(&row);
+        let status = || {
+            let (code, body) = fixture.body("sid=family-parent");
+            assert_eq!(code, 200);
+            body["items"][0]["details"]["family"]["runs"][0]["status"].clone()
+        };
+        assert_eq!(status(), json!({"state":"work","observation":"current"}));
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent]));
+        crate::write_facts(path, &facts).unwrap();
+        assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+        row["lifecycle"] = json!("retained");
+        save(&row);
+        assert_eq!(status(), json!({"state":"off","observation":"retained"}));
     }
 
     #[test]
