@@ -211,35 +211,12 @@ export function overhaulPortReference(D, html) {
   out = swapLine(
     out,
     '    const t = transcript(sid); t.append(jumpWrap); page.append(t);',
-    '    const t = transcript(sid), dock = el("div", "session-dock"), jumpSlot = el("div", "session-jump-slot"); jumpSlot.append(jumpWrap); dock.append(jumpSlot); t.prepend(el("p", "empty", "Cached history")); page.append(t, dock);',
+    '    const t = transcript(sid), dock = el("div", "session-dock"), jumpSlot = el("div", "session-jump-slot"); jumpSlot.append(jumpWrap); dock.append(jumpSlot); page.append(t, dock);',
   );
-  // The requested Composer move changes both the reading dock and Topbar.
-  // Keep the independent reference renderer and the existing pixel thresholds.
-  out = swapLine(
-    out,
-    '      bar.append(fb, mb);',
-    '      const composer = btn("btn sh-quiet session-composer-trigger", "Composer", "Open Composer"); composer.setAttribute("aria-haspopup", "dialog"); bar.append(composer, fb, mb);',
-  );
-  out = swapLine(
-    out,
-    '    else if (r.v === "session") { const s = SESS[r.id]; renderSession(page, r.id); if (s) { const lineage = lineageOf(r.id); bar(s.name, null, { session: s, lineage: lineage.length > 1 ? lineage.slice(0, -1) : null, line2: sessionLine(s) }); } else bar("Session", { label: "Sessions", go: () => go({ v: "sessions" }) }); }',
-    '    else if (r.v === "session") { const s = SESS[r.id]; renderSession(page, r.id); if (s) { const lineage = lineageOf(r.id); bar(s.name, { label: "Sessions", go: () => go({ v: "sessions" }) }, { session: s, lineage: lineage.length > 1 ? lineage.slice(0, -1) : null, line2: sessionLine(s) }); } else bar("Session", { label: "Sessions", go: () => go({ v: "sessions" }) }); }',
-  );
-  out = swapLine(
-    out,
-    '    if (opts.lineage?.length) { if (!phone.matches) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); }); }',
-    '    if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); } if (opts.lineage?.length) opts.lineage.forEach((item) => { const c = btn("crumb", item.name, "Open " + item.name); c.addEventListener("click", () => goSession(item.id)); l1.append(c, el("span", "crumb-sep", "›")); });',
-  );
-  out = swapLine(
-    out,
-    '    else if (crumb) { const c = btn("crumb", crumb.label, "Back to " + crumb.label); c.addEventListener("click", crumb.go); l1.append(c, el("span", "crumb-sep", "›")); }',
-    '',
-  );
-  out = swapLine(
-    out,
-    '    const tt = el("h1", "t", title); tt.style.margin = "0"; tt.style.font = "inherit"; tt.title = title; if (s && !(phone.matches && opts.lineage?.length)) l1.append(stateLead(s)); l1.append(tt); t.append(l1);',
-    '    const tt = el("h1", "t", title); tt.style.margin = "0"; tt.style.font = "inherit"; tt.title = title; if (s) l1.append(stateLead(s)); l1.append(tt); t.append(l1);',
-  );
+  // Preserve the selected complete application's own responsive session chrome:
+  // no added Sessions breadcrumb/mobile lineage or leading cached-history row.
+  // Collection scope supplies no Composer. Native qualification is tested on
+  // the candidate, never fabricated in this independent historical reference.
   // The canonical menu exposes indexed failures and Source selection. The
   // mockup's external Claude button has no action or corresponding capability.
   out = swapLine(
@@ -270,7 +247,6 @@ export function overhaulPortReference(D, html) {
 .session-dock { position: sticky; bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); margin-top: auto; padding-top: var(--s2); background: var(--ground); }
 .session-jump-slot { display: flex; justify-content: center; }
 .btn.sh-quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
-.session-composer-trigger { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: var(--tap); padding: 0 14px; border: 1px solid transparent; border-radius: var(--r2); background: transparent; color: var(--ink-2); font: 500 var(--fs-ui)/1.2 var(--sans); text-align: center; white-space: nowrap; }
 `;
   const stagingStyleEnd = out.lastIndexOf('</style>');
   if (stagingStyleEnd < 0) throw new Error('overhaul mockup style block moved');

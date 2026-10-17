@@ -1,24 +1,42 @@
-// Actual application comparison, separate from the unchanged mockup ratchets.
+// Required actual-application comparison, independent of the mockup ratchets.
 // The reference binary is the exact gitlink of the captured compat=1 UI.
-// Differences remain reported; pause removals are never painted back into either UI.
+// Pause removals are never painted back into either UI or silently exempted.
 import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
 import { ENV, launch, served, goto, data } from './lib.mjs';
+import {
+  assessPreservation,
+  BEFORE,
+  REFERENCE,
+  THRESHOLD,
+  MAX_RATIO,
+  WIDTHS,
+  SCHEMES,
+} from './preservation-contract.mjs';
+
+const args = process.argv.slice(2);
+const historical = args.length === 1 && args[0] === '--historical-before';
+if (
+  (args.length && !historical) ||
+  (historical && process.env.SEMON_PRESERVATION_CANDIDATE !== BEFORE)
+)
+  throw new Error('Only the pinned before candidate may use --historical-before');
 
 const out = path.join(ENV.out, 'preservation');
 fs.mkdirSync(out, { recursive: true });
 const report = {
   candidate: process.env.SEMON_PRESERVATION_CANDIDATE ?? process.env.GITHUB_SHA,
-  reference: '263a02da278716ab2309b8e34a463419e5c781e5',
-  threshold: 0.1,
-  maxRatio: 0.0001,
+  reference: REFERENCE.source,
+  referenceHub: REFERENCE.hub,
+  mode: historical ? 'historical-before' : 'required',
+  threshold: THRESHOLD,
+  maxRatio: MAX_RATIO,
   results: [],
   errors: [],
 };
-const browser = await launch();
-const D = await data();
+let browser;
 async function snapshot(page) {
   return page.evaluate(() => {
     const selectors = [
@@ -92,8 +110,15 @@ async function capture(candidate, reference, key) {
   });
 }
 try {
-  for (const width of [390, 820, 1280])
-    for (const dark of [false, true]) {
+  if (!ENV.base || !process.env.SEMON_PRESERVATION_BASE)
+    throw new Error('Both candidate and selected-reference servers are required');
+  if (ENV.base === process.env.SEMON_PRESERVATION_BASE.replace(/\/$/, ''))
+    throw new Error('Candidate and selected-reference servers must be independent');
+  browser = await launch();
+  const D = await data();
+  for (const width of WIDTHS)
+    for (const scheme of SCHEMES) {
+      const dark = scheme === 'dark';
       const options = {
         size: width === 390 ? 'phone' : 'desktop',
         viewport: { width, height: width === 390 ? 844 : 860 },
@@ -118,6 +143,7 @@ try {
         { v: 'session', id: 'harbor' },
         { v: 'session', id: 'atlas-ingest' },
         { v: 'session', id: 'deps' },
+        { v: 'session', id: 'h-failed' },
         { v: 'analytics' },
       ]) {
         await goto(candidate, route, D);
@@ -139,6 +165,18 @@ try {
           reference,
           prefix + '-' + route.v + (route.id ? '-' + route.id : ''),
         );
+        if (route.id === 'harbor') {
+          for (const page of [candidate, reference])
+            await page.locator('.think-disclosure').first().click();
+          await capture(candidate, reference, prefix + '-harbor-thinking-open');
+          for (const page of [candidate, reference]) await page.locator('.tsum').first().click();
+          await capture(candidate, reference, prefix + '-harbor-tools-open');
+          for (const page of [candidate, reference]) {
+            await page.locator('.tgroup .steps .step > button').first().click();
+            await page.locator('.tgroup .steps .out:not([hidden])').first().waitFor();
+          }
+          await capture(candidate, reference, prefix + '-harbor-tool-output-open');
+        }
       }
       if (width === 390) {
         await goto(candidate, { v: 'home' }, D);
@@ -160,10 +198,13 @@ try {
 } catch (error) {
   report.errors.push(error.stack);
 } finally {
-  await browser.close();
+  await browser?.close();
+  report.failures = assessPreservation(report);
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 }
 console.log(JSON.stringify(report));
-// Exact matching is diagnostic because the explicit pause removes controls.
-// Missing captures and execution errors still fail; no reference or gate changes.
-if (report.results.length !== 38 || report.errors.length) process.exitCode = 1;
+// Only the fixed historical before-run is diagnostic. The candidate must satisfy
+// pixel, geometry, provenance and exact coverage assertions. Neither native
+// qualification nor the control pause grants an implicit pixel waiver.
+if (report.failures.coverage.length || (!historical && report.failures.visual.length))
+  process.exitCode = 1;

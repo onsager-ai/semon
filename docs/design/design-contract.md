@@ -69,8 +69,13 @@ invent model/effort choices to make the panel look more sophisticated.
   keyboard selection, focus return, touch targets and reduced motion are checked.
   The interaction CI lane requires this suite in addition to existing tests.
 - Existing viewer pixel ratchets, functional suites and the required aggregate
-  remain unchanged. Hub adds its own production-page visual contract and uses
-  this same text audit on its page/sheet screenshots.
+  retain their thresholds and coverage. The selected complete application's
+  independent binary also supplies a required 62-state comparison on every
+  visual run, as defined in `tests/ui/preservation-contract.mjs`. Derived mockup
+  or pen exports cannot override that application's responsive presentation.
+  Hub adds its own production-page visual contract and uses this same text audit
+  on its page/sheet screenshots. Neither a successful capture nor a reduced diff
+  count is pixel acceptance; unapproved qualification/pause differences stay red.
 
 ## Intentional visual changes
 
