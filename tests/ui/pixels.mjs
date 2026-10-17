@@ -9,6 +9,10 @@ import { ENV, launch, served, goto, data, titleOf, waitForCaptureReady } from '.
 import { sample, BASE } from './fixture.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
+  SESSION_TRACE_EVIDENCE_LIMITS,
+  summarizeSessionTraceResponse,
+} from './session-trace-evidence.mjs';
+import {
   assessPixelComparison,
   assessVisualAcceptances,
   expectedPixelCoverage,
@@ -51,10 +55,15 @@ const report = {
   regions: [],
   errors: [],
   apiDiagnostics: [],
+  sessionTraceEvidence: [],
   routeMappings: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
+const sessionTraceBudget = { responses: 0, responseBytes: 0, summaryBytes: 0, stopped: false },
+  MAX_SESSION_TRACE_RESPONSES = 36,
+  MAX_SESSION_TRACE_RESPONSE_BYTES = 64 * 1024 * 1024,
+  MAX_SESSION_TRACE_SUMMARY_BYTES = 16 * 1024 * 1024;
 
 function fileKey(key) {
   return key.replace(/[^a-zA-Z0-9_-]+/g, '_');
@@ -66,6 +75,95 @@ function saveJson(key, suffix, value) {
   const bytes = Buffer.from(JSON.stringify(value, null, 2) + '\n');
   fs.writeFileSync(path.join(OUT, fileKey(key) + '-' + suffix + '.json'), bytes);
   return sha256(bytes);
+}
+
+function captureSessionTraceResponses(page, scheme) {
+  page.sessionTraceEvidence = [];
+  page.sessionTraceTasks = [];
+  page.sessionTraceErrors = [];
+  const origin = new URL(page.url()).origin;
+  page.on('response', (response) => {
+    let url;
+    try {
+      url = new URL(response.url());
+    } catch {
+      return;
+    }
+    if (
+      sessionTraceBudget.stopped ||
+      url.origin !== origin ||
+      url.pathname !== '/api/session-trace' ||
+      response.status() < 200 ||
+      response.status() >= 300
+    )
+      return;
+    sessionTraceBudget.responses++;
+    if (sessionTraceBudget.responses > MAX_SESSION_TRACE_RESPONSES) {
+      if (!sessionTraceBudget.stopped)
+        page.sessionTraceErrors.push(
+          `successful response count exceeds ${MAX_SESSION_TRACE_RESPONSES}`,
+        );
+      sessionTraceBudget.stopped = true;
+      return;
+    }
+    const tracked = page.inFlightApiRequests?.get(response.request()),
+      routeKey = page.captureRouteKey ?? null,
+      request = Object.fromEntries(
+        ['sid', 'turn', 'scope'].map((key) => [key, url.searchParams.get(key)]),
+      ),
+      status = response.status();
+    const task = (async () => {
+      const declaredBytes = Number(response.headers()['content-length']);
+      if (
+        Number.isFinite(declaredBytes) &&
+        declaredBytes > SESSION_TRACE_EVIDENCE_LIMITS.responseBytes
+      )
+        throw new Error(
+          `declared response bytes ${declaredBytes} exceed ${SESSION_TRACE_EVIDENCE_LIMITS.responseBytes}`,
+        );
+      const body = await response.body();
+      if (body.length > SESSION_TRACE_EVIDENCE_LIMITS.responseBytes)
+        throw new Error(
+          `response bytes ${body.length} exceed ${SESSION_TRACE_EVIDENCE_LIMITS.responseBytes}`,
+        );
+      if (sessionTraceBudget.responseBytes + body.length > MAX_SESSION_TRACE_RESPONSE_BYTES)
+        throw new Error(`aggregate response bytes exceed ${MAX_SESSION_TRACE_RESPONSE_BYTES}`);
+      sessionTraceBudget.responseBytes += body.length;
+      const summary = summarizeSessionTraceResponse(body),
+        evidence = {
+          scheme,
+          routeKey,
+          requestId: tracked?.id ?? null,
+          queryDigest: tracked?.queryDigest ?? null,
+          path: url.pathname,
+          request,
+          status,
+          ...summary,
+        },
+        summaryBytes = Buffer.byteLength(JSON.stringify(evidence));
+      if (sessionTraceBudget.summaryBytes + summaryBytes > MAX_SESSION_TRACE_SUMMARY_BYTES)
+        throw new Error(`aggregate evidence bytes exceed ${MAX_SESSION_TRACE_SUMMARY_BYTES}`);
+      sessionTraceBudget.summaryBytes += summaryBytes;
+      page.sessionTraceEvidence.push(evidence);
+    })().catch((error) => {
+      if (/^aggregate (response|evidence) bytes exceed/.test(error.message))
+        sessionTraceBudget.stopped = true;
+      page.sessionTraceErrors.push(
+        `route=${routeKey ?? 'unknown'} status=${status}: ${error.message}`,
+      );
+    });
+    page.sessionTraceTasks.push(task);
+  });
+}
+
+async function flushSessionTraceEvidence(page, scheme) {
+  await Promise.all(page.sessionTraceTasks);
+  report.sessionTraceEvidence.push(...page.sessionTraceEvidence);
+  report.errors.push(
+    ...page.sessionTraceErrors.map(
+      (error) => `${scheme} candidate session-trace capture: ${error}`,
+    ),
+  );
 }
 
 async function snapshot(page) {
@@ -757,6 +855,7 @@ try {
         token: referenceToken,
         ...(selfParity ? {} : { path: '/?compat=1' }),
       });
+    captureSessionTraceResponses(candidate, scheme);
     const retired = candidate.requests ?? [];
     for (const frame of expectedFrames) {
       if (frame === 'drawer' && !phone) continue;
@@ -774,7 +873,16 @@ try {
         const route = routeByName.get(frame);
         if (!route) continue;
         try {
+          const traceTaskStart = candidate.sessionTraceTasks.length;
           await goto(candidate, route.route, D);
+          if (route.route.v === 'trace') {
+            await Promise.all(candidate.sessionTraceTasks.slice(traceTaskStart));
+            const routeKey = JSON.stringify(route.route);
+            if (!candidate.sessionTraceEvidence.some((entry) => entry.routeKey === routeKey))
+              report.errors.push(
+                `${key} candidate successful /api/session-trace response was not captured for ${routeKey}`,
+              );
+          }
           const referenceRoute = selfParity
             ? route.route
             : Object.hasOwn(route, 'referenceRoute')
@@ -806,6 +914,7 @@ try {
         )
         .map((url) => `${scheme} retired candidate request: ${new URL(url).pathname}`),
     );
+    await flushSessionTraceEvidence(candidate, scheme);
     for (const [side, page] of [
       ['candidate', candidate],
       ['reference', reference],
