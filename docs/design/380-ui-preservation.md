@@ -25,14 +25,17 @@ Remove those additions while preserving the independent renderer, fixture-unit
 adaptation, original reference HTML, screen/region coverage, ratchets and
 thresholds. No candidate screenshot replaces a golden. No product UI changes.
 
-`preservation-contract.mjs` records the fixed Source/Hub reference pair and 62
-required viewport/theme/state keys. The actual-application comparison is now
+`preservation-contract.mjs` records the fixed Source/Hub reference pair and 68
+required viewport/theme/state keys: the original 62 plus six open Sessions Filter
+captures. The actual-application comparison is now
 required on all PR, main and manual visual runs, not only PR #438. Its candidate
 fails for pixel/size differences, missing/duplicate/unknown captures, invalid
 measurements, altered provenance/thresholds or execution errors. It includes the
 previous supplemental Thinking/tool-group/tool-output and completed-child cases.
-Only the exact pinned `eb535ff` before-run remains historical diagnostics; it
-still fails for invalid coverage/execution and reports all visual differences.
+Only the exact pinned `eb535ff` before-run retains its original 62-state
+historical contract; it still fails for invalid coverage/execution and reports
+all visual differences. A current candidate cannot claim historical mode to omit
+the six new states.
 
 There are no new pixel masks or implicit exceptions for paused controls, native
 scope/counts or cached/incomplete notices. Candidate differences need an actual
@@ -55,9 +58,13 @@ thermal restriction, qualify a new rendered candidate or satisfy release gates.
   complete presentation. Every loaded child now remains individually visible.
 - The shared filter dismissal defers its URL commit until the existing overlay
   history transaction completes. The native search form retains tablet touch
-  sizing, and native transcripts use the selected phone 2px / desktop 8px page inset. Routine cached
-  qualification follows the records; stale/incomplete/loading/error notices stay
-  ahead of them. Qualification stays visible without shifting the normal opening.
+  sizing, and native transcripts use the selected phone 2px / desktop 8px page inset.
+  Routine source/cache/search/order qualification uses the existing Filter and
+  shared tooltip/accessible descriptions; the redundant list footer is removed.
+  Stale/incomplete/loading/error and bounded-search notices remain ahead of the
+  records. The selected-source field, qualified count, pagination, query and focus
+  semantics remain truthful. The six added actual Filter captures require explicit
+  acceptance of any residual native qualification difference.
 - Recent restores duration and machine/repository metadata, recorded state labels,
   failed-descendant flags and the selected ancestry in rail mode. Child activity
   dots are reserved for the collapsed rail; expanded rows retain their descendant
@@ -216,8 +223,9 @@ Expanded actual-application machine captures exposed a separate presentation reg
 ### Recorded reading restoration — 2026-10-17 continuation
 
 The active actual-application gate retains all 113 historical frame identities and
-162 strict regions. Its additional complete reading protocol retains 62 states
-at phone, tablet and desktop widths in both themes. Historical adapter results,
+162 strict regions. Its additional complete reading protocol retains the original
+62 states and adds six open Filter states at phone, tablet and desktop widths in
+both themes, for 68 current cases. Historical adapter results,
 reference identities and thresholds remain evidence; the obsolete mockup renderer
 and adapter are removed under the user's explicit bounded-removal decision. The
 data-only fixtures retain their exact contents, verified against the original

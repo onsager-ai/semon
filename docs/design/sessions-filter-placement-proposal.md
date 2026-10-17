@@ -1,7 +1,7 @@
 # Sessions Filter placement proposal
 
-Status: candidate for review only. The source changes on this branch do not
-approve the placement or authorize a visual-baseline update.
+Status: preservation implementation candidate for the draft #438 review. Its
+visual acceptance remains open; no baseline or intentional difference is approved.
 
 The candidate removes the browser-native Sessions result footer, which repeats
 the loaded count already shown in the page summary and adds a count/sort/scope
@@ -47,8 +47,8 @@ close button focused, and Filter scroll body at the top. The required 113 full
 screenshots and 162 strict regions, all thresholds, references and approval rules
 remain unchanged. Any resulting visual difference stays subject to explicit
 review and approval. A passing fixture suite or request-budget run does not accept
-the visual change. Whether moving the routine explanation out of the
-always-visible footer is acceptable remains an open placement decision.
+the visual change. Final acceptance must review this qualified native placement
+against the exact source pin and the six open-Filter capture pairs.
 
 Asset preparation at `5ac406349f7a7a933e60fe097d92b8589d8db55a` ran in
 [CI 39074023198](https://github.com/onsager-ai/semon/actions/runs/39074023198).
