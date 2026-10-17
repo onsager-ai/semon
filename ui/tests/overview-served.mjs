@@ -157,7 +157,7 @@ test(
                   fullPage: name !== 'session-menu',
                 });
             };
-            const captureOpenInHarborFailure = async () => {
+            const captureServedFixtureFailure = async (stage, context = {}) => {
               const ui = await page.evaluate(() => {
                 const text = (node, limit = 500) =>
                   (node?.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, limit);
@@ -175,7 +175,28 @@ test(
                   }));
                 const recent = [...document.querySelectorAll('#lanes .treeitem')]
                   .slice(0, 32)
-                  .map((node) => ({ id: node.getAttribute('data-id'), text: text(node, 100) }));
+                  .map((node) => {
+                    const id = node.getAttribute('data-id') ?? '',
+                      group = node.querySelector(':scope > .tree-group'),
+                      children = group
+                        ? [...group.querySelectorAll(':scope > .treeitem')].slice(0, 8)
+                        : [];
+                    return {
+                      id,
+                      text: text(node, 100),
+                      expanded:
+                        node.getAttribute('aria-expanded') ??
+                        node.querySelector('[aria-expanded]')?.getAttribute('aria-expanded') ??
+                        null,
+                      groupHidden: group ? group.hidden : null,
+                      ...(id.includes('atlas-ingest')
+                        ? {
+                            childCount: group?.querySelectorAll(':scope > .treeitem').length ?? 0,
+                            childIds: children.map((child) => child.getAttribute('data-id') ?? ''),
+                          }
+                        : {}),
+                    };
+                  });
                 const cards = [...document.querySelectorAll('#page .child-card')]
                   .slice(0, 12)
                   .map((node) => ({
@@ -209,25 +230,53 @@ test(
                 'name',
                 'machine',
                 'source_key',
+                'sourceKey',
                 'catalog_key',
+                'catalogKey',
                 'read_scope',
+                'readScope',
                 'generation',
                 'content_generation',
+                'contentGeneration',
                 'errors_generation',
+                'errorsGeneration',
                 'status',
                 'state',
                 'kind',
                 'ask',
                 'source_turn',
+                'sourceTurn',
                 'parent_turn',
+                'parentTurn',
                 'parent_session',
                 'source_session',
                 'session_key',
                 'session_id',
+                'role',
+                'live_observation',
+                'liveObservation',
+                'details',
+                'family',
                 'origin',
+                'edge',
+                'edges',
+                'from',
+                'to',
+                'parent_name',
+                'parentName',
                 'relationship_context',
+                'context',
+                'sessions',
+                'handoffs',
+                'ancestors',
+                'runs',
                 'selected',
                 'parent',
+                'items',
+                'recent',
+                'inbox',
+                'working',
+                'answered',
                 'events',
                 'entries',
                 'turns',
@@ -247,7 +296,25 @@ test(
                 const fields = {};
                 for (const [key, item] of Object.entries(value)) {
                   if (!safeFields.has(key)) continue;
-                  if (['events', 'entries', 'turns', 'children', 'relationships'].includes(key)) {
+                  if (
+                    [
+                      'events',
+                      'entries',
+                      'turns',
+                      'children',
+                      'relationships',
+                      'edges',
+                      'sessions',
+                      'handoffs',
+                      'ancestors',
+                      'runs',
+                      'items',
+                      'recent',
+                      'inbox',
+                      'working',
+                      'answered',
+                    ].includes(key)
+                  ) {
                     const values = Array.isArray(item)
                       ? item.slice(0, 8).map((entry) => summarize(entry, depth + 1))
                       : item && typeof item === 'object'
@@ -272,12 +339,14 @@ test(
               const relevant = apiResponses
                 .filter((item) =>
                   [
+                    '/api/viewer/home',
+                    '/api/sessions',
                     '/api/session-home',
                     '/api/session-transcript',
                     '/api/session-identity',
                   ].includes(item.path),
                 )
-                .slice(-4);
+                .slice(-8);
               let timer;
               const api = await Promise.race([
                 Promise.all(
@@ -295,7 +364,9 @@ test(
               ]);
               clearTimeout(timer);
               console.error(
-                `[open-in-harbor diagnostic ${width} ${colorScheme}] ${JSON.stringify({
+                `[served fixture diagnostic ${width} ${colorScheme}] ${JSON.stringify({
+                  stage,
+                  context,
                   ui,
                   api,
                   pageErrors: errors.slice(-12),
@@ -402,15 +473,35 @@ test(
               const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
               await selectedRecent.waitFor({ state: 'visible' });
               const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
-                listedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem'),
-                listedChildIds = await listedChildren.evaluateAll((nodes) =>
-                  nodes.map((node) => node.getAttribute('data-id') ?? ''),
-                );
-              assert.equal(
-                listedChildIds.length,
-                3,
-                'the selected child occupies one of the three Recent preview slots',
+                listedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem');
+              try {
+                await listedChildren.nth(2).waitFor({ state: 'visible' });
+              } catch (error) {
+                await captureServedFixtureFailure('Recent third-child readiness', {
+                  expectedChildCount: 3,
+                }).catch(() => {
+                  console.error('[Recent preview diagnostic unavailable]');
+                });
+                throw error;
+              }
+              const listedChildIds = await listedChildren.evaluateAll((nodes) =>
+                nodes.map((node) => node.getAttribute('data-id') ?? ''),
               );
+              try {
+                assert.equal(
+                  listedChildIds.length,
+                  3,
+                  'the selected child occupies one of the three Recent preview slots',
+                );
+              } catch (error) {
+                await captureServedFixtureFailure('Recent preview child count', {
+                  listedChildIds,
+                  expectedChildCount: 3,
+                }).catch(() => {
+                  console.error('[Recent preview diagnostic unavailable]');
+                });
+                throw error;
+              }
               assert.ok(
                 listedChildIds.some((id) => id.includes('a-docs')),
                 'the selected child remains visible within the capped preview',
@@ -656,7 +747,7 @@ test(
             try {
               await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
             } catch (error) {
-              await captureOpenInHarborFailure().catch(() => {
+              await captureServedFixtureFailure('Open in Harbor visibility').catch(() => {
                 console.error('[open-in-harbor diagnostic unavailable]');
               });
               throw error;
