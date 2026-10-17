@@ -3587,6 +3587,45 @@ fn codex_orphan_subagent_keeps_its_task_title_without_inventing_a_parent() {
 }
 
 #[test]
+fn overview_prompt_sender_follows_the_recorded_turn_instead_of_session_ancestry() {
+    let home = Home::new();
+    home.codex("root", json!({}), &[
+        codex_user(ts(23, 0), "Coordinate"),
+        codex_line(ts(23, 1), "response_item", json!({"type":"function_call","name":"spawn_agent","call_id":"task","arguments":"{\"task_name\":\"audit_parser\",\"prompt\":\"Audit the parser\"}"})),
+    ]);
+    let initial = codex_user(ts(23, 2), "Audit the parser");
+    for (records, expected) in [
+        (vec![initial.clone()], "root"),
+        (
+            vec![
+                initial,
+                codex_reply(ts(23, 3), "Audit complete"),
+                codex_user(ts(23, 4), "A direct follow-up from you"),
+            ],
+            "you",
+        ),
+    ] {
+        home.codex("child", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &records);
+        let inputs = crate::inputs::inputs(&home.options)
+            .unwrap()
+            .into_iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .collect::<Vec<_>>();
+        let mut cache = EventCache::open(&home.options.cache);
+        let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+        let child = prepared.rows.iter().find(|row| row.key == "child").unwrap();
+        assert_eq!(child.parent.as_deref(), Some("root"));
+        let overview = serde_json::to_value(&child.overview).unwrap();
+        assert_eq!(
+            overview["home"]["detail_from"], expected,
+            "ancestry must not replace the latest prompt's sender"
+        );
+        drop(cache);
+        assert_staged_owner_parity(&home, &inputs);
+    }
+}
+
+#[test]
 fn codex_native_spawn_calls_place_their_exact_task() {
     let home = Home::new();
     home.codex("root", json!({}), &[

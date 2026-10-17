@@ -9,6 +9,11 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
 
 ## Acceptance contract repair — 2026-10-17
 
+This section records the earlier adapter repair. The continuation policy below
+supersedes keeping that renderer: obsolete executable mockups are now removed,
+their data is preserved as verified JSON, and their complete frame/region set is
+compared directly with the pinned application at unchanged strict thresholds.
+
 The user authorized fixing the acceptance baseline before further product UI
 alignment. This section supersedes the diagnostic-only and unchanged-adapter
 descriptions below; their runs remain historical evidence.
@@ -177,6 +182,8 @@ The continuation fixes three reading defects: session navigation restores headin
 
 Compact child activity reuses the existing bounded relationship preview owner. Metadata carries only tool identity/time; a selected generation-bound `session-home` request loads the capped argument through its native recipe. `session_fields` narrows that existing read to activity and avoids unrelated prompt reads. Current Working observations alone can show it. Retained-source publication drops a mismatched activity recipe instead of joining old arguments to newer runtime facts. No broad transcript scan, new polling owner, control action or SSH capability is added. Tests and exact-pair CI must validate these changes before they are accepted.
 
-The first native replay check exposed a producer mismatch: a worker-only staged publication had no physical parent file and lost the recorded sending turn that a complete publication retained. The bounded relationship context now preserves that witness, distinguishes unavailable or ambiguous physical observations from an unobserved foreign parent, and rejects conflicting witnesses. Old active stages restart through the existing bounded reset recipe. Catalog version 4 starts existing discovery/drain recovery before resuming an old subset stage, retains published history, and prevents a small component from advertising completeness for untouched older rows. This upgrades derived metadata without resetting the event cache or inventing a holding turn. The failed Rust run and the initial browser-test selector failure remain recorded; corrected final-head CI is still required.
+The first native replay check exposed a producer mismatch: a worker-only staged publication had no physical parent file and lost the recorded sending turn that a complete publication retained. The bounded relationship context now preserves that witness, distinguishes unavailable or ambiguous physical observations from an unobserved foreign parent, and rejects conflicting witnesses. Old active stages restart through the existing bounded reset recipe. Catalog version 5 starts existing discovery/drain recovery before resuming an old subset stage, retains published history, and prevents a small component from advertising completeness for untouched older rows. Version 5 also carries the recorded latest-prompt sender alongside its existing bounded prompt recipe; session ancestry alone is not sender proof. This upgrades derived metadata without resetting the event cache or inventing a holding turn. The failed Rust run and the initial browser-test selector failure remain recorded; corrected final-head CI is still required.
 
 The pause boundaries authorize keeping those features inactive. They do not, by themselves, approve every resulting pixel difference. Any remaining actual-application visual difference still needs the explicit evidence-bound approval required by the policy above.
+
+Expanded actual-application machine captures exposed a separate presentation regression: a Machine-only CSS variant changed phone padding/gaps and row geometry, suppressed the original detail while activity was present, moved ages into every row, and substituted harness/machine text for recorded ancestry. Machine pages now reuse the selected complete application's shared row and page styles, working-only harness/status placement, recorded parent names and bounded native prompt detail. The visually hidden machine heading is restored. The existing served tests verify those original phone/desktop dimensions and row semantics. These changes preserve native metadata qualification and do not adopt the deferred v6 layout.
