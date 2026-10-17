@@ -107,7 +107,7 @@ function captureSessionTraceResponses(page, scheme) {
       return;
     }
     const tracked = page.inFlightApiRequests?.get(response.request()),
-      routeKey = page.captureRouteKey ?? null,
+      routeKey = tracked?.routeKey ?? page.captureRouteKey ?? null,
       request = Object.fromEntries(
         ['sid', 'turn', 'scope'].map((key) => [key, url.searchParams.get(key)]),
       ),
@@ -178,6 +178,9 @@ async function snapshot(page) {
       '.tsum',
       '.session-dock',
       'dialog[open]',
+      '.agents-panel',
+      '.flow .hop',
+      '.hop .sent',
     ];
     return {
       historyState: history.state,
