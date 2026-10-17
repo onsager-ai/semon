@@ -25,7 +25,155 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  interaction_support:
+    name: supporting exact-runtime full interaction chain
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/review/380-full-interaction-support-20261018' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+      SEMON_UI_COVERAGE: representative
+    steps:
+      - name: Check out the actual diagnostic candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Prove production sources match the qualified runtime
+        env:
+          RUNTIME_SOURCE: e36113e69265e634b8b3490692e4065a991ccd61
+        run: |
+          git fetch --no-tags --depth=1 origin "$RUNTIME_SOURCE"
+          git diff --exit-code "$RUNTIME_SOURCE" -- ui/src crates
+      - name: Download exact e361 run binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 12109953497
+          run-id: 39058724365
+          github-token: ${{ github.token }}
+          path: target/debug
+          merge-multiple: true
+      - name: Verify runtime fingerprint and record supporting identity
+        run: |
+          printf '%s  target/debug/semon\n' cf07fb246e1c590c6ddb0d00e9ca1a7200402d8e29ff9d4af0be6d45f69d29f0 | sha256sum -c -
+          chmod +x target/debug/semon target/debug/examples/ui-account-server
+          mkdir -p tests/ui/out
+          python3 - <<'PYIDENTITY'
+          import json, os
+          from pathlib import Path
+          Path('tests/ui/out/support-identity.json').write_text(json.dumps({
+            'kind': 'supporting diagnostic; not final acceptance',
+            'candidate': os.environ['GITHUB_SHA'],
+            'runtime_source': 'e36113e69265e634b8b3490692e4065a991ccd61',
+            'runtime_merge_preview': '63b7d56b4a0eb0a28a33f9d6ad64131aec6500ac',
+            'runtime_fingerprint': 'cf07fb246e1c590c6ddb0d00e9ca1a7200402d8e29ff9d4af0be6d45f69d29f0',
+            'binary_run': 39058724365,
+            'binary_artifact': 12109953497,
+          }, indent=2) + '\n')
+          PYIDENTITY
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: tests/ui/package-lock.json
+
+      # Keep signed Ubuntu packages; avoid the intermittently unreachable Azure mirror.
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+
+      - name: Install the check tooling and Chromium
+        working-directory: tests/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Browser-check infrastructure regression tests
+        run: |
+          npm --prefix ui ci --no-audit --no-fund
+          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs
+
+      - name: Independent shared-account and application-shell lifecycle
+        run: |
+          node --test tests/ui/text-audit.test.mjs
+          node tests/ui/gallery.mjs
+          node tests/ui/compact-gallery.mjs
+          node tests/ui/native-controls.mjs
+          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/select-lifecycle.mjs ui/tests/code-scroll.mjs ui/tests/control-observation-browser.mjs ui/tests/jump-toolbar.mjs ui/tests/catalog-viewer-browser.mjs ui/tests/runtime-leaf-browser.mjs ui/tests/continuity-refinement-browser.mjs ui/tests/staging-viewer-browser.mjs ui/tests/passive-reading-browser.mjs
+
+      - name: Actual default catalog producer, keyboard and visual geometry
+        env:
+          SEMON_CATALOG_SERVED_BIN: ${{ github.workspace }}/target/debug/semon
+          SEMON_CATALOG_SERVED_SOURCE: ${{ github.sha }}
+          SEMON_CATALOG_SERVED_EVIDENCE: ${{ github.workspace }}/tests/ui/out/catalog-default.json
+          SEMON_OVERVIEW_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/overview-default
+          SEMON_CATALOG_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/catalog-default
+        run: node --test ui/tests/catalog-served.mjs ui/tests/overview-served.mjs
+
+      - name: Write the sample fixtures
+        run: |
+          echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")" >> "$GITHUB_ENV"
+          node tests/ui/fixture.mjs "$RUNNER_TEMP/sample-extras" --extras > /dev/null
+
+      - name: Serve the fixtures
+        run: |
+          serve() { # name port dir
+            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
+              --claude-home "$3/claude" --claude-json "$3/.claude.json" --codex-home "$3/codex" --copilot-home "$3/copilot" --proc-root "$3/proc" --cache "$3/index.json" \
+              < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
+            for _ in $(seq 1 100); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
+              [ -n "$url" ] && break
+              sleep 0.2
+            done
+            [ -n "$url" ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }
+            echo "${url%%/?t=*} ${url##*t=}"
+          }
+          read -r base token < <(serve sample 8765 "$RUNNER_TEMP/sample")
+          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
+          echo "SEMON_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_TOKEN=$token" >> "$GITHUB_ENV"
+          read -r base token < <(serve sample-extras 8766 "$RUNNER_TEMP/sample-extras")
+          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
+          echo "SEMON_EXTRA_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_EXTRA_TOKEN=$token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$base/?t=$token"
+          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/examples/ui-account-server \
+            127.0.0.1:8768 "$RUNNER_TEMP/sample-extras/claude" "$RUNNER_TEMP/sample-extras/codex" \
+            "$RUNNER_TEMP/sample-extras/proc" "$RUNNER_TEMP/sample-extras/account-index.json" \
+            < /dev/null > "$RUNNER_TEMP/account-menu.log" 2>&1 &
+          for _ in $(seq 1 100); do
+            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/account-menu.log" || true)
+            [ -n "$url" ] && break
+            sleep 0.2
+          done
+          [ -n "$url" ] || { cat "$RUNNER_TEMP/account-menu.log"; exit 1; }
+          base="${url%%/?t=*}"; token="${url##*t=}"
+          echo "SEMON_ACCOUNT_BASE=$base" >> "$GITHUB_ENV"
+          echo "SEMON_ACCOUNT_TOKEN=$token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$base/?t=$token"
+
+      - name: Functional checks
+        working-directory: tests/ui
+        run: node checks/run.mjs --group "$SUITE"
+        env:
+          SUITE: interaction
+      - name: Server logs
+        if: ${{ always() }}
+        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log || true
+      - name: Preserve supporting interaction reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: viewer-ui-interaction-support
+          path: tests/ui/out
+          if-no-files-found: warn
+
   foundation:
+    if: ${{ github.ref != 'refs/heads/review/380-full-interaction-support-20261018' }}
     name: UI types and generated assets
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -68,6 +216,7 @@ jobs:
           if-no-files-found: error
 
   build:
+    if: ${{ github.ref != 'refs/heads/review/380-full-interaction-support-20261018' }}
     name: viewer test binaries
     needs: foundation
     runs-on: ubuntu-latest
@@ -166,6 +315,7 @@ jobs:
           retention-days: 1
 
   checks:
+    if: ${{ github.ref != 'refs/heads/review/380-full-interaction-support-20261018' }}
     name: viewer / ${{ matrix.suite }}
     needs: build
     runs-on: ubuntu-latest
@@ -508,7 +658,7 @@ jobs:
 
   browser:
     name: viewer browser checks
-    if: ${{ always() }}
+    if: ${{ always() && github.ref != 'refs/heads/review/380-full-interaction-support-20261018' }}
     needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
