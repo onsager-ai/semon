@@ -185,5 +185,7 @@ test('unjoined relay participants stay passive and do not affect joined-turn cal
   );
   for (const key of ['start', 'end', 'ticks', 'legend', 'incomplete'])
     assert.deepEqual(withPeers[key], baseline[key], key);
+  assert.equal(baseline.summary[2], '$1.50 session totals');
+  assert.equal(withPeers.summary[2], '$1.50 joined session totals');
   assert.ok(withPeers.summary.some((item) => item.includes('2 relayed peers with catalog totals')));
 });

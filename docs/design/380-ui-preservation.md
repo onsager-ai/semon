@@ -220,9 +220,39 @@ passive text; no controller or Composer is reinstated.
 
 Candidate Trace response diagnostics hash the exact already-received response
 and retain bounded graph/identity structure, excluding transcript/tool bodies.
-They are needed to locate the atlas-ingest/harbor relation discrepancy: prior DOM
-captures were truncated and did not establish whether the producer emitted that
-edge. Until final CI proves the resulting behavior, this remains open rather than
-an accepted reading limitation. CI failures for a newly added test's formatting,
-Trace union narrowing and a missing required fixture boolean are retained and
-corrected; their failed runs are not inherited as acceptance.
+They established that the atlas-ingest branch emits its Harbor relay and a
+qualified participant identity, while its joined turn is unavailable. A separate
+allowlisted participant summary now reuses that same generation-qualified Catalog
+read for recorded model, token and cost totals. The navigable peer row explicitly
+states that no joined turn is available. It cannot contribute invented activity,
+duration, timeline segments, waits or critical edges, and stays outside joined-turn
+traversal and aggregates. Unknown or unpriced costs remain unknown. The unchanged
+128-participant and shared decoded-metadata input bounds remain; those input
+bounds do not claim a serialized-response byte cap.
+
+Trace relationship names return to the selected application's static prose.
+Turning them into touch-sized buttons had enlarged phone line boxes and changed
+wrapping despite identical recorded text. Agent rows and explicit Open in controls
+retain navigation. Session menus also remove a duplicate machine chooser and a
+new Directory detail absent from the selected application; the topbar chooser
+remains. Omission of the original inert Open in claude.ai action is a separate
+pending policy decision, not an approved visual exception.
+
+A capture key can change in Node before browser navigation dispatches. An old
+Quill Trace poll started in that handoff, was canceled by navigation, and was
+misattributed to Sentinel. Request ownership now requires an exact completed
+successful prior query during that narrow transition, and records its proof ID
+alongside the raw failure. Expected-current, unmatched and post-transition errors
+remain fatal. This does not introduce a general canceled-request allowance.
+
+The first instrumented replay completed 113 captures without errors and retained
+the scrolling transaction that can move a selected step out of view: bounded
+child hydration redraws called scrollEnd while follow state still reflected an
+earlier position. The diagnostics preserve native scroll writes and frame
+positions without changing capture waits, thresholds or visibility assertions.
+Final exact-pair checks still determine acceptance of the resulting owner fix.
+
+CI failures for newly added test formatting, Trace union narrowing and missing
+required fixture booleans remain retained and corrected; their failed runs are
+not inherited as acceptance. The current evidence packet distinguishes prepared
+changes, supporting branch runs, PR heads and tested merge-preview identities.

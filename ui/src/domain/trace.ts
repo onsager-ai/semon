@@ -233,7 +233,8 @@ export function createTraceCalculations(
     const summary = [
       participantCount + (participantCount === 1 ? ' agent' : ' agents'),
       dur(start, end),
-      costText(totalCost) + ' session totals',
+      costText(totalCost) +
+        (model.passivePeers.length ? ' joined session totals' : ' session totals'),
       ...(model.passivePeers.length
         ? [
             model.passivePeers.length +
