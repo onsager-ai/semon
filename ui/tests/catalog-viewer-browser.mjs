@@ -1736,11 +1736,21 @@ test('bounded metadata search preserves literal query and exposes empty partial 
   }
 });
 
-for (const width of [390, 1280])
-  test(`search submission and Back retain list context at ${width}px`, async () => {
+for (const { width, colorScheme } of [
+  { width: 390, colorScheme: 'light' },
+  { width: 390, colorScheme: 'dark' },
+  { width: 1280, colorScheme: 'light' },
+  { width: 1280, colorScheme: 'dark' },
+])
+  test(`search submission and Back retain list context at ${width}px ${colorScheme}`, async () => {
     const browser = await chromium.launch();
     try {
-      const page = await browser.newPage({ viewport: { width, height: 860 } });
+      const page = await browser.newPage({
+        viewport: { width, height: width === 390 ? 480 : 860 },
+        isMobile: width === 390,
+        hasTouch: width === 390,
+      });
+      await page.emulateMedia({ colorScheme });
       const reads = [];
       let fail = false;
       const items = Array.from({ length: 36 }, (_, i) => meta('row-' + i));
@@ -1755,31 +1765,37 @@ for (const width of [390, 1280])
             },
           });
         if (u.pathname === '/api/sessions') {
-          reads.push(Object.fromEntries(u.searchParams));
+          const params = Object.fromEntries(u.searchParams),
+            term = u.searchParams.get('q');
+          reads.push(params);
           if (fail) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+          const result = list(term === 'missing' ? [] : items);
+          if (term) {
+            result.search = {
+              semantics: 'unicode_lowercase_substring',
+              fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+              partial: term === 'Session',
+              candidates: 36,
+              index_complete: term !== 'Session',
+              candidate_budget: 512,
+              byte_budget: 2097152,
+            };
+            result.freshness =
+              term === 'Session' ? 'stale' : term === 'missing' ? 'unavailable' : 'cached';
+          }
+          if (term === 'Session') result.next_cursor = 'next-page';
           return route.fulfill({
-            json: {
-              ...list(u.searchParams.get('q') === 'missing' ? [] : items),
-              ...(u.searchParams.has('q')
-                ? {
-                    search: {
-                      semantics: 'unicode_lowercase_substring',
-                      fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
-                      partial: false,
-                      candidates: 36,
-                      index_complete: true,
-                      candidate_budget: 512,
-                      byte_budget: 2097152,
-                    },
-                  }
-                : {}),
-            },
+            json: result,
           });
         }
         if (u.pathname === '/api/session-identity')
-          return route.fulfill({ json: { api: 1, identity: identity(u.searchParams.get('sid')) } });
+          return route.fulfill({
+            json: { api: 1, identity: identity(u.searchParams.get('sid')) },
+          });
         if (u.pathname === '/api/session-transcript')
-          return route.fulfill({ json: transcript(u.searchParams.get('sid'), u.searchParams, 10) });
+          return route.fulfill({
+            json: transcript(u.searchParams.get('sid'), u.searchParams, 10),
+          });
         return route.fulfill({
           contentType: u.pathname === '/viewer.css' ? 'text/css' : 'text/html',
           body: u.pathname === '/viewer.css' ? css : html,
@@ -1790,8 +1806,87 @@ for (const width of [390, 1280])
       await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
       const query = page.getByRole('searchbox', { name: 'Search session details', exact: true });
       await query.waitFor();
+      if (process.env.SEMON_UI_OUT) {
+        await mkdir(process.env.SEMON_UI_OUT, { recursive: true });
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({
+          path: `${process.env.SEMON_UI_OUT}/sessions-filter-placement-list-${width}-${colorScheme}.png`,
+        });
+      }
+      assert.equal(await page.locator('.catalog-result-header').count(), 0);
+      const summary = page.locator('.ph .sub span').first();
+      assert.match(await summary.innerText(), /36/);
+      assert.match(await summary.innerText(), /sessions/);
+      assert.doesNotMatch(await summary.innerText(), /loaded/);
+      assert.match(
+        await summary.getAttribute('aria-description'),
+        /Selected source: Fixture source/,
+      );
+      assert.match(await summary.getAttribute('data-tip'), /Cached history/);
+      const searchQualification = await query.getAttribute('aria-description');
+      assert.match(searchQualification, /Metadata search checks session names, IDs/);
+      assert.match(
+        searchQualification,
+        /Conversation text and history across sources are unavailable/,
+      );
+      assert.equal(await query.getAttribute('data-tip'), searchQualification);
       // Filter choices commit together when the existing shared sheet closes.
       await page.locator('.facet-btn').click();
+      const filterInfo = page.locator('.filters-sheet .facet-info');
+      await filterInfo.waitFor();
+      assert.equal(
+        await filterInfo.evaluate((node) => node.parentElement?.classList.contains('vb')),
+        true,
+      );
+      assert.match(await filterInfo.innerText(), /Selected source: Fixture source/);
+      assert.match(await filterInfo.innerText(), /Cached history/);
+      assert.match(await filterInfo.innerText(), /Ordered by latest recorded activity/);
+      if (width === 390) {
+        const scrollable = await filterInfo.evaluate((node) => {
+          const body = node.closest('.vb');
+          return !!body && body.scrollHeight > body.clientHeight + 1;
+        });
+        assert.equal(scrollable, true, 'phone Filter context shares the scrollable .vb owner');
+        assert.equal(
+          await page.evaluate(() => {
+            const event = new Event('touchmove', { bubbles: true, cancelable: true });
+            document.querySelector('.filters-sheet .facet-info').dispatchEvent(event);
+            return event.defaultPrevented;
+          }),
+          false,
+          'touch scrolling is allowed from the Filter context inside .vb',
+        );
+        assert.equal(
+          await page.evaluate(() => {
+            const event = new Event('touchmove', { bubbles: true, cancelable: true });
+            document.querySelector('.filters-sheet .vh').dispatchEvent(event);
+            return event.defaultPrevented;
+          }),
+          true,
+          'touch scrolling remains held outside the Filter scroll owner',
+        );
+        const infoBox = await filterInfo.boundingBox();
+        assert.ok(infoBox);
+        await page.mouse.move(infoBox.x + 8, infoBox.y + 8);
+        await page.mouse.wheel(0, 180);
+        await page.waitForFunction(
+          () => document.querySelector('.filters-sheet .vb')?.scrollTop > 0,
+        );
+        assert.ok(await page.locator('.filters-sheet .vb').evaluate((node) => node.scrollTop > 0));
+      }
+      if (process.env.SEMON_UI_OUT)
+        await page.screenshot({
+          path: `${process.env.SEMON_UI_OUT}/sessions-filter-placement-sheet-${width}-${colorScheme}.png`,
+        });
+      const machine = page.locator('.sh-select[data-label="Machine"]');
+      assert.match(await machine.locator('.sh-select-trigger').innerText(), /Fixture source/);
+      await machine.locator('.sh-select-trigger').click();
+      const machineOptions = page.locator('[role="listbox"][aria-label="Machine"] [role="option"]');
+      await machineOptions.first().waitFor();
+      assert.equal(await machineOptions.count(), 1);
+      assert.equal((await machineOptions.first().innerText()).trim(), 'Fixture source');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !history.state?.shSelect);
       for (const [label, value] of [
         ['Harness', 'claude'],
         ['Repo', '/repo'],
@@ -1811,6 +1906,18 @@ for (const width of [390, 1280])
       await page.locator('.filters-sheet .fdone').click();
       await committed;
       await page.waitForFunction(() => !history.state?.sheet);
+      assert.equal(
+        await page.locator('.facet-btn').evaluate((node) => document.activeElement === node),
+        true,
+      );
+      await page.locator('.facet-btn').click();
+      await page.goBack();
+      await page.waitForFunction(() => !history.state?.sheet);
+      await page.locator('.filters-sheet').waitFor({ state: 'hidden' });
+      assert.equal(
+        await page.locator('.facet-btn').evaluate((node) => document.activeElement === node),
+        true,
+      );
       assert.equal(reads.length, 2);
       await query.fill('Session');
       const searched = page.waitForResponse((response) => {
@@ -1825,6 +1932,26 @@ for (const width of [390, 1280])
       assert.equal(reads[2].q, 'Session');
       assert.equal(reads[2].harness, 'claude');
       assert.equal(reads[2].repo, '/repo');
+      assert.equal(reads[2].machine, 'source');
+      await page
+        .getByText(
+          'Search checked a bounded part of the index. Load more sessions to continue looking for matches.',
+        )
+        .waitFor();
+      await page
+        .getByText('Search is incomplete while recorded sessions are being indexed.')
+        .waitFor();
+      await page.getByText('History observation is stale').waitFor();
+      for (const warning of [
+        'Search checked a bounded part of the index. Load more sessions to continue looking for matches.',
+        'Search is incomplete while recorded sessions are being indexed.',
+        'History observation is stale',
+      ]) {
+        assert.equal(
+          await page.getByText(warning).evaluate((node) => node.closest('.filters-sheet')),
+          null,
+        );
+      }
       const row = page.locator('#page [data-id="row-18"]');
       await row.scrollIntoViewIfNeeded();
       const listScroll = await page.evaluate(() =>
@@ -1853,10 +1980,18 @@ for (const width of [390, 1280])
       assert.equal(await query.inputValue(), '');
       assert.equal(await query.evaluate((node) => document.activeElement === node), true);
       assert.equal(reads.at(-1).q, undefined);
+      assert.equal(reads.at(-1).harness, undefined);
       assert.equal(reads.at(-1).repo, undefined);
       await query.fill('missing');
       await query.press('Enter');
       await page.getByText('No recorded sessions match these filters.').waitFor();
+      await page.getByText('History observation is unavailable').waitFor();
+      assert.equal(
+        await page
+          .getByText('History observation is unavailable')
+          .evaluate((node) => node.closest('.filters-sheet')),
+        null,
+      );
       assert.equal(
         await page.getByRole('button', { name: 'Clear filters', exact: true }).count(),
         1,
@@ -1865,6 +2000,12 @@ for (const width of [390, 1280])
       await query.fill('Session');
       await query.press('Enter');
       await page.getByRole('button', { name: 'Retry', exact: true }).waitFor();
+      assert.equal(
+        await page
+          .getByRole('button', { name: 'Retry', exact: true })
+          .evaluate((node) => node.closest('.filters-sheet')),
+        null,
+      );
       fail = false;
       await page.getByRole('button', { name: 'Retry', exact: true }).click();
       await row.waitFor();
@@ -1877,6 +2018,90 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`source freshness notices stay outside Filter at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 860 } });
+        await page.emulateMedia({ colorScheme });
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({
+              json: {
+                ...capabilities(true),
+                metadata_search: true,
+                filters: ['harness', 'repo', 'q'],
+              },
+            });
+          if (url.pathname === '/api/sessions') {
+            const term = url.searchParams.get('q'),
+              result = list([meta('freshness')]);
+            result.freshness =
+              term === 'stale'
+                ? 'stale'
+                : term === 'updating'
+                  ? 'updating'
+                  : term === 'incomplete'
+                    ? 'incomplete'
+                    : term === 'unavailable'
+                      ? 'unavailable'
+                      : 'cached';
+            if (term === 'updating') result.completeness = { state: 'partial' };
+            if (term)
+              result.search = {
+                semantics: 'unicode_lowercase_substring',
+                fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+                partial: false,
+                candidates: 1,
+                index_complete: true,
+                candidate_budget: 512,
+                byte_budget: 2097152,
+              };
+            return route.fulfill({ json: result });
+          }
+          return route.fulfill({
+            contentType: url.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+            body: url.pathname === '/viewer.css' ? css : html,
+          });
+        });
+        await page.goto('http://catalog.test/sessions');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+        const query = page.getByRole('searchbox', { name: 'Search session details', exact: true });
+        await page.locator('#page [data-id="freshness"]').waitFor();
+        for (const [term, warning] of [
+          ['stale', 'History observation is stale'],
+          ['incomplete', 'History is incomplete'],
+          ['unavailable', 'History observation is unavailable'],
+          ['updating', 'More sessions are being discovered. This list is incomplete.'],
+        ]) {
+          const response = page.waitForResponse((candidate) => {
+            const url = new URL(candidate.url());
+            return url.pathname === '/api/sessions' && url.searchParams.get('q') === term;
+          });
+          await query.fill(term);
+          await query.press('Enter');
+          await response;
+          const notice = page.locator('.catalog-note[role="status"]').filter({ hasText: warning });
+          await notice.waitFor();
+          assert.equal(await notice.evaluate((node) => node.closest('.filters-sheet')), null);
+          assert.equal(await page.locator('.catalog-note[role="status"]').count(), 1);
+          assert.equal(await page.locator('.catalog-result-header').count(), 0);
+          if (term === 'updating')
+            assert.equal(
+              await page.locator('.ph').getAttribute('data-catalog-observation'),
+              'Discovering history',
+            );
+        }
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
+
 for (const width of [390, 1280])
   test(`late name metadata updates list Recent and header without transcript reads at ${width}px`, async () => {
     const browser = await chromium.launch();

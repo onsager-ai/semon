@@ -14,7 +14,14 @@ export { createPanelChrome } from './panel';
 export type { PanelChrome, PanelHost, PanelOptions } from './panel';
 
 export { createFacetChrome } from './facets';
-export type { FacetChrome, FacetHost, FacetField, FacetOption, FacetSelect } from './facets';
+export type {
+  FacetChrome,
+  FacetChromeOptions,
+  FacetHost,
+  FacetField,
+  FacetOption,
+  FacetSelect,
+} from './facets';
 export {
   renderSessionsScreen,
   renderMachinesScreen,

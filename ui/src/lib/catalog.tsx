@@ -16,6 +16,12 @@ export interface CatalogListItem {
   freshness: { state: string };
   presentation?: import('./screens').SessionRow;
 }
+export type CatalogObservationState =
+  | 'cached'
+  | 'updating'
+  | 'stale'
+  | 'incomplete'
+  | 'unavailable';
 import { screenText, Glyph, SessionRowView, fitSessionRows } from './screens';
 export interface CatalogListSnapshot {
   browser?: {
@@ -34,7 +40,10 @@ export interface CatalogListSnapshot {
   }[];
   sourceLabel: string;
   updating: boolean;
+  observationState?: CatalogObservationState;
   observation?: string;
+  filterDescription?: string;
+  searchQualification?: string;
   discovering?: boolean;
   note: string;
   harness: string;
@@ -51,6 +60,25 @@ export interface CatalogListSnapshot {
   candidatesMore?: boolean;
   candidateUpdating?: boolean;
   candidateNote?: string;
+}
+
+export interface CatalogFilterDescription {
+  description: string;
+  searchQualification: string;
+}
+
+export function catalogFilterDescription(
+  sourceLabel: string,
+  observation: string,
+  metadataSearch: boolean,
+): CatalogFilterDescription {
+  const searchQualification = metadataSearch
+    ? 'Metadata search checks session names, IDs, repositories, branches, models and harnesses in this source only. Conversation text and history across sources are unavailable.'
+    : 'Metadata search is unavailable for this source. Conversation text and history across sources are unavailable.';
+  return {
+    searchQualification,
+    description: `Selected source: ${sourceLabel}. ${observation}. ${searchQualification} Ordered by latest recorded activity.`,
+  };
 }
 export interface CatalogListHost {
   group?(value: string): void;
@@ -73,6 +101,13 @@ export function renderCatalogList(
   host: CatalogListHost,
 ) {
   const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo || snapshot.model);
+  const observationState = snapshot.observationState ?? 'cached';
+  const observationWarning =
+    snapshot.browser &&
+    (observationState === 'stale' ||
+      observationState === 'unavailable' ||
+      (observationState === 'incomplete' && !snapshot.discovering) ||
+      (observationState === 'updating' && !snapshot.discovering && !snapshot.updating));
   const countLabel = `${snapshot.items.length === 1 ? 'session' : 'sessions'}${snapshot.completeCount ? '' : ' loaded'}`;
   function commit(form: HTMLFormElement) {
     const values = new FormData(form);
@@ -115,7 +150,10 @@ export function renderCatalogList(
         <h1>Sessions</h1>
         {snapshot.browser ? (
           <div class="sub">
-            <span>
+            <span
+              aria-description={snapshot.filterDescription}
+              data-tip={snapshot.filterDescription}
+            >
               <b>{snapshot.items.length}</b>
               {countLabel}
             </span>
@@ -161,6 +199,8 @@ export function renderCatalogList(
                   name="q"
                   type="search"
                   aria-label="Search session details"
+                  aria-description={snapshot.searchQualification}
+                  data-tip={snapshot.searchQualification}
                   placeholder="Search sessions"
                   value={snapshot.query ?? ''}
                   onInput={(event) => host.searchDraft?.(event.currentTarget.value)}
@@ -267,6 +307,11 @@ export function renderCatalogList(
             Apply filters
           </button>
         </form>
+      )}
+      {observationWarning && (
+        <p class="catalog-note" role="status">
+          {snapshot.sourceLabel} · {snapshot.observation}
+        </p>
       )}
       {snapshot.searchPartial && (
         <p class="catalog-note" role="status">
@@ -438,7 +483,6 @@ export function renderCatalogList(
           })}
         </div>
       )}
-      {snapshot.browser && resultHeader}
       {!snapshot.updating &&
         !snapshot.items.length &&
         !snapshot.note &&

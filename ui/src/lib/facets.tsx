@@ -30,8 +30,13 @@ export interface FacetHost {
 }
 export interface FacetChrome {
   element: HTMLElement;
-  update(fields: readonly FacetField[]): void;
+  update(fields: readonly FacetField[], options?: FacetChromeOptions): void;
   destroy(): void;
+}
+export interface FacetChromeOptions {
+  description?: string;
+  tooltip?: string;
+  action?: { label: string; run(): void };
 }
 const X = 'M6 6l12 12M18 6L6 18';
 function Icon({ path }: { path: string }) {
@@ -49,14 +54,15 @@ function Icon({ path }: { path: string }) {
     </svg>
   );
 }
-/** Persistent Preact controls; Select owns only its separate body slot. */
+/** Preact owns the chrome; the scroll body separately hosts the note and Select-owned nodes. */
 export function createFacetChrome(host: FacetHost): FacetChrome {
   const element = document.createElement('div');
   element.className = 'facet-filters';
   element.setAttribute('role', 'group');
   element.setAttribute('aria-label', 'Filter sessions');
   let dialog: HTMLDialogElement | null = null,
-    body: HTMLDivElement | null = null;
+    body: HTMLDivElement | null = null,
+    info: HTMLParagraphElement | null = null;
   const selects = new Map<string, FacetSelect>();
   let trigger: HTMLButtonElement | null = null,
     disposed = false,
@@ -125,7 +131,7 @@ export function createFacetChrome(host: FacetHost): FacetChrome {
   }
   return {
     element,
-    update(fields) {
+    update(fields, options) {
       if (disposed) return;
       for (const field of fields) {
         let select = selects.get(field.key);
@@ -146,6 +152,8 @@ export function createFacetChrome(host: FacetHost): FacetChrome {
             type="button"
             aria-haspopup="dialog"
             aria-label={active ? 'Filter, ' + active + ' active' : 'Filter'}
+            aria-description={options?.description}
+            data-tip={options?.tooltip}
             ref={(node) => {
               trigger = node;
             }}
@@ -157,6 +165,17 @@ export function createFacetChrome(host: FacetHost): FacetChrome {
               {active || ''}
             </span>
           </button>
+          {options?.action && (
+            <button
+              class="link facet-action"
+              type="button"
+              onClick={() => {
+                if (!disposed) options.action?.run();
+              }}
+            >
+              {options.action.label}
+            </button>
+          )}
           {fields.map((field) => (
             <button
               key={field.key}
@@ -218,6 +237,20 @@ export function createFacetChrome(host: FacetHost): FacetChrome {
         </>,
         element,
       );
+      if (body) {
+        if (options?.description) {
+          if (!info) {
+            info = document.createElement('p');
+            info.className = 'facet-info';
+            info.setAttribute('role', 'note');
+          }
+          info.textContent = options.description;
+          if (info.parentElement !== body || body.firstElementChild !== info) body.prepend(info);
+        } else {
+          info?.remove();
+          info = null;
+        }
+      }
       for (const select of selects.values())
         if (body && select.el.parentElement !== body) body.append(select.el);
     },
@@ -230,6 +263,7 @@ export function createFacetChrome(host: FacetHost): FacetChrome {
         else select.close();
       }
       if (dialog?.open) dialog.close();
+      info?.remove();
       if (opened && dialog) {
         opened = false;
         host.closed(dialog, 'destroyed');
