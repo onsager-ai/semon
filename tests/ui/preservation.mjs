@@ -1,4 +1,4 @@
-// Required actual-application comparison, independent of the mockup ratchets.
+// Required 62-state actual-application comparison, independent of the historical-frame gate.
 // The reference binary is the exact gitlink of the captured compat=1 UI.
 // Pause removals are never painted back into either UI or silently exempted.
 import fs from 'node:fs';
@@ -6,14 +6,17 @@ import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
 import { ENV, launch, served, goto, data } from './lib.mjs';
+import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
   assessPreservation,
+  assessVisualAcceptances,
   BEFORE,
   REFERENCE,
   THRESHOLD,
   MAX_RATIO,
   WIDTHS,
   SCHEMES,
+  sha256,
 } from './preservation-contract.mjs';
 
 const args = process.argv.slice(2);
@@ -28,6 +31,7 @@ const out = path.join(ENV.out, 'preservation');
 fs.mkdirSync(out, { recursive: true });
 const report = {
   candidate: process.env.SEMON_PRESERVATION_CANDIDATE ?? process.env.GITHUB_SHA,
+  candidateFingerprint: null,
   reference: REFERENCE.source,
   referenceHub: REFERENCE.hub,
   mode: historical ? 'historical-before' : 'required',
@@ -35,6 +39,7 @@ const report = {
   maxRatio: MAX_RATIO,
   results: [],
   errors: [],
+  domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
 async function snapshot(page) {
@@ -50,28 +55,42 @@ async function snapshot(page) {
       '.session-dock',
       'dialog[open]',
     ];
-    return Object.fromEntries(
-      selectors.map((selector) => [
-        selector,
-        [...document.querySelectorAll(selector)].slice(0, 100).map((node) => {
-          const box = node.getBoundingClientRect(),
-            css = getComputedStyle(node);
-          return {
-            text: node.textContent.slice(0, 12000),
-            box: [box.x, box.y, box.width, box.height],
-            font: css.font,
-            padding: css.padding,
-            gap: css.gap,
-            icons: [...node.querySelectorAll('img')].map((image) => image.getAttribute('src')),
-            paths: [...node.querySelectorAll('path')].map((p) => p.getAttribute('d')),
-          };
-        }),
-      ]),
-    );
+    return {
+      historyState: history.state,
+      pathname: location.pathname,
+      selectors: Object.fromEntries(
+        selectors.map((selector) => [
+          selector,
+          [...document.querySelectorAll(selector)].slice(0, 100).map((node) => {
+            const box = node.getBoundingClientRect(),
+              css = getComputedStyle(node);
+            return {
+              text: node.textContent.slice(0, 12000),
+              box: [box.x, box.y, box.width, box.height],
+              font: css.font,
+              padding: css.padding,
+              gap: css.gap,
+              icons: [...node.querySelectorAll('img')].map((image) => image.getAttribute('src')),
+              paths: [...node.querySelectorAll('path')].map((p) => p.getAttribute('d')),
+            };
+          }),
+        ]),
+      ),
+    };
   });
 }
 async function capture(candidate, reference, key) {
-  const images = [];
+  const images = [],
+    artifactDigests = {},
+    evidenceBySide = {},
+    artifactPaths = {
+      candidateImage: `preservation/${key}-candidate.png`,
+      candidateEvidence: `preservation/${key}-candidate.json`,
+      referenceImage: `preservation/${key}-reference.png`,
+      referenceEvidence: `preservation/${key}-reference.json`,
+      diffImage: `preservation/${key}-diff.png`,
+      comparisonEvidence: `preservation/${key}-comparison.json`,
+    };
   for (const [name, page] of [
     ['candidate', candidate],
     ['reference', reference],
@@ -93,28 +112,60 @@ async function capture(candidate, reference, key) {
     );
     const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
+    evidenceBySide[name] = await snapshot(page);
+    const evidence = Buffer.from(JSON.stringify(evidenceBySide[name], null, 2) + '\n');
     fs.writeFileSync(
       path.join(out, key + '-' + name + '.json'),
-      JSON.stringify(await snapshot(page), null, 2) + '\n',
+      evidence,
     );
+    artifactDigests[name] = { image: sha256(bytes), evidence: sha256(evidence) };
     images.push(PNG.sync.read(bytes));
   }
+  recordDomDiffSummary(
+    report.domDiffSummary,
+    compareDomEvidence(evidenceBySide.candidate, evidenceBySide.reference, key),
+  );
   const result = compare(...images, report.threshold);
-  fs.writeFileSync(path.join(out, key + '-diff.png'), PNG.sync.write(result.diff));
+  const diffBytes = PNG.sync.write(result.diff);
+  fs.writeFileSync(path.join(out, key + '-diff.png'), diffBytes);
+  const comparisonEvidence = Buffer.from(
+    JSON.stringify(
+      {
+        key,
+        pixels: result.pixels,
+        ratio: result.ratio,
+        size: result.size,
+        threshold: report.threshold,
+        maxRatio: report.maxRatio,
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  fs.writeFileSync(path.join(out, key + '-comparison.json'), comparisonEvidence);
+  artifactDigests.diff = { image: sha256(diffBytes), evidence: sha256(comparisonEvidence) };
   report.results.push({
     key,
     pixels: result.pixels,
     ratio: result.ratio,
     size: result.size,
     pass: !result.size && result.ratio <= report.maxRatio,
+    artifactDigests,
+    artifactPaths,
   });
 }
 try {
-  if (!ENV.base || !process.env.SEMON_PRESERVATION_BASE)
+  if (!ENV.base || !process.env.SEMON_PRESERVATION_BASE || !process.env.SEMON_PRESERVATION_TOKEN)
     throw new Error('Both candidate and selected-reference servers are required');
   if (ENV.base === process.env.SEMON_PRESERVATION_BASE.replace(/\/$/, ''))
     throw new Error('Candidate and selected-reference servers must be independent');
   browser = await launch();
+  if (!/^[a-f0-9]{40}$/.test(report.candidate ?? ''))
+    throw new Error('Candidate commit SHA is required for exact visual evidence');
+  const candidateBinary = process.env.SEMON_VISUAL_CANDIDATE_BIN ?? process.env.SEMON_BIN;
+  if (!candidateBinary || !fs.existsSync(candidateBinary))
+    throw new Error('Candidate binary is required for exact visual evidence');
+  report.candidateFingerprint = sha256(fs.readFileSync(candidateBinary));
   const D = await data();
   for (const width of WIDTHS)
     for (const scheme of SCHEMES) {
@@ -124,12 +175,8 @@ try {
         viewport: { width, height: width === 390 ? 844 : 860 },
         dark,
       };
-      const candidate = await served(browser, options);
-      const retired = [];
-      candidate.on('request', (request) => {
-        if (/\/api\/(model|transcript|expand)(?:[/?]|$)/.test(request.url()))
-          retired.push(new URL(request.url()).pathname);
-      });
+      const candidate = await served(browser, { ...options, captureRequests: true });
+      const retired = candidate.requests ?? [];
       const reference = await served(browser, {
         ...options,
         base: process.env.SEMON_PRESERVATION_BASE,
@@ -190,21 +237,24 @@ try {
       report.errors.push(
         ...candidate.errors.map((error) => prefix + ' candidate: ' + error),
         ...reference.errors.map((error) => prefix + ' reference: ' + error),
-        ...retired.map((url) => prefix + ' retired candidate request: ' + url),
+        ...retired
+          .filter((url) => /^\/api\/(?:model|transcript|expand|tx|tool|image)(?:\/|$)/.test(new URL(url).pathname))
+          .map((url) => prefix + ' retired candidate request: ' + new URL(url).pathname),
       );
       await candidate.context().close();
       await reference.context().close();
     }
 } catch (error) {
-  report.errors.push(error.stack);
+  report.errors.push(error.stack ?? error.message);
 } finally {
   await browser?.close();
   report.failures = assessPreservation(report);
+  report.acceptance = assessVisualAcceptances(report, 'preservation', report.failures);
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 }
 console.log(JSON.stringify(report));
 // Only the fixed historical before-run is diagnostic. The candidate must satisfy
 // pixel, geometry, provenance and exact coverage assertions. Neither native
 // qualification nor the control pause grants an implicit pixel waiver.
-if (report.failures.coverage.length || (!historical && report.failures.visual.length))
+if (report.failures.coverage.length || (!historical && !report.acceptance.pass))
   process.exitCode = 1;
