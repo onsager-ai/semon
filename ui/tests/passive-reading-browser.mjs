@@ -192,9 +192,13 @@ for (const width of [390, 1280])
           await button.tap();
           await explanation.waitFor({ state: 'detached' });
         }
+        const retiredButton = await button.elementHandle();
+        assert.ok(retiredButton);
         await page.evaluate(() => ReadingNotice.releaseScreen(reader));
-        await button.evaluate((node) => node.click());
-        assert.equal(await button.getAttribute('aria-expanded'), 'false');
+        assert.equal(await button.count(), 0, 'releasing the screen unmounts its controls');
+        assert.equal(await retiredButton.evaluate((node) => node.isConnected), false);
+        await retiredButton.evaluate((node) => node.click());
+        assert.equal(await retiredButton.getAttribute('aria-expanded'), 'false');
         await noActivePaths();
         assert.deepEqual(errors, []);
       } finally {

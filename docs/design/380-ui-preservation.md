@@ -88,7 +88,12 @@ button, drawer, Trace-removal or transcript redesign is implemented.
 
 List pages remain 60 rows, retaining at most 300 per source. Grouping and filter
 choices use loaded metadata; the source-qualified Machine field cannot imply a
-workspace union. Header counts say "sessions loaded". Native discovery,
+workspace union. Header counts say "sessions loaded" unless one accepted,
+complete, unpaged retained-history page proves the exact loaded key set for
+the same source, generation and filters. Search also requires a complete native
+search receipt. That bounded result may say "sessions"; it is never a workspace
+census. Partial discovery, cursors, failed or ignored queries and retained extra
+keys keep the loaded qualification. Native discovery,
 incomplete/stale generations, retry, cursors, selected transcripts, field expansion,
 custody and request cancellation retain their existing implementations.
 
@@ -97,6 +102,26 @@ Session actions, active runtime/control/SSH setup and broad full-text retrieval.
 Saved credentials, metadata, operations, ordinary collection and selected reading
 remain intact. Loaded-text navigation is independent of broad full-text search.
 No paused action is restored to satisfy a visual comparison.
+
+The reference's unavailable-controls disclosure is preserved as a passive
+saved-reading leaf. Its button has an explicit accessible name and opens only
+an availability explanation, with no control owner, draft, form, delivery or
+reconnect action. The original inert Claude external-menu row is retained as an
+explicitly unavailable menu item with the shared tooltip; no URL or action is
+invented. The Recent caption retains the original text while the existing
+machine scope remains in its tooltip and accessible tree description. These
+changes do not grant a workspace union or approve any remaining pixel mismatch.
+
+Anchored navigation disables the initial follow-tail pin before rendering its
+generation-bound range. Its ordinary Home check keeps the original timing and
+geometry assertion without layout-forcing diagnostics; a separate controlled
+range/frame test checks that queued bottom pins cannot override the turn anchor.
+The earlier failed and instrumented captures remain evidence, not inherited
+acceptance. Trace token presentation sums emitted million components as integer
+tokens and rounds one-decimal million totals at the display boundary; native
+accounting and the shared formatter's other consumers remain unchanged. Real
+Trace-row tests cover joined sessions and passive peers. Final exact-head CI and
+rendered comparison still determine acceptance.
 
 ## Fresh before result and classification
 

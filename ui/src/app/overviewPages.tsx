@@ -20,6 +20,7 @@ import { parseAnalytics, type AnalyticsData } from '../state/analytics-wire';
 import { renderAnalyticsPresentation } from './analyticsPresentation';
 import { createSeenResults } from './seenResults';
 import { HARNESSES, I, STATE } from './registry';
+import { selectedSessionState } from './sessionPresentation';
 import { ago, clock, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
 import type { EffectScope } from './effects';
 import type { ControlView } from '../lib/control';
@@ -346,15 +347,8 @@ export function createOverviewPages(host: OverviewHost) {
       for (const relative of [
         ...(selectedMetadata.details?.family?.ancestors ?? []),
         ...(selectedMetadata.details?.family?.runs ?? []),
-        {
-          key: selectedMetadata.key,
-          name: selectedMetadata.name,
-          harness: selectedMetadata.harness,
-          kind: selectedMetadata.presentation_kind ?? selectedMetadata.kind,
-          parent: selectedMetadata.parent,
-          cost: selectedMetadata.cost,
-        },
       ]) {
+        if (relative.key === selectedMetadata.key) continue;
         if (rows.some((row) => row.catalog_key === relative.key)) continue;
         rows.push({
           id: JSON.stringify([source, relative.key]),
@@ -368,10 +362,33 @@ export function createOverviewPages(host: OverviewHost) {
             parent: relative.parent ?? undefined,
             model: '',
             repo: null,
-            state: 'off',
+            state: relative.status?.state ?? 'off',
             start: 0,
-            last: 0,
+            last: relative.last ?? 0,
             cost: relative.cost.usd,
+            waiting_for: null,
+            waiting_since: null,
+          },
+        });
+      }
+      if (!rows.some((row) => row.source_key === source && row.catalog_key === current)) {
+        rows.push({
+          id: JSON.stringify([source, selectedMetadata.key]),
+          source_key: source,
+          catalog_key: selectedMetadata.key,
+          contentGeneration: selectedMetadata.transcript?.generation ?? null,
+          session: {
+            name: selectedMetadata.name,
+            kind: selectedMetadata.presentation_kind ?? selectedMetadata.kind,
+            harness: selectedMetadata.harness,
+            model: selectedMetadata.model,
+            repo: selectedMetadata.repo,
+            state: selectedMetadata.status?.state ?? selectedSessionState(selectedMetadata),
+            start: selectedMetadata.start ?? 0,
+            last: selectedMetadata.last ?? 0,
+            parent: selectedMetadata.parent ?? undefined,
+            branch: selectedMetadata.branch ?? undefined,
+            cost: selectedMetadata.cost.usd,
             waiting_for: null,
             waiting_since: null,
           },
@@ -439,7 +456,9 @@ export function createOverviewPages(host: OverviewHost) {
       );
       const visible = recentAll.has(row.id)
         ? kids
-        : kids.filter((child, index) => index < 3 || (index < 8 && rank(child) < 2));
+        : kids.filter(
+            (child, index) => path.has(child.id) || index < 3 || (index < 8 && rank(child) < 2),
+          );
       const open =
         recentOpen.get(row.id) ??
         (home?.machines.length === 1 ? recentOpen.get(row.catalog_key) : undefined) ??
@@ -470,7 +489,7 @@ export function createOverviewPages(host: OverviewHost) {
           current === row.catalog_key ? 'page' : rail && path.has(row.id) ? 'true' : undefined,
         state: row.session.state,
         stateLabel: STATE[row.session.state] ?? 'Status unavailable',
-        age: ago(row.session.last, recentNow),
+        age: row.session.last > 0 ? ago(row.session.last, recentNow) : '',
         model: shortModel(row.session.model),
         modelTip: row.session.model,
         harness: mark(row.session.harness),
