@@ -1849,6 +1849,18 @@ export function createCatalogViewer(
             end: focused.selectionEnd,
           }
         : null;
+    const descendants = new Map<string, CatalogSession[]>(),
+      loaded = new Map(items.map((item) => [item.key, item]));
+    for (const item of items) {
+      const seen = new Set([item.key]);
+      let parent = item.parent;
+      while (parent && !seen.has(parent) && loaded.has(parent)) {
+        seen.add(parent);
+        if (showApprovalReviews || item.presentation_kind !== 'Approval review')
+          descendants.set(parent, [...(descendants.get(parent) ?? []), item]);
+        parent = loaded.get(parent)!.parent;
+      }
+    }
     const ordered = orderRows(
       orderScope(
         'sessions',
@@ -1859,7 +1871,10 @@ export function createCatalogViewer(
         .filter((item) => showApprovalReviews || item.presentation_kind !== 'Approval review')
         .map((item) => ({ ...item, id: item.key })),
       (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key),
-    ).map((item) => ({ ...item, presentation: catalogSessionRow(item) }));
+    ).map((item) => ({
+      ...item,
+      presentation: catalogSessionRow(item, descendants.get(item.key)),
+    }));
     catalogBrowser.update({ harness, repo, model, q: query }, items, capabilities.source_key);
     const groupKey = (item: CatalogSession) =>
       groupBy === 'project'

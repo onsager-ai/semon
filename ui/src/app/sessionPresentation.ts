@@ -106,8 +106,25 @@ export function catalogSessionGroups<T extends { key: string; parent: string | n
 }
 
 /** Fenced list observations describe status without granting live control. */
-export function catalogSessionRow(session: CatalogSession): SessionRow {
+export function catalogSessionRow(
+  session: CatalogSession,
+  children: readonly CatalogSession[] = [],
+): SessionRow {
   const state = session.status?.state ?? 'off';
+  const subagents = children.filter(
+      (row) => row.presentation_kind === 'Subagent' || row.kind === 'subagent',
+    ).length,
+    runs = children.filter(
+      (row) => row.presentation_kind === 'Codex run' || row.kind === 'codex-run',
+    ).length,
+    other = children.length - subagents - runs;
+  const counts = [
+    subagents ? subagents + (subagents === 1 ? ' subagent' : ' subagents') : '',
+    runs ? runs + (runs === 1 ? ' Codex run' : ' runs') : '',
+    other ? other + (other === 1 ? ' other run' : ' other runs') : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return {
     id: session.key,
     name: session.name,
@@ -145,6 +162,16 @@ export function catalogSessionRow(session: CatalogSession): SessionRow {
               tip: session.repo,
               priority: 3,
               icon: I.repo,
+            },
+          ]
+        : []),
+      ...(counts
+        ? [
+            {
+              className: 'row-counts',
+              text: counts,
+              priority: 4,
+              tip: 'Recorded child sessions in the loaded page',
             },
           ]
         : []),
