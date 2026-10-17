@@ -35,7 +35,7 @@ async function snapshot(page) {
       '#lanes',
       '#page',
       '.nrow',
-      '.think',
+      '.thought',
       '.tsum',
       '.session-dock',
       'dialog[open]',
@@ -205,6 +205,18 @@ try {
           reference,
           prefix + '-' + route.v + (route.id ? '-' + route.id : ''),
         );
+        if (route.id === 'harbor') {
+          for (const page of [candidate, reference]) await page.locator('.think-disclosure').first().click();
+          await capture(candidate, reference, prefix + '-harbor-thinking-open');
+          for (const page of [candidate, reference]) await page.locator('.tsum').first().click();
+          await capture(candidate, reference, prefix + '-harbor-tools-open');
+          for (const page of [candidate, reference]) {
+            await page.locator('.tgroup .steps .step > button').first().click();
+            await page.locator('.tgroup .steps .out:not([hidden])').first().waitFor();
+          }
+          await capture(candidate, reference, prefix + '-harbor-tool-output-open');
+        }
+
       }
       if (width === 390) {
         await goto(candidate, { v: 'home' }, D);
@@ -232,4 +244,4 @@ try {
 console.log(JSON.stringify(report));
 // Exact matching is diagnostic because the explicit pause removes controls.
 // Missing captures and execution errors still fail; no reference or gate changes.
-if (report.results.length !== 38 || report.errors.length) process.exitCode = 1;
+if (report.results.length !== 56 || report.errors.length) process.exitCode = 1;
