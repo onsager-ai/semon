@@ -114,8 +114,12 @@ test(
             colorScheme,
             timezoneId: 'UTC',
           });
+          let captureServedFixtureFailure;
+          let page;
+          let journeyFailed = false;
+          let releaseHeldPreviews;
           try {
-            const page = await context.newPage();
+            page = await context.newPage();
             page.setDefaultTimeout(60000);
             await page.clock.setFixedTime(Number(fixture.stdout.trim()));
             const requests = [],
@@ -157,7 +161,7 @@ test(
                   fullPage: name !== 'session-menu',
                 });
             };
-            const captureServedFixtureFailure = async (stage, context = {}) => {
+            captureServedFixtureFailure = async (stage, context = {}) => {
               const ui = await page.evaluate(() => {
                 const text = (node, limit = 500) =>
                   (node?.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, limit);
@@ -390,11 +394,15 @@ test(
             const delayed = width === 390 && colorScheme === 'light';
             let holdPreviews = delayed;
             const held = [];
+            releaseHeldPreviews = () => {
+              holdPreviews = false;
+              for (const release of held.splice(0)) release();
+            };
             if (delayed)
               await page.route('**/api/session-home?**', async (route) => {
                 const response = await route.fetch();
                 if (holdPreviews) await new Promise((resolve) => held.push(resolve));
-                await route.fulfill({ response }).catch(() => {});
+                await route.fulfill({ response });
               });
             await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
             await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
@@ -474,41 +482,18 @@ test(
               await selectedRecent.waitFor({ state: 'visible' });
               const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
                 listedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem');
-              try {
-                await listedChildren.nth(2).waitFor({ state: 'visible' });
-              } catch (error) {
-                await captureServedFixtureFailure('Recent third-child readiness', {
-                  expectedChildCount: 3,
-                }).catch(() => {
-                  console.error('[Recent preview diagnostic unavailable]');
-                });
-                throw error;
-              }
+              await listedChildren.nth(2).waitFor({ state: 'visible' });
               const listedChildIds = await listedChildren.evaluateAll((nodes) =>
                 nodes.map((node) => node.getAttribute('data-id') ?? ''),
               );
-              try {
-                assert.equal(
-                  listedChildIds.length,
-                  3,
-                  'the selected child occupies one of the three Recent preview slots',
-                );
-              } catch (error) {
-                await captureServedFixtureFailure('Recent preview child count', {
-                  listedChildIds,
-                  expectedChildCount: 3,
-                }).catch(() => {
-                  console.error('[Recent preview diagnostic unavailable]');
-                });
-                throw error;
-              }
+              assert.equal(
+                listedChildIds.length,
+                3,
+                'the selected child occupies one of the three Recent preview slots',
+              );
               assert.ok(
                 listedChildIds.some((id) => id.includes('a-docs')),
                 'the selected child remains visible within the capped preview',
-              );
-              assert.ok(
-                listedChildIds[0]?.includes('a-docs'),
-                'the selected Recent path leads the freshly ordered child list',
               );
               assert.match(
                 await selectedRecent.innerText(),
@@ -542,6 +527,61 @@ test(
                 'true',
                 'the next navigation opens its required Recent ancestor despite saved collapse',
               );
+
+              // A fresh document preserves the existing ranked order; verify selected-path
+              // promotion separately while the same Recent ordering scope is still alive.
+              await page.route('**/api/viewer/home?**', withoutHomeSelected);
+              await page.route('**/api/sessions?**', withoutCatalogSelected);
+              sawUnavailableStatus = false;
+              await page.route('**/api/session-transcript?**', unavailableTranscript);
+              await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
+              await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+              await ingestRecent.waitFor({ state: 'visible' });
+              if ((await ingestRecent.getAttribute('aria-expanded')) !== 'true') {
+                await ingestToggle.focus();
+                await ingestToggle.press('Enter');
+                await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
+              }
+              const warmListedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem');
+              await warmListedChildren.nth(2).waitFor({ state: 'visible' });
+              const warmInitialIds = await warmListedChildren.evaluateAll((nodes) =>
+                nodes.map((node) => node.getAttribute('data-id') ?? ''),
+              );
+              assert.equal(warmInitialIds.length, 3, 'Home starts with three Recent preview rows');
+              assert.equal(
+                warmInitialIds.some((id) => id.includes('a-docs')),
+                false,
+                'the selected session starts outside the filtered Home preview',
+              );
+
+              await page.evaluate(
+                (path) => {
+                  history.pushState(history.state, '', path);
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                },
+                '/s/claude/a-docs?t=' + address[2] + '&compat=1',
+              );
+              await page.locator('#page [aria-label="Transcript"]').waitFor();
+              assert.equal(
+                sawUnavailableStatus,
+                true,
+                'the SPA-selected metadata reports unavailable status',
+              );
+              await selectedRecent.waitFor({ state: 'visible' });
+              await warmListedChildren.nth(2).waitFor({ state: 'visible' });
+              const promotedIds = await warmListedChildren.evaluateAll((nodes) =>
+                nodes.map((node) => node.getAttribute('data-id') ?? ''),
+              );
+              assert.equal(promotedIds.length, 3, 'selected promotion keeps the three-row cap');
+              assert.ok(
+                promotedIds.some((id) => id.includes('a-docs')),
+                'the selected child remains within the capped preview',
+              );
+              assert.ok(
+                promotedIds[0]?.includes('a-docs'),
+                'a newly selected child leads a retained Recent ordering scope',
+              );
+              await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
               await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
             }
@@ -566,8 +606,7 @@ test(
               assert.equal(await page.getByText(question.brief, { exact: true }).count(), 0);
               await navigate('analytics');
               await page.locator('#page h1').filter({ hasText: 'Analytics' }).waitFor();
-              holdPreviews = false;
-              for (const release of held) release();
+              releaseHeldPreviews();
               await page.locator('.analytics-metrics').waitFor();
               assert.equal(
                 await page.locator('#page .ib').count(),
@@ -744,14 +783,7 @@ test(
             await page
               .getByRole('button', { name: 'Open Check retry safety', exact: true })
               .click();
-            try {
-              await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
-            } catch (error) {
-              await captureServedFixtureFailure('Open in Harbor visibility').catch(() => {
-                console.error('[open-in-harbor diagnostic unavailable]');
-              });
-              throw error;
-            }
+            await page.getByRole('button', { name: 'Open in harbor', exact: true }).waitFor();
             assert.match(
               await page.locator('#page .session-foot').textContent(),
               /Returned to harbor.*Failed/,
@@ -813,8 +845,44 @@ test(
             );
             assert.deepEqual(errors, []);
             evidence.push({ width, colorScheme, requests, errors });
+          } catch (error) {
+            journeyFailed = true;
+            if (captureServedFixtureFailure)
+              await captureServedFixtureFailure('context journey failure', {
+                error:
+                  error instanceof Error
+                    ? { name: error.name.slice(0, 100), message: error.message.slice(0, 1000) }
+                    : String(error).slice(0, 1000),
+              }).catch(() => {
+                console.error('[served fixture diagnostic unavailable]');
+              });
+            throw error;
           } finally {
-            await context.close();
+            let cleanupError;
+            const reportCleanupError = (stage, error) => {
+              const message =
+                error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+              console.error(
+                `[served fixture ${stage} failed ${width} ${colorScheme}] ${message.slice(0, 1000)}`,
+              );
+            };
+            releaseHeldPreviews?.();
+            if (page) {
+              try {
+                await page.unrouteAll({ behavior: 'wait' });
+              } catch (error) {
+                cleanupError = error;
+                reportCleanupError('route drain', error);
+              }
+            }
+            try {
+              await context.close();
+            } catch (error) {
+              cleanupError ??= error;
+              reportCleanupError('context close', error);
+            }
+            // Preserve a failed journey; otherwise route-handler and close errors fail the test.
+            if (cleanupError && !journeyFailed) throw cleanupError;
           }
         }
       if (captures)
