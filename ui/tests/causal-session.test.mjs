@@ -382,6 +382,7 @@ test('causal participant parser rejects unrelated or excessive identity scope', 
       handoffs: [
         {
           ...relationship('move', 'move', 'selected', 'selected'),
+          declined: false,
           from_machine: 'machine-a',
           to_machine: 'machine-b',
         },
