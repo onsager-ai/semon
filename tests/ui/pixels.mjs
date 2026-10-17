@@ -334,6 +334,131 @@ async function snapshot(page) {
   });
 }
 
+async function snapshotPhoneHarborPaint(page) {
+  return page.evaluate(() => {
+    const MAX_NODES = 300,
+      MAX_SCAN = 2000,
+      selector = '#page, .transcript, .transcript *, .session-dock, .session-dock *',
+      all = document.querySelectorAll(selector),
+      records = [];
+    let visibleCount = 0;
+    const round = (value) => Math.round(value * 100) / 100;
+    const pseudo = (node, name) => {
+      const style = getComputedStyle(node, name);
+      if (
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.content === 'none' ||
+        style.content === 'normal'
+      )
+        return null;
+      return {
+        content: style.content.slice(0, 160),
+        display: style.display,
+        color: style.color,
+        background: style.backgroundColor,
+        opacity: style.opacity,
+        transform: style.transform.slice(0, 160),
+        filter: style.filter.slice(0, 160),
+      };
+    };
+    const scanCount = Math.min(all.length, MAX_SCAN);
+    for (let index = 0; index < scanCount; index++) {
+      const node = all[index],
+        box = node.getBoundingClientRect(),
+        style = getComputedStyle(node),
+        opacity = Number(style.opacity);
+      if (
+        box.width <= 0 ||
+        box.height <= 0 ||
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        opacity === 0
+      )
+        continue;
+      visibleCount++;
+      if (records.length >= MAX_NODES) continue;
+      records.push({
+        tag: node.tagName.toLowerCase(),
+        class: (node.getAttribute('class') ?? '').slice(0, 160),
+        text: (node.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 200),
+        box: [box.x, box.y, box.width, box.height].map(round),
+        font: style.font.slice(0, 160),
+        color: style.color,
+        background: style.backgroundColor,
+        opacity: style.opacity,
+        transform: style.transform.slice(0, 160),
+        filter: style.filter.slice(0, 160),
+        before: pseudo(node, '::before'),
+        after: pseudo(node, '::after'),
+        hovered: node.matches(':hover'),
+        focused: node.matches(':focus'),
+        focusVisible: node.matches(':focus-visible'),
+        focusWithin: node.matches(':focus-within'),
+        activeElement: document.activeElement === node,
+      });
+    }
+    const visual = window.visualViewport,
+      main = document.querySelector('#main'),
+      root = document.documentElement,
+      body = document.body,
+      faces = [...document.fonts].slice(0, 40);
+    return {
+      viewport: {
+        innerWidth,
+        innerHeight,
+        devicePixelRatio,
+        visual: visual
+          ? {
+              width: round(visual.width),
+              height: round(visual.height),
+              offsetLeft: round(visual.offsetLeft),
+              offsetTop: round(visual.offsetTop),
+              pageLeft: round(visual.pageLeft),
+              pageTop: round(visual.pageTop),
+              scale: visual.scale,
+            }
+          : null,
+      },
+      scroll: {
+        windowX: round(scrollX),
+        windowY: round(scrollY),
+        mainTop: main ? round(main.scrollTop) : null,
+        mainHeight: main ? main.clientHeight : null,
+        mainScrollHeight: main ? main.scrollHeight : null,
+      },
+      document: {
+        clientWidth: root.clientWidth,
+        clientHeight: root.clientHeight,
+        scrollWidth: root.scrollWidth,
+        scrollHeight: root.scrollHeight,
+        bodyScrollWidth: body.scrollWidth,
+        bodyScrollHeight: body.scrollHeight,
+      },
+      fonts: {
+        status: document.fonts.status,
+        faceCount: document.fonts.size,
+        faces: faces.map((face) => ({
+          family: face.family.slice(0, 100),
+          status: face.status,
+          weight: face.weight,
+          style: face.style,
+        })),
+        truncatedFaces: Math.max(0, document.fonts.size - faces.length),
+      },
+      nodes: records,
+      nodeCounts: {
+        candidates: all.length,
+        scanned: scanCount,
+        visible: visibleCount,
+        captured: records.length,
+        truncatedVisible: Math.max(0, visibleCount - records.length),
+        unscannedCandidates: Math.max(0, all.length - scanCount),
+      },
+    };
+  });
+}
+
 function minute(t) {
   return Math.round(((t - BASE) / 60000) * 1000) / 1000;
 }
@@ -564,7 +689,7 @@ async function navigate(page, route, referenceData) {
   else await navigateReference(page, route, referenceData);
 }
 
-async function prepareFrame(page, phone) {
+async function prepareFrame(page, phone, includePaintDiagnostics = false) {
   await page.evaluate(async () => {
     await document.fonts.ready;
     const state = history.state,
@@ -580,13 +705,18 @@ async function prepareFrame(page, phone) {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
   await waitForCaptureReady(page, `frame scroll ${page.url()}`);
-  return page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
+  const beforeScreenshot = includePaintDiagnostics
+    ? await snapshotPhoneHarborPaint(page)
+    : undefined;
+  const bytes = await page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
+  return { bytes, beforeScreenshot };
 }
 
 async function captureFrame(candidate, reference, key, phone) {
   const images = [],
     artifactDigests = {},
     evidenceBySide = {},
+    includePaintDiagnostics = scope === 'main' && phone && key.endsWith('|session-harbor'),
     prefix = fileKey(key),
     artifactPaths = {
       candidateImage: `pixels/${prefix}-candidate.png`,
@@ -601,9 +731,15 @@ async function captureFrame(candidate, reference, key, phone) {
     ['reference', reference],
   ]) {
     try {
-      const bytes = await prepareFrame(page, phone);
+      const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
+        bytes = prepared.bytes;
       save(key, name, bytes);
       evidenceBySide[name] = await snapshot(page);
+      if (includePaintDiagnostics)
+        evidenceBySide[name].phoneHarborPaint = {
+          beforeScreenshot: prepared.beforeScreenshot,
+          afterScreenshot: await snapshotPhoneHarborPaint(page),
+        };
       artifactDigests[name] = {
         image: sha256(bytes),
         evidence: saveJson(key, name, evidenceBySide[name]),
