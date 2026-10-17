@@ -8,9 +8,167 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { causalSessionPart, parseCausalTrace } = await import(
+const {
+  causalSessionPart,
+  parseCausalTrace,
+  reachableTraceSummary,
+  traceRootActor,
+  traceHopActor,
+  traceSentenceParts,
+  traceHandoffOutcome,
+  traceTurnOutcome,
+  traceCostText,
+  traceShortMoney,
+} = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
+const relationship = (id, kind, from, to, fields = {}) => ({
+  id,
+  kind,
+  from,
+  to,
+  at: 110,
+  status: 'done',
+  brief: '',
+  ...fields,
+});
+
+test('trace summary counts only root-reachable outgoing handoffs and keeps incomplete context explicit', () => {
+  const rootAsk = relationship('root-ask', 'ask', 'you', 'selected'),
+    spawn = relationship('spawn', 'spawn', 'selected', 'child'),
+    move = relationship('move', 'move', 'child', 'moved', {
+      fromMachine: 'machine-a',
+      toMachine: 'machine-b',
+    }),
+    result = relationship('result', 'toyou', 'selected', 'you', { ask: 'result' }),
+    question = relationship('question', 'toyou', 'selected', 'you', { ask: 'question' }),
+    relay = relationship('relay', 'relay', 'child', 'worker'),
+    child = { id: 'child-turn', sid: 'child', sent: [relay] },
+    worker = { id: 'worker-turn', sid: 'worker', sent: [] },
+    root = {
+      id: 'selected-turn',
+      sid: 'selected',
+      start: rootAsk,
+      sent: [spawn, move, result, question],
+    },
+    starts = new Map([
+      ['spawn', child],
+      ['relay', worker],
+    ]);
+
+  assert.equal(reachableTraceSummary(root, starts), '3 sessions · 4 handoffs');
+  assert.equal(
+    reachableTraceSummary(root, starts, true),
+    '3 sessions · 4 handoffs · some relationship context is unavailable',
+  );
+  assert.equal(traceRootActor(root), 'you');
+  assert.equal(traceRootActor({ ...root, start: spawn }), 'selected');
+  assert.equal(traceHopActor(result), 'selected');
+  assert.equal(traceHopActor(spawn), 'child');
+});
+
+test('trace relationship sentences preserve recorded ask, subagent, relay and user-message wording', () => {
+  const who = (id) => ({ className: 'who', text: id === 'you' ? 'You' : id }),
+    parts = (edge, recipientKind) =>
+      traceSentenceParts(edge, who, new Map(), undefined, recipientKind)
+        .map((part) => part.text)
+        .join('');
+
+  assert.equal(parts(relationship('ask', 'ask', 'you', 'atlas')), 'You asked atlas');
+  assert.equal(
+    parts(relationship('spawn', 'spawn', 'atlas', 'child'), 'Subagent'),
+    'atlas handed off to subagent child',
+  );
+  assert.equal(parts(relationship('relay', 'relay', 'atlas', 'child')), 'atlas relayed to child');
+  assert.equal(
+    parts(relationship('result', 'toyou', 'atlas', 'you', { ask: 'result' })),
+    'atlas sent you a result',
+  );
+  assert.equal(
+    parts(relationship('question', 'toyou', 'atlas', 'you', { ask: 'question' })),
+    'atlas asked you',
+  );
+  assert.equal(
+    parts(relationship('decision', 'toyou', 'atlas', 'you', { ask: 'decision' })),
+    'atlas needs your decision',
+  );
+});
+
+test('trace outcomes retain recorded state and event time without inventing a read receipt', () => {
+  const result = relationship('result', 'toyou', 'atlas', 'you', { ask: 'result' }),
+    end = { st: 'done', why: 'toyou', h: 'result' },
+    formatTime = (at) => `at:${at}`;
+
+  assert.deepEqual(
+    traceTurnOutcome(
+      { id: 'turn', sid: 'atlas', end, sent: [result] },
+      new Map([['result', result]]),
+      (id) => id,
+      formatTime,
+    ),
+    { state: 'done', text: 'Sent you a result · delivered · at:110' },
+  );
+  assert.deepEqual(
+    traceTurnOutcome(
+      { id: 'working', sid: 'atlas', end: { st: 'work', why: 'working' }, sent: [] },
+      new Map(),
+      (id) => id,
+      formatTime,
+    ),
+    { state: 'work', text: 'Still working' },
+  );
+  assert.deepEqual(
+    traceTurnOutcome(
+      { id: 'waiting', sid: 'atlas', end: { st: 'wait', why: 'input' }, sent: [] },
+      new Map(),
+      (id) => id,
+      formatTime,
+    ),
+    { state: 'wait', text: 'Waiting for your input' },
+  );
+  assert.deepEqual(traceHandoffOutcome(result), { state: 'done', text: 'delivered' });
+  assert.deepEqual(traceHandoffOutcome(relationship('move', 'move', 'atlas', 'atlas')), {
+    state: 'done',
+    text: 'Moved',
+  });
+  assert.deepEqual(
+    traceHandoffOutcome(
+      relationship('handoff', 'spawn', 'atlas', 'child', { result: 'Returned with the fix' }),
+    ),
+    { state: 'done', text: 'returned' },
+  );
+  assert.deepEqual(
+    traceTurnOutcome(
+      {
+        id: 'returned',
+        sid: 'child',
+        start: relationship('handoff', 'spawn', 'atlas', 'child', { done: 150 }),
+        end: { st: 'done', why: 'returned' },
+        sent: [],
+      },
+      new Map(),
+      (id) => (id === 'atlas' ? 'Atlas' : id),
+      formatTime,
+    ),
+    { state: 'done', text: 'Returned to Atlas · at:150' },
+  );
+  assert.deepEqual(
+    traceTurnOutcome(
+      { id: 'unresolved', sid: 'atlas', end: { st: 'idle', why: 'unrecognized' }, sent: [] },
+      new Map(),
+      (id) => id,
+      formatTime,
+    ),
+    { state: 'idle', text: 'No reply in these logs' },
+  );
+});
+
+test('trace cost labels keep the original precision and mark unpriced totals', () => {
+  assert.equal(traceCostText({ usd: 6.51 }), '$6.51');
+  assert.equal(traceCostText({ usd: 6.51, unpriced_models: ['unknown-model'] }), '—');
+  assert.equal(traceShortMoney(6.51), '$6.5');
+});
+
 test('incoming trace sender uses selected family identity without broadening the trace', () => {
   const data = {
     sessions: { selected: { name: 'Selected' } },
@@ -98,7 +256,7 @@ test('causal participant parser rejects unrelated or excessive identity scope', 
       {
         sid: 'selected',
         id: 'turn',
-        end: { st: 'done', why: 'replied' },
+        end: { st: 'done', why: 'replied', h: 'end-handoff' },
         sent: [],
         u: true,
         last: true,
@@ -108,7 +266,9 @@ test('causal participant parser rejects unrelated or excessive identity scope', 
     incomplete: false,
     previews_incomplete: false,
   };
-  assert.deepEqual(parseCausalTrace(data, 'fixture', 'selected', 'turn').participants, {});
+  const parsed = parseCausalTrace(data, 'fixture', 'selected', 'turn');
+  assert.deepEqual(parsed.participants, {});
+  assert.equal(parsed.turns.selected[0].end.h, 'end-handoff');
   for (const id of ['__proto__', 'constructor', 'toString']) {
     const named = {
       ...data,
