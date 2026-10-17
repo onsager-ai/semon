@@ -284,6 +284,7 @@ async function regionEvidence(page, region) {
     return {
       historyState: history.state,
       pathname: location.pathname,
+      viewport: [window.innerWidth, window.innerHeight],
       selector,
       count: roots.length,
       openSelector: open ?? null,
@@ -313,17 +314,7 @@ async function regionEvidence(page, region) {
 }
 
 async function regionShot(page, region, key, side) {
-  if (region.top || region.name === 'transcript') {
-    await page.evaluate(() => {
-      window.scrollTo(0, 0);
-      const main = document.querySelector('#main');
-      if (main) main.scrollTop = 0;
-    });
-    await page.evaluate(
-      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-    );
-    await page.waitForTimeout(120);
-  }
+  if (region.top || region.name === 'transcript') await resetTopScroll(page);
   if (region.open) {
     const opener = page.locator(region.open).first();
     if (!(await opener.count())) throw new Error(`open control missing: ${region.open}`);
@@ -335,42 +326,12 @@ async function regionShot(page, region, key, side) {
   if (!evidence.count) throw new Error(`region selector missing: ${region.selector}`);
   const target = page.locator(region.selector).first();
   await target.waitFor({ state: 'visible', timeout: 3000 });
-  const viewport = page.viewportSize(),
-    box = await target.boundingBox(),
-    dock = page.locator('.session-dock').first(),
-    dockHeight = (await dock.count()) ? ((await dock.boundingBox())?.height ?? 0) : 0,
-    expand =
-      region.name === 'transcript' && box && box.y + box.height + dockHeight + 80 > viewport.height;
-  let bytes;
-  try {
-    if (expand) {
-      await page.setViewportSize({
-        width: viewport.width,
-        height: Math.ceil(box.y + box.height + dockHeight + 80),
-      });
-      await page.evaluate(() => {
-        window.scrollTo(0, 0);
-        const main = document.querySelector('#main');
-        if (main) main.scrollTop = 0;
-      });
-      await page.evaluate(
-        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-      );
-      const full = await target.boundingBox();
-      if (
-        !full ||
-        Math.abs(full.width - box.width) > 0.5 ||
-        Math.abs(full.height - box.height) > 0.5
-      )
-        throw new Error('transcript geometry changed while stabilizing capture viewport');
-    }
-    const clip = region.name === 'transcript' ? await target.boundingBox() : null;
-    bytes = clip
-      ? await page.screenshot({ clip, animations: 'disabled', caret: 'hide' })
-      : await target.screenshot({ animations: 'disabled', caret: 'hide' });
-  } finally {
-    if (expand) await page.setViewportSize(viewport);
-  }
+  const clip = region.name === 'transcript' ? await target.boundingBox() : null;
+  if (region.name === 'transcript' && !clip)
+    throw new Error('transcript region has no capture box');
+  const bytes = clip
+    ? await page.screenshot({ clip, animations: 'disabled', caret: 'hide' })
+    : await target.screenshot({ animations: 'disabled', caret: 'hide' });
   if (region.open) {
     await page.keyboard.press('Escape');
     await page.waitForTimeout(150);
@@ -381,6 +342,101 @@ async function regionShot(page, region, key, side) {
     digests: { image: sha256(bytes), evidence: evidenceDigest },
     evidence,
   };
+}
+
+async function resetTopScroll(page) {
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    const main = document.querySelector('#main');
+    if (main) main.scrollTop = 0;
+  });
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  await page.waitForTimeout(120);
+}
+
+async function sharedTranscriptViewport(candidate, reference, region) {
+  const pages = [candidate, reference],
+    original = pages.map((page) => page.viewportSize());
+  if (
+    !original[0] ||
+    !original[1] ||
+    original[0].width !== original[1].width ||
+    original[0].height !== original[1].height
+  )
+    throw new Error('candidate and reference transcript viewports must match before capture');
+  await Promise.all(pages.map(resetTopScroll));
+  const boxes = await Promise.all(
+    pages.map((page) => page.locator(region.selector).first().boundingBox()),
+  );
+  if (boxes.some((box) => !box))
+    throw new Error('transcript is missing while sizing shared viewport');
+  const needed = await Promise.all(
+    pages.map(async (page, index) => {
+      const dock = page.locator('.session-dock').first(),
+        dockHeight = (await dock.count()) ? ((await dock.boundingBox())?.height ?? 0) : 0;
+      return boxes[index].y + boxes[index].height + dockHeight + 80;
+    }),
+  );
+  const height = Math.ceil(Math.max(original[0].height, ...needed)),
+    shared = original.map((viewport) => ({ width: viewport.width, height }));
+  try {
+    await Promise.all(pages.map((page, index) => page.setViewportSize(shared[index])));
+    await Promise.all(
+      pages.map((page) =>
+        page.evaluate(async () => {
+          await document.fonts.ready;
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          );
+        }),
+      ),
+    );
+    await Promise.all(pages.map((page) => page.waitForTimeout(120)));
+    const stabilized = await Promise.all(
+      pages.map((page) => page.locator(region.selector).first().boundingBox()),
+    );
+    if (
+      stabilized.some(
+        (box, index) =>
+          !box ||
+          Math.abs(box.width - boxes[index].width) > 0.5 ||
+          Math.abs(box.height - boxes[index].height) > 0.5,
+      )
+    )
+      throw new Error('transcript geometry changed while matching capture viewports');
+    const viewports = pages.map((page) => page.viewportSize());
+    if (
+      viewports.some(
+        (viewport) =>
+          !viewport || viewport.width !== original[0].width || viewport.height !== height,
+      )
+    )
+      throw new Error('candidate and reference transcript viewports failed to match');
+    const requiredAfter = await Promise.all(
+      pages.map(async (page, index) => {
+        const dock = page.locator('.session-dock').first(),
+          dockHeight = (await dock.count()) ? ((await dock.boundingBox())?.height ?? 0) : 0;
+        return stabilized[index].y + stabilized[index].height + dockHeight + 80;
+      }),
+    );
+    if (requiredAfter.some((required) => required > height))
+      throw new Error('shared transcript viewport does not fit both capture regions');
+    const actualViewports = await Promise.all(
+      pages.map((page) => page.evaluate(() => [window.innerWidth, window.innerHeight])),
+    );
+    if (
+      actualViewports.some(
+        ([width, viewportHeight]) => width !== original[0].width || viewportHeight !== height,
+      )
+    )
+      throw new Error('browser transcript viewports failed to match');
+    return original;
+  } catch (error) {
+    await Promise.all(pages.map((page, index) => page.setViewportSize(original[index])));
+    throw error;
+  }
 }
 
 async function captureRegion(candidate, reference, region, key) {
@@ -396,47 +452,57 @@ async function captureRegion(candidate, reference, region, key) {
       diffImage: `pixels/${prefix}-diff.png`,
       comparisonEvidence: `pixels/${prefix}-comparison.json`,
     };
-  for (const [side, page] of [
-    ['candidate', candidate],
-    ['reference', reference],
-  ]) {
-    try {
-      const captured = await regionShot(page, region, key, side);
-      images.push(captured.image);
-      artifactDigests[side] = captured.digests;
-      evidenceBySide[side] = captured.evidence;
-    } catch (error) {
-      report.errors.push(`${key} ${side}: ${error.message}`);
+  const pages = [candidate, reference],
+    originalViewports =
+      region.name === 'transcript'
+        ? await sharedTranscriptViewport(candidate, reference, region)
+        : null;
+  try {
+    for (const [side, page] of [
+      ['candidate', candidate],
+      ['reference', reference],
+    ]) {
+      try {
+        const captured = await regionShot(page, region, key, side);
+        images.push(captured.image);
+        artifactDigests[side] = captured.digests;
+        evidenceBySide[side] = captured.evidence;
+      } catch (error) {
+        report.errors.push(`${key} ${side}: ${error.message}`);
+      }
     }
-  }
-  if (images.length !== 2) return;
-  recordDomDiffSummary(
-    report.domDiffSummary,
-    compareDomEvidence(evidenceBySide.candidate, evidenceBySide.reference, key),
-  );
-  const result = compare(...images, THRESHOLD);
-  const diffBytes = PNG.sync.write(result.diff);
-  save(key, 'diff', diffBytes);
-  artifactDigests.diff = {
-    image: sha256(diffBytes),
-    evidence: saveJson(key, 'comparison', {
+    if (images.length !== 2) return;
+    recordDomDiffSummary(
+      report.domDiffSummary,
+      compareDomEvidence(evidenceBySide.candidate, evidenceBySide.reference, key),
+    );
+    const result = compare(...images, THRESHOLD);
+    const diffBytes = PNG.sync.write(result.diff);
+    save(key, 'diff', diffBytes);
+    artifactDigests.diff = {
+      image: sha256(diffBytes),
+      evidence: saveJson(key, 'comparison', {
+        key,
+        pixels: result.pixels,
+        ratio: result.ratio,
+        size: result.size,
+        threshold: THRESHOLD,
+        maxRatio: MAX_RATIO,
+      }),
+    };
+    report.regions.push({
       key,
       pixels: result.pixels,
       ratio: result.ratio,
       size: result.size,
-      threshold: THRESHOLD,
-      maxRatio: MAX_RATIO,
-    }),
-  };
-  report.regions.push({
-    key,
-    pixels: result.pixels,
-    ratio: result.ratio,
-    size: result.size,
-    pass: !result.size && result.ratio <= MAX_RATIO,
-    artifactDigests,
-    artifactPaths,
-  });
+      pass: !result.size && result.ratio <= MAX_RATIO,
+      artifactDigests,
+      artifactPaths,
+    });
+  } finally {
+    if (originalViewports)
+      await Promise.all(pages.map((page, index) => page.setViewportSize(originalViewports[index])));
+  }
 }
 
 async function openDrawer(page) {
