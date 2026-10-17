@@ -22,6 +22,7 @@ import { createSeenResults } from './seenResults';
 import { HARNESSES, I, STATE } from './registry';
 import { selectedSessionState } from './sessionPresentation';
 import { ago, clock, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
+import { selectRecentChildren } from '../domain/recent';
 import type { EffectScope } from './effects';
 import type { ControlView } from '../lib/control';
 
@@ -428,6 +429,30 @@ export function createOverviewPages(host: OverviewHost) {
     }
     for (const row of rows.filter((row) => !row.session.parent || !byId.has(idOf(row)))) visit(row);
     for (const row of rows) if (!reachable.has(row.id)) visit(row);
+    // Expanding one Recent group opens its ancestor path and every loaded descendant.
+    const expandedPath = new Set<string>(),
+      expandedUnder = new Set<string>();
+    for (const id of recentAll) {
+      const expanded = byId.get(id);
+      if (!expanded) continue;
+      const seen = new Set<string>([id]);
+      let parent = byId.get(idOf(expanded));
+      while (parent && !seen.has(parent.id)) {
+        seen.add(parent.id);
+        expandedPath.add(parent.id);
+        parent = byId.get(idOf(parent));
+      }
+      const visitExpanded = (parentId: string) => {
+        for (const child of children.get(parentId) ?? []) {
+          if (seen.has(child.id)) continue;
+          seen.add(child.id);
+          expandedUnder.add(child.id);
+          visitExpanded(child.id);
+        }
+      };
+      visitExpanded(id);
+    }
+    const requiredPath = new Set([...path, ...expandedPath]);
     const order = host.orderScope('recent', JSON.stringify([source, host.reviews(), rail]));
     const visibleParents = new Set(
       [...document.querySelectorAll<HTMLElement>('#lanes .treeitem')]
@@ -457,21 +482,28 @@ export function createOverviewPages(host: OverviewHost) {
       const kids = [...candidates].sort(
         (a, b) => rank(a) - rank(b) || b.session.last - a.session.last,
       );
-      const visible = recentAll.has(row.id)
-        ? kids
-        : kids.filter(
-            (child, index) => path.has(child.id) || index < 3 || (index < 8 && rank(child) < 2),
-          );
+      const showAll = recentAll.has(row.id) || expandedUnder.has(row.id),
+        visible = selectRecentChildren(kids, rank, requiredPath, showAll);
       const open =
-        recentOpen.get(row.id) ??
-        (home?.machines.length === 1 ? recentOpen.get(row.catalog_key) : undefined) ??
-        (path.has(row.id) || kids.some((child) => rank(child) < 2));
+        path.has(row.id) ||
+        expandedPath.has(row.id) ||
+        expandedUnder.has(row.id) ||
+        (recentOpen.get(row.id) ??
+          (home?.machines.length === 1 ? recentOpen.get(row.catalog_key) : undefined) ??
+          kids.some((child) => rank(child) < 2));
       const shown = orderRows(
         order,
-        (recentAll.has(row.id) ? 'all:' : 'kids:') + row.id,
+        (showAll ? 'all:' : 'kids:') + row.id,
         visible,
-        (a, b) => rank(a) - rank(b) || b.session.last - a.session.last,
-        { must: path, quiet: !open, seed: recentAll.has(row.id) || !visibleParents.has(row.id) },
+        (a, b) =>
+          Number(requiredPath.has(b.id)) - Number(requiredPath.has(a.id)) ||
+          rank(a) - rank(b) ||
+          b.session.last - a.session.last,
+        {
+          must: requiredPath,
+          quiet: !open,
+          seed: showAll || !visibleParents.has(row.id),
+        },
       );
       const below = (id: string, seen = new Set<string>()): HomeRow[] => {
         if (seen.has(id)) return [];

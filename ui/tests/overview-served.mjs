@@ -240,6 +240,24 @@ test(
               );
               const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
               await selectedRecent.waitFor({ state: 'visible' });
+              const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
+                listedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem'),
+                listedChildIds = await listedChildren.evaluateAll((nodes) =>
+                  nodes.map((node) => node.getAttribute('data-id') ?? ''),
+                );
+              assert.equal(
+                listedChildIds.length,
+                3,
+                'the selected child occupies one of the three Recent preview slots',
+              );
+              assert.ok(
+                listedChildIds.some((id) => id.includes('a-docs')),
+                'the selected child remains visible within the capped preview',
+              );
+              assert.ok(
+                listedChildIds[0]?.includes('a-docs'),
+                'the selected Recent path leads the freshly ordered child list',
+              );
               assert.match(
                 await selectedRecent.innerText(),
                 /Update the ingest docs/,
