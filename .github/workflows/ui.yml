@@ -49,11 +49,11 @@ jobs:
           npm --prefix tests/ui exec -- playwright install --with-deps chromium
       - name: Collect the unchanged passive component assertion
         run: node --test ui/tests/passive-reading-browser.mjs
-      - name: Retrieve the exact f1ab249b runtime for the route-fixture diagnostic
+      - name: Retrieve the exact 1901f15e runtime for the child-return diagnostic
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-test-binaries
-          run-id: 39050599486
+          run-id: 39053629641
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/served-fixture-binaries
       - name: Verify served fixture teardown against the reviewed runtime
