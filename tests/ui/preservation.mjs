@@ -5,7 +5,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data, waitForCaptureReady } from './lib.mjs';
+import {
+  ENV,
+  launch,
+  served,
+  goto,
+  data,
+  waitForCaptureReady,
+  homePostTagDiagnostics,
+} from './lib.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
   assessPreservation,
@@ -43,6 +51,7 @@ const report = {
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
+const homePostPages = [];
 async function snapshot(page) {
   return page.evaluate(() => {
     const selectors = [
@@ -437,11 +446,15 @@ try {
         viewport: { width, height: width === 390 ? 844 : 860 },
         dark,
       };
+      const prefix = width + '-' + (dark ? 'dark' : 'light');
       const candidate = await served(browser, {
         ...options,
         captureRequests: true,
         captureReadiness: true,
         captureRole: 'candidate',
+        captureHomePostTag: process.env.SEMON_HOME_POST_TAG_DIAGNOSTICS === '1',
+        onCaptureHomePostTagPage: (page) =>
+          homePostPages.push({ scope: prefix, side: 'candidate', page }),
       });
       const retired = candidate.requests ?? [];
       const reference = await served(browser, {
@@ -453,7 +466,6 @@ try {
         token: process.env.SEMON_PRESERVATION_TOKEN,
         path: '/?compat=1',
       });
-      const prefix = width + '-' + (dark ? 'dark' : 'light');
       for (const route of [
         { v: 'home' },
         { v: 'sessions' },
@@ -535,6 +547,12 @@ try {
 } catch (error) {
   report.errors.push(error.stack ?? error.message);
 } finally {
+  if (homePostPages.length)
+    report.homePostTagDiagnostics = homePostPages.map(({ scope, side, page }) => ({
+      scope,
+      side,
+      ...homePostTagDiagnostics(page),
+    }));
   await browser?.close();
   report.failures = assessPreservation(report);
   report.acceptance = assessVisualAcceptances(report, 'preservation', report.failures);
