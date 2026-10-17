@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data, waitForCaptureReady } from './lib.mjs';
+import { ENV, launch, served, goto, data, titleOf, waitForCaptureReady } from './lib.mjs';
 import { sample, BASE } from './fixture.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
@@ -280,26 +280,37 @@ function screens(D, source, handoffIds, referenceModel) {
   return list;
 }
 
-async function navigateReference(page, route) {
+async function navigateReference(page, route, referenceData) {
+  const title = titleOf(route, referenceData);
+  if (!title)
+    throw new Error(`pinned reference route has no qualified title: ${JSON.stringify(route)}`);
   if (page.captureReadinessEnabled) page.captureRouteKey = JSON.stringify(route);
   await page.evaluate((value) => {
     history.pushState(value, '');
     dispatchEvent(new PopStateEvent('popstate', { state: value }));
   }, route);
   try {
-    await page.waitForFunction((value) => {
-      const panel = document.querySelector('#page');
-      return (
-        history.state?.v === value.v &&
-        !!document.querySelector('#topbar .t, #topbar #find') &&
-        panel?.childElementCount > 0 &&
-        !panel.hasAttribute('aria-busy') &&
-        !panel.querySelector('[aria-busy="true"]') &&
-        (value.v !== 'session' ||
-          !!panel.querySelector('section[aria-label="Transcript"], .transcript')) &&
-        (value.v !== 'trace' || !!panel.querySelector('.trace-summary'))
-      );
-    }, route);
+    await page.waitForFunction(
+      ({ value, title }) => {
+        const panel = document.querySelector('#page');
+        return (
+          history.state?.v === value.v &&
+          document.querySelector('#topbar .t')?.textContent === title &&
+          panel?.childElementCount > 0 &&
+          !panel.hasAttribute('aria-busy') &&
+          !panel.querySelector('[aria-busy="true"]') &&
+          (value.v !== 'session' ||
+            (panel.querySelector('.ph h1')?.textContent === title &&
+              !!panel.querySelector('section[aria-label="Transcript"], .transcript'))) &&
+          (value.v !== 'trace' ||
+            (!!panel.querySelector('.trace-summary') &&
+              [...panel.querySelectorAll('.hop.k-root[data-turn]')].some(
+                (node) => node.dataset.turn === value.turn,
+              )))
+        );
+      },
+      { value: route, title },
+    );
   } catch (error) {
     const state = await page.evaluate(() => {
       const panel = document.querySelector('#page');
@@ -328,7 +339,7 @@ async function navigateReference(page, route) {
 
 async function navigate(page, route, referenceData) {
   if (selfParity) await goto(page, route, referenceData);
-  else await navigateReference(page, route);
+  else await navigateReference(page, route, referenceData);
 }
 
 async function prepareFrame(page, phone) {
@@ -465,16 +476,28 @@ async function regionShot(page, region, key, side) {
   const bytes = clip
     ? await page.screenshot({ clip, animations: 'disabled', caret: 'hide' })
     : await target.screenshot({ animations: 'disabled', caret: 'hide' });
-  if (region.open) {
-    await page.keyboard.press('Escape');
-    await waitForCaptureReady(page, `${key} closed region`);
-  }
+  if (region.open) await closeRegionPanel(page, region, key);
   save(key, side, bytes);
   return {
     image: PNG.sync.read(bytes),
     digests: { image: sha256(bytes), evidence: evidenceDigest },
     evidence,
   };
+}
+
+async function closeRegionPanel(page, region, key) {
+  // The original app's document Escape listener removes the menu node before
+  // its native close owner can release viewerEl/history. Use its real Close
+  // button for capture cleanup; keyboard dismissal has its functional suite.
+  await page
+    .locator(region.selector)
+    .first()
+    .getByRole('button', { name: 'Close', exact: true })
+    .click();
+  await page.waitForFunction(
+    () => !document.querySelector('dialog[open]') && !history.state?.sheet,
+  );
+  await waitForCaptureReady(page, `${key} closed region`);
 }
 
 async function resetTopScroll(page) {
@@ -696,7 +719,17 @@ try {
         !selectedNames.has(route.name)
       )
         report.errors.push('Unmapped multi-machine frame route: ' + route.name);
-  const referenceData = selfParity ? await data({ base: parityBase, token: parityToken }) : null;
+  const referenceData = selfParity
+    ? await data({ base: parityBase, token: parityToken })
+    : {
+        SESS: pinnedModel.model.sessions,
+        MACHINE: Object.fromEntries(
+          (pinnedModel.model.machines ?? [pinnedModel.model.machine]).map((machine) => [
+            machine.id,
+            machine.name,
+          ]),
+        ),
+      };
 
   const configured = coverage.frames.map((key) => key.split('|')[0]);
   const schemes = [...new Set(configured)];
