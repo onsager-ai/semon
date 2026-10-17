@@ -13,7 +13,9 @@ function same(left, right) {
 }
 
 function text(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').slice(0, 180);
+  return String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 180);
 }
 
 function example(index, left, right, fields) {
