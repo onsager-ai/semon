@@ -1399,7 +1399,8 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
         return route.fulfill({ json: value });
       }
       if (url.pathname === '/api/session-entry') {
-        const chunk = Number(url.searchParams.get('field_chunk'));
+        const chunk = Number(url.searchParams.get('field_chunk')),
+          text = chunk === 0 ? 'First expansion chunk ' : 'Final field segment.';
         return route.fulfill({
           json: {
             api: 1,
@@ -1407,7 +1408,8 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
             projection: { version: 5, generation: 'b'.repeat(64) },
             slot: 400,
             field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
-            text: chunk === 0 ? 'First expansion chunk ' : 'Final field segment.',
+            text,
+            observation: { source_bytes: Buffer.byteLength(text) },
             freshness: { state: 'cached' },
             provenance: { source: source('one'), offset: 400, block: 0, native_event_id: null },
           },

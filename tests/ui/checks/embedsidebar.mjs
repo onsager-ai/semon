@@ -109,9 +109,35 @@ export default async function embedSidebar(browser) {
         await page.waitForFunction(() => !document.body.classList.contains('drawer-open'));
         assert.equal(await page.evaluate(() => document.activeElement.id), 'lead-btn');
         await page.click('#lead-btn');
+        await page.waitForFunction(() => {
+          const bounds = document.querySelector('#sidebar').getBoundingClientRect();
+          return document.body.classList.contains('drawer-open') && Math.abs(bounds.x) < 0.5;
+        });
       }
+      const captureState = await page.evaluate(() => {
+        const bounds = document.querySelector('#sidebar').getBoundingClientRect();
+        return {
+          viewport: [innerWidth, innerHeight, devicePixelRatio],
+          fonts: document.fonts.status,
+          ready: document.readyState,
+          body: document.body.className,
+          sidebar: [bounds.x, bounds.y, bounds.width, bounds.height],
+          animations: document
+            .getAnimations()
+            .slice(0, 20)
+            .map((animation) => ({
+              state: animation.playState,
+              currentTime: animation.currentTime,
+            })),
+        };
+      });
+      fs.writeFileSync(
+        path.join(output, width + '-' + (dark ? 'dark' : 'light') + '.json'),
+        JSON.stringify(captureState, null, 2) + '\n',
+      );
       await page.screenshot({
         path: path.join(output, width + '-' + (dark ? 'dark' : 'light') + '.png'),
+        animations: 'disabled',
       });
       const [source] = JSON.parse(
         await page.locator('#lanes .srow').first().getAttribute('data-id'),
