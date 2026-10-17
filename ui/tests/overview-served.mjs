@@ -535,9 +535,7 @@ test(
                 await ingestToggle.press('Enter');
                 await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
               }
-              const warmListedChildren = ingestRecent.locator(
-                ':scope > .tree-group > .treeitem',
-              );
+              const warmListedChildren = ingestRecent.locator(':scope > .tree-group > .treeitem');
               await warmListedChildren.nth(2).waitFor({ state: 'visible' });
               const warmInitialIds = await warmListedChildren.evaluateAll((nodes) =>
                 nodes.map((node) => node.getAttribute('data-id') ?? ''),
@@ -549,10 +547,13 @@ test(
                 'the selected session starts outside the filtered Home preview',
               );
 
-              await page.evaluate((path) => {
-                history.pushState(history.state, '', path);
-                window.dispatchEvent(new PopStateEvent('popstate'));
-              }, '/s/claude/a-docs?t=' + address[2] + '&compat=1');
+              await page.evaluate(
+                (path) => {
+                  history.pushState(history.state, '', path);
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                },
+                '/s/claude/a-docs?t=' + address[2] + '&compat=1',
+              );
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               assert.equal(
                 sawUnavailableStatus,
