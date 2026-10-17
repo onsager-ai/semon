@@ -51,6 +51,7 @@ export interface RecordedSessionPresentation {
   calls?: number;
   usd?: number;
   live_observation?: boolean;
+  activity?: { tool: string; since: number };
 }
 /** Selected native content is a ranged read view, not a complete model graph. */
 export interface CatalogTranscriptPage {
@@ -235,6 +236,9 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
       handoffs: relationships,
       sessions: dictionary(context.sessions ?? {}, (value) => {
         const row = object(value);
+        const activity = row.activity == null ? undefined : object(row.activity);
+        if (activity && text(activity.tool).length > 256)
+          throw Error('Invalid recorded child activity');
         return {
           name: text(row.name),
           harness: text(row.harness),
@@ -245,6 +249,9 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
           last: row.last == null ? undefined : number(row.last),
           calls: row.calls == null ? undefined : ordinal(row.calls),
           usd: row.usd == null ? undefined : number(row.usd),
+          activity: activity
+            ? { tool: text(activity.tool), since: ordinal(activity.since) }
+            : undefined,
           live_observation:
             row.live_observation == null
               ? undefined

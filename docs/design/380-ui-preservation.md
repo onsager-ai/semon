@@ -168,3 +168,11 @@ Final-head results, exact pair and remaining failures are linked from Source #43
 Hub #268 and the #380 acceptance discussion. Candidate UI evidence does not satisfy
 trusted-main, published-image, staging or final release qualification. No merge,
 deployment or issue closure is part of this work.
+
+## Continuation and actual-reference policy — 2026-10-17
+
+The user explicitly selected actual-application acceptance while retaining historical comparison evidence, then authorized removing the obsolete mockup renderer/adapter after preserving its fixture data and full capture coverage. The selected reference commits and thresholds above are unchanged. Legacy run artifacts remain history; their reconstruction is not another product implementation to preserve. Replacement checks must cover all retained frames and regions, reject missing captures and page errors, and require individual approval for remaining pause/native differences. This policy does not waive the current differences or grant visual acceptance.
+
+The continuation fixes three reading defects: session navigation restores heading focus without moving scroll or stealing subsequent reader focus; the producer carries its unambiguous recorded sending turn into Open in parent; and anchor range reads retain the server's projection generation, with one re-resolution of that same turn on a proven generation conflict. An anchored range replaces accepted state only while its navigation epoch remains current. Superseded responses cannot scroll or overwrite a later selection.
+
+Compact child activity reuses the existing bounded relationship preview owner. Metadata carries only tool identity/time; a selected generation-bound `session-home` request loads the capped argument through its native recipe. `session_fields` narrows that existing read to activity and avoids unrelated prompt reads. Current Working observations alone can show it. Retained-source publication drops a mismatched activity recipe instead of joining old arguments to newer runtime facts. No broad transcript scan, new polling owner, control action or SSH capability is added. Tests and exact-pair CI must validate these changes before they are accepted.

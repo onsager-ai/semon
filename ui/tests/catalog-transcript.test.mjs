@@ -137,6 +137,18 @@ const { outputFiles: storeFiles } = await build({
 const { CatalogTranscriptStore } = await import(
   'data:text/javascript;base64,' + Buffer.from(storeFiles[0].text).toString('base64')
 );
+test('cold turn anchors bind their first range to the issued projection generation', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const request = store.request(0, 2, 'b'.repeat(64));
+  assert.equal(request.generation, 'b'.repeat(64));
+  const changed = page();
+  changed.projection.generation = 'c'.repeat(64);
+  assert.throws(() => store.accept(request, changed), /requested range/);
+  assert.equal(store.selectedPage(), null);
+  assert.equal(store.accept(request, page()), true);
+  assert.throws(() => store.request(0, 2, 'not-a-generation'), /Invalid/);
+});
 test('selected ranges reject old selections, cross-generation mixing and inconsistent overlaps atomically', () => {
   const store = new CatalogTranscriptStore();
   const scope = { source_key: 'source', catalog_key: 'session' };

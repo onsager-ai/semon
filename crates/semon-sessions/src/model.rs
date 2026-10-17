@@ -7634,9 +7634,16 @@ fn build_sources_inner(
         // turns and edges. Repeated workspace scans made publication quadratic.
         let mut turns_by_session: BTreeMap<&str, Vec<&Turn>> = BTreeMap::new();
         let mut holding_turns = BTreeMap::new();
+        let mut ambiguous_holding_turns = BTreeSet::new();
         for turn in &turns {
             turns_by_session.entry(&turn.sid).or_default().push(turn);
             for edge in &turn.sent {
+                if holding_turns
+                    .get(edge.as_str())
+                    .is_some_and(|prior: &&Turn| prior.sid != turn.sid || prior.id != turn.id)
+                {
+                    ambiguous_holding_turns.insert(edge.as_str());
+                }
                 holding_turns.entry(edge.as_str()).or_insert(turn);
             }
         }
@@ -7721,6 +7728,7 @@ fn build_sources_inner(
                             .and_then(|index| builder.files[*index].summary.cwd.as_deref()),
                         tx.get(&row.key).map(Arc::as_ref),
                     )
+                    .with_origin_turns(&holding_turns, &ambiguous_holding_turns)
                     .with_family_cost(family_costs[&row.key.as_str()]),
                 );
                 measurements.record("projection_trace", started, 1);

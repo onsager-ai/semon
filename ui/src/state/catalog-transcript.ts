@@ -66,13 +66,18 @@ export class CatalogTranscriptStore {
     this.access.clear();
     this.changed();
   }
-  request(after: number | null = null, limit = 60): CatalogRangeRequest {
+  request(
+    after: number | null = null,
+    limit = 60,
+    expectedGeneration?: string,
+  ): CatalogRangeRequest {
     if (this.disposed || !this.scope) throw new Error('No selected catalog transcript');
     if (
       !Number.isSafeInteger(limit) ||
       limit < 1 ||
       limit > 100 ||
-      (after !== null && (!Number.isSafeInteger(after) || after < 0))
+      (after !== null && (!Number.isSafeInteger(after) || after < 0)) ||
+      (expectedGeneration !== undefined && !/^[a-f0-9]{64}$/.test(expectedGeneration))
     )
       throw new Error('Invalid catalog transcript range');
     const request = Object.freeze({
@@ -80,7 +85,7 @@ export class CatalogTranscriptStore {
       epoch: this.epoch,
       after,
       limit,
-      generation: this.pages[0]?.projection.generation ?? null,
+      generation: expectedGeneration ?? this.pages[0]?.projection.generation ?? null,
       errorsGeneration: this.pages[0]?.projection.errorsGeneration ?? null,
       read_scope: this.readScope,
     });

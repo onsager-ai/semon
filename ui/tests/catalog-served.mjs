@@ -273,6 +273,9 @@ test(
       const selectedStart = performance.now();
       await page.locator('#page [data-id="backlog"]').click();
       await page.locator('#page [data-entry-key]:visible').first().waitFor({ timeout: 60000 });
+      await page.waitForFunction(
+        () => document.activeElement === document.querySelector('#page .ph > h1'),
+      );
       const selected = performance.now() - selectedStart;
       const preview = page.getByRole('button', { name: 'Load recorded text', exact: true });
       await preview.waitFor();

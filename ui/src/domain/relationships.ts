@@ -6,6 +6,7 @@ export interface RecordedRelationship {
   briefOwner?: string;
   resultOwner?: string;
   targetTurn?: string;
+  sourceTurn?: string;
 }
 export interface RecordedTurn {
   id: string;
@@ -62,6 +63,7 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     briefOwner: row.brief_session == null ? undefined : text(row.brief_session),
     resultOwner: row.result_session == null ? undefined : text(row.result_session),
     targetTurn: row.target_turn == null ? undefined : text(row.target_turn),
+    sourceTurn: row.source_turn == null ? undefined : text(row.source_turn),
   };
 }
 export function parseNativeRelationships(value: unknown, ids: readonly string[]) {
