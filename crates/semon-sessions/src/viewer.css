@@ -1345,7 +1345,8 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .page:has(> .transcript), .page:has(> .catalog-session > .transcript) { display: flex; flex-direction: column; min-height: calc(100dvh - 56px); padding-bottom: calc(var(--s4) + env(safe-area-inset-bottom, 0px)); }
 /* The native owner wraps the page's reader children. Preserve their reading
    pitch and top inset rather than collapsing the transcript/dock separation. */
-.page:has(> .catalog-session > .transcript) { padding-top: 2px; }
+.page:has(> .catalog-session > .transcript) { padding-top: var(--s2); }
+@media (max-width: 760px) { .page:has(> .catalog-session > .transcript) { padding-top: 2px; } }
 .catalog-session { display: flex; flex: 1; flex-direction: column; gap: var(--s5); }
 :is(.page, .catalog-session) > .transcript { flex: none; align-content: start; }
 .transcript { clip-path: inset(0 0 var(--reading-clip, 0px) 0); }
