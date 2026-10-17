@@ -6,7 +6,8 @@ import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
-    contents: "export {mountViewerApplication} from './src/app/viewer';",
+    contents:
+      "import {installSelect} from './src/lib/select'; installSelect(); export {mountViewerApplication} from './src/app/viewer';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -739,7 +740,13 @@ test('partial catalog discovery completes while retaining uncommitted search foc
     await page.route('http://catalog.test/**', (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path === '/api/session-capabilities')
-        return route.fulfill({ json: { ...capabilities(false), metadata_search: true } });
+        return route.fulfill({
+          json: {
+            ...capabilities(false),
+            metadata_search: true,
+            filters: ['harness', 'repo', 'q'],
+          },
+        });
       if (path === '/api/sessions') {
         reads++;
         return route.fulfill({

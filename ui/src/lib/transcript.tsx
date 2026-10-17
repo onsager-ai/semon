@@ -1061,11 +1061,6 @@ export function renderSessionScreen(
               ),
             )}
             <SessionPager owner={state} where="after" />
-            {view.observation === 'Cached history' && (
-              <p class="empty" role="status" data-transcript-observation="">
-                {view.observation}
-              </p>
-            )}
             {view.empty && (
               <p class="empty">
                 {screenText(view.empty)}{' '}
@@ -1083,6 +1078,11 @@ export function renderSessionScreen(
               </p>
             )}
           </div>
+          {view.observation === 'Cached history' && (
+            <p class="empty" role="status" data-transcript-observation="">
+              {view.observation}
+            </p>
+          )}
         </section>
         <SessionRuntime owner={state} />
         <div class="session-dock">
