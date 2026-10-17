@@ -5,7 +5,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data, titleOf, waitForCaptureReady } from './lib.mjs';
+import {
+  ENV,
+  launch,
+  served,
+  goto,
+  data,
+  titleOf,
+  waitForCaptureReady,
+  homePostTagDiagnostics,
+} from './lib.mjs';
 import { sample, BASE } from './fixture.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
@@ -55,11 +64,13 @@ const report = {
   regions: [],
   errors: [],
   apiDiagnostics: [],
+  homePostTagDiagnostics: [],
   sessionTraceEvidence: [],
   routeMappings: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
+const homePostPages = [];
 const sessionTraceBudget = { responses: 0, responseBytes: 0, summaryBytes: 0, stopped: false },
   MAX_SESSION_TRACE_RESPONSES = 36,
   MAX_SESSION_TRACE_RESPONSE_BYTES = 64 * 1024 * 1024,
@@ -992,6 +1003,8 @@ try {
         captureRequests: true,
         captureReadiness: true,
         captureRole: 'candidate',
+        captureHomePostTag: true,
+        onCaptureHomePostTagPage: (page) => homePostPages.push({ scheme, page }),
       }),
       reference = await served(browser, {
         ...options,
@@ -1080,6 +1093,10 @@ try {
 } catch (error) {
   report.errors.push(error.stack ?? error.message);
 } finally {
+  report.homePostTagDiagnostics = homePostPages.map(({ scheme, page }) => ({
+    scheme,
+    ...homePostTagDiagnostics(page),
+  }));
   await browser?.close();
   report.failures = assessPixelComparison(report);
   report.acceptance = assessVisualAcceptances(report, 'pixels', report.failures);

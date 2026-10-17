@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { captureRequestOwnership, failedSelectedApiEvents } from './lib.mjs';
+import {
+  captureRequestOwnership,
+  failedSelectedApiEvents,
+  resolveHomePostPriorAbortOwners,
+} from './lib.mjs';
 import {
   SESSION_TRACE_EVIDENCE_LIMITS,
   summarizeSessionTraceResponse,
@@ -36,6 +40,215 @@ function failures(events, role = 'reference', routeKey = 'selected') {
     captureRouteKey: routeKey,
   });
 }
+
+const homeTagId = '0123456789abcdef-1',
+  homePreviousRoute = JSON.stringify({ v: 'trace', id: 'atlas-ingest', turn: 'a-ask' }),
+  homeCurrentRoute = JSON.stringify({ v: 'trace', id: 'h-review', turn: 'h-answer' });
+function homePostPage(overrides = {}) {
+  const started = {
+      id: 17,
+      event: 'started',
+      method: 'POST',
+      path: '/api/viewer/home',
+      routeKey: homeCurrentRoute,
+      homePostTagId: homeTagId,
+      homePostTagHeaderPresent: true,
+    },
+    failed = { ...started, event: 'failed', error: 'net::ERR_ABORTED' },
+    finished = { ...started, event: 'finished', error: failed.error };
+  return {
+    captureRole: 'candidate',
+    captureRouteKey: homeCurrentRoute,
+    captureLastReadyRouteKey: homePreviousRoute,
+    captureHomePostRouteTransition: {
+      from: homePreviousRoute,
+      to: homeCurrentRoute,
+      fromAccepted: true,
+    },
+    captureHomePostTagEnabled: true,
+    captureHomePostTagFlushComplete: true,
+    captureHomePostTagInvocations: [{ id: homeTagId, routeMarker: homePreviousRoute }],
+    captureHomePostTagInvocationsTruncated: 0,
+    captureHomePostTagRequests: [
+      {
+        requestId: 17,
+        tagId: homeTagId,
+        tagHeaderPresent: true,
+        routeKey: homeCurrentRoute,
+      },
+    ],
+    captureHomePostTagRequestsTruncated: 0,
+    captureApiEvents: [started, failed, finished],
+    captureApiEventsTruncated: 0,
+    ...overrides,
+  };
+}
+
+function homeFailureState(page) {
+  const owners = resolveHomePostPriorAbortOwners(page);
+  page.captureHomePostOwners = owners;
+  return { owners, failures: failedSelectedApiEvents(page) };
+}
+
+test('only an exact prior-route Home POST abort is excluded from the current capture gate', () => {
+  const page = homePostPage(),
+    failure = page.captureApiEvents.find((event) => event.event === 'failed'),
+    owners = resolveHomePostPriorAbortOwners(page);
+  assert.equal(owners.size, 1);
+  assert.deepEqual(owners.get(17), {
+    ownerRouteKey: homePreviousRoute,
+    tagId: homeTagId,
+    invocationRouteMarker: homePreviousRoute,
+    nodeRouteKey: homeCurrentRoute,
+  });
+  page.captureHomePostOwners = owners;
+  assert.deepEqual(failedSelectedApiEvents(page), []);
+  assert.ok(page.captureApiEvents.includes(failure));
+  assert.equal(failure.error, 'net::ERR_ABORTED');
+});
+
+test('repeated readiness keeps the accepted transition proof; a later navigation replaces it', () => {
+  const page = homePostPage();
+  page.captureHomePostOwners = resolveHomePostPriorAbortOwners(page);
+  assert.equal(page.captureHomePostOwners.size, 1);
+
+  // The first readiness pass accepts the destination. A repeated pass for the
+  // same navigation still uses its immutable accepted-from provenance.
+  page.captureLastReadyRouteKey = homeCurrentRoute;
+  page.captureHomePostOwners = resolveHomePostPriorAbortOwners(page);
+  assert.equal(page.captureHomePostOwners.size, 1);
+  assert.deepEqual(failedSelectedApiEvents(page), []);
+
+  const nextRoute = JSON.stringify({ v: 'session', id: 'deps' });
+  page.captureHomePostRouteTransition = {
+    from: homeCurrentRoute,
+    to: nextRoute,
+    fromAccepted: true,
+  };
+  page.captureRouteKey = nextRoute;
+  page.captureHomePostOwners = resolveHomePostPriorAbortOwners(page);
+  assert.equal(page.captureHomePostOwners.size, 0);
+
+  const nextFailure = {
+    id: 18,
+    event: 'failed',
+    method: 'POST',
+    path: '/api/viewer/home',
+    routeKey: nextRoute,
+    error: 'net::ERR_ABORTED',
+  };
+  page.captureApiEvents.push(nextFailure);
+  assert.deepEqual(failedSelectedApiEvents(page), [nextFailure]);
+});
+
+test('current, unknown, duplicate, malformed, truncated and unaccepted Home POST ownership stays fatal', () => {
+  const start = homePostPage().captureApiEvents[0],
+    request = homePostPage().captureHomePostTagRequests[0],
+    invocation = homePostPage().captureHomePostTagInvocations[0],
+    cases = [
+      homePostPage({ captureHomePostTagFlushComplete: false }),
+      homePostPage({
+        captureHomePostRouteTransition: {
+          from: homePreviousRoute,
+          to: homeCurrentRoute,
+          fromAccepted: false,
+        },
+      }),
+      homePostPage({
+        captureHomePostTagInvocations: [{ ...invocation, routeMarker: homeCurrentRoute }],
+      }),
+      // A Node request with no delivered page binding has no exact owner.
+      homePostPage({ captureHomePostTagInvocations: [] }),
+      homePostPage({
+        captureHomePostTagInvocations: [invocation, invocation],
+      }),
+      homePostPage({
+        captureHomePostTagRequests: [request, { ...request, requestId: 18 }],
+      }),
+      homePostPage({ captureHomePostTagRequests: [request, { ...request }] }),
+      homePostPage({ captureHomePostTagInvocations: [{ ...invocation, routeMarker: 'invalid' }] }),
+      homePostPage({ captureHomePostTagInvocations: [{ ...invocation, routeMarker: '' }] }),
+      homePostPage({
+        captureHomePostTagInvocations: [
+          {
+            ...invocation,
+            routeMarker: JSON.stringify({ v: 'trace', id: 'atlas-ingest', turn: '' }),
+          },
+        ],
+      }),
+      homePostPage({ captureHomePostTagInvocationsTruncated: 1 }),
+      homePostPage({ captureHomePostTagRequestsTruncated: 1 }),
+      homePostPage({ captureApiEventsTruncated: 1 }),
+      homePostPage({
+        captureHomePostTagRequests: [{ ...request, tagHeaderPresent: false }],
+      }),
+      homePostPage({
+        captureHomePostTagRequests: [{ ...request, requestId: 99 }],
+      }),
+      homePostPage({
+        captureHomePostTagInvocations: [{ ...invocation, id: 'invalid-tag' }],
+        captureHomePostTagRequests: [{ ...request, tagId: 'invalid-tag' }],
+        captureApiEvents: homePostPage().captureApiEvents.map((event) =>
+          event.event === 'started' || event.event === 'failed' || event.event === 'finished'
+            ? { ...event, homePostTagId: 'invalid-tag' }
+            : event,
+        ),
+      }),
+      homePostPage({
+        captureApiEvents: [
+          { ...start, homePostTagId: 'fedcba9876543210-1' },
+          ...homePostPage().captureApiEvents.slice(1),
+        ],
+      }),
+      homePostPage({
+        captureApiEvents: homePostPage().captureApiEvents.map((event, index) =>
+          index === 0 ? { ...event, routeKey: homePreviousRoute } : event,
+        ),
+      }),
+      homePostPage({
+        captureHomePostTagRequests: [{ ...request, requestId: Number.MAX_SAFE_INTEGER + 1 }],
+        captureApiEvents: homePostPage().captureApiEvents.map((event) => ({
+          ...event,
+          id: Number.MAX_SAFE_INTEGER + 1,
+        })),
+      }),
+      homePostPage({
+        captureApiEvents: [start, ...homePostPage().captureApiEvents],
+      }),
+      homePostPage({
+        captureApiEvents: [...Array(9).fill(start), ...homePostPage().captureApiEvents.slice(1)],
+      }),
+    ];
+  for (const page of cases) {
+    const failed = page.captureApiEvents.find((event) => event.event === 'failed');
+    const result = homeFailureState(page);
+    assert.equal(result.owners.size, 0);
+    assert.deepEqual(result.failures, [failed]);
+  }
+});
+
+test('prior Home ownership never waives a non-abort failure or an HTTP non-2xx response', () => {
+  const nonAbort = homePostPage({
+      captureApiEvents: homePostPage().captureApiEvents.map((event) =>
+        event.event === 'failed' ? { ...event, error: 'net::ERR_CONNECTION_RESET' } : event,
+      ),
+    }),
+    httpFailure = homePostPage({
+      captureApiEvents: [
+        ...homePostPage().captureApiEvents.slice(0, 1),
+        { ...homePostPage().captureApiEvents[0], event: 'response', status: 503, ok: false },
+        ...homePostPage().captureApiEvents.slice(1),
+      ],
+    });
+  const nonAbortResult = homeFailureState(nonAbort),
+    httpFailureResult = homeFailureState(httpFailure);
+  assert.equal(nonAbortResult.owners.size, 0);
+  assert.equal(nonAbortResult.failures.length, 1);
+  assert.equal(httpFailureResult.owners.size, 0);
+  const httpErrors = httpFailureResult.failures;
+  assert.ok(httpErrors.some((event) => event.event === 'response' && event.status === 503));
+  assert.ok(httpErrors.some((event) => event.event === 'failed'));
+});
 
 test('the reference bodyless model 304 retains raw events without a failed read', () => {
   const events = [response(), aborted()];
