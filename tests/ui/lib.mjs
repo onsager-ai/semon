@@ -176,35 +176,59 @@ function matchHomePostRequestsToCdp(nodeStarts, cdpRequests, truncated) {
       return { nodeRequestId: start.nodeRequestId, association: 'unknown-node-network-timing-or-digest' };
     }
     const startTimeMs = Math.round(start.requestTimingStartTime);
+    const sameRequestScope = (request) =>
+      request.method === start.method &&
+      request.path === start.path &&
+      request.queryDigest === start.queryDigest;
+    const couldShareNetworkTime = (request) =>
+      !Number.isFinite(request.requestTimingStartTime) ||
+      request.requestTimingStartTime <= 0 ||
+      Math.round(request.requestTimingStartTime) === startTimeMs;
+    const couldShareCdpNetworkTime = (request) =>
+      !Number.isFinite(request.wallTime) ||
+      request.wallTime <= 0 ||
+      Math.round(request.wallTime * 1000) === startTimeMs;
+    const couldShareBody = (request) =>
+      request.postBodyDigestState !== 'complete' ||
+      typeof request.postBodyDigest !== 'string' ||
+      request.postBodyDigest === start.postBodyDigest;
     const candidates = cdpRequests.filter(
       (request) =>
         Number.isFinite(request.wallTime) &&
+        request.wallTime > 0 &&
         Math.round(request.wallTime * 1000) === startTimeMs &&
-        request.method === start.method &&
-        request.path === start.path &&
-        request.queryDigest === start.queryDigest &&
+        sameRequestScope(request) &&
         request.postBodyDigestState === 'complete' &&
         request.postBodyDigest === start.postBodyDigest,
     );
-    const matchingNodeStarts = nodeStarts.filter(
+    const possibleNodeStarts = nodeStarts.filter(
       (other) =>
-        Number.isFinite(other.requestTimingStartTime) &&
-        other.requestTimingStartTime > 0 &&
-        Math.round(other.requestTimingStartTime) === startTimeMs &&
-        other.method === start.method &&
-        other.path === start.path &&
-        other.queryDigest === start.queryDigest &&
-        other.postBodyDigest === start.postBodyDigest,
+        sameRequestScope(other) && couldShareNetworkTime(other) && couldShareBody(other),
     );
-    if (candidates.length !== 1 || matchingNodeStarts.length !== 1) {
+    const possibleCdpRequests = cdpRequests.filter(
+      (request) =>
+        sameRequestScope(request) &&
+        couldShareCdpNetworkTime(request) &&
+        couldShareBody(request),
+    );
+    if (
+      candidates.length !== 1 ||
+      possibleNodeStarts.length !== 1 ||
+      possibleCdpRequests.length !== 1
+    ) {
+      const hasPossibleDuplicate =
+        candidates.length > 1 ||
+        possibleNodeStarts.length > 1 ||
+        possibleCdpRequests.length > 1;
       return {
         nodeRequestId: start.nodeRequestId,
         association:
-          candidates.length > 1 || matchingNodeStarts.length > 1
-            ? 'ambiguous-cdp-network-time-and-signature'
+          hasPossibleDuplicate
+            ? 'ambiguous-or-incomplete-same-scope-request'
             : 'unknown-no-exact-cdp-network-time-and-signature',
         cdpRequestIds: candidates.map((request) => request.cdpRequestId),
-        nodeRequestIds: matchingNodeStarts.map((request) => request.nodeRequestId),
+        possibleCdpRequestIds: possibleCdpRequests.map((request) => request.cdpRequestId),
+        possibleNodeRequestIds: possibleNodeStarts.map((request) => request.nodeRequestId),
       };
     }
     return {
@@ -235,6 +259,43 @@ function refreshHomePostTiming(context, request, stage) {
   } catch {}
   context.requestTimingObservations[stage] = startTime;
   if (Number.isFinite(startTime) && startTime > 0) context.requestTimingStartTime = startTime;
+}
+
+export function homePostRequestDiagnostics(page) {
+  const nodeStarts = page.captureHomePostStarts?.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT) ?? [];
+  const cdpRequests = page.captureHomePostCdpRequests?.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT) ?? [];
+  const failedNodeRequestIds = [
+    ...new Set(
+      (page.captureApiEvents ?? [])
+        .filter(
+          (event) =>
+            event.event === 'failed' &&
+            event.method === 'POST' &&
+            event.path === '/api/viewer/home',
+        )
+        .map((event) => event.id),
+    ),
+  ];
+  const failedNodeIds = new Set(failedNodeRequestIds);
+  const cdpAssociations = matchHomePostRequestsToCdp(
+    nodeStarts,
+    cdpRequests,
+    (page.captureHomePostStartsTruncated ?? 0) > 0 ||
+      (page.captureHomePostCdpRequestsTruncated ?? 0) > 0,
+  );
+  return {
+    failedNodeRequestIds,
+    apiEventsTruncated: page.captureApiEventsTruncated ?? 0,
+    nodeStarts,
+    nodeStartsTruncated: page.captureHomePostStartsTruncated ?? 0,
+    pageInvocations: page.captureHomePostInvocations?.slice(-24) ?? [],
+    pageInvocationsTruncated: page.captureHomePostInvocationsTruncated ?? 0,
+    cdpRequests,
+    cdpRequestsTruncated: page.captureHomePostCdpRequestsTruncated ?? 0,
+    failedCdpAssociations: cdpAssociations.filter((entry) =>
+      failedNodeIds.has(entry.nodeRequestId),
+    ),
+  };
 }
 
 function recordHomePostInvocation(page, invocation) {
