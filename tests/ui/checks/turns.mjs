@@ -480,12 +480,16 @@ export default async function turnsCheck(browser) {
           let finished = false;
           const route = () => ({ v: history.state?.v ?? null, turn: history.state?.turn ?? null });
           const turn = () =>
-            [...document.querySelectorAll('.turn')].find((el) => el.dataset.turn === turnId) ?? null;
+            [...document.querySelectorAll('.turn')].find((el) => el.dataset.turn === turnId) ??
+            null;
           const rect = (el) => {
             if (!el) return null;
             const r = el.getBoundingClientRect();
             return Object.fromEntries(
-              ['top', 'bottom', 'height', 'width'].map((key) => [key, Math.round(r[key] * 10) / 10]),
+              ['top', 'bottom', 'height', 'width'].map((key) => [
+                key,
+                Math.round(r[key] * 10) / 10,
+              ]),
             );
           };
           const name = (el) =>
@@ -575,9 +579,18 @@ export default async function turnsCheck(browser) {
               ]
                 .filter(Boolean)
                 .map(box),
-              fonts: { status: document.fonts.status, faces: document.fonts.size, family, check: fontCheck },
+              fonts: {
+                status: document.fonts.status,
+                faces: document.fonts.size,
+                family,
+                check: fontCheck,
+              },
               focus: active
-                ? { tag: active.tagName.toLowerCase(), id: active.id || null, className: String(active.className ?? '').slice(0, 60) }
+                ? {
+                    tag: active.tagName.toLowerCase(),
+                    id: active.id || null,
+                    className: String(active.className ?? '').slice(0, 60),
+                  }
                 : null,
             };
           };
@@ -643,8 +656,15 @@ export default async function turnsCheck(browser) {
           const onScroll = () => push('scrolls', point());
           window.addEventListener('scroll', onScroll, { capture: true, passive: true });
           const fonts = document.fonts;
-          const onFont = (event) => push('fonts', { event: event.type, status: fonts.status, faces: fonts.size, point: point() });
-          for (const type of ['loading', 'loadingdone', 'loadingerror']) fonts.addEventListener(type, onFont);
+          const onFont = (event) =>
+            push('fonts', {
+              event: event.type,
+              status: fonts.status,
+              faces: fonts.size,
+              point: point(),
+            });
+          for (const type of ['loading', 'loadingdone', 'loadingerror'])
+            fonts.addEventListener(type, onFont);
           const wrap = (owner, key, method) => {
             if (!owner || typeof owner[key] !== 'function') return;
             const original = owner[key];
@@ -653,10 +673,16 @@ export default async function turnsCheck(browser) {
               const options = args.map((arg) => {
                 if (arg == null || typeof arg !== 'object') return arg;
                 const out = {};
-                for (const key of ['top', 'left', 'behavior', 'block', 'inline']) if (key in arg) out[key] = arg[key];
+                for (const key of ['top', 'left', 'behavior', 'block', 'inline'])
+                  if (key in arg) out[key] = arg[key];
                 return out;
               });
-              push('writes', { method, target: method.startsWith('Element.') ? name(this) : null, options, point: point() });
+              push('writes', {
+                method,
+                target: method.startsWith('Element.') ? name(this) : null,
+                options,
+                point: point(),
+              });
               return original.apply(this, args);
             };
             try {
@@ -683,7 +709,8 @@ export default async function turnsCheck(browser) {
               resizeObserver.disconnect();
               mutationObserver.disconnect();
               window.removeEventListener('scroll', onScroll, true);
-              for (const type of ['loading', 'loadingdone', 'loadingerror']) fonts.removeEventListener(type, onFont);
+              for (const type of ['loading', 'loadingdone', 'loadingerror'])
+                fonts.removeEventListener(type, onFont);
               for (const restore of restorers) restore();
               const result = include ? { initial, final: snapshot(), events, dropped } : null;
               delete window.__navAnchorDiag;
@@ -701,7 +728,7 @@ export default async function turnsCheck(browser) {
         const navigationDiagnostics = await page.evaluate((include) => {
           const diagnostic = window.__navAnchorDiag;
           return diagnostic ? diagnostic.finish(include) : null;
-        }, !fromHome.inView);
+        }, true);
         if (navigationDiagnostics) fromHome.navigationDiagnostics = navigationDiagnostics;
         D1.fromHome = fromHome;
         await page.goBack();
