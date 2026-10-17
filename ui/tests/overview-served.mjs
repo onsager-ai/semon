@@ -184,6 +184,19 @@ test(
               0,
               'expanded Recent keeps descendant status in its flag, without a rail dot shifting age',
             );
+            if (width === 1280 && colorScheme === 'light') {
+              await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2] + '&compat=1');
+              await page.locator('#page [aria-label="Transcript"]').waitFor();
+              const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
+              await selectedRecent.waitFor({ state: 'visible' });
+              assert.match(
+                await selectedRecent.innerText(),
+                /Update the ingest docs/,
+                'Recent keeps the selected child visible on its parent path',
+              );
+              await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
+              await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+            }
             if (width === 1280) {
               await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
               await page.locator('.app.rail').waitFor();
