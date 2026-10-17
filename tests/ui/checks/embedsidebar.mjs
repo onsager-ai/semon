@@ -84,7 +84,7 @@ export default async function embedSidebar(browser) {
         }),
       );
       await page.goto(ENV.base + '/__shell-sidebar.html');
-      await page.waitForSelector('#topbar .t.catalog-title', { state: 'attached' });
+      await page.waitForFunction(() => window.__nativeSidebarHostMounted === true);
       await page.evaluate(() => document.fonts.ready);
       const own = await page.evaluate((html) => {
         const was = new DOMParser().parseFromString(html, 'text/html');
