@@ -18,6 +18,7 @@ const {
   traceHopClass,
   traceHandoffIconKey,
   traceSessionChip,
+  traceQualifiedUnjoinedRelay,
   traceSentenceParts,
   traceHandoffOutcome,
   traceTurnOutcome,
@@ -504,6 +505,34 @@ test('passive relay summaries are scoped catalog facts and retain safe session n
     text: 'Harbor',
     action: { kind: 'session', id: 'harbor', turn: undefined },
   });
+  const relayEdge = parsed.handoffs.get('relay');
+  assert.ok(relayEdge);
+  assert.deepEqual(traceQualifiedUnjoinedRelay(parsed, relayEdge, false), {
+    session: 'harbor',
+    name: 'Harbor',
+    summary: parsed.participantSummaries.harbor,
+  });
+  assert.deepEqual(
+    traceQualifiedUnjoinedRelay({ ...parsed, participantSummaries: {} }, relayEdge, false),
+    { session: 'harbor', name: 'Harbor', summary: undefined },
+  );
+  assert.equal(traceQualifiedUnjoinedRelay(parsed, relayEdge, true), undefined);
+  assert.equal(
+    traceQualifiedUnjoinedRelay(
+      parsed,
+      relationship('unqualified', 'relay', 'selected', 'unrecorded'),
+      false,
+    ),
+    undefined,
+  );
+  assert.equal(
+    traceQualifiedUnjoinedRelay(
+      parsed,
+      relationship('spawn', 'spawn', 'selected', 'harbor'),
+      false,
+    ),
+    undefined,
+  );
   assert.throws(
     () =>
       parseCausalTrace(
