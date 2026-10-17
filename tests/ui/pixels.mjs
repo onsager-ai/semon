@@ -172,6 +172,13 @@ async function snapshot(page) {
       '#sidebar',
       '#topbar',
       '#lanes',
+      '#lanes .tree-row',
+      '#lanes .tree-row > .srow',
+      '#lanes .tree-row > .srow .dot',
+      '#lanes .tree-row > .srow .nm',
+      '#lanes .tree-row > .srow .ag',
+      '#lanes .tree-row > .srow .kid-flag',
+      '#lanes .tree-row > .srow .hicon',
       '#page',
       '.nrow',
       '.think',
@@ -195,91 +202,122 @@ async function snapshot(page) {
       historyState: history.state,
       pathname: location.pathname,
       selectors: Object.fromEntries(
-        selectors.map((selector) => [
-          selector,
-          [...document.querySelectorAll(selector)].slice(0, 60).map((node) => {
-            const box = node.getBoundingClientRect(),
-              css = getComputedStyle(node),
-              traceStyleSelector =
-                selector === '.hop .node' ||
-                selector === '.hop .sent > *' ||
-                selector === '.hop .meta > *',
-              styleDetail = (style) => ({
-                fontWeight: style.fontWeight,
-                color: style.color,
-                textDecoration: style.textDecoration,
-                fill: style.fill,
-                stroke: style.stroke,
-                strokeWidth: style.strokeWidth,
-              }),
-              pseudoDetail = (pseudo) => {
-                const style = getComputedStyle(node, pseudo);
+        selectors.map((selector) => {
+          const recentStyleSelector = selector.startsWith('#lanes .tree-row');
+          return [
+            selector,
+            [...document.querySelectorAll(selector)]
+              .slice(0, recentStyleSelector ? 30 : 60)
+              .map((node) => {
+                const box = node.getBoundingClientRect(),
+                  css = getComputedStyle(node),
+                  traceStyleSelector =
+                    selector === '.hop .node' ||
+                    selector === '.hop .sent > *' ||
+                    selector === '.hop .meta > *',
+                  styleDetail = (style) => ({
+                    fontWeight: style.fontWeight,
+                    color: style.color,
+                    textDecoration: style.textDecoration,
+                    fill: style.fill,
+                    stroke: style.stroke,
+                    strokeWidth: style.strokeWidth,
+                  }),
+                  pseudoDetail = (pseudo) => {
+                    const style = getComputedStyle(node, pseudo);
+                    return {
+                      content: style.content,
+                      display: style.display,
+                      color: style.color,
+                      background: style.backgroundColor,
+                      border: style.border,
+                      boxShadow: style.boxShadow,
+                      fontWeight: style.fontWeight,
+                      textDecoration: style.textDecoration,
+                      fill: style.fill,
+                      stroke: style.stroke,
+                      strokeWidth: style.strokeWidth,
+                    };
+                  },
+                  vectorStyles = traceStyleSelector
+                    ? [...node.querySelectorAll('svg, path, rect, circle, line, polyline, polygon')]
+                        .slice(0, 40)
+                        .map((item) => {
+                          const itemBox = item.getBoundingClientRect(),
+                            itemStyle = getComputedStyle(item);
+                          return {
+                            tag: item.tagName,
+                            class: item.getAttribute('class'),
+                            path: item.getAttribute('d'),
+                            fillAttribute: item.getAttribute('fill'),
+                            strokeAttribute: item.getAttribute('stroke'),
+                            strokeWidthAttribute: item.getAttribute('stroke-width'),
+                            box: [itemBox.x, itemBox.y, itemBox.width, itemBox.height],
+                            ...styleDetail(itemStyle),
+                            opacity: itemStyle.opacity,
+                          };
+                        })
+                    : undefined;
                 return {
-                  content: style.content,
-                  display: style.display,
-                  color: style.color,
-                  background: style.backgroundColor,
-                  border: style.border,
-                  boxShadow: style.boxShadow,
-                  fontWeight: style.fontWeight,
-                  textDecoration: style.textDecoration,
-                  fill: style.fill,
-                  stroke: style.stroke,
-                  strokeWidth: style.strokeWidth,
-                };
-              },
-              vectorStyles = traceStyleSelector
-                ? [...node.querySelectorAll('svg, path, rect, circle, line, polyline, polygon')]
+                  text: node.textContent.slice(0, 2000),
+                  class: node.getAttribute('class'),
+                  path: node.getAttribute('d'),
+                  box: [box.x, box.y, box.width, box.height],
+                  ...(recentStyleSelector
+                    ? {
+                        recentStyle: {
+                          dataId:
+                            node.getAttribute('data-id') ??
+                            node.closest('.treeitem')?.getAttribute('data-id'),
+                          role: node.getAttribute('role'),
+                          ariaLabel:
+                            node.getAttribute('aria-label') ??
+                            node.closest('.treeitem')?.getAttribute('aria-label'),
+                          ariaCurrent: node.getAttribute('aria-current'),
+                          dataTip: node.getAttribute('data-tip')?.slice(0, 160),
+                          dataHarness: node.getAttribute('data-harness'),
+                          hovered: node.matches(':hover'),
+                          focused: node.matches(':focus'),
+                          focusVisible: node.matches(':focus-visible'),
+                          focusWithin: node.matches(':focus-within'),
+                          activeElement: document.activeElement === node,
+                          fontWeight: css.fontWeight,
+                          textDecoration: css.textDecoration,
+                          fill: css.fill,
+                          stroke: css.stroke,
+                          strokeWidth: css.strokeWidth,
+                        },
+                      }
+                    : {}),
+                  ...(traceStyleSelector
+                    ? {
+                        tag: node.tagName,
+                        traceStyle: {
+                          ...styleDetail(css),
+                          before: pseudoDetail('::before'),
+                          after: pseudoDetail('::after'),
+                        },
+                        ...(vectorStyles?.length ? { vectorStyles } : {}),
+                      }
+                    : {}),
+                  font: css.font,
+                  color: css.color,
+                  background: css.backgroundColor,
+                  padding: css.padding,
+                  gap: css.gap,
+                  display: css.display,
+                  opacity: css.opacity,
+                  border: css.border,
+                  icons: [...node.querySelectorAll('img')]
                     .slice(0, 40)
-                    .map((item) => {
-                      const itemBox = item.getBoundingClientRect(),
-                        itemStyle = getComputedStyle(item);
-                      return {
-                        tag: item.tagName,
-                        class: item.getAttribute('class'),
-                        path: item.getAttribute('d'),
-                        fillAttribute: item.getAttribute('fill'),
-                        strokeAttribute: item.getAttribute('stroke'),
-                        strokeWidthAttribute: item.getAttribute('stroke-width'),
-                        box: [itemBox.x, itemBox.y, itemBox.width, itemBox.height],
-                        ...styleDetail(itemStyle),
-                        opacity: itemStyle.opacity,
-                      };
-                    })
-                : undefined;
-            return {
-              text: node.textContent.slice(0, 2000),
-              class: node.getAttribute('class'),
-              path: node.getAttribute('d'),
-              box: [box.x, box.y, box.width, box.height],
-              ...(traceStyleSelector
-                ? {
-                    tag: node.tagName,
-                    traceStyle: {
-                      ...styleDetail(css),
-                      before: pseudoDetail('::before'),
-                      after: pseudoDetail('::after'),
-                    },
-                    ...(vectorStyles?.length ? { vectorStyles } : {}),
-                  }
-                : {}),
-              font: css.font,
-              color: css.color,
-              background: css.backgroundColor,
-              padding: css.padding,
-              gap: css.gap,
-              display: css.display,
-              opacity: css.opacity,
-              border: css.border,
-              icons: [...node.querySelectorAll('img')]
-                .slice(0, 40)
-                .map((image) => image.getAttribute('src')),
-              paths: [...node.querySelectorAll('path')]
-                .slice(0, 80)
-                .map((item) => item.getAttribute('d')),
-            };
-          }),
-        ]),
+                    .map((image) => image.getAttribute('src')),
+                  paths: [...node.querySelectorAll('path')]
+                    .slice(0, 80)
+                    .map((item) => item.getAttribute('d')),
+                };
+              }),
+          ];
+        }),
       ),
     };
   });
