@@ -54,6 +54,14 @@ its completion witness is the native-publication success message in the CI log.
   registry does not create a self-referential commit hash or imply ancestry.
   Stale, unreviewed or incomplete records fail closed. No broad waiver, mask,
   auto-approval or threshold change can turn a mismatch green.
+- Captures require bounded API/DOM quiescence and the requested rendered title,
+  session heading or exact Trace root turn. Reference menu cleanup uses its real
+  Close button and waits for the overlay history entry to finish. The original
+  Escape cleanup could leave a stale menu owner and consume the next navigation;
+  history state alone was not evidence that the requested page was rendered.
+  Raw HTTP/network events remain retained. Only a reference model poll's exact
+  recorded bodyless 304 can explain its matching `ERR_ABORTED`; candidate read
+  failures and aborts after 200 remain fatal.
 - The `overhaul.html` and `semon-sample.html` HTML renderers and their screenshot
   workflow are retired from the active tree. The historical fixture values stay
   in `fixture-data/*.json`; CI compares them deeply with extraction from pinned
@@ -72,7 +80,7 @@ its completion witness is the native-publication success message in the CI log.
 
 Workflow dispatch exposes `exhaustive` for deeper touch audits.
 `refresh_diagnostics` also runs the candidate harness against pinned recovery baseline `c402e481dbe23bcf03841e47b5f7eccd14c0e426`; recovery PR #438 enables this comparison automatically. Both binaries use the same runner, locked browser, long fixture, viewports and 4× CPU throttle. The original three append samples and assertions remain; eight additional appends sweep 0/750/1500/2250 ms after naturally occurring selected-metadata requests twice. Each still appends ten records. `perf.json` and `refresh-baseline/perf.json` retain per-endpoint CDP admission/response/completion/failure/cancellation, observed JSON generation/refresh state, and marker DOM-commit/two-frame-visible times. These are browser observations, not server worker-admission or index-publication timestamps; returned generations bound when changed evidence first becomes observable. No extra product polling or timer changes are introduced. Timing remains report-only; missing markers, instrumentation and page errors fail as before.
-The infrastructure tests (`suite-plan`, pixel diff, tap hit-testing, catalog cache,
+The infrastructure tests (capture network lifecycle, `suite-plan`, pixel diff, tap hit-testing, catalog cache,
 catalog wire validation, bounded DOM evidence, and preservation contracts) guard
 coverage selection, exact artifact approval bindings and the actual comparison
 machinery. The visual artifacts include a cross-state selector summary of changed
@@ -121,6 +129,6 @@ remain required.
 The interaction lane also runs `ui/tests/catalog-served.mjs` and
 `ui/tests/overview-served.mjs` against the compiled producer and embedded bundle
 at 390px, 820px and 1280px in both themes. They check bounded ranges, native bytes,
-keyboard paging, focus, Home/Analytics, causal navigation and the contextual
-Composer, and save actual served screenshots for review. New screenshots do not
+keyboard paging, focus, Home/Analytics, causal navigation and paused-control
+refusal, and save actual served screenshots for review. New screenshots do not
 replace approved visual references.
