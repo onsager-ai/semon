@@ -176,8 +176,162 @@ async function flushSessionTraceEvidence(page, scheme) {
   );
 }
 
-async function snapshot(page) {
-  return page.evaluate(() => {
+async function snapshot(page, sidebarOnly = false) {
+  return page.evaluate((sidebarOnly) => {
+    if (sidebarOnly && history.state?.v !== 'session') return { sidebarDiagnostics: null };
+    const safeTextSummary = (value) => {
+        const raw = String(value ?? ''),
+          text = raw.slice(0, 512).replace(/\s+/g, ' ').trim(),
+          allowed = new Set(['Done', 'Failed', 'Working', 'Idle', 'Needs you']);
+        return {
+          text: allowed.has(text) ? text : null,
+          length: Math.min(raw.length, 4096),
+          truncated: raw.length > 4096,
+        };
+      },
+      safePseudoContent = (value) =>
+        ['none', 'normal', '""', "''"].includes(value)
+          ? value
+          : `custom(${Math.min(value.length, 4096)}${value.length > 4096 ? '+' : ''})`,
+      styleSummary = (style) => ({
+        display: style.display,
+        position: style.position,
+        overflowX: style.overflowX,
+        overflowY: style.overflowY,
+        scrollbarGutter: style.scrollbarGutter,
+        background: style.backgroundColor,
+        color: style.color,
+        border: style.border,
+        boxShadow: style.boxShadow,
+        opacity: style.opacity,
+        visibility: style.visibility,
+        pointerEvents: style.pointerEvents,
+        clipPath: style.clipPath,
+      }),
+      pseudoSummary = (node, pseudo) => {
+        const style = getComputedStyle(node, pseudo);
+        return {
+          content: safePseudoContent(style.content),
+          display: style.display,
+          position: style.position,
+          top: style.top,
+          right: style.right,
+          bottom: style.bottom,
+          left: style.left,
+          width: style.width,
+          height: style.height,
+          opacity: style.opacity,
+          color: style.color,
+          background: style.backgroundColor,
+          border: style.border,
+          boxShadow: style.boxShadow,
+          transform: style.transform,
+          clipPath: style.clipPath,
+          zIndex: style.zIndex,
+          pointerEvents: style.pointerEvents,
+        };
+      },
+      scrollSelectors = ['#sidebar', '#side-list', '#lanes'],
+      scrollNodes = scrollSelectors
+        .map((selector) => [selector, document.querySelector(selector)])
+        .filter(([, node]) => node),
+      sidebarBox = document.querySelector('#sidebar')?.getBoundingClientRect(),
+      listBox = document.querySelector('#side-list')?.getBoundingClientRect(),
+      intersects = (box, clip) =>
+        !!box &&
+        !!clip &&
+        box.width > 0 &&
+        box.height > 0 &&
+        box.right > clip.left &&
+        box.left < clip.right &&
+        box.bottom > clip.top &&
+        box.top < clip.bottom,
+      sidebarDiagnostics = {
+        scroll: scrollNodes.map(([selector, node]) => {
+          const box = node.getBoundingClientRect(),
+            style = getComputedStyle(node);
+          return {
+            selector,
+            box: [box.x, box.y, box.width, box.height],
+            scrollTop: node.scrollTop,
+            scrollLeft: node.scrollLeft,
+            scrollWidth: node.scrollWidth,
+            scrollHeight: node.scrollHeight,
+            clientWidth: node.clientWidth,
+            clientHeight: node.clientHeight,
+            style: styleSummary(style),
+            before: pseudoSummary(node, '::before'),
+            after: pseudoSummary(node, '::after'),
+          };
+        }),
+        rows: [
+          ...document.querySelectorAll(
+            '#lanes .tree-row, #lanes .tree-row > .srow, #lanes .tree-toggle',
+          ),
+        ]
+          .filter((node) => intersects(node.getBoundingClientRect(), listBox ?? sidebarBox))
+          .slice(0, 32)
+          .map((node) => {
+            const box = node.getBoundingClientRect();
+            return {
+              tag: node.tagName,
+              class: node.getAttribute('class'),
+              box: [box.x, box.y, box.width, box.height],
+              ariaCurrent: node.getAttribute('aria-current'),
+              ariaExpanded: node.getAttribute('aria-expanded'),
+              hovered: node.matches(':hover'),
+              focused: node.matches(':focus'),
+              focusVisible: node.matches(':focus-visible'),
+              before: pseudoSummary(node, '::before'),
+              after: pseudoSummary(node, '::after'),
+            };
+          }),
+        tips: [
+          ...document.querySelectorAll(
+            '#sidebar [data-tip]:hover, #sidebar [data-tip]:focus-visible',
+          ),
+        ]
+          .slice(0, 8)
+          .map((node) => {
+            const box = node.getBoundingClientRect();
+            return {
+              tag: node.tagName,
+              class: node.getAttribute('class'),
+              box: [box.x, box.y, box.width, box.height],
+              inRecent: !!node.closest('#lanes'),
+              hovered: node.matches(':hover'),
+              focusVisible: node.matches(':focus-visible'),
+              tip: safeTextSummary(node.getAttribute('data-tip')),
+            };
+          }),
+        overlays: [...document.querySelectorAll('[popover]:popover-open, dialog[open]')]
+          .slice(0, 8)
+          .map((node) => {
+            const box = node.getBoundingClientRect(),
+              style = getComputedStyle(node),
+              text = node.textContent;
+            return {
+              kind:
+                node.id === 'sh-tooltip'
+                  ? 'tooltip'
+                  : node.tagName === 'DIALOG'
+                    ? 'dialog'
+                    : 'popover',
+              tag: node.tagName,
+              popover: node.getAttribute('popover'),
+              box: [box.x, box.y, box.width, box.height],
+              visible:
+                box.width > 0 &&
+                box.height > 0 &&
+                style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                Number(style.opacity) > 0,
+              style: styleSummary(style),
+              text: safeTextSummary(text),
+            };
+          }),
+      };
+    if (sidebarOnly) return { sidebarDiagnostics };
     const selectors = [
       '#sidebar',
       '#topbar',
@@ -211,6 +365,7 @@ async function snapshot(page) {
     return {
       historyState: history.state,
       pathname: location.pathname,
+      sidebarDiagnostics: history.state?.v === 'session' ? sidebarDiagnostics : null,
       selectors: Object.fromEntries(
         selectors.map((selector) => {
           const recentStyleSelector = selector.startsWith('#lanes .tree-row');
@@ -330,7 +485,7 @@ async function snapshot(page) {
         }),
       ),
     };
-  });
+  }, sidebarOnly);
 }
 
 function minute(t) {
@@ -579,7 +734,11 @@ async function prepareFrame(page, phone) {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
   await waitForCaptureReady(page, `frame scroll ${page.url()}`);
-  return page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
+  const beforeScreenshot = await snapshot(page, true);
+  return {
+    image: await page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' }),
+    sidebarDiagnosticsBeforeScreenshot: beforeScreenshot.sidebarDiagnostics,
+  };
 }
 
 async function captureFrame(candidate, reference, key, phone) {
@@ -600,9 +759,12 @@ async function captureFrame(candidate, reference, key, phone) {
     ['reference', reference],
   ]) {
     try {
-      const bytes = await prepareFrame(page, phone);
+      const prepared = await prepareFrame(page, phone),
+        bytes = prepared.image;
       save(key, name, bytes);
       evidenceBySide[name] = await snapshot(page);
+      evidenceBySide[name].sidebarDiagnosticsBeforeScreenshot =
+        prepared.sidebarDiagnosticsBeforeScreenshot;
       artifactDigests[name] = {
         image: sha256(bytes),
         evidence: saveJson(key, name, evidenceBySide[name]),
