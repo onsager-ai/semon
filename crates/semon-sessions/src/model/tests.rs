@@ -3588,14 +3588,19 @@ fn codex_orphan_subagent_keeps_its_task_title_without_inventing_a_parent() {
 
 #[test]
 fn overview_prompt_sender_follows_the_recorded_turn_instead_of_session_ancestry() {
+    const ROOT: &str = "11111111-1111-4111-8111-111111111111";
     let home = Home::new();
-    home.codex("root", json!({}), &[
+    home.lines(
+        "codex/session_index.jsonl",
+        &[json!({"id":ROOT,"thread_name":"Coordinator label","updated_at":"2026-09-24T23:01:00Z"})],
+    );
+    home.codex(ROOT, json!({}), &[
         codex_user(ts(23, 0), "Coordinate"),
         codex_line(ts(23, 1), "response_item", json!({"type":"function_call","name":"spawn_agent","call_id":"task","arguments":"{\"task_name\":\"audit_parser\",\"prompt\":\"Audit the parser\"}"})),
     ]);
     let initial = codex_user(ts(23, 2), "Audit the parser");
     for (records, expected) in [
-        (vec![initial.clone()], "root"),
+        (vec![initial.clone()], ROOT),
         (
             vec![
                 initial,
@@ -3605,7 +3610,7 @@ fn overview_prompt_sender_follows_the_recorded_turn_instead_of_session_ancestry(
             "you",
         ),
     ] {
-        home.codex("child", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &records);
+        home.codex("child", json!({"parent_thread_id":ROOT,"thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &records);
         let inputs = crate::inputs::inputs(&home.options)
             .unwrap()
             .into_iter()
@@ -3614,12 +3619,25 @@ fn overview_prompt_sender_follows_the_recorded_turn_instead_of_session_ancestry(
         let mut cache = EventCache::open(&home.options.cache);
         let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
         let child = prepared.rows.iter().find(|row| row.key == "child").unwrap();
-        assert_eq!(child.parent.as_deref(), Some("root"));
+        assert_eq!(child.parent.as_deref(), Some(ROOT));
         let overview = serde_json::to_value(&child.overview).unwrap();
         assert_eq!(
             overview["home"]["detail_from"], expected,
             "ancestry must not replace the latest prompt's sender"
         );
+        if expected == ROOT {
+            let sender = prepared.rows.iter().find(|row| row.key == ROOT).unwrap();
+            assert_eq!(sender.name, "Coordinator label");
+            assert_eq!(
+                overview["home"]["detail_from_name"], sender.name,
+                "the source-qualified sender label must survive a bounded recent list"
+            );
+        } else {
+            assert!(
+                overview["home"]["detail_from_name"].is_null(),
+                "a direct user turn must not inherit the parent's name"
+            );
+        }
         drop(cache);
         assert_staged_owner_parity(&home, &inputs);
     }

@@ -4688,10 +4688,20 @@ impl<'a> Builder<'a> {
                 turn.u.then_some("you")
             }
         });
+        let detail_from_name = detail_from.filter(|from| *from != "you").and_then(|from| {
+            let sender = &self.sessions[*self.by_key.get(from)?];
+            if sender.files.is_empty() {
+                self.staged_endpoints
+                    .get(from)
+                    .map(|endpoint| endpoint.row.name.as_str())
+            } else {
+                Some(sender.out.name.as_str())
+            }
+        });
         let activity=self.by_key.get(key).map(|index| &self.sessions[*index]).and_then(|session|session.out.activity.as_ref()).and_then(|(name,_,_,at)| {
             tx.slots.iter().rev().find(|slot|slot.call_name()==Some(name.as_str()) && slot.t==Some(*at)).and_then(|slot|slot.file.as_ref().and_then(|file|file.path.to_str().map(|path|serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"activity","tool":name,"cwd":file.cwd}))))
         });
-        serde_json::json!({"events":events,"detail":current.and_then(origin),"detail_from":detail_from,"activity":activity})
+        serde_json::json!({"events":events,"detail":current.and_then(origin),"detail_from":detail_from,"detail_from_name":detail_from_name,"activity":activity})
     }
 
     #[cfg(test)]

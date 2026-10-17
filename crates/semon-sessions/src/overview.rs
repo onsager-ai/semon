@@ -72,7 +72,7 @@ impl Summary {
             home: json!({"name":session.name,"kind":session.kind,"harness":session.harness,
             "model":session.model,"repo":session.repo,"state":session.state,"last":session.last,
             "start":session.start,"parent":parent,"branch":session.branch,"waiting_for":null,"waiting_since":session.waiting_since,
-            "activity":session.activity.as_ref().map(|(name,_,age,at)|(name,"",age,at)),"detail":null,"detail_from":content["detail_from"],"content":content,"cost":session.cost.usd,"events":events}),
+            "activity":session.activity.as_ref().map(|(name,_,age,at)|(name,"",age,at)),"detail":null,"detail_from":content["detail_from"],"detail_from_name":content["detail_from_name"],"content":content,"cost":session.cost.usd,"events":events}),
         }
     }
     pub(crate) fn with_sources(
@@ -540,7 +540,7 @@ pub(crate) fn session_home_details_inner(
         drop(statement);
         tx.commit().map_err(failed)?;
         let content = &summary.home["content"];
-        let mut result = json!({"api":1,"identity":identity,"generation":expected,"session":{"detail":null,"detail_from":summary.home["detail_from"],"activity":summary.home["activity"]},"events":{},"turns":{},"incomplete":false});
+        let mut result = json!({"api":1,"identity":identity,"generation":expected,"session":{"detail":null,"detail_from":summary.home["detail_from"],"detail_from_name":summary.home["detail_from_name"],"activity":summary.home["activity"]},"events":{},"turns":{},"incomplete":false});
         crate::transcript_range::with_source_reader(
             options,
             &row.harness,
