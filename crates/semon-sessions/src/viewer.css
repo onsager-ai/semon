@@ -1347,6 +1347,8 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
    pitch and top inset rather than collapsing the transcript/dock separation. */
 .page:has(> .catalog-session > .transcript) { padding-top: var(--s2); }
 @media (max-width: 760px) { .page:has(> .catalog-session > .transcript) { padding-top: 2px; } }
+/* Native turn anchors clear the fixed phone bar even when the footer permits more scrolling. */
+@media (max-width: 760px) { .catalog-session .turn { scroll-margin-top: calc(var(--barh, 56px) + var(--s5)); } }
 .catalog-session { display: flex; flex: 1; flex-direction: column; gap: var(--s5); }
 :is(.page, .catalog-session) > .transcript { flex: none; align-content: start; }
 .transcript { clip-path: inset(0 0 var(--reading-clip, 0px) 0); }

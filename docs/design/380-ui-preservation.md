@@ -33,6 +33,8 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   relationship identifies its sending turn; it never invokes runtime control.
   The selected session footer retains fenced recorded status, calls, duration and
   own-session cost. Passive facts are not treated as paused control actions.
+  Native turn anchors clear the measured fixed phone bar, including when the
+  restored footer makes a short session scrollable.
 - Repeated Find publication keeps the focused account widget in its host's Find
   row. Shared chrome does not reparent that widget into the ordinary toolbar.
 
