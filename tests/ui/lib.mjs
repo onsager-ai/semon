@@ -56,6 +56,7 @@ const CAPTURE_STABLE_MS = 200;
 const CAPTURE_TIMEOUT_MS = 8000;
 const CAPTURE_API_EVENT_LIMIT = 2000;
 const CAPTURE_HOME_POST_EVENT_LIMIT = 48;
+const CAPTURE_HOME_POST_INVOCATION_LIMIT = 64;
 const CAPTURE_HOME_POST_BODY_LIMIT = 64 * 1024;
 // One same-origin Home POST record per request; the last capture emitted 50.
 const CAPTURE_HOME_POST_REQUEST_LIMIT = 64;
@@ -173,7 +174,10 @@ function matchHomePostRequestsToCdp(nodeStarts, cdpRequests, truncated) {
       start.requestTimingStartTime <= 0 ||
       typeof start.queryDigest !== 'string'
     ) {
-      return { nodeRequestId: start.nodeRequestId, association: 'unknown-node-network-timing-or-digest' };
+      return {
+        nodeRequestId: start.nodeRequestId,
+        association: 'unknown-node-network-timing-or-digest',
+      };
     }
     const startTimeMs = Math.round(start.requestTimingStartTime);
     const sameRequestScope = (request) =>
@@ -202,14 +206,11 @@ function matchHomePostRequestsToCdp(nodeStarts, cdpRequests, truncated) {
         request.postBodyDigest === start.postBodyDigest,
     );
     const possibleNodeStarts = nodeStarts.filter(
-      (other) =>
-        sameRequestScope(other) && couldShareNetworkTime(other) && couldShareBody(other),
+      (other) => sameRequestScope(other) && couldShareNetworkTime(other) && couldShareBody(other),
     );
     const possibleCdpRequests = cdpRequests.filter(
       (request) =>
-        sameRequestScope(request) &&
-        couldShareCdpNetworkTime(request) &&
-        couldShareBody(request),
+        sameRequestScope(request) && couldShareCdpNetworkTime(request) && couldShareBody(request),
     );
     if (
       candidates.length !== 1 ||
@@ -217,15 +218,12 @@ function matchHomePostRequestsToCdp(nodeStarts, cdpRequests, truncated) {
       possibleCdpRequests.length !== 1
     ) {
       const hasPossibleDuplicate =
-        candidates.length > 1 ||
-        possibleNodeStarts.length > 1 ||
-        possibleCdpRequests.length > 1;
+        candidates.length > 1 || possibleNodeStarts.length > 1 || possibleCdpRequests.length > 1;
       return {
         nodeRequestId: start.nodeRequestId,
-        association:
-          hasPossibleDuplicate
-            ? 'ambiguous-or-incomplete-same-scope-request'
-            : 'unknown-no-exact-cdp-network-time-and-signature',
+        association: hasPossibleDuplicate
+          ? 'ambiguous-or-incomplete-same-scope-request'
+          : 'unknown-no-exact-cdp-network-time-and-signature',
         cdpRequestIds: candidates.map((request) => request.cdpRequestId),
         possibleCdpRequestIds: possibleCdpRequests.map((request) => request.cdpRequestId),
         possibleNodeRequestIds: possibleNodeStarts.map((request) => request.nodeRequestId),
@@ -263,7 +261,8 @@ function refreshHomePostTiming(context, request, stage) {
 
 export function homePostRequestDiagnostics(page) {
   const nodeStarts = page.captureHomePostStarts?.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT) ?? [];
-  const cdpRequests = page.captureHomePostCdpRequests?.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT) ?? [];
+  const cdpRequests =
+    page.captureHomePostCdpRequests?.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT) ?? [];
   const failedNodeRequestIds = [
     ...new Set(
       (page.captureApiEvents ?? [])
@@ -288,13 +287,16 @@ export function homePostRequestDiagnostics(page) {
     apiEventsTruncated: page.captureApiEventsTruncated ?? 0,
     nodeStarts,
     nodeStartsTruncated: page.captureHomePostStartsTruncated ?? 0,
-    pageInvocations: page.captureHomePostInvocations?.slice(-24) ?? [],
+    pageInvocations:
+      page.captureHomePostInvocations?.slice(-CAPTURE_HOME_POST_INVOCATION_LIMIT) ?? [],
     pageInvocationsTruncated: page.captureHomePostInvocationsTruncated ?? 0,
     cdpRequests,
     cdpRequestsTruncated: page.captureHomePostCdpRequestsTruncated ?? 0,
     failedCdpAssociations: cdpAssociations.filter((entry) =>
       failedNodeIds.has(entry.nodeRequestId),
     ),
+    terminalObserverNote:
+      'The temporary observer attaches a rejection handler to monitored fetch promises and may suppress unhandledrejection reporting for a directly unhandled fetch; the original fetch promise returned to callers is unchanged.',
   };
 }
 
@@ -311,8 +313,8 @@ function recordHomePostInvocation(page, invocation) {
   } else {
     page.captureHomePostInvocations.push(invocation);
   }
-  if (page.captureHomePostInvocations.length > CAPTURE_HOME_POST_EVENT_LIMIT) {
-    const dropped = page.captureHomePostInvocations.length - CAPTURE_HOME_POST_EVENT_LIMIT;
+  if (page.captureHomePostInvocations.length > CAPTURE_HOME_POST_INVOCATION_LIMIT) {
+    const dropped = page.captureHomePostInvocations.length - CAPTURE_HOME_POST_INVOCATION_LIMIT;
     page.captureHomePostInvocations.splice(0, dropped);
     page.captureHomePostInvocationsTruncated += dropped;
   }
@@ -710,7 +712,7 @@ export async function waitForCaptureReady(page, label = 'actual UI capture') {
           }
           pageInvocations = {
             ...pageInvocations,
-            events: page.captureHomePostInvocations.slice(-CAPTURE_HOME_POST_EVENT_LIMIT),
+            events: page.captureHomePostInvocations.slice(-CAPTURE_HOME_POST_INVOCATION_LIMIT),
             truncated:
               page.captureHomePostInvocationsTruncated +
               (pageInvocations.documentInvocationRingTruncated ?? 0),
@@ -721,14 +723,17 @@ export async function waitForCaptureReady(page, label = 'actual UI capture') {
             homePostFailures.some((failure) => failure.id === event.nodeRequestId),
           );
           const failedNodeIds = new Set(homePostFailures.map((failure) => failure.id));
-          const cdpRequests = page.captureHomePostCdpRequests.slice(-CAPTURE_HOME_POST_REQUEST_LIMIT);
+          const cdpRequests = page.captureHomePostCdpRequests.slice(
+            -CAPTURE_HOME_POST_REQUEST_LIMIT,
+          );
           const cdpAssociations = matchHomePostRequestsToCdp(
             nodeStarts,
             cdpRequests,
             page.captureHomePostCdpRequestsTruncated > 0 || page.captureHomePostStartsTruncated > 0,
           ).filter((association) => failedNodeIds.has(association.nodeRequestId));
           homePostTrace = {
-            documentURLAtFailure: pageInvocations.documentURLAtFailure ?? sanitizedDocumentURL(page.url()),
+            documentURLAtFailure:
+              pageInvocations.documentURLAtFailure ?? sanitizedDocumentURL(page.url()),
             documentEpoch: pageInvocations.documentEpoch ?? null,
             navigationRouteMarkerAtFailure: page.captureRouteKey,
             routeTransitionAtFailure: captureRouteTransitionMarker(page.captureRouteTransition),
@@ -913,7 +918,9 @@ export async function served(browser, opts = {}) {
               : 'complete';
       const postBodyDigest =
         postBodyDigestState === 'complete'
-          ? createHash('sha256').update(postBytes ?? Buffer.alloc(0)).digest('hex')
+          ? createHash('sha256')
+              .update(postBytes ?? Buffer.alloc(0))
+              .digest('hex')
           : null;
       recordHomePostCdpRequest(page, {
         event: 'requestWillBeSent',
@@ -1107,7 +1114,12 @@ export async function served(browser, opts = {}) {
           const method = String(
             init?.method ?? (input instanceof Request ? input.method : 'GET'),
           ).toUpperCase();
-          if (url.origin !== location.origin || url.pathname !== '/api/viewer/home' || method !== 'POST') return;
+          if (
+            url.origin !== location.origin ||
+            url.pathname !== '/api/viewer/home' ||
+            method !== 'POST'
+          )
+            return null;
           const query = new URLSearchParams(
             [...url.searchParams.entries()]
               .filter(([key]) => key !== 't')
@@ -1127,18 +1139,19 @@ export async function served(browser, opts = {}) {
             postBodyBytes: null,
             postBodyDigest: null,
             postBodyDigestState: 'pending',
+            terminal: { state: 'pending' },
           };
           homePostInvocations.push(invocation);
-          if (homePostInvocations.length > 24) {
+          if (homePostInvocations.length > 64) {
             homePostInvocations.shift();
             homePostInvocationTruncated++;
           }
           const publishInvocation = () => {
             try {
               invocation.revision++;
-              void Promise.resolve(
-                window.__semonRecordHomePostInvocation({ ...invocation }),
-              ).catch(() => {});
+              void Promise.resolve(window.__semonRecordHomePostInvocation({ ...invocation })).catch(
+                () => {},
+              );
             } catch {}
           };
           publishInvocation();
@@ -1172,12 +1185,62 @@ export async function served(browser, opts = {}) {
           } else {
             invocation.postBodyDigestState = 'unavailable';
           }
+          return invocation;
         } catch {}
+        return null;
       };
       const originalFetch = window.fetch;
       window.fetch = function (input, init) {
-        captureHomePost(input, init);
-        return Reflect.apply(originalFetch, this, arguments);
+        const invocation = captureHomePost(input, init),
+          result = Reflect.apply(originalFetch, this, arguments);
+        if (invocation) {
+          const recordTerminal = (state, detail = {}) => {
+            const settledAt = performance.timeOrigin + performance.now();
+            invocation.terminal = {
+              state,
+              ...detail,
+              atUnixMs: settledAt,
+              elapsedMs: Math.max(0, settledAt - invocation.invokedAtUnixMs),
+              pathname: location.pathname,
+              routeMarker: routeMarker(),
+            };
+            try {
+              invocation.revision++;
+              void Promise.resolve(window.__semonRecordHomePostInvocation({ ...invocation })).catch(
+                () => {},
+              );
+            } catch {}
+          };
+          try {
+            void result
+              .then(
+                (response) => {
+                  const status = Number(response?.status);
+                  recordTerminal('fulfilled', {
+                    responseStatus:
+                      Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+                  });
+                },
+                (error) => {
+                  const name =
+                    typeof error?.name === 'string' &&
+                    [
+                      'AbortError',
+                      'TypeError',
+                      'TimeoutError',
+                      'Error',
+                      'SecurityError',
+                      'NetworkError',
+                    ].includes(error.name)
+                      ? error.name
+                      : 'Other';
+                  recordTerminal('rejected', { errorName: name });
+                },
+              )
+              .catch(() => {});
+          } catch {}
+        }
+        return result;
       };
       Object.defineProperty(window, '__semonHomePostInvocations', {
         value: homePostInvocations,

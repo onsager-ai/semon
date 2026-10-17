@@ -5,7 +5,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data, waitForCaptureReady } from './lib.mjs';
+import {
+  ENV,
+  launch,
+  served,
+  goto,
+  data,
+  waitForCaptureReady,
+  homePostRequestDiagnostics,
+} from './lib.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
   assessPreservation,
@@ -40,6 +48,7 @@ const report = {
   results: [],
   errors: [],
   apiDiagnostics: [],
+  homePostDiagnostics: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
@@ -294,9 +303,22 @@ async function waitForRouteCaptureReady(page, side, key) {
 function recordApiDiagnostics(pages, key) {
   for (const [name, page] of pages) {
     const from = page.captureApiEventsReported ?? 0;
-    report.apiDiagnostics.push(
-      ...page.captureApiEvents.slice(from).map((event) => ({ state: key, side: name, ...event })),
-    );
+    const events = page.captureApiEvents.slice(from);
+    report.apiDiagnostics.push(...events.map((event) => ({ state: key, side: name, ...event })));
+    if (
+      events.some(
+        (event) =>
+          event.method === 'POST' &&
+          event.path === '/api/viewer/home' &&
+          (event.event === 'failed' ||
+            (event.event === 'response' && !event.ok && event.status !== 304)),
+      )
+    )
+      report.homePostDiagnostics.push({
+        observedDuringState: key,
+        side: name,
+        ...homePostRequestDiagnostics(page),
+      });
     page.captureApiEventsReported = page.captureApiEvents.length;
   }
 }
