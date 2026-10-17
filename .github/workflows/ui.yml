@@ -26,7 +26,7 @@ jobs:
           target.mkdir()
           with zipfile.ZipFile(pathlib.Path(os.environ['RUNNER_TEMP']) / 'visual.zip') as archive:
               for side in ['candidate', 'reference']:
-                  suffix = 'phone-dark-session-harbor-' + side + '.png'
+                  suffix = 'phone-dark_session-harbor-' + side + '.png'
                   names = [name for name in archive.namelist() if name.endswith('/' + suffix) or name == suffix]
                   if len(names) != 1:
                       raise RuntimeError((side, names))

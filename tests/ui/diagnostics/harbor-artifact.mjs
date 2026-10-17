@@ -8,9 +8,15 @@ import { compare } from '../pixel-diff.mjs';
 const root = process.argv[2];
 const inputs = ['candidate', 'reference'].map((side) => {
   const bytes = fs.readFileSync(path.join(root, side + '.png'));
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const expected = {
+    candidate: '32f5203d17f35320bea4f9723de43804246632d81bba1005991b2b23492824be',
+    reference: '8f3335d3abf0b2810c20d97b4d7daf5d764e9408bab3a26137d4a0750dd7d7ba',
+  };
+  if (digest !== expected[side]) throw new Error('Retained ' + side + ' image digest changed');
   return {
     side,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
+    sha256: digest,
     image: PNG.sync.read(bytes),
   };
 });
