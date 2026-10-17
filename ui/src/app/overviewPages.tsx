@@ -672,7 +672,7 @@ export function createOverviewPages(host: OverviewHost) {
                   : ' sent you a result',
           },
         ],
-        age: timeText(Math.max(0, home!.now - event.at)) + ' ago',
+        age: ago(event.at, home!.now),
         preview:
           event.brief || (loading ? 'Loading recorded text…' : 'Recorded preview unavailable'),
         answer:
@@ -718,8 +718,15 @@ export function createOverviewPages(host: OverviewHost) {
             home!.machines.length > 1
               ? home!.machines.find((machine) => machine.key === row.source_key)?.label
               : null,
-            row.session.detail ? 'for you' : null,
-            row.session.detail,
+            row.session.detail
+              ? 'for ' +
+                (home!.recent.find(
+                  (parent) =>
+                    parent.source_key === row.source_key &&
+                    parent.catalog_key === row.session.parent,
+                )?.session.name ?? 'you')
+              : null,
+            row.session.detail ? previewLine(row.session.detail) : null,
           ]
             .filter(Boolean)
             .join(' · '),
