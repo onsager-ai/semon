@@ -3,12 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       diagnostic:
-        description: Select one bounded Harbor investigation
+        description: Select one bounded retained-artifact investigation
         type: choice
         options:
           - paint
           - retained-images
           - expanded-scroll
+          - filter-artifacts
         default: paint
         required: true
 permissions:
@@ -238,4 +239,66 @@ jobs:
           name: ${{ inputs.diagnostic == 'paint' && 'harbor-fullpage-paint-protocol' || 'harbor-expansion-scroll-protocol' }}
           path: tests/ui/out/harbor-paint-protocol
           if-no-files-found: warn
+          retention-days: 30
+
+  filter-artifact-equivalence:
+    if: github.ref == 'refs/heads/diagnostic/380-harbor-artifact-20261018' && inputs.diagnostic == 'filter-artifacts'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - run: npm --prefix tests/ui ci --no-audit --no-fund
+      - name: Verify and extract the two immutable six-Filter artifact sets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          download() {
+            label="$1"; artifact_id="$2"; expected_run="$3"; expected_head="$4"; expected_digest="$5"
+            metadata="$RUNNER_TEMP/filter-$label-metadata.json"
+            archive="$RUNNER_TEMP/filter-$label.zip"
+            gh api "repos/onsager-ai/semon/actions/artifacts/$artifact_id" > "$metadata"
+            jq -e --argjson run "$expected_run" --arg head "$expected_head" --arg digest "sha256:$expected_digest" \
+              '.name == "viewer-ui-visual" and .workflow_run.id == $run and .workflow_run.head_sha == $head and .digest == $digest and .expired == false' \
+              "$metadata" > /dev/null
+            gh api "repos/onsager-ai/semon/actions/artifacts/$artifact_id/zip" > "$archive"
+            printf '%s  %s\n' "$expected_digest" "$archive" | sha256sum --check --status
+            python3 - "$archive" "$RUNNER_TEMP/filter-$label" <<'PYEXTRACT'
+          import pathlib, sys, zipfile
+          destination = pathlib.Path(sys.argv[2])
+          keys = [f'{width}-{scheme}-sessions-filter-open' for width in [390,820,1280] for scheme in ['light','dark']]
+          expected = {f'preservation/{key}-{side}.{extension}' for key in keys for side in ['candidate','reference'] for extension in ['png','json']}
+          expected |= {f'preservation/{key}-diff.png' for key in keys}
+          expected |= {f'preservation/{key}-comparison.json' for key in keys}
+          expected.add('preservation/report.json')
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              found = set()
+              for info in archive.infolist():
+                  if info.filename not in expected:
+                      continue
+                  if info.filename in found or info.file_size > 5_000_000:
+                      raise RuntimeError('duplicate or oversized retained capture')
+                  found.add(info.filename)
+                  archive.extract(info, destination)
+              if found != expected:
+                  raise RuntimeError('missing retained Filter artifact members')
+          PYEXTRACT
+          }
+          download old 12116974023 39075952251 39aa0073a278135a8b7064bf84618487224055b0 b7f3f37cd2bd7655b2107452482bbb5be233ca4ae560b1e05b74aa9ae3d090e0
+          download new 12118072449 39079042239 790fcf4a0938bea41b4a8a9d3626e6b6f5297f65 41173e0c780f86eabd715d1df0395565c815d9deff01fac3bf010f219dfbd410
+      - name: Diagnose exact retained PNG bytes and decoded pixels without recapture
+        env:
+          OLD_DIR: ${{ runner.temp }}/filter-old/preservation
+          NEW_DIR: ${{ runner.temp }}/filter-new/preservation
+          REPORT_PATH: ${{ runner.temp }}/filter-artifact-equivalence/report.json
+        run: node tests/ui/filter-png-artifact-diagnostic.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: filter-artifact-equivalence
+          path: ${{ runner.temp }}/filter-artifact-equivalence/report.json
+          if-no-files-found: error
           retention-days: 30
