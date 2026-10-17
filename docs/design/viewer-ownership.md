@@ -314,3 +314,8 @@ and EffectScope own observation and teardown. Only initial input is exposed.
 Recorded native turns/intents retire that witness. Subsequent session control
 selection still requires qualified native Catalog ownership, and archive
 readiness is unchanged. The host never constructs a transcript or synthetic row.
+
+A host may supply `initialHome.title` with its onboarding content. The canonical
+reader uses that heading only while the same content element occupies its root;
+ordinary Home and other routes retain their shared titles. Domain wording stays
+with the host and introduces no additional routing or observation owner.

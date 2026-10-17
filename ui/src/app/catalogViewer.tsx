@@ -1065,7 +1065,9 @@ export function createCatalogViewer(
       viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
         ? viewerHost.nativePage.title
         : route === 'home'
-          ? 'Home'
+          ? ((viewerHost?.initialHome?.element.parentElement === root
+              ? viewerHost.initialHome.title
+              : undefined) ?? 'Home')
           : route === 'analytics'
             ? 'Analytics'
             : route === 'machine'

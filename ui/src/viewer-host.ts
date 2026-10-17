@@ -2,6 +2,8 @@ import { safePath, type ShellNavigation, type ShellDestination } from './lib';
 /** Narrow document host port; the viewer remains the sole router and read lifecycle owner. */
 export interface ViewerContent {
   element: HTMLElement;
+  /** Host-owned heading while this initial content occupies the canonical reader. */
+  title?: string;
   destroy(): void;
 }
 export interface ViewerHost {
