@@ -383,7 +383,10 @@ export function createOverviewPages(host: OverviewHost) {
             harness: selectedMetadata.harness,
             model: selectedMetadata.model,
             repo: selectedMetadata.repo,
-            state: selectedMetadata.status?.state ?? selectedSessionState(selectedMetadata),
+            state:
+              selectedMetadata.status === undefined
+                ? selectedSessionState(selectedMetadata)
+                : (selectedMetadata.status.state ?? 'off'),
             start: selectedMetadata.start ?? 0,
             last: selectedMetadata.last ?? 0,
             parent: selectedMetadata.parent ?? undefined,
