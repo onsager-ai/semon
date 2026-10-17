@@ -373,15 +373,19 @@ for (const width of [390, 1280])
           true,
         );
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
-        await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
-        await page.getByRole('menuitem', { name: 'Choose a machine', exact: true }).click();
+        await page
+          .locator('#topbar')
+          .getByRole('button', { name: 'Choose a machine', exact: true })
+          .click();
         await page.locator('[data-source-key="second"]').click();
         await page.locator('#page [data-id="one"]').click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !history.state?.sheet);
-        await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
-        await page.getByRole('menuitem', { name: 'Choose a machine', exact: true }).click();
+        await page
+          .locator('#topbar')
+          .getByRole('button', { name: 'Choose a machine', exact: true })
+          .click();
         await page.locator('[data-source-key="source"]').click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
         assert.equal(
