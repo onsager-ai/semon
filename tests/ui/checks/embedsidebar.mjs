@@ -35,11 +35,19 @@ export default async function embedSidebar(browser) {
       });
       const page = await ctx.newPage();
       const errors = [],
-        retired = [];
+        retired = [],
+        nativeRequests = [];
+      let nativePage = true;
       page.on('pageerror', (error) => errors.push(error.message));
       page.on('request', (request) => {
+        if (nativePage && new URL(request.url()).pathname.startsWith('/api/'))
+          nativeRequests.push(new URL(request.url()).pathname);
         if (/\/api\/(model|tx)(?:[/?]|$)/.test(new URL(request.url()).pathname))
           retired.push(request.url());
+      });
+      page.on('framenavigated', (frame) => {
+        if (frame === page.mainFrame() && new URL(frame.url()).pathname === '/sessions')
+          nativePage = false;
       });
       await page.clock.setFixedTime(ENV.now);
       const sheet = await page.goto(ENV.base + '/shell.css?t=' + ENV.token);
@@ -76,7 +84,7 @@ export default async function embedSidebar(browser) {
         }),
       );
       await page.goto(ENV.base + '/__shell-sidebar.html');
-      await page.waitForSelector('#lanes .srow', { state: 'attached' });
+      await page.waitForSelector('#topbar .t.catalog-title', { state: 'attached' });
       await page.evaluate(() => document.fonts.ready);
       const own = await page.evaluate((html) => {
         const was = new DOMParser().parseFromString(html, 'text/html');
@@ -87,26 +95,23 @@ export default async function embedSidebar(browser) {
           current: [...document.querySelectorAll('#nav [aria-current="page"]')].map(
             (row) => row.dataset.go,
           ),
-          qualified: [...document.querySelectorAll('#lanes .srow')].every((row) => {
-            const id = JSON.parse(row.dataset.id);
-            return (
-              id.length === 2 && id.every((value) => typeof value === 'string' && value.length)
-            );
-          }),
+          recent: document.querySelectorAll('#lanes .srow').length,
         };
       }, html);
       assert.deepEqual(own, {
         untouched: true,
         title: 'Devices',
         current: ['machines'],
-        qualified: true,
+        recent: 0,
       });
       assert.equal(await overflow(page), 0);
       if (width === 390) {
         await page.click('#lead-btn');
         await page.waitForFunction(() => document.body.classList.contains('drawer-open'));
         await page.keyboard.press('Escape');
-        await page.waitForFunction(() => !document.body.classList.contains('drawer-open'));
+        await page.waitForFunction(
+          () => !document.body.classList.contains('drawer-open') && !history.state?.drawer,
+        );
         assert.equal(await page.evaluate(() => document.activeElement.id), 'lead-btn');
         await page.click('#lead-btn');
         await page.waitForFunction(() => {
@@ -139,23 +144,46 @@ export default async function embedSidebar(browser) {
         path: path.join(output, width + '-' + (dark ? 'dark' : 'light') + '.png'),
         animations: 'disabled',
       });
-      const [source] = JSON.parse(
-        await page.locator('#lanes .srow').first().getAttribute('data-id'),
-      );
+      assert.deepEqual(nativeRequests, [], 'native chrome does not read workspace history');
       await page.evaluate(() => {
         window.__nativePageMarker = true;
       });
-      await page.locator('#lanes .srow').first().click();
-      await page.waitForURL((url) => url.pathname.startsWith('/s/'));
+      await page.locator('#nav a[data-go="sessions"]').click();
+      await page.waitForURL((url) => url.pathname === '/sessions');
       assert.equal(
         await page.evaluate(() => window.__nativePageMarker),
         undefined,
-        'native rows retain server navigation',
+        'native Sessions link retains server navigation',
       );
+      assert.equal(await page.locator('#own-content').count(), 0);
+      assert.deepEqual(nativeRequests, [], 'native navigation does not read workspace history');
+      await page.waitForSelector('#lanes .srow', { state: 'attached' });
+      const qualified = await page.locator('#lanes .srow').evaluateAll((rows) =>
+        rows.every((row) => {
+          const id = JSON.parse(row.dataset.id);
+          return id.length === 2 && id.every((value) => typeof value === 'string' && value.length);
+        }),
+      );
+      assert.equal(qualified, true, 'reader Recent retains source-qualified identities');
+      const [source] = JSON.parse(
+        await page.locator('#lanes .srow').first().getAttribute('data-id'),
+      );
+      if (width === 390) {
+        await page.click('#lead-btn');
+        await page.waitForFunction(() => document.body.classList.contains('drawer-open'));
+      }
+      await page.locator('#lanes .srow').first().click();
+      await page.waitForURL((url) => url.pathname.startsWith('/s/'));
       assert.equal(new URL(page.url()).searchParams.get('machine'), source);
       assert.deepEqual(errors, []);
       assert.deepEqual(retired, []);
-      results.push({ width, theme: dark ? 'dark' : 'light', ...own, nativeNavigation: true });
+      results.push({
+        width,
+        theme: dark ? 'dark' : 'light',
+        ...own,
+        qualified,
+        nativeNavigation: true,
+      });
       await closePage(page);
     }
   report.results = results;
