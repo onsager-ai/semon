@@ -30,7 +30,9 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   competing with the name. Sessions navigation retains the reader's existing
   filter/focus/scroll return transaction through native links and the shared drawer.
   Child cards retain Run view as a passive native Trace link when the recorded
-  relationship identifies its target turn; it never invokes runtime control.
+  relationship identifies its sending turn; it never invokes runtime control.
+  The selected session footer retains fenced recorded status, calls, duration and
+  own-session cost. Passive facts are not treated as paused control actions.
 - Repeated Find publication keeps the focused account widget in its host's Find
   row. Shared chrome does not reparent that widget into the ordinary toolbar.
 

@@ -451,7 +451,7 @@ export function recordedRelationshipViews(
   relationship: RecordedRelationship,
   selected: string,
   participants: Record<string, RecordedSessionPresentation>,
-  native: { brief?: string; result?: string; answer?: string | string[] },
+  native: { brief?: string; result?: string; answer?: string | string[]; trace?: string },
 ): EntryView[] {
   const edge = relationship.edge,
     target = participants[edge.to],
@@ -495,7 +495,7 @@ export function recordedRelationshipViews(
         handoff: edge.id,
         id: edge.to,
         turn: relationship.targetTurn,
-        trace: relationship.targetTurn,
+        trace: native.trace,
         traceLabel: 'Run view for ' + target.name,
         name: target.name,
         state: status,
