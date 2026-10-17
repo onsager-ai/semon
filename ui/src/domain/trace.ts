@@ -1,6 +1,25 @@
 import type { Session, Handoff, Turn, Cost } from './types';
 import type { AgentRow, AgentChart } from '../lib/trace';
 import { clock as formatClock, dur as formatDuration, tok, shortModel } from './format';
+
+/** Results viewed in the selected bounded trace, never unrelated loaded turns. */
+export function reachableResultIds(root: Turn, starts: ReadonlyMap<string, Turn>): string[] {
+  const visited = new Set<string>(),
+    results = new Set<string>();
+  const walk = (turn: Turn) => {
+    if (visited.has(turn.id)) return;
+    visited.add(turn.id);
+    for (const edge of turn.sent) {
+      if (edge.kind === 'toyou' && edge.ask === 'result') results.add(edge.id);
+      if (edge.kind !== 'spawn' && edge.kind !== 'relay') continue;
+      const child = starts.get(edge.id);
+      if (child) walk(child);
+    }
+  };
+  walk(root);
+  return [...results];
+}
+
 interface AgentNode {
   sid: string;
   turn: Turn | null;
