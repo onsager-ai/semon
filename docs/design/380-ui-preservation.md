@@ -260,8 +260,9 @@ Turning them into touch-sized buttons had enlarged phone line boxes and changed
 wrapping despite identical recorded text. Agent rows and explicit Open in controls
 retain navigation. Session menus also remove a duplicate machine chooser and a
 new Directory detail absent from the selected application; the topbar chooser
-remains. Omission of the original inert Open in claude.ai action is a separate
-pending policy decision, not an approved visual exception.
+remains. The original inert Open in claude.ai row is preserved with an explicit
+unavailable description and no external URL or host action. That restoration
+supersedes the earlier omit-row policy question; no exception is required.
 
 A capture key can change in Node before browser navigation dispatches. An old
 Quill Trace poll started in that handoff, was canceled by navigation, and was
