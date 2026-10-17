@@ -252,9 +252,8 @@ test(
                 true,
                 'unavailable selected status does not fall back to stale completed details',
               );
-              await page.unroute('**/api/viewer/home?**', withoutHomeSelected);
-              await page.unroute('**/api/sessions?**', withoutCatalogSelected);
-              await page.unroute('**/api/session-transcript?**', unavailableTranscript);
+              // Drain active async routes before navigation so no handler races its response.
+              await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
               await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
             }
