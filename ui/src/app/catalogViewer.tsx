@@ -1388,7 +1388,13 @@ export function createCatalogViewer(
       recent.update(overview.recentSnapshot(undefined, [], undefined, rail));
     else
       recent.update(
-        overview.recentSnapshot(capabilities.source_key, items, active?.key, rail, active?.meta),
+        overview.recentSnapshot(
+          capabilities.source_key,
+          items,
+          navigation.route.v === 'trace' ? navigation.route.sid : active?.key,
+          rail,
+          active?.meta,
+        ),
       );
     const pinned = shell.slots.recent.querySelector<HTMLElement>('.tree-row.stuck');
     setGeometry(shell.slots.recent, 'scrollPaddingTop', pinned ? pinned.offsetHeight + 8 : null);

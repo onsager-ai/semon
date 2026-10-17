@@ -621,12 +621,6 @@ export function createOverviewPages(host: OverviewHost) {
       { limit: 8, must: path },
     );
     const visibleRoots = orderedRoots.slice(0, 8);
-    for (const row of orderedRoots.filter((row) => path.has(row.id))) {
-      if (visibleRoots.includes(row)) continue;
-      let last = visibleRoots.length - 1;
-      while (last >= 0 && path.has(visibleRoots[last]!.id)) last--;
-      if (last >= 0) visibleRoots.splice(last, 1, row);
-    }
     return {
       // Host-owned pages preserve their empty Recent slot. No filter was run
       // there, so the reader's "No sessions match" result does not apply.
