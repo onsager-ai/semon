@@ -376,7 +376,6 @@ export function selectedSessionMenu(
       note: 'Step through',
       className: 'menu-errors',
     });
-  actions.push({ key: 'source', text: 'Choose a machine', icon: I.machine });
   if (!matchMedia('(max-width: 760px)').matches)
     actions.push({ key: 'wide', text: 'Wide transcript', icon: I.wide, checked: wide });
   else if (metadata?.family?.runs.length)
@@ -415,7 +414,6 @@ export function selectedSessionMenu(
   ];
   for (const [label, value] of [
     ['Effort', session.effort],
-    ['Directory', metadata?.cwd ?? session.repo],
     ['Branch', session.branch],
   ])
     if (value)

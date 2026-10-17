@@ -1661,8 +1661,6 @@ export function createCatalogViewer(
           writeShellPreference('wide', wide);
           root.classList.toggle('wide-mode', wide);
           shell.account.updateWide(wide);
-        } else if (key === 'source') {
-          navigateFromPanel(panel, () => sources.click());
         } else if (key === 'signals' || key === 'errors') {
           navigateFromPanel(panel, () => {
             const kind = key === 'errors' ? 'errors' : 'signals';
