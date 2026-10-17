@@ -74,6 +74,10 @@ export async function served(browser, opts = {}) {
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', (e) => page.errors.push(e.message.split('\n')[0]));
+  if (opts.captureRequests) {
+    page.requests = [];
+    page.on('request', (request) => page.requests.push(request.url()));
+  }
   page.setDefaultTimeout(opts.timeout ?? 5000);
   await page.clock.setFixedTime(ENV.now);
   await page.route(/.*/, (r) =>
