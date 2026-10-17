@@ -120,6 +120,8 @@ interface SelectedView {
     }
   >;
   following: boolean;
+  jumpVisible: boolean;
+  jumpGeneration: string | null;
   newCount: number;
   lastTotal: number | null;
   queuedAfter?: number | null;
@@ -1552,6 +1554,7 @@ export function createCatalogViewer(
     const delta = (row.top + row.bottom - top - bottom) / 2;
     if (phone) window.scrollBy(0, delta);
     else main.scrollTop += delta;
+    syncJump(view, true);
   }
   function closeAnnotations(view: SelectedView) {
     view.errorMode = undefined;
@@ -1579,6 +1582,7 @@ export function createCatalogViewer(
       }
       if (matchMedia('(max-width: 760px)').matches) window.scrollTo(0, restore.scroll);
       else document.querySelector<HTMLElement>('#main')!.scrollTop = restore.scroll;
+      syncJump(view, true);
       chrome();
       document.querySelector<HTMLElement>(restore.focus)?.focus({ preventScroll: true });
     };
@@ -2406,6 +2410,8 @@ export function createCatalogViewer(
       );
       return;
     }
+    const changedProjection = view.jumpGeneration !== current.projection.generation;
+    view.jumpGeneration = current.projection.generation;
     // A reader can move before the browser delivers its scroll event. Capture
     // the existing reading geometry before a late context redraw, as the
     // complete viewer's scroll transaction does, rather than trusting that
@@ -2462,7 +2468,7 @@ export function createCatalogViewer(
       measureSessionScreen(view.root);
       updateSessionControl(view.root, controlFor(view));
       updateSessionRuntime(view.root, runtimeFor(view));
-      syncJump(view);
+      syncJump(view, changedProjection);
       if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
         updateSessionPager(view.root, {
           sid: view.key,
@@ -2696,7 +2702,7 @@ export function createCatalogViewer(
         window.scrollTo(0, document.documentElement.scrollHeight);
       else main.scrollTop = main.scrollHeight;
     }
-    syncJump(view);
+    syncJump(view, changedProjection);
     if (view.errorMode)
       scope.frame(() => {
         if (view.annotations?.generation !== annotationGeneration(view)) void readAnnotations(view);
@@ -2711,13 +2717,25 @@ export function createCatalogViewer(
       main.scrollTop = main.scrollHeight;
     }
   }
-  function syncJump(view: SelectedView) {
+  function syncJump(view: SelectedView, observeGeometry = false) {
     if (active !== view || disposed) return;
-    updateSessionJump(view.root, !view.following, view.newCount, false, jumpTarget);
+    // Position restoration captures geometry before every redraw. The dock's
+    // visibility instead follows scroll/navigation and native content updates,
+    // as in the complete reader: expanding local content or accepting unchanged
+    // metadata must not turn a later identity redraw into a scroll observation.
+    if (observeGeometry) {
+      const gap = readingGap(),
+        page = view.store.selectedPage(),
+        latestEnd = view.store.loadedRanges().at(-1)?.end ?? 0;
+      view.jumpVisible = gap > 80 || !!(page && latestEnd < page.projection.total);
+      if (gap <= 80) view.newCount = 0;
+    }
+    updateSessionJump(view.root, view.jumpVisible, view.newCount, false, jumpTarget);
   }
   function jumpLatest(view: SelectedView) {
     if (active !== view || disposed) return;
     view.following = true;
+    view.jumpVisible = false;
     view.newCount = 0;
     syncJump(view);
     scrollEnd();
@@ -2887,7 +2905,10 @@ export function createCatalogViewer(
       drawSelected(view);
       return;
     }
-    if (after !== null) view.following = false;
+    if (after !== null) {
+      view.following = false;
+      view.jumpVisible = true;
+    }
     scope.clearTimeout(view.retry);
     const store = view.store,
       request = store.request(after, after === null ? 60 : 100),
@@ -3205,6 +3226,8 @@ export function createCatalogViewer(
         renderedFooter: '',
         fields: new Map(),
         following: true,
+        jumpVisible: false,
+        jumpGeneration: null,
         newCount: 0,
         lastTotal: null,
       };
@@ -3232,10 +3255,13 @@ export function createCatalogViewer(
       // An anchored reader must not inherit or start the delayed tail pin. The
       // first render happens before its generation-bound range is available.
       view.following = false;
+      view.jumpVisible = false;
       view.opening = false;
       pinUntil = 0;
     } else if (push) {
       view.following = true;
+      view.jumpVisible = false;
+      view.newCount = 0;
       view.opening = true;
     }
     view.errorMode = undefined;
@@ -3432,6 +3458,7 @@ export function createCatalogViewer(
                 (node) => node.dataset.turn === turn,
               );
               target?.scrollIntoView({ block: 'start' });
+              syncJump(view, true);
               target?.classList.add('flash');
               scope.timeout(() => target?.classList.remove('flash'), 1400);
             }, 0);
@@ -3452,6 +3479,7 @@ export function createCatalogViewer(
       if (push && !turn) scrollEnd();
       else if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, view.scroll);
       else document.querySelector<HTMLElement>('#main')!.scrollTop = view.scroll;
+      syncJump(view, true);
     } else {
       void loadIdentity(view);
       if (capabilities.selected_transcript) await loadSelected(view);
@@ -4043,7 +4071,7 @@ export function createCatalogViewer(
     active.following = gap <= 80;
     if (!active.following) pinUntil = 0;
     if (active.following) active.newCount = 0;
-    syncJump(active);
+    syncJump(active, true);
   };
   scope.listen(window, 'scroll', readingScroll, { passive: true });
   scope.listen(document.querySelector<HTMLElement>('#main')!, 'scroll', readingScroll, {

@@ -2476,6 +2476,260 @@ for (const width of [390, 1280])
       }
     });
 
+for (const width of [820, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`local tool expansion keeps jump visibility through unchanged observations at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch(),
+        page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme }),
+        errors = [];
+      let releaseMetadata,
+        releaseIdentity,
+        signalMetadata,
+        signalIdentity,
+        holdObservations = false,
+        generation = 'b',
+        total = 40,
+        stage = 'setup',
+        primaryError,
+        errorOverflow = false;
+      const metadataGate = new Promise((resolve) => {
+          releaseMetadata = resolve;
+        }),
+        identityGate = new Promise((resolve) => {
+          releaseIdentity = resolve;
+        }),
+        metadataStarted = new Promise((resolve) => {
+          signalMetadata = resolve;
+        }),
+        identityStarted = new Promise((resolve) => {
+          signalIdentity = resolve;
+        });
+      const waitForReading = (predicate, label, argument) => {
+        let waiting = true;
+        return withDeadline(
+          (async () => {
+            while (waiting && !(await page.evaluate(predicate, argument)))
+              await new Promise((resolve) => setTimeout(resolve, 10));
+          })(),
+          label,
+        ).finally(() => {
+          waiting = false;
+        });
+      };
+      try {
+        page.setDefaultTimeout(10000);
+        page.on('pageerror', (error) => {
+          if (errors.length < 20) errors.push(String(error).slice(0, 1000));
+          else errorOverflow = true;
+        });
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(true) });
+          if (url.pathname === '/api/sessions') {
+            const selected = url.searchParams.get('sid') === 'one';
+            if (selected && holdObservations) {
+              signalMetadata();
+              await metadataGate;
+            }
+            return route.fulfill({
+              json: list([
+                {
+                  ...meta('one'),
+                  name: selected && holdObservations ? 'Observed tool session' : 'Session one',
+                  transcript: {
+                    generation: generation.repeat(64),
+                    errors_generation: generation.repeat(64),
+                    total,
+                  },
+                },
+              ]),
+            });
+          }
+          if (url.pathname === '/api/session-identity') {
+            if (holdObservations) {
+              signalIdentity();
+              await identityGate;
+            }
+            return route.fulfill({ json: { api: 1, identity: identity('one') } });
+          }
+          if (url.pathname === '/api/session-transcript') {
+            if (
+              url.searchParams.has('generation') &&
+              url.searchParams.get('generation') !== generation.repeat(64)
+            )
+              return route.fulfill({ status: 409, json: { error: 'stale_projection' } });
+            const value = transcript('one', url.searchParams, total, generation);
+            value.entries = value.entries.map((entry) => {
+              const { text, clipped, field, ...rest } = entry;
+              return {
+                ...rest,
+                k: 'tool',
+                tid: 'tool-' + entry.slot,
+                name: 'Bash',
+                arg: 'echo recorded-' + entry.slot,
+                out: 'Recorded output',
+                ok: true,
+              };
+            });
+            return route.fulfill({ json: value });
+          }
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/sessions');
+        await page.clock.install({ time: new Date('2026-10-18T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-18T00:00:00.001Z'));
+        await page.evaluate(() => {
+          window.readingScrollEvents = 0;
+          window.identityJSONCompleted = 0;
+          const fetch = window.fetch;
+          window.fetch = async (...args) => {
+            const response = await fetch(...args);
+            if (new URL(response.url).pathname === '/api/session-identity') {
+              const json = response.json.bind(response);
+              response.json = async () => {
+                const value = await json();
+                window.identityJSONCompleted++;
+                return value;
+              };
+            }
+            return response;
+          };
+          document.querySelector('#main').addEventListener('scroll', () => {
+            window.readingScrollEvents++;
+          });
+        });
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+        });
+        await page.locator('#page [data-id="one"]').click();
+        await page.locator('#page .tsum').waitFor();
+        await waitForReading(() => window.identityJSONCompleted > 0, 'initial selected identity');
+        await page.evaluate(() => document.fonts.ready);
+        await page.clock.runFor(34);
+        const geometry = () =>
+          page.locator('#main').evaluate((main) => ({
+            top: main.scrollTop,
+            gap: main.scrollHeight - main.scrollTop - main.clientHeight,
+            jump: !document.querySelector('#page .jump-wrap').hidden,
+            scrollEvents: window.readingScrollEvents,
+          }));
+        assert.deepEqual(await geometry(), { top: 0, gap: 0, jump: false, scrollEvents: 0 });
+        stage = 'expand at top';
+        await page.locator('#page .tsum').click();
+        await page.clock.runFor(34);
+        const expanded = await geometry();
+        assert.ok(expanded.gap > 80, JSON.stringify(expanded));
+        assert.equal(expanded.top, 0);
+        assert.equal(expanded.scrollEvents, 0);
+        assert.equal(expanded.jump, false, 'Local expansion does not observe a scroll');
+        stage = 'delayed metadata';
+        holdObservations = true;
+        await page.clock.runFor(3100);
+        await withDeadline(metadataStarted, 'held metadata observation');
+        const identityBefore = await page.evaluate(() => window.identityJSONCompleted);
+        releaseMetadata();
+        await page.locator('#page .ph > h1').filter({ hasText: 'Observed tool session' }).waitFor();
+        await withDeadline(identityStarted, 'held unchanged identity');
+        assert.deepEqual(await geometry(), expanded, 'Metadata redraw retains the pre-input dock');
+        stage = 'delayed unchanged identity';
+        releaseIdentity();
+        await waitForReading(
+          (before) => window.identityJSONCompleted > before,
+          'unchanged identity JSON delivery',
+          identityBefore,
+        );
+        // The next browser task runs after the accepted identity continuation.
+        await page.evaluate(() => Promise.resolve());
+        assert.deepEqual(await geometry(), expanded, 'Identity redraw retains geometry and dock');
+        stage = 'new native projection';
+        generation = 'c';
+        total = 41;
+        await page.clock.runFor(3100);
+        await page.locator('#page [data-entry-key="one:40"]').waitFor({ state: 'attached' });
+        const updated = await geometry();
+        assert.equal(updated.top, 0, 'Native updates retain the expanded reading position');
+        assert.equal(updated.jump, true, 'A changed native projection observes the new extent');
+        stage = 'actual scroll';
+        const point = await page.locator('#main').evaluate((main) => {
+          const rect = main.getBoundingClientRect();
+          return { x: rect.right - 20, y: rect.top + 200 };
+        });
+        await page.mouse.move(point.x, point.y);
+        await page.mouse.wheel(0, 100000);
+        await page.clock.runFor(34);
+        await waitForReading(() => {
+          const main = document.querySelector('#main');
+          return (
+            main.scrollTop > 0 &&
+            main.scrollHeight - main.scrollTop - main.clientHeight <= 1 &&
+            document.querySelector('#page .jump-wrap').hidden
+          );
+        }, 'actual scroll to bottom');
+        await page.mouse.wheel(0, -100000);
+        await page.clock.runFor(34);
+        await waitForReading(
+          () =>
+            document.querySelector('#main').scrollTop === 0 &&
+            !document.querySelector('#page .jump-wrap').hidden,
+          'actual return scroll updates dock',
+        );
+        assert.ok((await geometry()).scrollEvents > 0);
+        stage = 'deliberate jump';
+        await page.getByRole('button', { name: /Jump to bottom/ }).click();
+        await page.clock.runFor(34);
+        await waitForReading(() => {
+          const main = document.querySelector('#main');
+          return (
+            main.scrollHeight - main.scrollTop - main.clientHeight <= 1 &&
+            document.querySelector('#page .jump-wrap').hidden
+          );
+        }, 'deliberate Jump to Bottom');
+        assert.equal(errorOverflow, false);
+        assert.deepEqual(errors, []);
+      } catch (error) {
+        primaryError = error;
+        console.error(
+          'reading dock diagnostic',
+          JSON.stringify({
+            width,
+            colorScheme,
+            stage,
+            errors: errors.slice(-10),
+            errorOverflow,
+            state: await withDeadline(
+              page.evaluate(() => {
+                const main = document.querySelector('#main'),
+                  jump = document.querySelector('#page .jump-wrap');
+                return {
+                  top: main?.scrollTop,
+                  height: main?.scrollHeight,
+                  viewport: main?.clientHeight,
+                  jumpHidden: jump?.hidden,
+                  scrollEvents: window.readingScrollEvents,
+                  identityJSONCompleted: window.identityJSONCompleted,
+                };
+              }),
+              'reading dock failure geometry',
+            ).catch(() => null),
+          }),
+        );
+        throw error;
+      } finally {
+        releaseMetadata();
+        releaseIdentity();
+        try {
+          await withDeadline(browser.close(), 'reading dock browser teardown');
+        } catch (error) {
+          if (primaryError)
+            throw new AggregateError([primaryError, error], 'Reading dock failure and teardown');
+          throw error;
+        }
+      }
+    });
+
 test('cached history restores tail following independently of another reader position', async () => {
   const browser = await chromium.launch();
   try {

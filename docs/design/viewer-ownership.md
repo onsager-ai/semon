@@ -106,6 +106,12 @@ with blank text under their previous projection proof. Malformed records,
 request budgets and unavailable archive bytes retain explicit incomplete states.
 Home and Analytics versions bind their qualified source publications, including
 stable machine keys; presentation hostnames never supply read authority.
+The selected reader captures current geometry before a redraw to preserve its
+reading position, including before a pending scroll event is delivered. The
+dock separately retains its last observed Jump visibility: actual scrolling,
+navigation restoration, explicit paging/Jump actions and a changed native
+projection update it. Local disclosure expansion and unchanged identity,
+metadata or relationship-preview redraws do not synthesize a scroll observation.
 One application ResizeObserver keeps an opening session at its tail while layout
 settles; user input ends that initial hold. Listener/frame cleanup belongs to the
 application effect lifetime.
