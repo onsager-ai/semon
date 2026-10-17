@@ -6077,6 +6077,26 @@ mod tests {
             .map(|snapshot| snapshot.watched.clone())
     }
 
+    /// Observe a complete committed publication without requesting a refresh.
+    /// A busy work lock is not a publication identity, and changed watcher
+    /// metadata alone does not prove that the replacement worker published.
+    fn native_complete_publication(view: &MachineView) -> Option<String> {
+        let work = match view.evidence.work.try_lock() {
+            Ok(work) => work,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if view.evidence.catalog_pending(&work) {
+            return None;
+        }
+        let cache = work.events.as_ref()?;
+        if !cache.qualified_catalog().ok()? {
+            return None;
+        }
+        let generation = work.observed_catalog_generation.clone()?;
+        (cache.session_catalog_generation().as_ref() == Some(&generation)).then_some(generation)
+    }
+
     /// The documented bound: a line is served within the rebuild spacing
     /// and one check of when it lands, plus a build (given 750 ms here),
     /// even when it lands just after a rebuild.
@@ -6166,9 +6186,10 @@ mod tests {
         let pool = RefreshPool::new(1);
         let view = pooled(&fixture, Refresh::Background, &pool);
         let _v1 = warm(&view);
-        // A build counts when it starts: the model it shows is what ends it.
-        let shown = || native_snapshot(&view);
-        let before = shown();
+        // A build counts when it starts. Only a complete committed generation
+        // proves publication; a transient busy lock cannot be the baseline.
+        let shown = || native_complete_publication(&view);
+        let before = eventually("initial complete native publication", shown);
         let started = pool.peak_and_started().1;
         let armed = Arc::new(AtomicBool::new(true));
         let trigger = armed.clone();
@@ -6187,9 +6208,7 @@ mod tests {
         eventually("a rebuild by the new worker", || {
             // The replacement may finish before the preceding read returns.
             // Wait for its published result, not an additional future build.
-            shown()
-                .filter(|snapshot| Some(snapshot) != before.as_ref())
-                .map(drop)
+            shown().filter(|generation| generation != &before).map(drop)
         });
         assert!(serves(&view, "after the panic"));
         assert!(pool.threads() <= 1);
