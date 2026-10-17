@@ -251,7 +251,10 @@ allowlisted participant summary now reuses that same generation-qualified Catalo
 read for recorded model, token and cost totals. The navigable peer row explicitly
 states that no joined turn is available. It cannot contribute invented activity,
 duration, timeline segments, waits or critical edges, and stays outside joined-turn
-traversal and aggregates. Unknown or unpriced costs remain unknown. The unchanged
+traversal and activity calculations. As in the selected application, unique
+qualified participants still contribute to the agent count and session-cost total;
+those totals do not assert a receiving turn. Unknown or unpriced costs remain
+unknown. The unchanged
 128-participant and shared decoded-metadata input bounds remain; those input
 bounds do not claim a serialized-response byte cap.
 
@@ -282,3 +285,19 @@ CI failures for newly added test formatting, Trace union narrowing and missing
 required fixture booleans remain retained and corrected; their failed runs are
 not inherited as acceptance. The current evidence packet distinguishes prepared
 changes, supporting branch runs, PR heads and tested merge-preview identities.
+
+Recent child selection follows the selected application's three passes: retain up
+to eight waiting/running children, include the selected or expanded ancestor path,
+then fill an ordinary preview to three rows. A one-machine Home publication and
+that same selected machine share the document's ordering scope, so a newly listed
+selected child uses the existing required-path insertion. A fresh scope keeps its
+original status/last-activity ordering. Multi-machine source changes retain their
+scope boundary. Canonical navigation identity resets forced ancestor opening;
+keyboard collapse stays effective until the next navigation. Expanding a complete
+group retains its loaded descendants and ancestor path without new reads.
+
+The served overview regression drains its owned asynchronous Playwright routes
+before navigating Home. Individual route removal did not wait for in-flight
+handlers and produced a double-handled response during navigation. The correction
+uses the locked browser tool's waiting teardown without changing application
+timers, assertions or the captured reference.

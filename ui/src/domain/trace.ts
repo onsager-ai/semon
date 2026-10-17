@@ -227,24 +227,23 @@ export function createTraceCalculations(
       active += p.change;
       peak = Math.max(peak, active);
     }
-    const totalCost = costForSessions(
-      allRunNodes(model)
-        .map((n) => SESS[n.sid])
-        .filter(Boolean),
-    );
-    const participantCount = allRunNodes(model).length;
+    const runNodes = allRunNodes(model),
+      joinedCost = costForSessions(runNodes.map((n) => SESS[n.sid]).filter(Boolean)),
+      participantCosts = [joinedCost, ...model.passivePeers.map((peer) => peer.summary.cost)],
+      totalCost: Cost = {
+        ...joinedCost,
+        usd: participantCosts.some((cost) => cost.usd == null)
+          ? null
+          : participantCosts.reduce((sum, cost) => sum + cost.usd!, 0),
+        unpriced_models: [
+          ...new Set(participantCosts.flatMap((cost) => cost.unpriced_models ?? [])),
+        ],
+      };
+    const participantCount = runNodes.length + model.passivePeers.length;
     const summary = [
       participantCount + (participantCount === 1 ? ' agent' : ' agents'),
       dur(start, end),
-      costText(totalCost) +
-        (model.passivePeers.length ? ' joined session totals' : ' session totals'),
-      ...(model.passivePeers.length
-        ? [
-            model.passivePeers.length +
-              (model.passivePeers.length === 1 ? ' relayed peer' : ' relayed peers') +
-              ' with catalog totals; no joined turn',
-          ]
-        : []),
+      costText(totalCost) + ' session totals',
       ...(spawned.length ? ['Recorded spawn overlap: ' + peak] : []),
       ...(missingSpawnEnds
         ? [missingSpawnEnds + ' spawn end' + (missingSpawnEnds === 1 ? '' : 's') + ' not recorded']
@@ -377,7 +376,7 @@ export function createTraceCalculations(
           label: [
             peer.summary.name,
             peerModel,
-            'No joined turn in this trace',
+            "Its turn isn't in these logs",
             tokens,
             costText(recordedCost) + ' recorded catalog session total',
           ]
@@ -385,7 +384,7 @@ export function createTraceCalculations(
             .join(', '),
           name: peer.summary.name,
           model: peerModel,
-          qualification: 'No joined turn in this trace',
+          qualification: "Its turn isn't in these logs",
           tokens,
           cost,
           costTip: 'Recorded catalog session total: ' + costText(recordedCost),

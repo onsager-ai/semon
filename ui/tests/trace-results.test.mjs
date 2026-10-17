@@ -44,7 +44,7 @@ test('viewing a bounded trace marks only root-reachable results through recorded
   assert.deepEqual(reachableResultIds(root, starts), ['root-result', 'child-result']);
 });
 
-test('unjoined relay participants stay passive and do not affect joined-turn calculations', () => {
+test('qualified relay participants contribute session totals without joining causal activity', () => {
   const sessions = {
       root: {
         id: 'root',
@@ -90,6 +90,7 @@ test('unjoined relay participants stay passive and do not affect joined-turn cal
         relay('known-relay', 'joined', 160, 180),
         relay('constructor-relay', 'constructor', 170, 185),
         relay('prototype-relay', '__proto__', 180, 190),
+        relay('harbor-again', 'harbor', 190, 195),
       ],
     },
     joinedTurn = {
@@ -137,7 +138,10 @@ test('unjoined relay participants stay passive and do not affect joined-turn cal
           { claude: 'Claude Code', codex: 'Codex' },
           { done: 'Finished', work: 'Working', wait: 'Waiting', idle: 'Idle', err: 'Failed' },
         );
-      return calculations.agentSnapshot(root);
+      return {
+        ...calculations.agentSnapshot(root),
+        tree: calculations.traceAgentTree(root),
+      };
     },
     baseline = snapshot(undefined),
     withPeers = snapshot({
@@ -150,22 +154,30 @@ test('unjoined relay participants stay passive and do not affect joined-turn cal
       joined: participantSummary('Joined relay', { usd: 0.5, unpriced_models: [] }),
     }),
     peers = withPeers.rows.filter((row) => row.kind === 'peer'),
-    joinedRows = withPeers.rows.filter((row) => row.kind === 'agent');
+    joinedRows = withPeers.rows.filter((row) => row.kind === 'agent'),
+    knownPeer = snapshot({
+      harbor: participantSummary('Harbor', { usd: 2.25, unpriced_models: [] }),
+      joined: participantSummary('Joined relay', { usd: 0.5, unpriced_models: [] }),
+    }),
+    unknownPeer = snapshot({
+      harbor: participantSummary('Harbor', { usd: null, unpriced_models: [] }),
+    });
 
   assert.equal(peers.length, 2);
   assert.deepEqual(
     peers.map((row) => row.name),
     ['Harbor', 'Unpriced peer'],
   );
-  assert.equal(peers[0].qualification, 'No joined turn in this trace');
+  assert.equal(peers[0].qualification, "Its turn isn't in these logs");
   assert.equal(peers[0].cost, '$2.3');
   assert.match(peers[0].costTip, /\$2\.25/);
   assert.equal(peers[1].cost, '—');
-  assert.match(peers[1].label, /No joined turn in this trace/);
+  assert.match(peers[1].label, /Its turn isn't in these logs/);
   for (const row of peers) {
     for (const absent of [
       'state',
       'stateLabel',
+      'critical',
       'duration',
       'segments',
       'spawns',
@@ -183,9 +195,31 @@ test('unjoined relay participants stay passive and do not affect joined-turn cal
     joinedRows,
     baseline.rows.filter((row) => row.kind === 'agent'),
   );
+  assert.deepEqual(
+    withPeers.tree.peers.map((node) => node.sid),
+    ['joined'],
+  );
+  assert.deepEqual(
+    withPeers.tree.passivePeers.map((node) => node.sid),
+    ['harbor', 'unpriced'],
+  );
+  for (const peer of withPeers.tree.passivePeers) {
+    assert.equal(Object.hasOwn(peer, 'turn'), false);
+    assert.equal(Object.hasOwn(peer, 'children'), false);
+  }
   for (const key of ['start', 'end', 'ticks', 'legend', 'incomplete'])
     assert.deepEqual(withPeers[key], baseline[key], key);
+  assert.equal(baseline.summary[0], '2 agents');
   assert.equal(baseline.summary[2], '$1.50 session totals');
-  assert.equal(withPeers.summary[2], '$1.50 joined session totals');
-  assert.ok(withPeers.summary.some((item) => item.includes('2 relayed peers with catalog totals')));
+  // Repeated relays and a summary for an already joined session do not count twice.
+  assert.equal(knownPeer.summary[0], '3 agents');
+  assert.equal(knownPeer.summary[2], '$3.75 session totals');
+  assert.equal(unknownPeer.summary[0], '3 agents');
+  assert.equal(unknownPeer.summary[2], '— session totals');
+  assert.equal(withPeers.summary[0], '4 agents');
+  assert.equal(withPeers.summary[2], '— session totals');
+  assert.equal(
+    withPeers.summary.some((item) => item.includes('relayed peer')),
+    false,
+  );
 });
