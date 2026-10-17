@@ -3289,25 +3289,33 @@ export function createCatalogViewer(
               // content. Revalidate only the already retained bounded ranges
               // under the new observation before committing their replacement.
               for (const range of previousStore.loadedRanges()) {
-                if (range.first >= Number(anchor.slot) && range.end <= Number(anchor.slot) + 100)
-                  continue;
-                const retainedRequest = anchored.request(
-                    range.first,
-                    Math.min(100, range.end - range.first),
-                  ),
-                  retainedQuery = params();
-                retainedQuery.set('sid', key);
-                retainedQuery.set('after', String(range.first));
-                retainedQuery.set('limit', String(retainedRequest.limit));
-                retainedQuery.set('generation', text(anchor.generation));
-                retainedQuery.set('errors_generation', retainedRequest.errorsGeneration!);
-                if (!currentAnchor()) throw Error('Retired turn anchor');
-                const retainedValue = await api('/api/session-transcript?' + retainedQuery);
-                if (!currentAnchor() || view.store !== previousStore)
-                  throw Error('Retired turn anchor');
-                if (!anchored.accept(retainedRequest, retainedValue))
-                  throw Error('Retired turn anchor');
+                for (let first = range.first; first < range.end; first += 100) {
+                  const limit = Math.min(100, range.end - first);
+                  if (first >= Number(anchor.slot) && first + limit <= Number(anchor.slot) + 100)
+                    continue;
+                  const retainedRequest = anchored.request(first, limit),
+                    retainedQuery = params();
+                  retainedQuery.set('sid', key);
+                  retainedQuery.set('after', String(first));
+                  retainedQuery.set('limit', String(retainedRequest.limit));
+                  retainedQuery.set('generation', text(anchor.generation));
+                  retainedQuery.set('errors_generation', retainedRequest.errorsGeneration!);
+                  if (!currentAnchor()) throw Error('Retired turn anchor');
+                  const retainedValue = await api('/api/session-transcript?' + retainedQuery);
+                  if (!currentAnchor() || view.store !== previousStore)
+                    throw Error('Retired turn anchor');
+                  if (!anchored.accept(retainedRequest, retainedValue))
+                    throw Error('Retired turn anchor');
+                }
               }
+              // Keep the requested turn newest in the bounded cache. Reuse the
+              // validated response instead of rereading its native range.
+              const finalAnchor = anchored.request(
+                Number(anchor.slot),
+                100,
+                text(anchor.generation),
+              );
+              if (!anchored.accept(finalAnchor, value)) throw Error('Retired turn anchor');
             }
           } catch (error) {
             if (!retained) anchored.destroy();
