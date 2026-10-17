@@ -44,15 +44,29 @@ jobs:
         run: |
           set -euo pipefail
           inventory="$RUNNER_TEMP/ui-reference-dependencies.txt"
-          git grep -n -E 'overhaul-port|reference-map|semon-sample\.html|overhaul\.html|tests/ui/fixture\.mjs|fixture\.mjs|sample\(' -- . > "$inventory" || status=$?
+          git grep -n -E 'overhaul-port|reference-map|semon-sample\.html|overhaul\.html|fixture\.mjs|sample\(|shots\.json|shots\.mjs|mockup-shots\.yml|pixels\.mjs' -- . > "$inventory" || status=$?
           if [ "${status:-0}" -gt 1 ]; then exit "$status"; fi
           cat "$inventory"
           test -s "$inventory"
+      - name: Extract original mockup data as JSON without running fixture writers
+        run: |
+          mkdir -p "$RUNNER_TEMP/legacy-reference-data"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { sample } from './tests/ui/fixture.mjs';
+
+          for (const name of ['overhaul', 'semon-sample']) {
+            const json = JSON.stringify(sample(name + '.html'), null, 2) + '\n';
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/legacy-reference-data/${name}.json`, json);
+          }
+          NODE
       - name: Retain dependency inventory
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-reference-dependency-inventory
-          path: ${{ runner.temp }}/ui-reference-dependencies.txt
+          path: |
+            ${{ runner.temp }}/ui-reference-dependencies.txt
+            ${{ runner.temp }}/legacy-reference-data/*.json
           if-no-files-found: error
           retention-days: 7
 
