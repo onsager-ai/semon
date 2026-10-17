@@ -34,6 +34,13 @@ export interface TraceParticipantSummary {
     scope: 'whole_session';
     last: number | null;
     status: RecordedStatus;
+    recordedActivity?:
+      | {
+          state: 'available';
+          kind: 'timestamp_clusters';
+          intervals: readonly (readonly [number, number])[];
+        }
+      | { state: 'unavailable' };
   };
 }
 export interface TokenObservation {

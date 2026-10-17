@@ -760,6 +760,82 @@ test('passive relay summaries are scoped catalog facts and retain safe session n
   ])
     assert.equal(traceMissingContextLocallyCovered({ ...qualified, ...changed }), false);
   assert.equal(traceMissingContextLocallyCovered(parsed), false);
+  const activity = {
+      state: 'available',
+      kind: 'timestamp_clusters',
+      intervals: [
+        [10, 20],
+        [30, 40],
+      ],
+    },
+    activityExtent = (recorded_activity, status = extent.status) =>
+      withExtent({ ...extent, status, recorded_activity });
+  assert.deepEqual(
+    activityExtent(activity).participantSummaries.harbor.observedExtent.recordedActivity,
+    activity,
+  );
+  assert.deepEqual(
+    activityExtent({ ...activity, intervals: [] }).participantSummaries.harbor.observedExtent
+      .recordedActivity.intervals,
+    [],
+  );
+  assert.deepEqual(
+    activityExtent({ state: 'unavailable' }).participantSummaries.harbor.observedExtent
+      .recordedActivity,
+    { state: 'unavailable' },
+  );
+  assert.equal(traceMissingContextLocallyCovered(activityExtent({ state: 'unavailable' })), true);
+  for (const invalid of [
+    { state: 'unknown' },
+    { state: 'unavailable', intervals: [] },
+    { ...activity, kind: 'receiving_turn' },
+    { ...activity, busy: [] },
+    { ...activity, intervals: [[20, 10]] },
+    { ...activity, intervals: [[-1, 10]] },
+    { ...activity, intervals: [[1, Number.MAX_SAFE_INTEGER + 1]] },
+    { ...activity, intervals: [[1.5, 2]] },
+    {
+      ...activity,
+      intervals: [
+        [10, 20],
+        [15, 30],
+      ],
+    },
+    {
+      ...activity,
+      intervals: [
+        [30, 40],
+        [10, 20],
+      ],
+    },
+    { ...activity, intervals: Array(257).fill([0, 0]) },
+  ])
+    assert.throws(() => activityExtent(invalid));
+  assert.throws(() => activityExtent(activity, { state: null, observation: 'unavailable' }));
+  let visited = 0;
+  const oversized = Array(257),
+    oversizedPair = Array(3);
+  Object.defineProperty(oversized, 0, {
+    get() {
+      visited++;
+      return [0, 0];
+    },
+  });
+  Object.defineProperty(oversizedPair, 0, {
+    get() {
+      visited++;
+      return 0;
+    },
+  });
+  assert.throws(
+    () => activityExtent({ ...activity, intervals: oversized }),
+    /Invalid causal recorded activity/,
+  );
+  assert.throws(
+    () => activityExtent({ ...activity, intervals: [oversizedPair] }),
+    /Invalid causal recorded activity/,
+  );
+  assert.equal(visited, 0, 'oversized collections are rejected before decoding their elements');
   assert.equal(
     withExtent({ ...extent, last: null }).participantSummaries.harbor.observedExtent.last,
     null,

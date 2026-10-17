@@ -49,6 +49,9 @@ export interface AgentRow {
   qualification?: string;
   duration?: string;
   extentTip?: string;
+  activityTip?: string;
+  activityQualification?: string;
+  recordedActivity?: readonly { left: number; width: number }[];
   cost?: string;
   costTip?: string;
   segments?: readonly { left: number; width: number; kind: string }[];
@@ -380,9 +383,12 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                                 />
                               </span>
                             )}
-                            {!row.duration && (
-                              <span class="agent-peer-qualification" data-tip={row.qualification}>
-                                {screenText(row.qualification ?? '')}
+                            {(row.activityQualification || !row.duration) && (
+                              <span
+                                class="agent-peer-qualification"
+                                data-tip={row.activityQualification ?? row.qualification}
+                              >
+                                {screenText(row.activityQualification ?? row.qualification ?? '')}
                               </span>
                             )}
                             <span
@@ -399,12 +405,23 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                         <span class="agent-cost" data-tip={row.costTip}>
                           {row.cost}
                         </span>
-                        <span class="agent-track" aria-hidden="true">
+                        <span class="agent-track" aria-hidden="true" data-tip={row.activityTip}>
                           {agents.ticks.map((tick, i) => (
                             <span
                               key={'grid' + i}
                               class={'agent-gridline ' + left(tick.left)}
                               aria-hidden="true"
+                            />
+                          ))}
+                          {row.recordedActivity?.map((segment, i) => (
+                            <span
+                              key={'recorded-activity' + i}
+                              class={
+                                'agent-segment busy ' +
+                                left(segment.left) +
+                                ' ' +
+                                width(segment.width)
+                              }
                             />
                           ))}
                         </span>

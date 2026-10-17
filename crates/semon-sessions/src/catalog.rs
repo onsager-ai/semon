@@ -4768,6 +4768,75 @@ mod tests {
             );
             serde_json::from_slice::<Value>(&reply.body).unwrap()
         };
+        let activity_reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
+        let peer_header: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_headers WHERE session_key='session-00001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut peer_header: Value = serde_json::from_str(&peer_header).unwrap();
+        peer_header["busy"] = json!([[10, 20], [30, 40]]);
+        let save_peer_header = |header: &Value| {
+            db.execute(
+                "UPDATE session_trace_headers SET metadata=?1 WHERE session_key='session-00001'",
+                [header.to_string()],
+            )
+            .unwrap();
+        };
+        save_peer_header(&peer_header);
+        assert_eq!(
+            trace()["participant_summaries"]["session-00001"]["observed_extent"]["recorded_activity"],
+            json!({"state":"available","kind":"timestamp_clusters","intervals":[[10,20],[30,40]]})
+        );
+        let mut empty = peer_header.clone();
+        empty["busy"] = json!([]);
+        save_peer_header(&empty);
+        assert_eq!(
+            trace()["participant_summaries"]["session-00001"]["observed_extent"]["recorded_activity"],
+            json!({"state":"available","kind":"timestamp_clusters","intervals":[]})
+        );
+        db.execute(
+            "UPDATE session_trace_headers SET metadata=?1 WHERE session_key='session-00001'",
+            ["{"],
+        )
+        .unwrap();
+        assert_eq!(
+            trace()["participant_summaries"]["session-00001"]["observed_extent"]["recorded_activity"],
+            json!({"state":"unavailable"})
+        );
+        for busy in [
+            Value::Null,
+            json!(vec![(0, 0); 257]),
+            json!([[20, 10]]),
+            json!([[10, 20], [15, 30]]),
+            json!(["x".repeat(16 * 1024)]),
+        ] {
+            let mut invalid = peer_header.clone();
+            invalid["busy"] = busy;
+            save_peer_header(&invalid);
+            let unavailable = trace();
+            assert_eq!(
+                unavailable["participant_summaries"]["session-00001"]["observed_extent"]["recorded_activity"],
+                json!({"state":"unavailable"})
+            );
+            // Activity availability never rewrites causal missing-context facts.
+            assert_eq!(unavailable["incomplete"], true);
+            assert_eq!(unavailable["incomplete_only_missing_receiving_turns"], true);
+        }
+        let mut oversized = peer_header.clone();
+        oversized["padding"] = json!("x".repeat(1024 * 1024));
+        save_peer_header(&oversized);
+        assert_eq!(
+            trace()["participant_summaries"]["session-00001"]["observed_extent"]["recorded_activity"],
+            json!({"state":"unavailable"})
+        );
+        save_peer_header(&peer_header);
+        assert_eq!(
+            crate::events::CACHE_READS.with(std::cell::Cell::get),
+            activity_reads
+        );
         assert_eq!(trace()["incomplete_only_missing_receiving_turns"], true);
         for tid in ["ambiguous-one", "ambiguous-two"] {
             db.execute(
@@ -4858,6 +4927,14 @@ mod tests {
             let extent = &trace["participant_summaries"]["session-00001"]["observed_extent"];
             assert_eq!(extent["scope"], "whole_session");
             assert_eq!(extent["status"], child["status"]);
+            assert_eq!(
+                extent["recorded_activity"],
+                if child["status"]["observation"] == "unavailable" {
+                    json!({"state":"unavailable"})
+                } else {
+                    json!({"state":"available","kind":"timestamp_clusters","intervals":[[10,20],[30,40]]})
+                }
+            );
             assert_eq!(trace["incomplete"], true);
             assert_eq!(
                 trace["incomplete_only_missing_receiving_turns"],
@@ -4941,6 +5018,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+    }
+
+    #[test]
+    fn unjoined_trace_activity_headers_share_the_existing_decoded_metadata_budget() {
+        let fixture = Fixture::new();
+        fixture.publish(6);
+        native_refresh(&fixture);
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let (turn_id, encoded): (String,String) = db.query_row("SELECT turn_id,metadata FROM session_trace_turns WHERE session_key='session-00000' ORDER BY turn_id LIMIT 1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        let ids: Vec<_> = (1..6).map(|n| format!("peer-relay-{n}")).collect();
+        let mut turn: Value = serde_json::from_str(&encoded).unwrap();
+        turn["sent"] = json!(ids);
+        db.execute("UPDATE session_trace_turns SET metadata=?1 WHERE session_key='session-00000' AND turn_id=?2", rusqlite::params![turn.to_string(),turn_id]).unwrap();
+        for n in 1..6 {
+            let key = format!("session-{n:05}");
+            let id = format!("peer-relay-{n}");
+            db.execute("INSERT INTO session_trace_edges(session_key,edge_id,metadata) VALUES('session-00000',?1,?2)", rusqlite::params![id,json!({"id":id,"kind":"relay","from":"session-00000","to":key,"at":1790812800000i64,"status":"done"}).to_string()]).unwrap();
+            let encoded: String = db
+                .query_row(
+                    "SELECT metadata FROM session_trace_headers WHERE session_key=?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut header: Value = serde_json::from_str(&encoded).unwrap();
+            header["busy"] = json!([[10, 20]]);
+            header["padding"] = json!("x".repeat(900_000));
+            let encoded = header.to_string();
+            assert!(encoded.len() < 1024 * 1024);
+            db.execute(
+                "UPDATE session_trace_headers SET metadata=?1 WHERE session_key=?2",
+                rusqlite::params![encoded, key],
+            )
+            .unwrap();
+        }
+        let reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
+        let assert_budget = || {
+            let reply = crate::session_causal_trace(
+                &fixture.options,
+                "local",
+                &format!(
+                    "sid=session-00000&scope=retained_history&turn={}",
+                    crate::viewer::percent_encode(&turn_id)
+                ),
+            );
+            assert_eq!(reply.status, 413);
+        };
+        assert_budget();
+        for table in ["session_catalog", "session_history_catalog"] {
+            db.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query.runtime','unavailable-runtime') WHERE session_key!='session-00000'"), []).unwrap();
+        }
+        assert_eq!(
+            fixture.body("sid=session-00001").1["items"][0]["status"]["observation"],
+            "unavailable"
+        );
+        assert_budget();
+        db.execute("UPDATE session_trace_headers SET source_generation='mismatched-source' WHERE session_key!='session-00000'", []).unwrap();
+        assert_budget();
+        assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), reads);
     }
 
     #[test]

@@ -468,6 +468,14 @@ for (const width of [390, 1280])
                       scope: 'whole_session',
                       last: now - 1000,
                       status: { state: 'work', observation: 'current' },
+                      recorded_activity: {
+                        state: 'available',
+                        kind: 'timestamp_clusters',
+                        intervals: [
+                          [now - 130000, now - 100000],
+                          [now - 90000, now - 80000],
+                        ],
+                      },
                     },
                   },
                 },
@@ -648,7 +656,15 @@ for (const width of [390, 1280])
         assert.equal(await peer.locator('.agent-harness-dot.h-codex').count(), 1);
         assert.equal(await peer.locator('.agent-relay-icon').count(), 1);
         assert.ok((await peer.locator('.agent-track .agent-gridline').count()) > 0);
-        assert.equal(await peer.locator('.agent-segment,.agent-wait,.agent-spawn-tick').count(), 0);
+        assert.equal(await peer.locator('.agent-segment.busy').count(), 2);
+        assert.equal(
+          await peer.locator('.agent-segment.idle,.agent-wait,.agent-spawn-tick').count(),
+          0,
+        );
+        assert.match(
+          await peer.locator('.agent-track').getAttribute('data-tip'),
+          /whole-session timestamp clusters.*not continuous CPU activity/,
+        );
         assert.equal(await peer.getAttribute('data-agent-id'), null);
         assert.equal(await peer.getAttribute('data-critical'), null);
         assert.match(await peer.getAttribute('aria-label'), /receiving|turn isn't in these logs/);
