@@ -110,7 +110,7 @@ test('retired mockup data remains available as inert historical provenance', () 
     sample: 'reference/semon-sample.html',
     overhaul: 'reference/overhaul.html',
   });
-  assert.equal(Object.keys(historical.main).length, 113);
+  assert.equal(Object.keys(historical.main).length, 150);
   assert.equal(Object.keys(historical['two-machines']).length, 12);
   for (const row of [
     ...Object.values(historical.main),
@@ -251,7 +251,7 @@ test('required actual comparison reaches every visual workflow, independently of
     assert.doesNotMatch(body, /pull_request\.number|continue-on-error/);
   }
   const candidate = step('Compare actual native and selected complete reading UI');
-  assert.match(candidate, /node preservation\.mjs\n/);
+  assert.match(candidate, /node preservation\.mjs \|\| failed=1\n/);
   assert.match(candidate, /SEMON_PIXEL_SCOPE=main node pixels\.mjs/);
   assert.doesNotMatch(candidate, /--historical-before/);
   assert.match(
