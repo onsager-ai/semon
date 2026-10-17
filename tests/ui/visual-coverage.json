@@ -1,0 +1,84 @@
+{
+  "source": "historical tests/ui/pixel-baseline.json frame names, captured before renderer retirement",
+  "historicalAdapterMap": "historical-reference-map.json is retained as inactive provenance; runtime comparison reads only this expanded manifest and the selected complete application",
+  "historicalRatchetData": "historical-pixel-ratchet.json preserves the original per-case mockup ratios and dimensions for provenance only; it is not an active baseline or acceptance rule",
+  "scopes": {
+    "main": {
+      "frames": "all",
+      "schemes": ["phone-light", "phone-dark", "desktop-light"]
+    },
+    "two-machines": {
+      "frames": ["machines", "machine-laptop", "machine-desktop"],
+      "schemes": ["phone-light", "phone-dark", "desktop-light", "desktop-dark"]
+    },
+    "pushed": {
+      "frames": ["home", "sessions", "analytics", "session-harbor", "session-deps"],
+      "schemes": ["phone-light", "phone-dark", "desktop-light"]
+    }
+  },
+  "frames": [
+    "analytics",
+    "drawer",
+    "home",
+    "machine-laptop",
+    "machines",
+    "session-a-docs",
+    "session-a-index",
+    "session-a-parse",
+    "session-a-review",
+    "session-a-review-grep",
+    "session-a-scan",
+    "session-a-store",
+    "session-advisor",
+    "session-atlas",
+    "session-atlas-ingest",
+    "session-deps",
+    "session-h-codex",
+    "session-h-failed",
+    "session-h-review",
+    "session-h-review-codex",
+    "session-harbor",
+    "session-l-sub",
+    "session-ledger",
+    "session-principal",
+    "session-q-codex",
+    "session-q-plan",
+    "session-quill",
+    "session-sentinel",
+    "sessions",
+    "trace-a-review-a-h-review",
+    "trace-atlas-h12",
+    "trace-atlas-ingest-a-ask",
+    "trace-h-review-h3",
+    "trace-harbor-h1",
+    "trace-ledger-h16",
+    "trace-principal-h8",
+    "trace-quill-h4",
+    "trace-sentinel-sentinel_0"
+  ],
+  "regions": [
+    {
+      "name": "machine-content",
+      "selector": "#page",
+      "top": true,
+      "screens": ["machine-"]
+    },
+    {
+      "name": "topbar",
+      "selector": "#topbar",
+      "top": true,
+      "screens": ["home", "sessions", "machines", "machine-", "session-"]
+    },
+    {
+      "name": "menu",
+      "selector": "dialog.panel",
+      "open": "#more-btn",
+      "screens": ["session-harbor", "session-atlas-ingest", "session-deps"]
+    },
+    {
+      "name": "transcript",
+      "selector": "#page section[aria-label=\"Transcript\"]",
+      "screens": ["session-"]
+    }
+  ]
+}

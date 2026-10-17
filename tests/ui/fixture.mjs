@@ -23,7 +23,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Original data only; renderer HTML is retained in Git history for provenance.
 export function sample(file = 'overhaul.json') {
-  const name = path.basename(file).replace(/\.html$/, '.json');
+  const name = path.basename(file);
   if (!['overhaul.json', 'semon-sample.json'].includes(name))
     throw new Error('unknown retained fixture data: ' + file);
   return JSON.parse(fs.readFileSync(path.join(here, 'fixture-data', name), 'utf8'));
