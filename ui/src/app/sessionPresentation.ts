@@ -563,17 +563,23 @@ export function selectedSessionMenu(
       ).flatMap(({ root, children }) => {
         const depths = new Map([[root.key, 0]]);
         return [root, ...children].map((run) => {
-          const depth = run === root ? 0 : (depths.get(run.parent ?? '') ?? -1) + 1;
+          const depth = run === root ? 0 : (depths.get(run.parent ?? '') ?? -1) + 1,
+            state = run.status?.state ?? 'off',
+            stateLabel =
+              run.status?.state == null
+                ? 'Status unavailable'
+                : (STATE[state] ?? 'Recorded history'),
+            cost = money(run.cost.usd);
           depths.set(run.key, depth);
           return {
             id: run.key,
             depth,
-            label: 'Open ' + run.name,
+            label: 'Open ' + [run.name, run.kind, stateLabel, cost].join(', '),
             name: run.name,
             kind: run.kind,
-            state: 'off',
-            stateLabel: 'Recorded history',
-            cost: money(run.cost.usd),
+            state,
+            stateLabel,
+            cost,
           };
         });
       }),
