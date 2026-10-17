@@ -349,3 +349,24 @@ from sharing selection or ancestry. Browser fixtures cover phone/desktop and bot
 themes, transport cancellation independently from late JSON, focused content,
 partial/unavailable workspace metadata, selected reading and Trace. These changes
 require generated-asset freshness and exact-pair CI before acceptance.
+
+The first restored-clip run exposed real View all/View script click failures.
+Failure-only geometry in CI run `39057943250`, artifact `12110193218`, identifies
+the final obstruction as the sticky topbar: the button lands near viewport y=0,
+its center hit stack reaches `header#topbar`, and transcript bottom-clip clearance
+exceeds 230px. Earlier dock interceptors remain in the raw call logs. The shared
+output expansion buttons now have a scroll margin using the shell's measured
+`--barh` plus the existing 8px spacing token. This changes scroll alignment without
+changing layout, clip geometry or click assertions. Independent source review
+covers desktop's main scroller and the phone document scroller; CI must still
+prove successful real clicks and unchanged visual comparisons.
+
+The same diagnostic's selected-status assertion had a fixture precondition
+failure. Its query-only Home route missed the bare Home POST, so the selected row
+remained in the accepted publication instead of exercising the intended native
+metadata fallback. The matcher now covers the exact Home pathname with or without
+a query. Each cold/warm attempt proves removal from all Home arrays and waits for
+its own visible accepted-publication witness before checking the unchanged
+selected inclusion, unavailable-status and three-row cap assertions. No product
+status logic or timing changed. The earlier interpretation as a selected-status
+application bug is superseded by this request/publication evidence.
