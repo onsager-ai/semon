@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { chromium } from 'playwright';
 
 export const ENV = {
@@ -51,6 +52,262 @@ export const VIEWPORTS = {
   },
 };
 
+const CAPTURE_STABLE_MS = 200;
+const CAPTURE_TIMEOUT_MS = 8000;
+const CAPTURE_API_EVENT_LIMIT = 2000;
+const CAPTURE_GENERATION_QUERY_KEYS = new Set(['generation', 'errors_generation']);
+// Fail only selected content reads. Optional observations and native controls
+// remain in the raw event log and retain their own existing suite assertions.
+const SELECTED_READ_APIS = {
+  candidate: new Set([
+    '/api/session-home',
+    '/api/session-sources',
+    '/api/session-trace',
+    '/api/session-transcript',
+    '/api/sessions',
+    '/api/viewer/chrome',
+    '/api/viewer/analytics',
+    '/api/viewer/home',
+  ]),
+  reference: new Set(['/api/analytics', '/api/model', '/api/tx']),
+};
+
+function selectedApiPath(url, origin) {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === origin && parsed.pathname.startsWith('/api/') ? parsed.pathname : null;
+  } catch {
+    return null;
+  }
+}
+
+function selectedApiQueryDigest(url, origin, { retryScope = false } = {}) {
+  const parsed = new URL(url);
+  if (parsed.origin !== origin) return null;
+  const query = new URLSearchParams(
+    [...parsed.searchParams.entries()]
+      .filter(
+        ([key]) =>
+          key !== 't' && !(retryScope && CAPTURE_GENERATION_QUERY_KEYS.has(key)),
+      )
+      .sort(([a], [b]) => a.localeCompare(b)),
+  ).toString();
+  return createHash('sha256').update(query).digest('hex');
+}
+
+function recordCaptureApiEvent(page, event) {
+  if (page.captureApiEvents.length < CAPTURE_API_EVENT_LIMIT) page.captureApiEvents.push(event);
+  else page.captureApiEventsTruncated++;
+}
+
+function failedSelectedApiEvents(page, routeKey = page.captureRouteKey) {
+  const events = page.captureApiEvents.filter((event) => event.routeKey === routeKey),
+    selected = SELECTED_READ_APIS[page.captureRole] ?? new Set();
+  return events.filter((event) => {
+    if (!selected.has(event.path)) return false;
+    if (event.event === 'response') {
+      if (event.ok || event.status === 304) return false;
+      if (event.status === 409)
+        return !events.some(
+          (later) =>
+            later.event === 'response' &&
+            (later.ok || later.status === 304) &&
+            later.path === event.path &&
+            later.method === event.method &&
+            later.retryScopeDigest === event.retryScopeDigest &&
+            later.routeKey === event.routeKey &&
+            later.at > event.at,
+        );
+      return true;
+    }
+    if (event.event !== 'failed') return false;
+    return !(
+      /ERR_ABORTED|aborted|cancelled/i.test(event.error ?? '') &&
+      event.routeKey !== page.captureRouteKey
+    );
+  });
+}
+
+function waitForSelectedApiIdle(page, timeoutMs) {
+  if (!page.inFlightApiRequests.size) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const cleanup = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      page.captureApiIdleWaiters.delete(onIdle);
+    };
+    const onIdle = () => {
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('selected API requests did not become idle'));
+    }, timeoutMs);
+    page.captureApiIdleWaiters.add(onIdle);
+    if (!page.inFlightApiRequests.size) onIdle();
+  });
+}
+
+async function waitForStableCaptureDom(page, timeoutMs) {
+  return page.evaluate(
+    ({ stableMs, timeoutMs }) =>
+      new Promise((resolve, reject) => {
+        const state = window.__semonCaptureReadiness;
+        if (!state) {
+          reject(new Error('capture mutation observer was not installed'));
+          return;
+        }
+        let stableTimer;
+        const clearStableTimer = () => {
+          if (stableTimer) clearTimeout(stableTimer);
+        };
+        const inspect = () => {
+          const panel = document.querySelector('#page'),
+            loading =
+              !panel ||
+              panel.hasAttribute('aria-busy') ||
+              !!panel.querySelector('[aria-busy="true"], [data-loading="true"]'),
+            selected =
+              !!history.state?.v &&
+              !!document.querySelector('#topbar .t, #topbar #find') &&
+              !!panel?.childElementCount;
+          return {
+            selected,
+            loading,
+            errors: panel
+              ? [...panel.querySelectorAll('[role="alert"], [data-error="true"]')]
+                  .slice(0, 10)
+                  .map((node) => node.textContent.slice(0, 200))
+              : [],
+            pathname: location.pathname,
+            state: history.state?.v ?? null,
+            mutationVersion: state.version,
+            stableForMs: Math.max(0, performance.now() - state.lastMutationAt),
+            viewport: [window.innerWidth, window.innerHeight],
+          };
+        };
+        let complete = false;
+        const finish = (error, snapshot) => {
+          if (complete) return;
+          complete = true;
+          clearTimeout(deadline);
+          clearStableTimer();
+          state.waiters.delete(check);
+          if (error) reject(error);
+          else resolve(snapshot);
+        };
+        const check = () => {
+          const snapshot = inspect();
+          if (!snapshot.selected || snapshot.loading) {
+            clearStableTimer();
+            return;
+          }
+          const remaining = stableMs - snapshot.stableForMs;
+          if (remaining <= 0) finish(null, snapshot);
+          else {
+            clearStableTimer();
+            stableTimer = setTimeout(check, remaining);
+          }
+        };
+        state.waiters.add(check);
+        const deadline = setTimeout(
+          () => finish(new Error('selected DOM did not become stable before the capture deadline')),
+          timeoutMs,
+        );
+        check();
+      }),
+    { stableMs: CAPTURE_STABLE_MS, timeoutMs },
+  );
+}
+
+export async function waitForCaptureReady(page, label = 'actual UI capture') {
+  if (!page.captureReadinessEnabled)
+    throw new Error(`${label}: served page did not enable capture request tracking`);
+  const started = Date.now(),
+    deadline = started + CAPTURE_TIMEOUT_MS;
+  let cause;
+  try {
+    while (Date.now() < deadline) {
+      await waitForSelectedApiIdle(page, Math.max(1, deadline - Date.now()));
+      const quietFor = Date.now() - page.captureApiActivityAt;
+      if (quietFor < CAPTURE_STABLE_MS)
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(deadline - Date.now(), CAPTURE_STABLE_MS - quietFor)),
+        );
+      const dom = await waitForStableCaptureDom(page, Math.max(1, deadline - Date.now()));
+      if (
+        page.inFlightApiRequests.size ||
+        Date.now() - page.captureApiActivityAt < CAPTURE_STABLE_MS ||
+        dom.stableForMs < CAPTURE_STABLE_MS
+      )
+        continue;
+      const pageErrors = page.capturePageErrors.filter(
+          (error) => error.routeKey === page.captureRouteKey,
+        ),
+        apiFailures = failedSelectedApiEvents(page);
+      if (page.captureApiEventsTruncated)
+        throw new Error(`${label}: API diagnostics truncated at ${CAPTURE_API_EVENT_LIMIT} events`);
+      if (pageErrors.length || apiFailures.length || dom.errors.length)
+        throw new Error(
+          `${label}: selected page/reading errors: ` +
+            JSON.stringify({
+              pageErrors: pageErrors.slice(0, 10),
+              apiFailures: apiFailures.slice(0, 20),
+              domErrors: dom.errors.slice(0, 10),
+            }),
+        );
+      return dom;
+    }
+  } catch (error) {
+    cause = error;
+  }
+  if (cause?.message.startsWith(`${label}: selected page/reading errors:`)) throw cause;
+  if (cause?.message.startsWith(`${label}: API diagnostics truncated`)) throw cause;
+  const [dom, pending] = await Promise.all([
+    page
+      .evaluate(() => {
+        const panel = document.querySelector('#page'),
+          state = window.__semonCaptureReadiness;
+        return {
+          selected:
+            !!history.state?.v &&
+            !!document.querySelector('#topbar .t, #topbar #find') &&
+            !!panel?.childElementCount,
+          loading:
+            !panel ||
+            panel.hasAttribute('aria-busy') ||
+            !!panel.querySelector('[aria-busy="true"], [data-loading="true"]'),
+          errors: panel
+            ? [...panel.querySelectorAll('[role="alert"], [data-error="true"]')]
+                .slice(0, 10)
+                .map((node) => node.textContent.slice(0, 200))
+            : [],
+          pathname: location.pathname,
+          state: history.state?.v ?? null,
+          mutationVersion: state?.version ?? null,
+          stableForMs: state ? Math.max(0, performance.now() - state.lastMutationAt) : 0,
+          viewport: [window.innerWidth, window.innerHeight],
+        };
+      })
+      .catch((error) => ({ unavailable: error.message })),
+    Promise.resolve([...page.inFlightApiRequests.values()]),
+  ]);
+  const apiDiagnostics = page.captureApiEvents.slice(-30);
+  throw new Error(
+    `${label}: capture readiness timed out after ${Date.now() - started}ms; ` +
+      `pending selected API=${JSON.stringify(pending)}; ` +
+      `API quiet=${Date.now() - page.captureApiActivityAt}ms; DOM=${JSON.stringify(dom)}; ` +
+      `page errors=${JSON.stringify(page.capturePageErrors.slice(-10))}; ` +
+      `API diagnostics=${JSON.stringify(apiDiagnostics)}; ` +
+      `diagnosticsTruncated=${page.captureApiEventsTruncated}; ` +
+      `cause=${cause?.message ?? 'readiness deadline elapsed'}`,
+    { cause },
+  );
+}
+
 export async function context(browser, { size = 'phone', dark = false, viewport } = {}) {
   return browser.newContext({
     ...VIEWPORTS[size],
@@ -73,9 +330,103 @@ export async function served(browser, opts = {}) {
   const ctx = await context(browser, opts);
   const page = await ctx.newPage();
   page.errors = [];
-  page.on('pageerror', (e) => page.errors.push(e.message.split('\n')[0]));
-  if (opts.captureRequests) {
-    page.requests = [];
+  page.capturePageErrors = [];
+  page.on('pageerror', (e) => {
+    const message = e.message.split('\n')[0];
+    page.errors.push(message);
+    if (page.captureReadinessEnabled)
+      page.capturePageErrors.push({ message, routeKey: page.captureRouteKey, at: Date.now() });
+  });
+  if (opts.captureRequests) page.requests = [];
+  if (opts.captureReadiness) {
+    const origin = new URL(base).origin;
+    page.captureReadinessEnabled = true;
+    page.captureRole = opts.captureRole ?? 'unknown';
+    page.captureRouteKey = 'initial';
+    page.inFlightApiRequests = new Map();
+    page.captureApiIdleWaiters = new Set();
+    page.captureApiEvents = [];
+    page.captureApiEventsTruncated = 0;
+    page.captureApiRequestSequence = 0;
+    page.captureApiActivityAt = Date.now();
+    page.on('request', (request) => {
+      const apiPath = selectedApiPath(request.url(), origin);
+      if (page.requests) page.requests.push(request.url());
+      if (apiPath) {
+        const tracked = {
+          id: ++page.captureApiRequestSequence,
+          method: request.method(),
+          path: apiPath,
+          queryDigest: selectedApiQueryDigest(request.url(), origin),
+          retryScopeDigest: selectedApiQueryDigest(request.url(), origin, { retryScope: true }),
+          routeKey: page.captureRouteKey,
+          startedAt: Date.now(),
+        };
+        page.inFlightApiRequests.set(request, tracked);
+        page.captureApiActivityAt = Date.now();
+        recordCaptureApiEvent(page, { event: 'started', ...tracked });
+      }
+    });
+    const completed = (request, event, details = {}) => {
+      const tracked = page.inFlightApiRequests.get(request);
+      if (tracked && page.inFlightApiRequests.delete(request)) {
+        page.captureApiActivityAt = Date.now();
+        if (event)
+          recordCaptureApiEvent(page, {
+            event,
+            ...tracked,
+            ...details,
+            at: Date.now(),
+            durationMs: Date.now() - tracked.startedAt,
+          });
+        recordCaptureApiEvent(page, {
+          event: 'finished',
+          ...tracked,
+          ...details,
+          at: Date.now(),
+          durationMs: Date.now() - tracked.startedAt,
+        });
+        if (!page.inFlightApiRequests.size)
+          for (const resolve of page.captureApiIdleWaiters) resolve();
+      }
+    };
+    page.on('requestfinished', (request) => completed(request));
+    page.on('requestfailed', (request) => {
+      const tracked = page.inFlightApiRequests.get(request);
+      if (tracked) {
+        const error = request.failure()?.errorText ?? 'network error';
+        recordCaptureApiEvent(page, { event: 'failed', ...tracked, error, at: Date.now() });
+        completed(request, null, { error });
+      }
+    });
+    page.on('response', (response) => {
+      const apiPath = selectedApiPath(response.url(), origin);
+      const tracked = page.inFlightApiRequests.get(response.request());
+      if (apiPath && tracked)
+        recordCaptureApiEvent(page, {
+          event: 'response',
+          ...tracked,
+          status: response.status(),
+          ok: response.ok(),
+          at: Date.now(),
+        });
+    });
+    await page.addInitScript(() => {
+      const state = { version: 0, lastMutationAt: performance.now(), waiters: new Set() },
+        observer = new MutationObserver(() => {
+          state.version++;
+          state.lastMutationAt = performance.now();
+          for (const waiter of state.waiters) waiter();
+        });
+      observer.observe(document, {
+        attributes: true,
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      Object.defineProperty(window, '__semonCaptureReadiness', { value: state });
+    });
+  } else if (opts.captureRequests) {
     page.on('request', (request) => page.requests.push(request.url()));
   }
   page.setDefaultTimeout(opts.timeout ?? 5000);
@@ -92,7 +443,37 @@ export async function served(browser, opts = {}) {
     base + (opts.path ?? '/') + ((opts.path ?? '/').includes('?') ? '&' : '?') + 't=' + token,
     { waitUntil: 'load' },
   );
-  await settled(page);
+  try {
+    await settled(page);
+  } catch (error) {
+    const dom = await page
+        .evaluate(() => ({
+          historyState: history.state,
+          pathname: location.pathname,
+          pageText: document.querySelector('#page')?.innerText.slice(0, 600) ?? null,
+        }))
+        .catch((diagnosticError) => ({ unavailable: diagnosticError.message })),
+      pending = [...(page.inFlightApiRequests?.values() ?? [])];
+    throw new Error(
+      `initial viewer load did not settle; DOM=${JSON.stringify(dom)}; ` +
+        `pending selected API=${JSON.stringify(pending)}; ` +
+        `page errors=${JSON.stringify(page.capturePageErrors ?? page.errors)}; ` +
+        `API diagnostics=${JSON.stringify(page.captureApiEvents?.slice(-30) ?? [])}; ` +
+        `cause=${error.message}`,
+      { cause: error },
+    );
+  }
+  if (opts.captureReadiness) {
+    const initialFailures = failedSelectedApiEvents(page, 'initial');
+    if (initialFailures.length)
+      throw new Error(
+        `initial viewer load had selected API failures: ${JSON.stringify(initialFailures.slice(0, 20))}`,
+      );
+    page.captureRouteKey = await page.evaluate(() =>
+      JSON.stringify(history.state ?? { v: 'unknown' }),
+    );
+    await waitForCaptureReady(page, 'initial viewer load');
+  }
   return page;
 }
 
@@ -160,6 +541,7 @@ export async function goto(page, route, D) {
   const url = new URL(destination, page.url());
   if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
   if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
+  if (page.captureReadinessEnabled) page.captureRouteKey = JSON.stringify(route);
   await page.evaluate(
     ({ r, url }) => {
       history.pushState(r, '', url);
@@ -231,7 +613,8 @@ export async function goto(page, route, D) {
     }
   }
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(60);
+  if (page.captureReadinessEnabled) await waitForCaptureReady(page, `route ${route.v}`);
+  else await page.waitForTimeout(60);
 }
 
 // Test expectations in the reference fixture's shapes, assembled exclusively

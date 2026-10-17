@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data } from './lib.mjs';
+import { ENV, launch, served, goto, data, waitForCaptureReady } from './lib.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
   assessPreservation,
@@ -39,6 +39,7 @@ const report = {
   maxRatio: MAX_RATIO,
   results: [],
   errors: [],
+  apiDiagnostics: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
 let browser;
@@ -83,6 +84,10 @@ async function capture(candidate, reference, key) {
   const images = [],
     artifactDigests = {},
     evidenceBySide = {},
+    pages = [
+      ['candidate', candidate],
+      ['reference', reference],
+    ],
     artifactPaths = {
       candidateImage: `preservation/${key}-candidate.png`,
       candidateEvidence: `preservation/${key}-candidate.json`,
@@ -91,25 +96,38 @@ async function capture(candidate, reference, key) {
       diffImage: `preservation/${key}-diff.png`,
       comparisonEvidence: `preservation/${key}-comparison.json`,
     };
-  for (const [name, page] of [
-    ['candidate', candidate],
-    ['reference', reference],
-  ]) {
-    // Both readers open at the latest record. Cancel that initial following
-    // transaction with the same real reader input before comparing their heads.
-    await page.mouse.move(page.viewportSize().width - 20, 300);
-    await page.mouse.wheel(0, -100000);
-    await page.keyboard.press('Home');
-    await page.evaluate(async () => {
-      await document.fonts.ready;
-      window.scrollTo(0, 0);
-      document.querySelector('#main').scrollTop = 0;
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    });
-    await page.waitForTimeout(150);
-    await page.waitForFunction(
-      () => scrollY <= 1 && document.querySelector('#main').scrollTop <= 1,
+  const readiness = await Promise.allSettled(
+    pages.map(async ([name, page]) => {
+      // Both readers open at the latest record. Cancel that initial following
+      // transaction with the same real reader input before comparing their heads.
+      await page.mouse.move(page.viewportSize().width - 20, 300);
+      await page.mouse.wheel(0, -100000);
+      await page.keyboard.press('Home');
+      await page.evaluate(async () => {
+        await document.fonts.ready;
+        window.scrollTo(0, 0);
+        document.querySelector('#main').scrollTop = 0;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      await page.waitForFunction(
+        () => scrollY <= 1 && document.querySelector('#main').scrollTop <= 1,
+      );
+      await waitForCaptureReady(page, `${key} ${name}`);
+    }),
+  );
+  for (const [name, page] of pages) {
+    const from = page.captureApiEventsReported ?? 0;
+    report.apiDiagnostics.push(
+      ...page.captureApiEvents.slice(from).map((event) => ({ state: key, side: name, ...event })),
     );
+    page.captureApiEventsReported = page.captureApiEvents.length;
+  }
+  const readinessErrors = readiness
+    .filter((result) => result.status === 'rejected')
+    .map((result) => result.reason?.message ?? String(result.reason));
+  if (readinessErrors.length)
+    throw new Error(`${key} capture readiness failed: ${readinessErrors.join(' | ')}`);
+  for (const [name, page] of pages) {
     const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
     evidenceBySide[name] = await snapshot(page);
@@ -172,10 +190,18 @@ try {
         viewport: { width, height: width === 390 ? 844 : 860 },
         dark,
       };
-      const candidate = await served(browser, { ...options, captureRequests: true });
+      const candidate = await served(browser, {
+        ...options,
+        captureRequests: true,
+        captureReadiness: true,
+        captureRole: 'candidate',
+      });
       const retired = candidate.requests ?? [];
       const reference = await served(browser, {
         ...options,
+        captureRequests: true,
+        captureReadiness: true,
+        captureRole: 'reference',
         base: process.env.SEMON_PRESERVATION_BASE,
         token: process.env.SEMON_PRESERVATION_TOKEN,
         path: '/?compat=1',
@@ -191,6 +217,7 @@ try {
         { v: 'analytics' },
       ]) {
         await goto(candidate, route, D);
+        reference.captureRouteKey = JSON.stringify(route);
         await reference.evaluate((route) => {
           history.pushState(route, '');
           dispatchEvent(new PopStateEvent('popstate', { state: route }));
@@ -224,6 +251,7 @@ try {
       }
       if (width === 390) {
         await goto(candidate, { v: 'home' }, D);
+        reference.captureRouteKey = JSON.stringify({ v: 'home' });
         await reference.evaluate(() => {
           history.pushState({ v: 'home' }, '');
           dispatchEvent(new PopStateEvent('popstate', { state: { v: 'home' } }));
@@ -240,6 +268,20 @@ try {
           )
           .map((url) => prefix + ' retired candidate request: ' + new URL(url).pathname),
       );
+      for (const [side, page] of [
+        ['candidate', candidate],
+        ['reference', reference],
+      ]) {
+        const from = page.captureApiEventsReported ?? 0;
+        report.apiDiagnostics.push(
+          ...page.captureApiEvents.slice(from).map((event) => ({ state: prefix, side, ...event })),
+        );
+        page.captureApiEventsReported = page.captureApiEvents.length;
+        if (page.captureApiEventsTruncated)
+          report.errors.push(
+            `${prefix} ${side} API diagnostics truncated after ${page.captureApiEventsTruncated} events`,
+          );
+      }
       await candidate.context().close();
       await reference.context().close();
     }
@@ -251,7 +293,24 @@ try {
   report.acceptance = assessVisualAcceptances(report, 'preservation', report.failures);
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 }
-console.log(JSON.stringify(report));
+console.log(
+  JSON.stringify({
+    candidate: report.candidate,
+    reference: report.reference,
+    cases: report.results.length,
+    coverageFailures: report.failures.coverage.length,
+    visualFailures: report.failures.visual.length,
+    acceptedVisualFailures: report.acceptance.accepted.length,
+    pendingVisualFailures: report.acceptance.pending.length,
+    apiEvents: report.apiDiagnostics.length,
+    apiFailures: report.apiDiagnostics.filter(
+      (event) =>
+        event.event === 'failed' ||
+        (event.event === 'response' && !event.ok && event.status !== 304),
+    ).length,
+    errors: report.errors.length,
+  }),
+);
 // Only the fixed historical before-run is diagnostic. The candidate must satisfy
 // pixel, geometry, provenance and exact coverage assertions. Neither native
 // qualification nor the control pause grants an implicit pixel waiver.
