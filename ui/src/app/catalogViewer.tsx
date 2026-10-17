@@ -3540,8 +3540,8 @@ export function createCatalogViewer(
     const observedSource = capabilities.source_key,
       observedEpoch = sourcesEpoch;
     try {
+      if (viewerHost?.nativePage) return;
       if (
-        viewerHost?.nativePage ||
         navigation.route.v === 'home' ||
         navigation.route.v === 'analytics' ||
         navigation.route.v === 'machines' ||
@@ -3833,6 +3833,11 @@ export function createCatalogViewer(
     }
   }
   function fromLocation() {
+    if (viewerHost?.nativePage) {
+      navigation.route = { v: 'machines' };
+      chrome();
+      return;
+    }
     const queryParams = new URLSearchParams(location.search);
     const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
     if (machineBookmark && !viewerHost?.nativePage) {
@@ -3862,16 +3867,6 @@ export function createCatalogViewer(
       location.pathname === '/timeline'
     ) {
       goOverview(location.pathname === '/' ? 'home' : 'analytics', false);
-      return;
-    }
-    if (
-      viewerHost?.nativePage &&
-      location.pathname !== '/sessions' &&
-      !location.pathname.startsWith('/s/')
-    ) {
-      navigation.route = { v: 'machines' };
-      chrome();
-      void overview.refresh();
       return;
     }
     const machine = queryParams.get('machine');
