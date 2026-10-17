@@ -34,6 +34,7 @@ const relationship = (id, kind, from, to, fields = {}) => ({
   at: 110,
   status: 'done',
   brief: '',
+  declined: false,
   ...fields,
 });
 
