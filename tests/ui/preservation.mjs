@@ -385,10 +385,9 @@ function fixedCaptureWheelPoint(pages) {
   const viewports = pages.map(([, page]) => page.viewportSize());
   const viewport = viewports[0];
   const width = viewport?.width ?? 0;
-  const height = viewport?.height ?? 0;
   return {
-    x: Math.max(0, width - 48),
-    y: Math.max(0, Math.min(300, height - 48)),
+    x: Math.max(0, width - 20),
+    y: 300,
     viewports,
   };
 }
@@ -399,7 +398,7 @@ async function captureWheelPointValidation(page, point) {
     const target = document.elementFromPoint(x, y);
     const element = target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
     const interactive = element?.closest(
-      'button, a, input, textarea, select, [role="button"], [contenteditable="true"]',
+      'button, a, input, textarea, select, summary, dialog, [data-tip], [role="button"], [role="link"], [role="menuitem"], [contenteditable="true"]',
     );
     let nestedScroller = null;
     for (let node = element; node && node !== main; node = node.parentElement) {
@@ -466,6 +465,10 @@ async function waitForCaptureWheel(page, deadline, predicateLabel, predicate, ar
 }
 
 async function normalizeDesktopSessionScroll(pages, key) {
+  // Local expansion can change overflow and reveal derived jump/dock chrome while
+  // scrollTop stays at zero. The reset's upward wheel is then a no-op, so send the
+  // same trusted down/up pair at its fixed inert point on both readers; never
+  // choose whether to send input from one side's geometry or pixel result.
   const evidenceBySide = new Map();
   const errors = [];
   const point = fixedCaptureWheelPoint(pages);
@@ -553,7 +556,7 @@ async function normalizeDesktopSessionScroll(pages, key) {
             },
             {
               beforeMainTop: beforeMainTop ?? 0,
-              expectedFlow,
+              expectedFlow: expectedMainFlow,
             },
           );
         } catch (error) {
