@@ -25,6 +25,7 @@ export interface CausalTrace {
   previewReady?: Set<string>;
   observation?: string;
   metadata?: CatalogSession;
+  readResults?: ReadonlySet<string>;
 }
 const optionalText = (value: unknown) => (value == null ? undefined : text(value));
 const optionalNumber = (value: unknown) => (value == null ? undefined : number(value));
@@ -303,26 +304,23 @@ export function traceSentenceParts(
     return [session(edge.from, currentTurn), verb(text), session(edge.to, starts.get(edge.id)?.id)];
   }
   if (edge.kind === 'move') return [verb('Semon moved '), session(edge.to)];
-  const text = {
-    question: ' asked you',
-    result: ' sent you a result',
-    decision: ' needs your decision',
-  }[edge.ask];
-  return [session(edge.from, currentTurn), verb(text)];
+  if (edge.kind === 'toyou') {
+    const text = {
+      question: ' asked you',
+      result: ' sent you a result',
+      decision: ' needs your decision',
+    }[edge.ask];
+    return [session(edge.from, currentTurn), verb(text)];
+  }
+  throw new Error('Unsupported recorded relationship');
 }
 
-export function traceHandoffOutcome(edge: Handoff) {
+export function traceHandoffOutcome(edge: Handoff, readResults?: ReadonlySet<string>) {
   if (edge.kind === 'move') return { state: 'done', text: 'Moved' };
   if (edge.kind === 'toyou' && edge.ask === 'result')
     return {
-      state: edge.status,
-      text: {
-        new: 'new',
-        work: 'working',
-        wait: 'waiting on you',
-        err: 'failed',
-        done: 'delivered',
-      }[edge.status],
+      state: readResults?.has(edge.id) ? 'read' : 'new',
+      text: readResults?.has(edge.id) ? 'read' : 'new',
     };
   return {
     state: edge.status,
@@ -341,6 +339,7 @@ export function traceTurnOutcome(
   handoffs: Map<string, Handoff>,
   nameOf: (id: string) => string,
   formatTime: (at: number) => string,
+  readResults?: ReadonlySet<string>,
 ) {
   const end = turn.end,
     state = end?.st ?? 'idle',
@@ -358,7 +357,7 @@ export function traceTurnOutcome(
     return { state: 'wait', text: 'Waiting on permission' };
   if (end?.why === 'working') return { state: 'work', text: 'Still working' };
   if (end?.why === 'toyou' && handoff?.kind === 'toyou') {
-    const outcome = traceHandoffOutcome(handoff),
+    const outcome = traceHandoffOutcome(handoff, readResults),
       label = [edgeAskLabel(handoff), outcome.text].filter(Boolean).join(' · ');
     return {
       state: handoff.status === 'wait' ? 'wait' : 'done',
@@ -450,6 +449,7 @@ export function renderCausalTrace(
       data.handoffs,
       (id) => causalSessionPart(data, id).text,
       (at) => clock(at, now),
+      data.readResults,
     );
     return {
       state: outcome.state,
@@ -507,7 +507,7 @@ export function renderCausalTrace(
     for (const edge of turn.sent) {
       const child = data.starts.get(edge.id),
         isResult = edge.kind === 'toyou' && edge.ask === 'result',
-        edgeOutcome = traceHandoffOutcome(edge);
+        edgeOutcome = traceHandoffOutcome(edge, data.readResults);
       hops.push({
         key: edge.id,
         className: traceHopClass(edge, !!child),

@@ -7,6 +7,7 @@ import {
 import { render } from 'preact';
 import { createOverviewPages } from './overviewPages';
 import { parseCausalTrace, renderCausalTrace, type CausalTrace } from './tracePresentation';
+import { reachableResultIds } from '../domain/trace';
 import type { ControlView } from '../lib/control';
 import type { ViewerApplication } from './viewer';
 import { object, text } from '../domain/validate';
@@ -794,6 +795,9 @@ export function createCatalogViewer(
   function drawCausal() {
     if (!causal || navigation.route.v !== 'trace') return;
     const accepted = causal;
+    const results = reachableResultIds(accepted.root, accepted.starts);
+    overview.markResults(accepted.source, results);
+    accepted.readResults = new Set(results);
     renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
       session(key, turn) {
         const url =
