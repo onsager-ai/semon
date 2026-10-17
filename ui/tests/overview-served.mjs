@@ -427,7 +427,7 @@ test(
               let sawUnavailableStatus = false,
                 sawSelectedRemovedFromHome = false,
                 sawAcceptedHomeWitness = false;
-              const homeWitnessName = 'Accepted filtered Home publication';
+              let homeWitnessName = 'Accepted filtered Home publication';
               const withoutHomeSelected = async (route) => {
                 const response = await route.fetch();
                 const body = await response.json();
@@ -495,6 +495,10 @@ test(
               await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2] + '&compat=1');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
+              await page
+                .locator('#lanes .treeitem[data-id*="atlas-ingest"]')
+                .getByText(homeWitnessName, { exact: true })
+                .waitFor({ state: 'visible' });
               assert.equal(
                 sawUnavailableStatus,
                 true,
@@ -510,10 +514,6 @@ test(
                 true,
                 'the filtered Home response includes a visible publication witness',
               );
-              await page
-                .locator('#lanes .treeitem[data-id*="atlas-ingest"]')
-                .getByText(homeWitnessName, { exact: true })
-                .waitFor({ state: 'visible' });
               const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
               await selectedRecent.waitFor({ state: 'visible' });
               const ingestRecent = page.locator('#lanes .treeitem[data-id*="atlas-ingest"]'),
@@ -567,13 +567,29 @@ test(
 
               // A fresh document preserves the existing ranked order; verify selected-path
               // promotion separately while the same Recent ordering scope is still alive.
-              await page.route('**/api/viewer/home?**', withoutHomeSelected);
+              homeWitnessName = 'Accepted warm filtered Home publication';
+              sawSelectedRemovedFromHome = false;
+              sawAcceptedHomeWitness = false;
+              await page.route(/\/api\/viewer\/home(?:\?.*)?$/, withoutHomeSelected);
               await page.route('**/api/sessions?**', withoutCatalogSelected);
               sawUnavailableStatus = false;
               await page.route('**/api/session-transcript?**', unavailableTranscript);
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
               await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
               await ingestRecent.waitFor({ state: 'visible' });
+              await ingestRecent
+                .getByText(homeWitnessName, { exact: true })
+                .waitFor({ state: 'visible' });
+              assert.equal(
+                sawSelectedRemovedFromHome,
+                true,
+                'the warm Home publication omits the selected child',
+              );
+              assert.equal(
+                sawAcceptedHomeWitness,
+                true,
+                'the warm filtered Home response has its own visible witness',
+              );
               if ((await ingestRecent.getAttribute('aria-expanded')) !== 'true') {
                 await ingestToggle.focus();
                 await ingestToggle.press('Enter');
