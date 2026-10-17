@@ -19,6 +19,7 @@ const {
   traceHarnessClass,
   traceHandoffIconKey,
   traceSessionChip,
+  traceSessionMeta,
   traceQualifiedUnjoinedRelay,
   traceSentenceParts,
   traceHandoffOutcome,
@@ -187,6 +188,27 @@ test('trace harness classes use qualified CSS tokens and leave unknown harnesses
   assert.equal(traceHarnessClass('atlas'), undefined);
   assert.equal(traceHarnessClass('atlas', 'unrecognized'), undefined);
   assert.equal(traceSessionChip({ harness: 'unrecognized' }).chipClass, undefined);
+});
+
+test('to-you hop metadata keeps its source session, current turn, and harness chip', () => {
+  const edge = relationship('question', 'toyou', 'quill', 'you', {
+      ask: 'question',
+      status: 'wait',
+    }),
+    meta = traceSessionMeta(
+      { name: 'quill', harness: 'claude' },
+      edge.from,
+      'current-turn',
+      traceHandoffOutcome(edge),
+    );
+
+  assert.equal(meta.state, 'wait');
+  assert.equal(meta.text, 'waiting on you');
+  assert.equal(meta.session, 'quill');
+  assert.equal(meta.turn, 'current-turn');
+  assert.equal(meta.name, 'quill');
+  assert.equal(meta.chip, 'Claude Code');
+  assert.equal(meta.chipClass, 'h-claude');
 });
 
 test('trace outcomes retain recorded time and distinguish locally viewed results', () => {
