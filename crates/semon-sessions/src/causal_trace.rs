@@ -655,6 +655,40 @@ struct TraceParticipantExtent {
     scope: &'static str,
     last: Option<i64>,
     status: Value,
+    recorded_activity: TraceParticipantActivity,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum TraceParticipantActivity {
+    Available {
+        kind: &'static str,
+        intervals: Vec<(i64, i64)>,
+    },
+    Unavailable,
+}
+
+fn trace_participant_activity(header: &Value) -> TraceParticipantActivity {
+    let Some(busy) = header.get("busy").filter(|value| {
+        value.as_array().is_some_and(|values| values.len() <= 256)
+            && value.to_string().len() <= 16 * 1024
+    }) else {
+        return TraceParticipantActivity::Unavailable;
+    };
+    let Ok(intervals) = serde_json::from_value::<Vec<(i64, i64)>>(busy.clone()) else {
+        return TraceParticipantActivity::Unavailable;
+    };
+    let mut previous_end = 0;
+    for (start, end) in &intervals {
+        if *start < previous_end || *start < 0 || end < start || *end > 9_007_199_254_740_991 {
+            return TraceParticipantActivity::Unavailable;
+        }
+        previous_end = *end;
+    }
+    TraceParticipantActivity::Available {
+        kind: "timestamp_clusters",
+        intervals,
+    }
 }
 
 #[derive(Default)]
@@ -710,6 +744,7 @@ fn trace_participant_summary(
                 .last
                 .filter(|value| (0..=9_007_199_254_740_991).contains(value)),
             status,
+            recorded_activity: TraceParticipantActivity::Unavailable,
         },
     }
 }
@@ -894,17 +929,27 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         let mut participant_summaries = BTreeMap::new();
         missing.other |= related.len() > 128;
         for sid in related.into_iter().take(128) {
-            let header: Option<(String, String)> = tx
+            let header: Option<(String, String, Option<String>)> = tx
                 .query_row(
-                    "SELECT generation,source_generation FROM session_trace_headers WHERE session_key=?1",
-                    [&sid],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    "SELECT generation,source_generation,CASE WHEN ?2 THEN CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END ELSE NULL END FROM session_trace_headers WHERE session_key=?1",
+                    params![sid, relay_peers.contains(&sid)],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(|_| 503u16)?;
-            let Some((version, source)) = header else {
+            let Some((version, source, activity_header)) = header else {
                 missing.other = true;
                 continue;
+            };
+            // Charge every returned relay header before any source/status
+            // rejection can discard it. Unavailable peers share the same cap.
+            let recorded_activity = match activity_header {
+                Some(encoded) => match decode(encoded) {
+                    Ok(header) => trace_participant_activity(&header),
+                    Err(413) => return Err(413),
+                    Err(_) => TraceParticipantActivity::Unavailable,
+                },
+                None => TraceParticipantActivity::Unavailable,
             };
             let metadata = crate::history_projection::catalog(&tx, &sid)
                 .map_err(|_| 503u16)?
@@ -938,7 +983,11 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                     &row,
                 );
                 missing.other |= status["observation"] == "unavailable";
-                participant_summaries.insert(sid.clone(), trace_participant_summary(&row, status));
+                let mut summary = trace_participant_summary(&row, status);
+                if summary.observed_extent.status["observation"] != "unavailable" {
+                    summary.observed_extent.recorded_activity = recorded_activity;
+                }
+                participant_summaries.insert(sid.clone(), summary);
             }
             participants.insert(sid, row.name);
         }
@@ -997,6 +1046,8 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
                 if summary.observed_extent.status["observation"] == "current" {
                     summary.observed_extent.status =
                         json!({"state":null,"observation":"unavailable"});
+                    summary.observed_extent.recorded_activity =
+                        TraceParticipantActivity::Unavailable;
                     missing.other = true;
                 }
             }
@@ -1252,7 +1303,7 @@ mod generation_tests {
         assert_eq!(summary["cost"]["unpriced_models"], json!(["unknown-model"]));
         assert_eq!(
             summary["observed_extent"],
-            json!({"scope":"whole_session","last":20,"status":{"state":"off","observation":"retained"}})
+            json!({"scope":"whole_session","last":20,"status":{"state":"off","observation":"retained"},"recorded_activity":{"state":"unavailable"}})
         );
         assert_eq!(
             summary
@@ -1301,6 +1352,42 @@ mod generation_tests {
             other: true,
         };
         assert!(!missing.locally_covered(true, true));
+    }
+
+    #[test]
+    fn recorded_activity_accepts_only_bounded_ordered_timestamp_clusters() {
+        use super::{TraceParticipantActivity, trace_participant_activity};
+        assert_eq!(
+            trace_participant_activity(&json!({"busy":[]})),
+            TraceParticipantActivity::Available {
+                kind: "timestamp_clusters",
+                intervals: vec![]
+            }
+        );
+        assert_eq!(
+            trace_participant_activity(&json!({"busy":[[10,20],[30,40]]})),
+            TraceParticipantActivity::Available {
+                kind: "timestamp_clusters",
+                intervals: vec![(10, 20), (30, 40)]
+            }
+        );
+        for header in [
+            json!({}),
+            json!({"busy":null}),
+            json!({"busy":[[20,10]]}),
+            json!({"busy":[[-1,10]]}),
+            json!({"busy":[[1,9_007_199_254_740_992i64]]}),
+            json!({"busy":[[1.5,2]]}),
+            json!({"busy":[[10,20],[15,30]]}),
+            json!({"busy":[[30,40],[10,20]]}),
+            json!({"busy":vec![(0,0);257]}),
+            json!({"busy":["x".repeat(16*1024)]}),
+        ] {
+            assert_eq!(
+                trace_participant_activity(&header),
+                TraceParticipantActivity::Unavailable
+            );
+        }
     }
 }
 
