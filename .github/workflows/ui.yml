@@ -172,6 +172,8 @@ jobs:
           }
           read -r candidate_base candidate_token < <(serve candidate 8765 "$SEMON_BIN" "$RUNNER_TEMP/candidate-index.json")
           read -r reference_base reference_token < <(serve reference 8770 "$SEMON_HARBOR_REFERENCE_BIN" "$RUNNER_TEMP/reference-index.json")
+          echo "::add-mask::$candidate_token"
+          echo "::add-mask::$reference_token"
           curl -fsS -o /dev/null "$candidate_base/?t=$candidate_token"
           curl -fsS -o /dev/null "$reference_base/?t=$reference_token"
           {
