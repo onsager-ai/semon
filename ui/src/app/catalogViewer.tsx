@@ -53,6 +53,7 @@ import {
   selectedSessionLabels,
   selectedSessionMenu,
   selectedSessionState,
+  selectedSessionFooter,
   catalogSessionRow,
   catalogSessionGroups,
 } from './sessionPresentation';
@@ -96,6 +97,7 @@ interface SelectedView {
   retryDelay: number;
   renderedRevision: number;
   renderedNote: string;
+  renderedFooter: string;
   fields: Map<
     string,
     {
@@ -2311,16 +2313,16 @@ export function createCatalogViewer(
         },
         {
           committed() {},
-          trace(turn, session = view.key) {
+          trace(turn) {
             const url =
               '/trace/native/' +
-              encodeURIComponent(session) +
+              encodeURIComponent(view.key) +
               '/' +
               encodeURIComponent(turn) +
               '?' +
               new URLSearchParams({ machine: view.sourceKey });
             history.pushState(null, '', url);
-            goCausal(session, turn);
+            goCausal(view.key, turn);
           },
           session(key) {
             void goSession(key);
@@ -2350,7 +2352,13 @@ export function createCatalogViewer(
         )
         .map((row) => row.edge.id),
     );
-    if (view.renderedRevision === view.store.revision && view.renderedNote === observationNote) {
+    const footer = view.meta ? selectedSessionFooter(view.meta) : undefined,
+      footerKey = JSON.stringify(footer ?? null);
+    if (
+      view.renderedRevision === view.store.revision &&
+      view.renderedNote === observationNote &&
+      view.renderedFooter === footerKey
+    ) {
       measureSessionScreen(view.root);
       updateSessionControl(view.root, controlFor(view));
       updateSessionRuntime(view.root, runtimeFor(view));
@@ -2367,6 +2375,7 @@ export function createCatalogViewer(
     }
     view.renderedRevision = view.store.revision;
     view.renderedNote = observationNote;
+    view.renderedFooter = footerKey;
     const anchor = [...view.root.querySelectorAll<HTMLElement>('[data-entry-key]')].find(
       (node) =>
         node.getBoundingClientRect().bottom >
@@ -2381,6 +2390,7 @@ export function createCatalogViewer(
         composerTarget,
         id: view.key,
         name: view.meta?.name ?? 'Session',
+        footer,
         control: controlFor(view),
         runtime: runtimeFor(view),
         observation:
@@ -2421,6 +2431,7 @@ export function createCatalogViewer(
               brief: preview(relationship.briefOwner)?.brief,
               result: preview(relationship.resultOwner)?.result,
               answer: preview(relationship.briefOwner)?.answer,
+              trace: context.turns.find((turn) => turn.sent.includes(relationship.edge.id))?.id,
             });
           },
           view.meta?.details?.live_observation === true,
@@ -2487,16 +2498,16 @@ export function createCatalogViewer(
         composerClosed(panel) {
           panelClosed(panel);
         },
-        trace(turn, session = view.key) {
+        trace(turn) {
           const url =
             '/trace/native/' +
-            encodeURIComponent(session) +
+            encodeURIComponent(view.key) +
             '/' +
             encodeURIComponent(turn) +
             '?' +
             new URLSearchParams({ machine: view.sourceKey });
           history.pushState(null, '', url);
-          goCausal(session, turn);
+          goCausal(view.key, turn);
         },
         session(key, turn) {
           void goSession(key, undefined, true, turn);
@@ -3043,6 +3054,7 @@ export function createCatalogViewer(
         retryDelay: 1000,
         renderedRevision: -1,
         renderedNote: '',
+        renderedFooter: '',
         fields: new Map(),
         following: true,
         newCount: 0,

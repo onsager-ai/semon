@@ -320,6 +320,11 @@ test(
               0,
             );
             assert.ok(await page.locator('#page [data-turn]').count());
+            assert.match(
+              await page.locator('#page .session-foot').textContent(),
+              /Working.*5 tool calls.*1d 4h.*\$14\.04/,
+            );
+
             assert.equal(
               await page.locator('#page [aria-label="Conversation controls"]').count(),
               0,

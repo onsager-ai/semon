@@ -1,5 +1,12 @@
 import type { CatalogSession } from '../state/catalog-wire';
-import type { BarLabel, HarnessMark, MenuAction, MenuDetail, SessionMenuSnapshot } from '../lib';
+import type {
+  BarLabel,
+  HarnessMark,
+  MenuAction,
+  MenuDetail,
+  SessionMenuSnapshot,
+  FooterView,
+} from '../lib';
 import { ago, clock, compactCount, dur, shortModel } from '../domain/format';
 import type { SessionRow } from '../lib';
 import { resumeCommand } from '../domain/resume';
@@ -15,6 +22,42 @@ export function selectedSessionState(session: CatalogSession): string {
   return (details.state === 'work' || details.state === 'wait') && !details.live_observation
     ? 'off'
     : details.state;
+}
+/** Recorded footer facts share the selected observation fence; they grant no control authority. */
+export function selectedSessionFooter(session: CatalogSession): FooterView | undefined {
+  const details = session.details;
+  if (!details) return undefined;
+  const state = selectedSessionState(session),
+    calls = details.calls,
+    cost = details.cost,
+    items: FooterView['items'][number][] = [
+      {
+        kind: 'calls',
+        text: (calls ?? '—') + (calls === 1 ? ' tool call' : ' tool calls'),
+        tip:
+          Object.entries(details.tool_calls)
+            .map(([name, count]) => name + ' ' + count)
+            .join(' · ') || 'Recorded tool calls',
+      },
+    ];
+  if (session.start != null)
+    items.push({
+      kind: 'time',
+      text: dur(session.start, state === 'work' ? null : session.last, Date.now()),
+      tip: 'Recorded session duration',
+    });
+  if (cost.usd != null && cost.usd >= 0.005 && !cost.unpriced_models.length)
+    items.push({
+      kind: 'cost',
+      text: money(cost.usd),
+      tip: 'Recorded API-equivalent cost',
+    });
+  return {
+    state,
+    stateLabel: STATE[state] ?? 'Recorded history',
+    text: STATE[state] ?? 'Recorded history',
+    items,
+  };
 }
 function familyCost(session: CatalogSession): Cost {
   const own: Cost = session.details?.cost ?? session.cost,
