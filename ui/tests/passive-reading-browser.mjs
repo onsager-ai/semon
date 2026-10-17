@@ -108,7 +108,42 @@ for (const width of [390, 1280])
             { exact: true },
           ),
           transcript = await page.locator('[data-entry-key="saved-entry"]').elementHandle();
-        await button.waitFor();
+        try {
+          await button.waitFor();
+        } catch (error) {
+          const diagnostic = await page.evaluate(() => {
+            const reader = document.querySelector('#reader');
+            return {
+              html: reader?.outerHTML.slice(0, 8000),
+              unavailable: [...document.querySelectorAll('.composer-unavailable')]
+                .slice(0, 4)
+                .map((node) => {
+                  const bounds = node.getBoundingClientRect(),
+                    style = getComputedStyle(node);
+                  return {
+                    tag: node.tagName,
+                    text: node.textContent,
+                    role: node.getAttribute('role'),
+                    ariaLabel: node.getAttribute('aria-label'),
+                    hidden: node.hidden,
+                    display: style.display,
+                    visibility: style.visibility,
+                    bounds: {
+                      x: bounds.x,
+                      y: bounds.y,
+                      width: bounds.width,
+                      height: bounds.height,
+                    },
+                  };
+                }),
+            };
+          });
+          diagnostic.aria = (await page.locator('#reader').ariaSnapshot()).slice(0, 4000);
+          diagnostic.pageErrors = errors.slice(0, 8);
+          throw new Error('Passive reading fixture: ' + JSON.stringify(diagnostic), {
+            cause: error,
+          });
+        }
         assert.equal(await button.getAttribute('aria-expanded'), 'false');
         assert.equal(await explanation.count(), 0);
         const geometry = await button.evaluate((node) => ({
