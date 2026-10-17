@@ -793,8 +793,8 @@ test(
               await captureServedFixtureFailure('context journey failure', {
                 error:
                   error instanceof Error
-                    ? { name: error.name, message: error.message }
-                    : String(error),
+                    ? { name: error.name.slice(0, 100), message: error.message.slice(0, 1000) }
+                    : String(error).slice(0, 1000),
               }).catch(() => {
                 console.error('[served fixture diagnostic unavailable]');
               });
