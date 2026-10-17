@@ -533,7 +533,11 @@ try {
         if (!route) continue;
         try {
           await goto(candidate, route.route, D);
-          const referenceRoute = selfParity ? route.route : route.referenceRoute;
+          const referenceRoute = selfParity
+            ? route.route
+            : Object.hasOwn(route, 'referenceRoute')
+              ? route.referenceRoute
+              : route.route;
           if (!referenceRoute) throw new Error('original reference route mapping is unavailable');
           await navigate(reference, referenceRoute, referenceData);
           await captureFrame(candidate, reference, key, phone);
