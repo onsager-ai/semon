@@ -145,7 +145,7 @@ export function renderSessionMenu(
                 role={action.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
                 aria-checked={action.checked === undefined ? undefined : wide}
                 aria-disabled={action.unavailable ? true : undefined}
-                title={action.unavailable}
+                data-tip={action.unavailable}
                 onClick={() => {
                   if (!live() || action.unavailable) return;
                   if (action.key === 'copy') {
