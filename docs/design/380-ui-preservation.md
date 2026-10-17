@@ -316,6 +316,17 @@ successful prior query during that narrow transition, and records its proof ID
 alongside the raw failure. Expected-current, unmatched and post-transition errors
 remain fatal. This does not introduce a general canceled-request allowance.
 
+The subsequent Home POST diagnostic also proved that Node's navigation key can
+advance before the browser dispatches navigation. Candidate captures now attach
+an opaque request tag and retain the browser's route marker alongside the raw
+network events. Only an exact `net::ERR_ABORTED` request with a unique, bounded,
+complete proof of ownership by the just-departed accepted route can be attributed
+to that prior route. Current, unknown, malformed, duplicated, truncated and
+non-abort failures remain fatal. Both required and expanded capture reports retain
+the raw evidence and derived ownership proof. The original fetch promise, request
+body, cancellation signal and capture deadline remain unchanged. This correction
+requires fresh CI; diagnostic runs and static review are not acceptance.
+
 The first instrumented replay completed 113 captures without errors and retained
 the scrolling transaction that can move a selected step out of view: bounded
 child hydration redraws called scrollEnd while follow state still reflected an
