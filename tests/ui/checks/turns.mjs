@@ -710,7 +710,7 @@ export default async function turnsCheck(browser) {
           (node) => node.dataset.turn === turn && node.classList.contains('flash'),
         ),
       started.id,
-      { polling: 'mutation' },
+      { polling: 50 },
     );
     const before = await anchorPage.evaluate((turn) => {
       const target = [...document.querySelectorAll('.turn')].find(
