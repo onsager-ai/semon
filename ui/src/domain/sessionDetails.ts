@@ -3,6 +3,7 @@ import type { Cost, TokenKind, Usage } from './types';
 
 export interface SessionDetails {
   state: string;
+  role?: boolean | null;
   cwd?: string | null;
   family?: {
     state: 'complete' | 'incomplete';
@@ -34,6 +35,7 @@ export interface SessionRelative {
   harness: string;
   kind: string;
   parent: string | null;
+  last?: number | null;
   cost: Cost;
 }
 const optionalNumber = (value: unknown) => (value == null ? undefined : number(value));
@@ -87,6 +89,7 @@ function parseRelative(value: unknown): SessionRelative {
     harness: text(row.harness),
     kind: text(row.kind),
     parent: nullableText(row.parent),
+    last: row.last == null ? null : number(row.last),
     cost: parseCost(row.cost),
   };
 }
@@ -114,6 +117,7 @@ export function parseSessionDetails(value: unknown): SessionDetails {
   if (new Set(keys).size !== keys.length) throw Error('Invalid recorded family identity');
   return {
     state,
+    role: row.role == null ? null : boolean(row.role),
     turns: count(row.turns),
     calls: row.calls == null ? null : count(row.calls),
     errors: row.errors == null ? null : count(row.errors),
