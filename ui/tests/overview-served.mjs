@@ -179,6 +179,23 @@ test(
             );
             await page.locator('#page .ib').first().waitFor();
             await page.locator('#lanes .srow').first().waitFor({ state: 'attached' });
+            assert.equal(
+              await page.locator('#lanes .child-dot').count(),
+              0,
+              'expanded Recent keeps descendant status in its flag, without a rail dot shifting age',
+            );
+            if (width === 1280) {
+              await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
+              await page.locator('.app.rail').waitFor();
+              assert.ok(
+                (await page.locator('#lanes .child-dot').count()) > 0,
+                'collapsed rail retains recorded descendant activity',
+              );
+              assert.equal(await page.locator('#lanes .kid-flag').count(), 0);
+              await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click();
+              await page.locator('.app:not(.rail)').waitFor();
+            }
+
             if (delayed) {
               assert.equal(
                 await page.locator('#page .ib:not(.quiet)').count(),
