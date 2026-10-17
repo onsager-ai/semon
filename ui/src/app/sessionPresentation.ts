@@ -46,7 +46,7 @@ export function selectedSessionFooter(session: CatalogSession): FooterView | und
       text: dur(session.start, state === 'work' ? null : session.last, Date.now()),
       tip: 'Recorded session duration',
     });
-  if (cost.usd != null && cost.usd >= 0.005 && !cost.unpriced_models.length)
+  if (cost.usd != null && cost.usd >= 0.005 && !cost.unpriced_models?.length)
     items.push({
       kind: 'cost',
       text: money(cost.usd),
