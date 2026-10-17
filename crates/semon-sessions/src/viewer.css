@@ -921,6 +921,7 @@ dialog.viewer::backdrop { background: rgb(0 0 0 / .45); }
 @media (hover: hover) { .facet-btn:hover { background: var(--hover); } .facet-chip:hover { background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent)); } }
 .filters-sheet .vclose { grid-row: auto; }
 .filters-sheet .vb { display: grid; align-content: start; gap: 12px; padding-top: 16px; padding-bottom: 16px; }
+.filters-sheet .vb .facet-info { grid-column: 1 / -1; margin: 0; padding: 0; color: var(--muted); font-size: var(--fs-sm); line-height: 1.45; overflow-wrap: anywhere; }
 .filters-sheet .vf { flex: none; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
 .filters-sheet .vf button { min-height: var(--tap); padding: 0 16px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--ground); color: var(--ink); font-size: var(--fs-sm); font-weight: 500; }
 .filters-sheet .vf .fdone { border-color: var(--ink); background: var(--ink); color: var(--ground); }
@@ -1129,7 +1130,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 /* Tablets and landscape phones keep the desktop layout, with finger-sized controls. */
 @media (pointer: coarse) and (min-width: 761px) {
   .ibtn, .rail-toggle, .nav-item, .tree-toggle, .tree-all, .menu button,
-  .menu-item, .vclose, .groupby button, .facet-btn,
+  .menu-item, .vclose, .groupby button, .facet-btn, .facet-action,
   .facet-chip, .fclear, .fdone, .disclose, .run-row, .cw-toggle, .show-all,
   .tracebtn, .hop, .turn-h .from, .more, .jump-bottom, .order-pill,
   .step > button, .tsum, .chip, .think-disclosure, .composer-unavailable { min-height: 44px; min-width: 44px; }

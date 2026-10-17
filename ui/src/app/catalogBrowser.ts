@@ -1,4 +1,5 @@
 import { createFacetChrome, createSelect, type FacetField } from '../lib';
+import type { CatalogFilterDescription } from '../lib/catalog';
 import type { CatalogSession } from '../state/catalog-wire';
 import { HARNESS } from './registry';
 import { shortModel } from '../domain/format';
@@ -15,6 +16,7 @@ export function createCatalogBrowser(host: {
   opened(panel: { destroy(): void }): void;
   closed(panel: { destroy(): void }): void;
   changed(filters: CatalogFilters): void;
+  clearFilters(): void;
 }) {
   let filters: CatalogFilters = { harness: '', repo: '', model: '', q: '' },
     before = '',
@@ -53,6 +55,7 @@ export function createCatalogBrowser(host: {
       rows: readonly CatalogSession[],
       source: string,
       sourceLabel: string,
+      context: CatalogFilterDescription,
     ) {
       // Options are observations of the loaded source, never a workspace census.
       for (const key of [...options.keys()])
@@ -101,7 +104,12 @@ export function createCatalogBrowser(host: {
         display: sourceLabel,
         options: [{ value: '', label: sourceLabel }],
       });
-      owner.update(fields);
+      const filtered = !!(values.harness || values.repo || values.model || values.q);
+      owner.update(fields, {
+        description: context.description,
+        tooltip: context.searchQualification,
+        action: filtered ? { label: 'Clear filters', run: host.clearFilters } : undefined,
+      });
     },
     destroy() {
       owner.destroy();

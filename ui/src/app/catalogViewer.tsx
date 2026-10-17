@@ -25,7 +25,11 @@ import { CatalogTranscriptStore } from '../state/catalog-transcript';
 import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
 import { createRecentRenderer } from '../lib/recent';
-import { renderCatalogList } from '../lib/catalog';
+import {
+  catalogFilterDescription,
+  renderCatalogList,
+  type CatalogObservationState,
+} from '../lib/catalog';
 import { createCatalogBrowser, type CatalogFilters } from './catalogBrowser';
 import {
   renderSessionScreen,
@@ -661,6 +665,13 @@ export function createCatalogViewer(
     saveFilters();
     void loadList(false);
   }
+  function clearListFilters() {
+    cancelCandidate();
+    harness = repo = model = query = '';
+    saveFilters();
+    void loadList(false);
+    root.querySelector<HTMLInputElement>('#sq')?.focus();
+  }
   const catalogBrowser = createCatalogBrowser({
     canOpen: () => !disposed && navigation.route.v === 'sessions' && !active && !sourcesOpen,
     opened: panelOpened,
@@ -682,6 +693,7 @@ export function createCatalogViewer(
       if (overlayBackPending) afterOverlayClose = commit;
       else commit();
     },
+    clearFilters: clearListFilters,
   });
   const params = () =>
     new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
@@ -1931,11 +1943,26 @@ export function createCatalogViewer(
       ...item,
       presentation: catalogSessionRow(item, item.parent ? [] : descendants.get(item.key)),
     }));
+    const observationState: CatalogObservationState = page?.freshness ?? 'cached',
+      observation = {
+        cached: 'Cached history',
+        updating: 'Discovering history',
+        stale: 'History observation is stale',
+        incomplete: 'History is incomplete',
+        unavailable: 'History observation is unavailable',
+      }[observationState],
+      selectedSourceLabel = sourceLabel(capabilities.source_key),
+      filterDescription = catalogFilterDescription(
+        selectedSourceLabel,
+        observation,
+        capabilities.metadata_search,
+      );
     catalogBrowser.update(
       { harness, repo, model, q: query },
       items,
       capabilities.source_key,
-      sourceLabel(capabilities.source_key),
+      selectedSourceLabel,
+      filterDescription,
     );
     const groupKey = (item: CatalogSession) =>
       groupBy === 'project'
@@ -1984,18 +2011,15 @@ export function createCatalogViewer(
           showApprovalReviews || items.some((item) => item.presentation_kind === 'Approval review'),
         sourceLabel: page?.machine_info.label ?? (capabilities.source_key || 'This source'),
         updating,
+        observationState,
         candidates,
         candidatesMore: candidateCursor !== null,
         candidateUpdating,
         candidateNote,
         discovering: page?.completeness.state === 'partial',
-        observation: {
-          cached: 'Cached history',
-          updating: 'Discovering history',
-          stale: 'History observation is stale',
-          incomplete: 'History is incomplete',
-          unavailable: 'History observation is unavailable',
-        }[page?.freshness ?? 'cached'],
+        observation,
+        filterDescription: filterDescription.description,
+        searchQualification: filterDescription.searchQualification,
         note,
         harness,
         repo,
@@ -2046,13 +2070,7 @@ export function createCatalogViewer(
           history.replaceState(history.state, '', '/sessions?' + draft);
         },
         filters: applyListFilters,
-        clearFilters() {
-          cancelCandidate();
-          harness = repo = model = query = '';
-          saveFilters();
-          void loadList(false);
-          root.querySelector<HTMLInputElement>('#sq')?.focus();
-        },
+        clearFilters: clearListFilters,
         more() {
           void loadList(true);
         },

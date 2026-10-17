@@ -253,6 +253,11 @@ count/scope explanation follows its rows so it does not displace their reading
 geometry. The independent compact Catalog component retains its optional grouped
 snapshot contract; no route selects another application or transport.
 
+The alternative Filter placement is an open proposal recorded in
+[sessions-filter-placement-proposal.md](sessions-filter-placement-proposal.md).
+The accepted layout above remains the review reference until that placement is
+explicitly selected; the proposal does not authorize changing its pixel baselines.
+
 ## Selected observation
 
 Catalog list rows carry a compact recorded status observation. They reuse the
