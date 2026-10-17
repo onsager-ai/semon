@@ -105,6 +105,56 @@ function recordCaptureApiEvent(page, event) {
   else page.captureApiEventsTruncated++;
 }
 
+// Node prepares the next capture before the browser dispatches its navigation.
+// A previous Trace poll can start in that protocol gap. Bind it only to an
+// already completed exact prior query; unmatched/current requests stay current.
+export function captureRequestOwnership(page, tracked) {
+  const transition = page.captureRouteTransition;
+  if (
+    page.captureRole !== 'candidate' ||
+    !transition ||
+    transition.from === transition.to ||
+    tracked.routeKey !== transition.to ||
+    tracked.method !== 'GET' ||
+    tracked.path !== '/api/session-trace' ||
+    !transition.expectedQueryDigest ||
+    tracked.queryDigest === transition.expectedQueryDigest
+  )
+    return { routeKey: tracked.routeKey };
+  const previous = page.captureApiEvents.findLast(
+    (event) =>
+      event.event === 'response' &&
+      event.status === 200 &&
+      event.ok &&
+      event.id < tracked.id &&
+      event.method === tracked.method &&
+      event.path === tracked.path &&
+      event.routeKey === transition.from &&
+      event.queryDigest === tracked.queryDigest &&
+      page.captureApiEvents.some(
+        (finished) =>
+          finished.event === 'finished' &&
+          finished.id === event.id &&
+          finished.method === event.method &&
+          finished.path === event.path &&
+          finished.routeKey === event.routeKey &&
+          finished.queryDigest === event.queryDigest &&
+          !finished.error,
+      ),
+  );
+  return previous
+    ? {
+        routeKey: transition.from,
+        captureRouteKeyAtStart: tracked.routeKey,
+        ownerAttribution: {
+          kind: 'completed-prior-trace-during-navigation',
+          responseId: previous.id,
+          expectedQueryDigest: transition.expectedQueryDigest,
+        },
+      }
+    : { routeKey: tracked.routeKey };
+}
+
 export function failedSelectedApiEvents(page, routeKey = page.captureRouteKey) {
   const events = page.captureApiEvents.filter((event) => event.routeKey === routeKey),
     selected = SELECTED_READ_APIS[page.captureRole] ?? new Set();
@@ -389,6 +439,7 @@ export async function served(browser, opts = {}) {
           routeKey: page.captureRouteKey,
           startedAt: Date.now(),
         };
+        Object.assign(tracked, captureRequestOwnership(page, tracked));
         page.inFlightApiRequests.set(request, tracked);
         page.captureApiActivityAt = Date.now();
         recordCaptureApiEvent(page, { event: 'started', ...tracked });
@@ -565,22 +616,54 @@ export async function goto(page, route, D) {
   const url = new URL(destination, page.url());
   if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
   if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
-  if (page.captureReadinessEnabled) page.captureRouteKey = JSON.stringify(route);
-  await page.evaluate(
-    ({ r, url }) => {
-      history.pushState(r, '', url);
-      dispatchEvent(new PopStateEvent('popstate', { state: r }));
-    },
-    {
-      r:
-        route.v === 'machine'
-          ? { ...route, id: machineKey }
-          : ['session', 'trace'].includes(route.v)
-            ? { ...route, ...(route.id ? { id: key } : { sid: key }) }
-            : route,
-      url: url.pathname + url.search + url.hash,
-    },
-  );
+  if (page.captureReadinessEnabled) {
+    const previous = page.captureRouteKey;
+    const current = JSON.stringify(route);
+    let previousRoute;
+    try {
+      previousRoute = JSON.parse(previous);
+    } catch {}
+    const traceQuery = new URLSearchParams({
+      machine: machine ?? '',
+      scope: 'retained_history',
+      sid: key ?? '',
+      turn: route.turn ?? '',
+    });
+    page.captureRouteTransition =
+      page.captureRole === 'candidate' &&
+      previousRoute?.v === 'trace' &&
+      route.v === 'trace' &&
+      machine
+        ? {
+            from: previous,
+            to: current,
+            expectedQueryDigest: selectedApiQueryDigest(
+              new URL('/api/session-trace?' + traceQuery, page.url()).href,
+              new URL(page.url()).origin,
+            ),
+          }
+        : null;
+    page.captureRouteKey = current;
+  }
+  try {
+    await page.evaluate(
+      ({ r, url }) => {
+        history.pushState(r, '', url);
+        dispatchEvent(new PopStateEvent('popstate', { state: r }));
+      },
+      {
+        r:
+          route.v === 'machine'
+            ? { ...route, id: machineKey }
+            : ['session', 'trace'].includes(route.v)
+              ? { ...route, ...(route.id ? { id: key } : { sid: key }) }
+              : route,
+        url: url.pathname + url.search + url.hash,
+      },
+    );
+  } finally {
+    page.captureRouteTransition = null;
+  }
   const title = titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
   if (title) {
