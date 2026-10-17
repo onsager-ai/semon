@@ -844,9 +844,10 @@ fn recorded_status(
     Ok(json!({"state":null,"observation":"unavailable"}))
 }
 
-/// Family rows reuse the Catalog request's runtime and custody observations.
-/// Only the bounded relative's published sources are checked; no bodies load.
-fn relative_status(
+/// Bounded related rows reuse the Catalog owner's runtime and custody checks.
+/// Callers share one capture and apply the owner's final response fences.
+/// Only the row's published sources are checked; no bodies load.
+pub(crate) fn relative_status(
     options: &Options,
     runtime: &crate::native_evidence::RuntimeObservations,
     recorded: Option<&crate::facts::source_authority::CurrentSources>,
@@ -4724,7 +4725,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_family_status_reuses_source_runtime_and_retained_qualification() {
+    fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
         fs::write(
@@ -4739,6 +4740,76 @@ mod tests {
         fixture.publish(2);
         native_refresh(&fixture);
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let (turn_id, turn_metadata): (String, String) = db.query_row(
+            "SELECT turn_id,metadata FROM session_trace_turns WHERE session_key='session-00000' ORDER BY turn_id LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let mut turn: Value = serde_json::from_str(&turn_metadata).unwrap();
+        turn["sent"] = json!(["qualified-peer-relay"]);
+        db.execute(
+            "UPDATE session_trace_turns SET metadata=?1 WHERE session_key='session-00000' AND turn_id=?2",
+            rusqlite::params![turn.to_string(), turn_id],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO session_trace_edges(session_key,edge_id,metadata) VALUES('session-00000','qualified-peer-relay',?1)",
+            [json!({"id":"qualified-peer-relay","kind":"relay","from":"session-00000","to":"session-00001","at":1790812800000i64,"status":"done"}).to_string()],
+        ).unwrap();
+        let trace_query = format!(
+            "sid=session-00000&scope=retained_history&turn={}",
+            crate::viewer::percent_encode(&turn_id)
+        );
+        let trace = || {
+            let reply = crate::session_causal_trace(&fixture.options, "local", &trace_query);
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            serde_json::from_slice::<Value>(&reply.body).unwrap()
+        };
+        assert_eq!(trace()["incomplete_only_missing_receiving_turns"], true);
+        for tid in ["ambiguous-one", "ambiguous-two"] {
+            db.execute(
+                "INSERT INTO session_trace_turns(session_key,turn_id,start_id,metadata) VALUES('session-00001',?1,'qualified-peer-relay','{}')",
+                [tid],
+            ).unwrap();
+        }
+        let ambiguous = trace();
+        assert_eq!(ambiguous["incomplete"], true);
+        assert_eq!(ambiguous["incomplete_only_missing_receiving_turns"], false);
+        assert!(ambiguous["sessions"].get("session-00001").is_none());
+        db.execute("DELETE FROM session_trace_turns WHERE session_key='session-00001' AND start_id='qualified-peer-relay'", []).unwrap();
+        let header: String = db
+            .query_row(
+                "SELECT metadata FROM session_trace_headers WHERE session_key='session-00000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut incomplete_header: Value = serde_json::from_str(&header).unwrap();
+        incomplete_header["relationships_incomplete"] = json!(true);
+        db.execute(
+            "UPDATE session_trace_headers SET metadata=?1 WHERE session_key='session-00000'",
+            [incomplete_header.to_string()],
+        )
+        .unwrap();
+        assert_eq!(trace()["incomplete_only_missing_receiving_turns"], false);
+        incomplete_header["relationships_incomplete"] = json!(false);
+        incomplete_header["content_generation"] = Value::Null;
+        db.execute(
+            "UPDATE session_trace_headers SET metadata=?1 WHERE session_key='session-00000'",
+            [incomplete_header.to_string()],
+        )
+        .unwrap();
+        let no_preview = trace();
+        assert_eq!(no_preview["previews_incomplete"], true);
+        assert_eq!(no_preview["incomplete_only_missing_receiving_turns"], false);
+        db.execute(
+            "UPDATE session_trace_headers SET metadata=?1 WHERE session_key='session-00000'",
+            [header],
+        )
+        .unwrap();
         let text: String = db
             .query_row(
                 "SELECT metadata FROM session_catalog WHERE session_key='session-00001'",
@@ -4776,6 +4847,38 @@ mod tests {
                 assert!(child.get(private).is_none());
             }
             assert!(!body.to_string().contains("synthetic prompt"));
+            let trace = crate::session_causal_trace(&fixture.options, "local", &trace_query);
+            assert_eq!(
+                trace.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&trace.body)
+            );
+            let trace: Value = serde_json::from_slice(&trace.body).unwrap();
+            let extent = &trace["participant_summaries"]["session-00001"]["observed_extent"];
+            assert_eq!(extent["scope"], "whole_session");
+            assert_eq!(extent["status"], child["status"]);
+            assert_eq!(trace["incomplete"], true);
+            assert_eq!(
+                trace["incomplete_only_missing_receiving_turns"],
+                child["status"]["observation"] != "unavailable"
+            );
+            assert!(trace["sessions"].get("session-00001").is_none());
+            assert!(
+                trace["turns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|turn| turn["sid"] == "session-00000")
+            );
+            for private in ["query", "sources", "busy", "wait_edges", "turns"] {
+                assert!(
+                    trace["participant_summaries"]["session-00001"]
+                        .get(private)
+                        .is_none()
+                );
+            }
+            assert!(!trace.to_string().contains("synthetic prompt"));
             assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), reads);
             child["status"].clone()
         };

@@ -9,7 +9,7 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { reachableResultIds, createTraceCalculations } = await import(
+const { reachableResultIds, createTraceCalculations, traceParticipantObservedEnd } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
 
@@ -108,7 +108,7 @@ test('qualified relay participants contribute session totals without joining cau
       tokens: [1.5, 2, 0.5],
       cost,
     }),
-    snapshot = (participantSummaries) => {
+    snapshot = (participantSummaries, observedNow = 1000) => {
       const costForSessions = (rows) => ({
           usd: rows.some((row) => row.cost?.usd == null)
             ? null
@@ -128,12 +128,12 @@ test('qualified relay participants contribute session totals without joining cau
             costText: (cost) =>
               cost.usd == null || cost.unpriced_models?.length ? '—' : '$' + cost.usd.toFixed(2),
             shortMoney: (usd) => '$' + usd.toFixed(1),
-            hcls: (id) => sessions[id]?.harness ?? 'you',
+            hcls: (id) => sessions[id]?.harness ?? participantSummaries?.[id]?.harness ?? 'you',
             usageTotal: (session) =>
               (session.tokens ?? []).reduce((sum, value) => sum + value, 0) * 1e6,
             nameOf: (id) => sessions[id]?.name ?? id,
           },
-          () => 1000,
+          () => observedNow,
           new Map(),
           { claude: 'Claude Code', codex: 'Codex' },
           { done: 'Finished', work: 'Working', wait: 'Waiting', idle: 'Idle', err: 'Failed' },
@@ -221,5 +221,66 @@ test('qualified relay participants contribute session totals without joining cau
   assert.equal(
     withPeers.summary.some((item) => item.includes('relayed peer')),
     false,
+  );
+  const observedSummary = (status, last = 800) => ({
+      ...participantSummary('Harbor', { usd: 2.25, unpriced_models: [] }),
+      observedExtent: { scope: 'whole_session', last, status },
+    }),
+    current = observedSummary({ state: 'work', observation: 'current' }),
+    withExtent = snapshot({ harbor: current }, 100000),
+    extentPeer = withExtent.rows.find((row) => row.kind === 'peer');
+  assert.equal(traceParticipantObservedEnd(current, 1000), 1000);
+  assert.equal(
+    traceParticipantObservedEnd(observedSummary({ state: 'off', observation: 'retained' }), 1000),
+    800,
+  );
+  assert.equal(
+    traceParticipantObservedEnd(observedSummary({ state: 'done', observation: 'current' }), 1000),
+    800,
+  );
+  for (const summary of [
+    participantSummary('Harbor', { usd: 2.25 }),
+    observedSummary({ state: null, observation: 'unavailable' }),
+    observedSummary({ state: 'work', observation: 'retained' }),
+    observedSummary({ state: 'wait', observation: 'retained' }),
+    observedSummary({ state: 'done', observation: 'retained' }, null),
+    observedSummary({ state: 'done', observation: 'current' }, -1),
+    observedSummary({ state: 'done', observation: 'current' }, 1.5),
+  ]) {
+    assert.equal(traceParticipantObservedEnd(summary, 1000), undefined);
+    const unavailable = snapshot({ harbor: summary });
+    assert.equal(unavailable.end, baseline.end);
+    assert.equal(unavailable.rows.find((row) => row.kind === 'peer').duration, undefined);
+  }
+  assert.equal(traceParticipantObservedEnd(current, Infinity), undefined);
+  assert.notEqual(withExtent.end, baseline.end);
+  assert.equal(withExtent.summary[0], '3 agents');
+  assert.equal(withExtent.summary[2], '$3.75 session totals');
+  assert.equal(extentPeer.state, 'work');
+  assert.equal(extentPeer.stateLabel, 'Working');
+  assert.equal(extentPeer.harnessClass, 'codex');
+  assert.equal(extentPeer.relay, true);
+  assert.equal(typeof extentPeer.duration, 'string');
+  assert.match(extentPeer.extentTip, /Whole-session.*receiving turn/);
+  assert.match(withExtent.extentTip, /whole-session.*do not add causal activity/);
+  assert.equal(extentPeer.qualification, "Its turn isn't in these logs");
+  const predatingRelay = snapshot({
+    harbor: observedSummary({ state: 'done', observation: 'retained' }, 129),
+  });
+  assert.equal(predatingRelay.end, baseline.end);
+  assert.equal(predatingRelay.extentTip, undefined);
+  assert.equal(predatingRelay.rows.find((row) => row.kind === 'peer').duration, undefined);
+  for (const absent of ['turn', 'segments', 'waits', 'critical', 'spawns', 'edge'])
+    assert.equal(Object.hasOwn(extentPeer, absent), false, absent);
+  assert.deepEqual(withExtent.tree.rootNode, knownPeer.tree.rootNode);
+  assert.deepEqual(withExtent.tree.peers, knownPeer.tree.peers);
+  assert.deepEqual(
+    withExtent.tree.passivePeers.map((peer) => peer.sid),
+    ['harbor'],
+  );
+  assert.deepEqual(reachableResultIds(root, new Map([['known-relay', joinedTurn]])), []);
+  assert.deepEqual(
+    withExtent.rows.filter((row) => row.kind === 'agent').map((row) => row.id),
+    ['root', 'joined'],
   );
 });

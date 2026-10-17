@@ -12,6 +12,7 @@ import { clock, tok } from '../domain/format';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
 import { parseRecordedRelationship } from '../domain/relationships';
+import { parseRecordedStatus } from '../domain/sessionDetails';
 import type { CatalogSession } from '../state/catalog-wire';
 
 export interface CausalTrace {
@@ -27,6 +28,7 @@ export interface CausalTrace {
   handoffs: Map<string, Handoff>;
   frontier: { catalog_key: string; turn: string }[];
   incomplete: boolean;
+  incompleteOnlyMissingReceivingTurns?: boolean;
   previewsIncomplete: boolean;
   previews: Record<string, string>;
   previewOwners: Map<string, { brief?: string; result?: string }>;
@@ -72,7 +74,7 @@ function parseCost(value: unknown): Cost {
 }
 function parseTraceParticipantSummary(value: unknown): TraceParticipantSummary {
   const row = object(value),
-    fields = ['name', 'harness', 'kind', 'model', 'tokens', 'cost'];
+    fields = ['name', 'harness', 'kind', 'model', 'tokens', 'cost', 'observed_extent'];
   if (Object.keys(row).some((key) => !fields.includes(key)))
     throw Error('Invalid causal participant summary fields');
   const tokens = array(row.tokens, number),
@@ -84,7 +86,22 @@ function parseTraceParticipantSummary(value: unknown): TraceParticipantSummary {
     !Object.hasOwn(cost, 'unpriced_models')
   )
     throw Error('Invalid causal participant summary metrics');
+  let observedExtent: TraceParticipantSummary['observedExtent'];
+  if (row.observed_extent !== undefined) {
+    const extent = object(row.observed_extent),
+      last = extent.last == null ? null : number(extent.last),
+      status = parseRecordedStatus(extent.status);
+    if (
+      extent.scope !== 'whole_session' ||
+      Object.keys(extent).some((key) => !['scope', 'last', 'status'].includes(key)) ||
+      !status ||
+      (last !== null && (!Number.isSafeInteger(last) || last < 0))
+    )
+      throw Error('Invalid causal participant observed extent');
+    observedExtent = { scope: 'whole_session', last, status };
+  }
   return {
+    ...(observedExtent ? { observedExtent } : {}),
     name: text(row.name),
     harness: text(row.harness),
     kind: text(row.kind),
@@ -254,6 +271,10 @@ export function parseCausalTrace(
     generation: text(data.generation),
     frontier,
     incomplete: boolean(data.incomplete),
+    incompleteOnlyMissingReceivingTurns:
+      data.incomplete_only_missing_receiving_turns === undefined
+        ? false
+        : boolean(data.incomplete_only_missing_receiving_turns),
     previewsIncomplete: boolean(data.previews_incomplete),
     previews,
     previewOwners,
@@ -311,6 +332,37 @@ export function reachableTraceSummary(root: Turn, starts: Map<string, Turn>, inc
   ]
     .filter(Boolean)
     .join(' · ');
+}
+
+/** Omit a duplicate global warning only after the producer and visible hops agree. */
+export function traceMissingContextLocallyCovered(data: CausalTrace): boolean {
+  if (
+    !data.incomplete ||
+    data.incompleteOnlyMissingReceivingTurns !== true ||
+    data.frontier.length ||
+    data.previewsIncomplete
+  )
+    return false;
+  const seen = new Set<string>();
+  let missing = 0,
+    covered = true;
+  const walk = (turn: Turn) => {
+    if (seen.has(turn.id)) return;
+    seen.add(turn.id);
+    for (const edge of turn.sent) {
+      if (edge.kind !== 'spawn' && edge.kind !== 'relay') continue;
+      const child = data.starts.get(edge.id);
+      if (child) walk(child);
+      else {
+        missing++;
+        // renderCausalTrace emits the explicit missing-turn note for precisely
+        // these hops. The participant must also retain its qualified identity.
+        covered &&= Object.hasOwn(data.participants, edge.to) && !!data.participants[edge.to];
+      }
+    }
+  };
+  walk(data.root);
+  return covered && missing > 0;
 }
 
 export function traceRootActor(turn: Turn) {
@@ -700,7 +752,11 @@ export function renderCausalTrace(
     root,
     {
       empty: false,
-      summary: reachableTraceSummary(data.root, data.starts, data.incomplete),
+      summary: reachableTraceSummary(
+        data.root,
+        data.starts,
+        data.incomplete && !traceMissingContextLocallyCovered(data),
+      ),
       hops,
       agents: agentSnapshot(data.root),
       observation: data.observation,
