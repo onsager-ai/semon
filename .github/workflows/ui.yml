@@ -1,506 +1,93 @@
-# Build once; independent suites run with isolated fixture servers and report directories.
-# The aggregate job keeps the existing required check name. See tests/ui/README.md.
-name: Viewer UI
-
+name: 380 capture-state diagnostics
 on:
   workflow_dispatch:
-    inputs:
-      exhaustive:
-        description: Audit touch targets in every fixture session
-        type: boolean
-        default: false
-      sample_report:
-        description: Include historical sample-mockup pixel reports
-        type: boolean
-        default: false
-      refresh_diagnostics:
-        description: Compare recovery live refresh with the pinned recovery baseline
-        type: boolean
-        default: false
-  pull_request:
-  push:
-    branches: [main]
-
 permissions:
   contents: read
-
-concurrency:
-  group: viewer-ui-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  actions: read
 jobs:
-  foundation:
-    name: UI types and generated assets
+  capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.x
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install pinned UI tooling
-        run: npm --prefix ui ci --no-audit --no-fund
-      - name: Type-check, security boundaries, deterministic build and freshness
-        run: |
-          npm --prefix ui run format:check
-          npm --prefix ui run check:architecture
-          npm --prefix ui run check:design
-          npm --prefix ui run typecheck
-          npm --prefix ui test
-          npm --prefix ui run check:bundle
-          npm --prefix ui run sizes
-
-      - name: Prepare generated assets for thermal-restricted review
-        if: failure() && (github.event.pull_request.number == 438 || github.event_name == 'workflow_dispatch')
-        run: npm --prefix ui run build
-      - name: Retain generated assets without bypassing freshness
-        if: failure() && (github.event.pull_request.number == 438 || github.event_name == 'workflow_dispatch')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: ui-generated-review
-          path: crates/semon-sessions/src/*.generated.js
-          if-no-files-found: error
-
-  build:
-    name: viewer test binaries
-    needs: foundation
-    runs-on: ubuntu-latest
-    # Recovery UI review builds the candidate and three exact historical refs.
-    timeout-minutes: ${{ github.event.pull_request.number == 438 && 25 || 15 }}
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Unpinned on purpose, as in rust.yml: the ref selects the stable channel.
-      - name: Install Rust toolchain
-        id: rust-toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-ui-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-ui-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
-
-      # The test-clock feature lets SEMON_TEST_NOW pin the server's clock to the fixture's.
-      - name: Build semon with the test clock
-        run: cargo build --locked -p semon-cli --bin semon --features semon-sessions/test-clock
-
-      - name: Build the embedding API fixture
-        run: cargo build --locked -p semon-sessions --example ui-account-server --features test-clock,test-ui-account-server
-
-      - name: Strip debug symbols from transferred binaries
-        run: strip --strip-debug target/debug/semon target/debug/examples/ui-account-server
-
-      # Temporary recovery qualification; ordinary runs build only the candidate.
-      # Keep the exact candidate binary while reusing dependencies for the baseline.
-      - name: Build the pinned recovery baseline for refresh comparison
-        if: github.event.pull_request.number == 438 || inputs.refresh_diagnostics
-        env:
-          REFRESH_BASELINE: c402e481dbe23bcf03841e47b5f7eccd14c0e426
-        run: |
-          cp target/debug/semon "$RUNNER_TEMP/semon-refresh-candidate"
-          git fetch --no-tags --depth=1 origin "$REFRESH_BASELINE"
-          git worktree add --detach "$RUNNER_TEMP/refresh-baseline" "$REFRESH_BASELINE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/refresh-baseline/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-          mv target/debug/semon target/debug/semon-refresh-baseline
-          cp "$RUNNER_TEMP/semon-refresh-candidate" target/debug/semon
-
-      - name: Upload test binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-test-binaries
-          path: |
-            target/debug/semon
-            target/debug/semon-refresh-baseline
-            target/debug/examples/ui-account-server
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Build the selected complete UI reference
-        if: github.event.pull_request.number == 438
-        env:
-          UI_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
-        run: |
-          git fetch --no-tags --depth=1 origin eb535ff8920fe9aa54e78babc9649cf6c9400ad6
-          git worktree add --detach "$RUNNER_TEMP/ui-before" eb535ff8920fe9aa54e78babc9649cf6c9400ad6
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-before/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-          mkdir -p target/ui-before
-          cp target/debug/semon target/ui-before/semon
-          git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
-          git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-store --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-      - name: Retain selected UI reference binary
-        if: github.event.pull_request.number == 438
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: viewer-ui-reference-binary
-          path: target/debug/semon
-          if-no-files-found: error
-          retention-days: 1
-      - name: Retain the exact before candidate binary
-        if: github.event.pull_request.number == 438
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: viewer-ui-before-binary
-          path: target/ui-before/semon
-          if-no-files-found: error
-          retention-days: 1
-
-  checks:
-    name: viewer / ${{ matrix.suite }}
-    needs: build
-    runs-on: ubuntu-latest
-    # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
-    # Product deadlines and every other suite's existing allowance stay unchanged.
-    timeout-minutes: ${{ matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) && 30 || 15 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [navigation, transcript, shell, interaction, accessibility, visual, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
-    env:
-      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
-      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-      SEMON_UI_COVERAGE: ${{ inputs.exhaustive && 'exhaustive' || 'representative' }}
-      SEMON_PIXEL_SAMPLE_REPORT: ${{ inputs.sample_report && '1' || '0' }}
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Download test binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: viewer-test-binaries
+          run-id: 38994298298
+          github-token: ${{ github.token }}
           path: target/debug
-      - name: Download selected UI reference
-        if: matrix.suite == 'visual' && github.event.pull_request.number == 438
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-ui-reference-binary
+          run-id: 38994298298
+          github-token: ${{ github.token }}
           path: target/ui-reference
-      - name: Download the freshly verified before candidate
-        if: matrix.suite == 'visual' && github.event.pull_request.number == 438
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-ui-before-binary
+          run-id: 38994298298
+          github-token: ${{ github.token }}
           path: target/ui-before
-      - name: Restore executable permissions
-        run: chmod +x target/debug/semon target/debug/examples/ui-account-server
-      - name: Restore baseline executable permissions
-        if: matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics)
-        run: chmod +x target/debug/semon-refresh-baseline
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.x
-          cache: npm
-          cache-dependency-path: tests/ui/package-lock.json
-
-      # Keep signed Ubuntu packages; avoid the intermittently unreachable Azure mirror.
-      - name: Configure Ubuntu browser dependency mirrors
+      - name: Install matching browser tools
+        working-directory: tests/ui
         run: |
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
-
-      - name: Install the check tooling and Chromium
-        working-directory: tests/ui
-        run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
-
-      - name: Browser-check infrastructure regression tests
+      - name: Serve the exact candidate, before and reference artifacts
         run: |
-          npm --prefix ui ci --no-audit --no-fund
-          node --test tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs
-
-      - name: Independent shared-account and application-shell lifecycle
-        if: matrix.suite == 'interaction'
-        run: |
-          node --test tests/ui/text-audit.test.mjs
-          node tests/ui/gallery.mjs
-          node tests/ui/compact-gallery.mjs
-          node tests/ui/native-controls.mjs
-          node --test ui/tests/browser-lifecycle.mjs ui/tests/application-lifecycle.mjs ui/tests/native-shell-lifecycle.mjs ui/tests/select-lifecycle.mjs ui/tests/code-scroll.mjs ui/tests/control-observation-browser.mjs ui/tests/jump-toolbar.mjs ui/tests/catalog-viewer-browser.mjs ui/tests/runtime-leaf-browser.mjs ui/tests/continuity-refinement-browser.mjs ui/tests/staging-viewer-browser.mjs
-
-      - name: Actual default catalog producer, keyboard and visual geometry
-        if: matrix.suite == 'interaction'
-        env:
-          SEMON_CATALOG_SERVED_BIN: ${{ github.workspace }}/target/debug/semon
-          SEMON_CATALOG_SERVED_SOURCE: ${{ github.sha }}
-          SEMON_CATALOG_SERVED_EVIDENCE: ${{ github.workspace }}/tests/ui/out/catalog-default.json
-          SEMON_OVERVIEW_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/overview-default
-          SEMON_CATALOG_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/catalog-default
-        run: node --test ui/tests/catalog-served.mjs ui/tests/overview-served.mjs
-
-      - name: Write the sample fixtures
-        run: |
-          echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")" >> "$GITHUB_ENV"
-          node tests/ui/fixture.mjs "$RUNNER_TEMP/sample-extras" --extras > /dev/null
-
-      - name: Serve the fixtures
-        run: |
-          serve() { # name port dir
-            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \
-              --claude-home "$3/claude" --claude-json "$3/.claude.json" --codex-home "$3/codex" --copilot-home "$3/copilot" --proc-root "$3/proc" --cache "$3/index.json" \
-              < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
-            for _ in $(seq 1 100); do
-              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
+          chmod +x target/debug/semon target/ui-before/semon target/ui-reference/semon
+          now=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")
+          echo "SEMON_NOW=$now" >> "$GITHUB_ENV"
+          serve() {
+            local name=$1 bin=$2 port=$3 url
+            SEMON_TEST_NOW="$now" setsid nohup "$bin" sessions --serve --listen "127.0.0.1:$port" \
+              --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" \
+              --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" \
+              --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/$name-index.json" \
+              < /dev/null > "$RUNNER_TEMP/$name.log" 2>&1 &
+            for _ in $(seq 1 150); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$name.log" || true)
               [ -n "$url" ] && break
               sleep 0.2
             done
-            [ -n "$url" ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }
-            echo "${url%%/?t=*} ${url##*t=}"
+            [ -n "$url" ] || return 1
+            echo "::add-mask::${url##*t=}"
+            printf '%s\n' "$url" > "$RUNNER_TEMP/$name.url"
           }
-          read -r base token < <(serve sample 8765 "$RUNNER_TEMP/sample")
-          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
-          echo "SEMON_BASE=$base" >> "$GITHUB_ENV"
-          echo "SEMON_TOKEN=$token" >> "$GITHUB_ENV"
-          read -r base token < <(serve sample-extras 8766 "$RUNNER_TEMP/sample-extras")
-          [ -n "$token" ] || { cat "$RUNNER_TEMP"/sample*.log; exit 1; }
-          echo "SEMON_EXTRA_BASE=$base" >> "$GITHUB_ENV"
-          echo "SEMON_EXTRA_TOKEN=$token" >> "$GITHUB_ENV"
-          curl -fsS -o /dev/null "$base/?t=$token"
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/examples/ui-account-server \
-            127.0.0.1:8768 "$RUNNER_TEMP/sample-extras/claude" "$RUNNER_TEMP/sample-extras/codex" \
-            "$RUNNER_TEMP/sample-extras/proc" "$RUNNER_TEMP/sample-extras/account-index.json" \
-            < /dev/null > "$RUNNER_TEMP/account-menu.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/account-menu.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/account-menu.log"; exit 1; }
-          base="${url%%/?t=*}"; token="${url##*t=}"
-          echo "SEMON_ACCOUNT_BASE=$base" >> "$GITHUB_ENV"
-          echo "SEMON_ACCOUNT_TOKEN=$token" >> "$GITHUB_ENV"
-          curl -fsS -o /dev/null "$base/?t=$token"
-
-      - name: Fixture gaps against the sample's data
-        if: matrix.suite == 'navigation'
+          serve candidate target/debug/semon 8765
+          serve before target/ui-before/semon 8771
+          serve reference target/ui-reference/semon 8770
+          candidate=$(cat "$RUNNER_TEMP/candidate.url")
+          reference=$(cat "$RUNNER_TEMP/reference.url")
+          echo "SEMON_BASE=${candidate%%/?t=*}" >> "$GITHUB_ENV"
+          echo "SEMON_TOKEN=${candidate##*t=}" >> "$GITHUB_ENV"
+          echo "SEMON_PRESERVATION_BASE=${reference%%/?t=*}" >> "$GITHUB_ENV"
+          echo "SEMON_PRESERVATION_TOKEN=${reference##*t=}" >> "$GITHUB_ENV"
+          git fetch --no-tags --depth=1 origin eb535ff8920fe9aa54e78babc9649cf6c9400ad6
+          git show eb535ff8920fe9aa54e78babc9649cf6c9400ad6:crates/semon-sessions/src/viewer.generated.js > "$RUNNER_TEMP/before-viewer.js"
+      - name: Original and neutral focus, matching before and after
         working-directory: tests/ui
-        run: node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
-
-      - name: Functional checks
-        if: contains(fromJSON('["navigation","transcript","shell","interaction","accessibility"]'), matrix.suite)
-        working-directory: tests/ui
-        run: node checks/run.mjs --group "$SUITE"
         env:
-          SUITE: ${{ matrix.suite }}
-      - name: Pixel comparison with the mockup
-        if: ${{ !cancelled() && matrix.suite == 'visual' }}
-        working-directory: tests/ui
-        run: node pixels.mjs
-
-      - name: Compare actual native and selected complete reading UI
-        if: ${{ !cancelled() && matrix.suite == 'visual' && github.event.pull_request.number == 438 }}
+          SEMON_PRESERVATION_CANDIDATE: 7e8a87a0873c2e68ba1e4e58e342554f76629fce
         run: |
-          chmod +x target/ui-reference/semon
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-reference/semon sessions --serve --listen 127.0.0.1:8770 \
-            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-reference-index.json" \
-            < /dev/null > "$RUNNER_TEMP/ui-reference.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-reference.log"; exit 1; }
-          cd tests/ui
-          SEMON_PRESERVATION_BASE="${url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${url##*t=}" node preservation.mjs
-
-      - name: Capture the before candidate under the same comparison protocol
-        if: ${{ !cancelled() && matrix.suite == 'visual' && github.event.pull_request.number == 438 }}
-        run: |
-          reference_url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log")
-          chmod +x target/ui-before/semon
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-before/semon sessions --serve --listen 127.0.0.1:8771 \
-            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-before-index.json" \
-            < /dev/null > "$RUNNER_TEMP/ui-before.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-before.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-before.log"; exit 1; }
-          cd tests/ui
-          SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" SEMON_UI_OUT="$SEMON_UI_OUT/before" \
-            SEMON_PRESERVATION_CANDIDATE=eb535ff8920fe9aa54e78babc9649cf6c9400ad6 \
-            SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" node preservation.mjs
-
-      - name: Live updates while the logs are written
-        if: ${{ !cancelled() && matrix.suite == 'live' }}
-        working-directory: tests/ui
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-        run: node checks/live.mjs
-
-      - name: Errors mode
-        if: ${{ !cancelled() && matrix.suite == 'performance' }}
-        working-directory: tests/ui
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-        run: node checks/errnav.mjs
-
-      - name: Long-session performance
-        if: ${{ !cancelled() && matrix.suite == 'performance' }}
-        working-directory: tests/ui
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-          SEMON_PERF_SOURCE: ${{ github.sha }}
-          SEMON_PERF_REFRESH_DIAGNOSTICS: ${{ (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) && '1' || '0' }}
-        run: node checks/perf.mjs
-
-      - name: Same-run pinned baseline live-refresh comparison
-        if: ${{ !cancelled() && matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) }}
-        working-directory: tests/ui
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon-refresh-baseline
-          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/refresh-baseline
-          SEMON_PERF_SOURCE: c402e481dbe23bcf03841e47b5f7eccd14c0e426
-          SEMON_PERF_REFRESH_DIAGNOSTICS: '1'
-        run: node checks/perf.mjs
-
-      # Requests, bytes and long tasks per screen (perf step 0). Report only: it prints the lines over tests/ui/perf-budget.json
-      # and fails only when it could not measure.
-      - name: Request and main-thread budget
-        if: ${{ !cancelled() && matrix.suite == 'performance' }}
-        working-directory: tests/ui
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-        run: node checks/budget.mjs
-
-      # One viewer over two machines' homes (the sample and a second machine, `desktop`): its Machines screens, held to
-      # their baselines against the overhaul mockup (the "two-machines" section of tests/ui/pixel-baseline.json), at 390×844
-      # and 1280×860, light and dark.
-      - name: Two machines in one viewer
-        if: ${{ !cancelled() && matrix.suite == 'transport' }}
-        env:
-          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/two-machines
-          SEMON_PIXEL_SCREENS: machines,machine-
-          SEMON_PIXEL_SCHEMES: all
-          SEMON_PIXEL_BASELINE: two-machines
-        run: |
-          [ "$(node tests/ui/fixture.mjs "$RUNNER_TEMP/second" --second)" = "$SEMON_NOW" ]
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8767 --claude-json "$RUNNER_TEMP/sample/.claude.json" \
-            --machine "$RUNNER_TEMP/sample" --machine "$RUNNER_TEMP/second" < /dev/null > "$RUNNER_TEMP/two-machines.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/two-machines.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/two-machines.log"; exit 1; }
-          cd tests/ui
-          SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" node pixels.mjs
-
-      # A second machine the way one really arrives: the sample fixture pushed over loopback (plain http, so no TLS) to `semon
-      # receive`, which writes it under recv/machines/laptop. The token is written to a 0600 file and never echoed. Both the
-      # receiver and `semon push --watch` keep running for the step below, as they would on a real pair of machines.
-      # The model built from that copy must equal the machine's own, byte for byte (tests/ui/pushed-parity.mjs).
-      - name: Pushed data, received and compared with the machine's own model
-        id: pushed-parity
-        if: ${{ !cancelled() && matrix.suite == 'transport' }}
-        env:
-          SEMON_BIN: ${{ github.workspace }}/target/debug/semon
-          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
-        run: |
-          recv="$RUNNER_TEMP/recv"; fixture_root="$RUNNER_TEMP/sample"
-          mkdir -p "$RUNNER_TEMP/recv-home" "$RUNNER_TEMP/pushed"
-          (umask 077; target/debug/semon receive token add laptop --dir "$recv" \
-            2> "$RUNNER_TEMP/token-add.log" | tr -d '\n' > "$RUNNER_TEMP/recv.token")
-          chmod 600 "$RUNNER_TEMP/recv.token"
-          [ "$(wc -c < "$RUNNER_TEMP/recv.token")" -eq 43 ] || { cat "$RUNNER_TEMP/token-add.log"; echo "no token was written"; exit 1; }
-          setsid nohup target/debug/semon receive --listen 127.0.0.1:0 --dir "$recv" \
-            < /dev/null > "$RUNNER_TEMP/receive.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*' "$RUNNER_TEMP/receive.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/receive.log"; exit 1; }
-          XDG_STATE_HOME="$RUNNER_TEMP/push-state" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon push --watch \
-            --to "$url" --token-file "$RUNNER_TEMP/recv.token" --state "$RUNNER_TEMP/push-state.json" \
-            --claude-home "$fixture_root/claude" --claude-json "$fixture_root/.claude.json" --codex-home "$fixture_root/codex" --copilot-home "$fixture_root/copilot" --proc-root "$fixture_root/proc" --cache "$RUNNER_TEMP/push-index.json" \
-            < /dev/null > "$RUNNER_TEMP/push.log" 2>&1 &
-          SEMON_TEST_NOW="$SEMON_NOW" node tests/ui/pushed-parity.mjs --home "$fixture_root" --received "$recv" --scratch "$RUNNER_TEMP/pushed"
-
-      # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
-      # the local one does: the fixture gaps (the served model and every transcript against the sample mockup's data, so the
-      # pushed transcripts are the machine's own), and the pixel comparison, served against served (the pushed copy against the
-      # machine's own server), of Home, the sessions list, Analytics and two
-      # session transcripts (harbor, a Claude session with a Codex run and a subagent under it, and deps, a Codex run), at
-      # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
-      # local fixture above.
-      - name: Pushed data in the viewer
-        if: ${{ !cancelled() && matrix.suite == 'transport' && steps.pushed-parity.outcome == 'success' }}
-        env:
-          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
-          SEMON_PIXEL_SCREENS: home,sessions,analytics,session-harbor,session-deps
-          # The pushed copy's screens are compared with the same screens on the machine's own server (started above), not with a
-          # mockup: the same viewer over the same data must draw the same pixels.
-          SEMON_REF_BASE: ${{ env.SEMON_BASE }}
-          SEMON_REF_TOKEN: ${{ env.SEMON_TOKEN }}
-        run: |
-          [ -d "$RUNNER_TEMP/recv/machines/laptop" ] || { echo "nothing was received"; exit 1; }
-          reader="$RUNNER_TEMP/pushed/reader"
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8769 \
-            --machines "$RUNNER_TEMP/recv" --no-local --claude-home "$reader/claude" --claude-json "$reader/.claude.json" --codex-home "$reader/codex" --copilot-home "$reader/copilot" \
-            --proc-root "$reader/proc" --cache "$reader/serve-index.json" < /dev/null > "$RUNNER_TEMP/pushed-viewer.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/pushed-viewer.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/pushed-viewer.log"; exit 1; }
-          export SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}"
-          cd tests/ui
-          node pushed-parity.mjs --native-pages
-          failed=0
-          node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN" || failed=1
-          node pixels.mjs || failed=1
-          # An empty or short list of screens must not pass: 5 screens at 3 schemes.
-          node -e 'const n = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results.length; if (n !== 15) { console.error("pixels compared " + n + " screens, expected 15"); process.exit(1); } console.log("pixels compared " + n + " screens")' \
-            "$SEMON_UI_OUT/pixels.json" || failed=1
-          exit "$failed"
-
-      # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
-      - name: Stable session order
-        if: ${{ !cancelled() && startsWith(matrix.suite, 'order-') }}
-        working-directory: tests/ui
-        env:
-          SEMON_ORDER_SCHEMES: ${{ matrix.suite == 'order-phone' && 'phone-light,phone-dark' || matrix.suite == 'order-desktop-light' && 'desktop-light' || 'desktop-dark' }}
-        run: node checks/order.mjs
-      - name: Server logs
-        if: ${{ always() }}
-        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
-
-      - name: Upload reports, screenshots and diffs
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          node preservation-state.mjs
+          SEMON_PRESERVATION_NEUTRAL_FOCUS=1 SEMON_UI_OUT=out/neutral node preservation-state.mjs
+          before=$(cat "$RUNNER_TEMP/before.url")
+          SEMON_BASE="${before%%/?t=*}" SEMON_TOKEN="${before##*t=}" SEMON_UI_OUT=out/before \
+            SEMON_PRESERVATION_EXPECTED_JS="$RUNNER_TEMP/before-viewer.js" \
+            SEMON_PRESERVATION_CANDIDATE=eb535ff8920fe9aa54e78babc9649cf6c9400ad6 node preservation-state.mjs
+          SEMON_BASE="${before%%/?t=*}" SEMON_TOKEN="${before##*t=}" SEMON_UI_OUT=out/before-neutral \
+            SEMON_PRESERVATION_EXPECTED_JS="$RUNNER_TEMP/before-viewer.js" SEMON_PRESERVATION_NEUTRAL_FOCUS=1 \
+            SEMON_PRESERVATION_CANDIDATE=eb535ff8920fe9aa54e78babc9649cf6c9400ad6 node preservation-state.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
-          name: viewer-ui-${{ matrix.suite }}
+          name: capture-state-evidence
           path: tests/ui/out
           if-no-files-found: warn
-
-  browser:
-    name: viewer browser checks
-    if: ${{ always() }}
-    needs: [foundation, build, checks]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every suite to pass
-        env:
-          FOUNDATION_RESULT: ${{ needs.foundation.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          CHECKS_RESULT: ${{ needs.checks.result }}
-        run: test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+          retention-days: 7
