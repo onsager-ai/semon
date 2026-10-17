@@ -578,7 +578,11 @@ export async function clickWithFailureDiagnostics(page, selector, label, click) 
           node instanceof Element
             ? node.tagName.toLowerCase() +
               (node.id ? '#' + node.id : '') +
-              [...node.classList].map((name) => '.' + name).join('')
+              [...node.classList]
+                .slice(0, 12)
+                .map((name) => '.' + name)
+                .join('')
+                .slice(0, 200)
             : (node?.nodeName ?? String(node)).slice(0, 100);
         const describe = (node) => {
           if (!node) return null;
@@ -606,12 +610,15 @@ export async function clickWithFailureDiagnostics(page, selector, label, click) 
             ],
           };
         };
-        const candidates = [...document.querySelectorAll(selector)];
+        const matches = document.querySelectorAll(selector);
+        const candidates = [...matches].slice(0, 16);
         const target =
           candidates.find((node) => {
             const style = getComputedStyle(node);
             return node.getClientRects().length && style.visibility !== 'hidden';
-          }) ?? candidates[0] ?? null;
+          }) ??
+          candidates[0] ??
+          null;
         const main = document.querySelector('#main');
         const topbar = document.querySelector('#topbar');
         const dock = document.querySelector('.session-dock');
@@ -683,13 +690,21 @@ export async function clickWithFailureDiagnostics(page, selector, label, click) 
         };
         const frames = [snapshot()];
         for (let index = 0; index < 3; index++) {
-          await new Promise((resolve) => requestAnimationFrame(resolve));
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, 100);
+            requestAnimationFrame(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
           frames.push(snapshot());
         }
-        return { selector, candidateCount: candidates.length, frames };
+        return { selector, candidateCount: matches.length, frames };
       }, selector);
     } catch (diagnosticError) {
-      evidence = { unavailable: diagnosticError.message };
+      evidence = {
+        unavailable: String(diagnosticError?.message ?? diagnosticError).slice(0, 1000),
+      };
     }
     console.error(
       '[served click geometry failure] ' +
