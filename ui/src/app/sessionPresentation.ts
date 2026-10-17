@@ -369,6 +369,13 @@ export function selectedSessionMenu(
   if (trace)
     actions.push({ key: 'trace', text: 'Trace this turn', icon: I.trace, className: 'menu-trace' });
   if (command) actions.push({ key: 'copy', text: 'Copy resume command', icon: I.copy });
+  if (session.harness === 'claude')
+    actions.push({
+      key: 'external',
+      text: 'Open in claude.ai',
+      icon: I.ext,
+      unavailable: 'An external conversation link is unavailable for this recorded session.',
+    });
   if (phone && metadata?.errors)
     actions.push({
       key: 'errors',
