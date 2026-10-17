@@ -660,6 +660,44 @@ const REF_BASE = (process.env.SEMON_REF_BASE ?? '').replace(/\/$/, ''),
 const REGIONS = MAP.regions ?? [];
 const regionsOf = (name) =>
   REGIONS.filter((r) => r.screens.some((x) => (x.endsWith('-') ? name.startsWith(x) : name === x)));
+// Keep source-readable evidence alongside the actual captures. This diagnostic
+// never alters a comparison, its references or its acceptance threshold.
+async function regionEvidence(page, selector) {
+  return page
+    .locator(selector)
+    .first()
+    .evaluate((root) => {
+      const nodes = [root, ...root.querySelectorAll('*')].slice(0, 400);
+      return nodes.map((node) => {
+        const box = node.getBoundingClientRect(),
+          css = getComputedStyle(node);
+        return {
+          tag: node.tagName,
+          id: node.id,
+          class: node.getAttribute('class'),
+          label: node.getAttribute('aria-label'),
+          text: [...node.childNodes]
+            .filter((child) => child.nodeType === Node.TEXT_NODE)
+            .map((child) => child.textContent)
+            .join(''),
+          path: node.getAttribute('d'),
+          box: [box.x, box.y, box.width, box.height],
+          style: Object.fromEntries(
+            [
+              'display',
+              'font',
+              'color',
+              'backgroundColor',
+              'gap',
+              'padding',
+              'margin',
+              'overflow',
+            ].map((key) => [key, css[key]]),
+          ),
+        };
+      });
+    });
+}
 async function regionShot(page, region) {
   await mask(page);
   // A region that does not depend on how far the page is scrolled (the bar, whose border shows once it is) is taken at the top, so a
@@ -850,6 +888,21 @@ function saveMismatch(row, name, scheme, p) {
         }
         try {
           const q = compare(await regionShot(page, region), await regionShot(port, region));
+          if (q.pixels || q.size) {
+            const evidenceDir = path.join(OUT, 'dom', scheme);
+            fs.mkdirSync(evidenceDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(evidenceDir, name + '.json'),
+              J(
+                {
+                  served: await regionEvidence(page, region.selector),
+                  reference: await regionEvidence(port, region.selector),
+                },
+                null,
+                2,
+              ) + '\n',
+            );
+          }
           rrow.port = {
             pixels: q.pixels,
             ratio: q.ratio,
