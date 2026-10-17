@@ -43,11 +43,7 @@ export function traceTokenTotal(tokens: readonly number[]): number {
 
 /** Format nonnegative integer token totals with deterministic one-decimal half-up rounding. */
 export function traceTokenText(total: number): string {
-  if (
-    !Number.isSafeInteger(total) ||
-    total < 0 ||
-    total > Number.MAX_SAFE_INTEGER - 50_000
-  )
+  if (!Number.isSafeInteger(total) || total < 0 || total > Number.MAX_SAFE_INTEGER - 50_000)
     return tok(total / 1_000_000);
   if (total < 1_000_000) return tok(total / 1_000_000);
   return (Math.floor((total + 50_000) / 100_000) / 10).toFixed(1) + 'M';
