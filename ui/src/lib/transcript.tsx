@@ -197,6 +197,7 @@ class PassiveReadingNotice extends Component<{ owner: SessionOwner }, { disclose
         <button
           type="button"
           class="composer-unavailable"
+          aria-label="Native session controls are unavailable."
           aria-expanded={disclosed}
           onClick={(event) => {
             if (!this.props.owner.disposed && event.currentTarget.isConnected)
