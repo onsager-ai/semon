@@ -1,3 +1,4 @@
+import type { RecordedStatus } from './sessionDetails';
 /** Validated data consumed by domain calculations; no document or JSON bag types. */
 export type SessionState = 'work' | 'wait' | 'idle' | 'done' | 'err';
 export type HandoffStatus = 'work' | 'wait' | 'done' | 'err' | 'new';
@@ -29,6 +30,11 @@ export interface TraceParticipantSummary {
   model: string;
   tokens: readonly [number, number, number];
   cost: Pick<Cost, 'usd' | 'unpriced_models'>;
+  observedExtent?: {
+    scope: 'whole_session';
+    last: number | null;
+    status: RecordedStatus;
+  };
 }
 export interface TokenObservation {
   input: number;
