@@ -68,7 +68,8 @@ export function createTraceCalculations(
   } = state;
   const workingEnd = (session: Session) =>
     session.state === 'work' && session.liveObservation !== false ? now() : session.last;
-  const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } = domain;
+  const { costForSessions, costForSession, costText, shortMoney, hcls, usageTotal, nameOf } =
+    domain;
   const tokenText = domain.tokenText ?? ((total: number) => tok(total / 1_000_000));
   const clock = (at: number) => formatClock(at, now()),
     dur = (from: number, to: number) => formatDuration(from, to, now()),
