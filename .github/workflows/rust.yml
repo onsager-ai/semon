@@ -11,7 +11,61 @@ permissions:
   contents: read
 
 jobs:
+  diagnostic:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/review/380-codex-process-diagnostic-20261018'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Record actual diagnostic provenance and unchanged fixture
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/codex-process-provenance.txt"
+          git diff --exit-code beb801eecf9da922441f9fbcb25b93e3dae54056 -- Cargo.lock crates/semon-runtime/Cargo.toml crates/semon-runtime/tests/fixtures/codex-device.py
+          git diff --stat beb801eecf9da922441f9fbcb25b93e3dae54056 >> "$RUNNER_TEMP/codex-process-provenance.txt"
+
+      - name: Install Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Check formatting of the two diagnostic files
+        run: rustfmt --edition 2024 --check --config skip_children=true crates/semon-runtime/src/codex_auth/process.rs crates/semon-runtime/tests/codex_process.rs
+
+      - name: Run the original six offline process tests once with original parallelism
+        env:
+          SEMON_TEST_COORDINATOR_SECRET: offline-fixture
+          E2B_API_KEY: offline-fixture
+        run: |
+          set -o pipefail
+          cargo test -p semon-runtime --features codex-process --locked --test codex_process -- --nocapture 2>&1 | tee "$RUNNER_TEMP/codex-process-diagnostic.log"
+
+      - name: Retain diagnostic provenance and output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-process-availability-diagnostic
+          path: |
+            ${{ runner.temp }}/codex-process-provenance.txt
+            ${{ runner.temp }}/codex-process-diagnostic.log
+
   test:
+    if: github.ref != 'refs/heads/review/380-codex-process-diagnostic-20261018'
     name: fmt, clippy, test
     runs-on: ubuntu-latest
     steps:
