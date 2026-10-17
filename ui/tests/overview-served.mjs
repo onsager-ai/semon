@@ -271,9 +271,7 @@ test(
                 'unavailable selected status does not fall back to stale completed details',
               );
               const ingestSelector = '#lanes .treeitem[data-id*="atlas-ingest"]',
-                ingestToggle = page.locator(
-                  ingestSelector + ' > .tree-row > .tree-toggle',
-                );
+                ingestToggle = page.locator(ingestSelector + ' > .tree-row > .tree-toggle');
               await ingestToggle.focus();
               await ingestToggle.press('Enter');
               await page.locator(ingestSelector + '[aria-expanded="false"]').waitFor();
