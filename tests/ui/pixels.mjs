@@ -5,7 +5,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
-import { ENV, launch, served, goto, data, titleOf, waitForCaptureReady } from './lib.mjs';
+import {
+  ENV,
+  launch,
+  served,
+  goto,
+  data,
+  titleOf,
+  waitForCaptureReady,
+  homePostRequestDiagnostics,
+} from './lib.mjs';
 import { sample, BASE } from './fixture.mjs';
 import { compareDomEvidence, recordDomDiffSummary } from './dom-evidence.mjs';
 import {
@@ -55,6 +64,7 @@ const report = {
   regions: [],
   errors: [],
   apiDiagnostics: [],
+  homePostDiagnostics: [],
   sessionTraceEvidence: [],
   routeMappings: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
@@ -1069,6 +1079,13 @@ try {
       report.apiDiagnostics.push(
         ...page.captureApiEvents.map((event) => ({ scheme, side, ...event })),
       );
+      const homePostDiagnostics = homePostRequestDiagnostics(page);
+      if (
+        homePostDiagnostics.nodeStarts.length ||
+        homePostDiagnostics.cdpRequests.length ||
+        homePostDiagnostics.failedNodeRequestIds.length
+      )
+        report.homePostDiagnostics.push({ scheme, side, ...homePostDiagnostics });
       if (page.captureApiEventsTruncated)
         report.errors.push(
           `${scheme} ${side} API diagnostics truncated after ${page.captureApiEventsTruncated} events`,
