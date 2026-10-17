@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { failedSelectedApiEvents } from './lib.mjs';
+import {
+  SESSION_TRACE_EVIDENCE_LIMITS,
+  summarizeSessionTraceResponse,
+} from './session-trace-evidence.mjs';
 
 const request = {
   id: 1,
@@ -97,4 +102,78 @@ test('initial selected failures are retained until initial readiness completes',
   const error = aborted({ path: '/api/session-entry', routeKey: 'initial' });
   assert.deepEqual(failures([error], 'candidate', 'initial'), [error]);
   assert.deepEqual(failures([error], 'candidate', 'later-selection'), []);
+});
+
+test('session trace evidence hashes exact bytes and retains only bounded graph identities', () => {
+  const body = Buffer.from(
+    JSON.stringify({
+      api: 1,
+      source_key: 'laptop',
+      catalog_key: 'atlas-ingest',
+      root: 't8',
+      generation: 'a'.repeat(64),
+      incomplete: true,
+      previews_incomplete: false,
+      sessions: {
+        'atlas-ingest': { name: 'atlas ingest', harness: 'claude', kind: 'Root', cost: '$secret' },
+      },
+      participants: { harbor: 'harbor' },
+      turns: [
+        { id: 't8', sid: 'atlas-ingest', start: 'a-ask', sent: ['a-relay'], transcript: 'secret' },
+      ],
+      handoffs: [
+        { id: 'a-ask', kind: 'ask', from: 'you', to: 'atlas-ingest', brief: 'secret' },
+        { id: 'a-relay', kind: 'relay', from: 'atlas-ingest', to: 'harbor', result: 'secret' },
+      ],
+      toolBody: 'must not be retained',
+    }),
+  );
+
+  const evidence = summarizeSessionTraceResponse(body);
+  assert.deepEqual(evidence, {
+    responseBytes: body.length,
+    responseDigest: createHash('sha256').update(body).digest('hex'),
+    api: 1,
+    sourceKey: 'laptop',
+    catalogKey: 'atlas-ingest',
+    root: 't8',
+    generation: 'a'.repeat(64),
+    incomplete: true,
+    previewsIncomplete: false,
+    turns: [{ id: 't8', sid: 'atlas-ingest', start: 'a-ask', sent: ['a-relay'] }],
+    handoffs: [
+      { id: 'a-ask', kind: 'ask', from: 'you', to: 'atlas-ingest' },
+      { id: 'a-relay', kind: 'relay', from: 'atlas-ingest', to: 'harbor' },
+    ],
+    sessions: [{ id: 'atlas-ingest', name: 'atlas ingest', harness: 'claude', kind: 'Root' }],
+    participants: [{ id: 'harbor', name: 'harbor' }],
+  });
+  assert.doesNotMatch(JSON.stringify(evidence), /secret|toolBody/);
+});
+
+test('session trace evidence fails diagnostically on response and record bounds', () => {
+  assert.throws(
+    () =>
+      summarizeSessionTraceResponse(Buffer.alloc(SESSION_TRACE_EVIDENCE_LIMITS.responseBytes + 1)),
+    /response bytes .* exceeds limit/,
+  );
+  const oversizedTurns = Buffer.from(
+    JSON.stringify({
+      api: 1,
+      incomplete: true,
+      previews_incomplete: false,
+      sessions: { x: { name: 'x', harness: 'claude' } },
+      participants: {},
+      turns: Array(SESSION_TRACE_EVIDENCE_LIMITS.turns + 1).fill({
+        id: 'x',
+        sid: 'x',
+        start: null,
+        sent: [],
+      }),
+    }),
+  );
+  assert.throws(
+    () => summarizeSessionTraceResponse(oversizedTurns),
+    /turns count .* exceeds limit/,
+  );
 });
