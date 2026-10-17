@@ -16,7 +16,7 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   complete presentation. Every loaded child now remains individually visible.
 - The shared filter dismissal defers its URL commit until the existing overlay
   history transaction completes. The native search form retains tablet touch
-  sizing, and native transcripts use the selected 2px page inset. Routine cached
+  sizing, and native transcripts use the selected phone 2px / desktop 8px page inset. Routine cached
   qualification follows the records; stale/incomplete/loading/error notices stay
   ahead of them. Qualification stays visible without shifting the normal opening.
 - Recent restores duration and machine/repository metadata, recorded state labels,
@@ -100,7 +100,9 @@ Remaining differences must be classified against that actual reference:
   review-aware visible child counts. These are not automatically approved pixel
   exceptions. Read the retained DOM/text evidence before attributing a mismatch.
 - Mockup-only divergence: extra Sessions/mobile lineage in the adapter, contrasted
-  with the authoritative complete application. The unchanged gate remains red.
+  with the authoritative complete application. Its injected leading cached-history
+  row also shifts transcript crops after the normal notice is moved below records.
+  The unchanged gate remains red.
 - Capture or execution failures: for example a missing menu or unsettled scroll;
   these do not count as successful comparison and must be retained or rerun.
 
