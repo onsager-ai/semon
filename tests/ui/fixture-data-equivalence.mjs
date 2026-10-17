@@ -11,13 +11,14 @@ if (!/^[0-9a-f]{40}$/.test(source ?? ''))
   throw new Error('SEMON_FIXTURE_DATA_SOURCE must be a full pinned Git revision');
 
 function originalData(name) {
-  const html = execFileSync(
-    'git',
-    ['show', `${source}:tests/ui/reference/${name}.html`],
-    { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 },
-  );
+  const html = execFileSync('git', ['show', `${source}:tests/ui/reference/${name}.html`], {
+    encoding: 'utf8',
+    maxBuffer: 5 * 1024 * 1024,
+  });
   const start = html.indexOf('  const T = (h, m) => h * 60 + m;');
-  const end = html.indexOf('  // ====================================================================================\n  const $ = ');
+  const end = html.indexOf(
+    '  // ====================================================================================\n  const $ = ',
+  );
   if (start < 0 || end < start) throw new Error(`${name}: original data block is missing`);
   const values = vm.runInNewContext(
     '(() => {\n' +
@@ -41,6 +42,10 @@ for (const name of ['overhaul', 'semon-sample']) {
   const actual = JSON.parse(
     fs.readFileSync(path.join(here, 'fixture-data', name + '.json'), 'utf8'),
   );
-  assert.deepStrictEqual(actual, expected, `${name}: data-only fixture differs from source ${source}`);
+  assert.deepStrictEqual(
+    actual,
+    expected,
+    `${name}: data-only fixture differs from source ${source}`,
+  );
   console.log(`${name}: data-only fixture equals source ${source}`);
 }

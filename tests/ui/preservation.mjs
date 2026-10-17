@@ -114,10 +114,7 @@ async function capture(candidate, reference, key) {
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
     evidenceBySide[name] = await snapshot(page);
     const evidence = Buffer.from(JSON.stringify(evidenceBySide[name], null, 2) + '\n');
-    fs.writeFileSync(
-      path.join(out, key + '-' + name + '.json'),
-      evidence,
-    );
+    fs.writeFileSync(path.join(out, key + '-' + name + '.json'), evidence);
     artifactDigests[name] = { image: sha256(bytes), evidence: sha256(evidence) };
     images.push(PNG.sync.read(bytes));
   }
@@ -238,7 +235,9 @@ try {
         ...candidate.errors.map((error) => prefix + ' candidate: ' + error),
         ...reference.errors.map((error) => prefix + ' reference: ' + error),
         ...retired
-          .filter((url) => /^\/api\/(?:model|transcript|expand|tx|tool|image)(?:\/|$)/.test(new URL(url).pathname))
+          .filter((url) =>
+            /^\/api\/(?:model|transcript|expand|tx|tool|image)(?:\/|$)/.test(new URL(url).pathname),
+          )
           .map((url) => prefix + ' retired candidate request: ' + new URL(url).pathname),
       );
       await candidate.context().close();

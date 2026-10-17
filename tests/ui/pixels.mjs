@@ -163,9 +163,7 @@ function screens(D, source, handoffIds) {
     list.push({
       name: 'trace-' + turn.sid + '-' + String(stableTurn).replace(/[^\w-]/g, '_'),
       route: { v: 'trace', sid: turn.sid, turn: turn.id },
-      referenceRoute: referenceTurn
-        ? { v: 'trace', sid: turn.sid, turn: referenceTurn }
-        : null,
+      referenceRoute: referenceTurn ? { v: 'trace', sid: turn.sid, turn: referenceTurn } : null,
     });
   }
   return list;
@@ -176,22 +174,19 @@ async function navigateReference(page, route) {
     history.pushState(value, '');
     dispatchEvent(new PopStateEvent('popstate', { state: value }));
   }, route);
-  await page.waitForFunction(
-    (value) => {
-      const panel = document.querySelector('#page');
-      return (
-        history.state?.v === value.v &&
-        !!document.querySelector('#topbar .t, #topbar #find') &&
-        panel?.childElementCount > 0 &&
-        !panel.hasAttribute('aria-busy') &&
-        !panel.querySelector('[aria-busy="true"]') &&
-        (value.v !== 'session' ||
-          !!panel.querySelector('section[aria-label="Transcript"], .transcript')) &&
-        (value.v !== 'trace' || !!panel.querySelector('.trace-summary'))
-      );
-    },
-    route,
-  );
+  await page.waitForFunction((value) => {
+    const panel = document.querySelector('#page');
+    return (
+      history.state?.v === value.v &&
+      !!document.querySelector('#topbar .t, #topbar #find') &&
+      panel?.childElementCount > 0 &&
+      !panel.hasAttribute('aria-busy') &&
+      !panel.querySelector('[aria-busy="true"]') &&
+      (value.v !== 'session' ||
+        !!panel.querySelector('section[aria-label="Transcript"], .transcript')) &&
+      (value.v !== 'trace' || !!panel.querySelector('.trace-summary'))
+    );
+  }, route);
   if (route.v === 'analytics')
     await page.waitForSelector('.analytics-metrics[data-analytics-ready]');
   await page.evaluate(() => document.fonts.ready);
@@ -283,41 +278,38 @@ async function captureFrame(candidate, reference, key, phone) {
 }
 
 async function regionEvidence(page, region) {
-  return page.evaluate(
-    ({ selector, open }) => {
-      const roots = [...document.querySelectorAll(selector)];
-      const nodes = roots.flatMap((root) => [root, ...root.querySelectorAll('*')]).slice(0, 180);
-      return {
-        historyState: history.state,
-        pathname: location.pathname,
-        selector,
-        count: roots.length,
-        openSelector: open ?? null,
-        openCount: open ? document.querySelectorAll(open).length : null,
-        nodes: nodes.map((node) => {
-          const box = node.getBoundingClientRect(),
-            css = getComputedStyle(node);
-          return {
-            tag: node.tagName,
-            id: node.id,
-            class: node.getAttribute('class'),
-            label: node.getAttribute('aria-label'),
-            text: [...node.childNodes]
-              .filter((child) => child.nodeType === Node.TEXT_NODE)
-              .map((child) => child.textContent.slice(0, 300))
-              .join(''),
-            box: [box.x, box.y, box.width, box.height],
-            style: Object.fromEntries(
-              ['display', 'font', 'color', 'backgroundColor', 'gap', 'padding', 'overflow'].map(
-                (key) => [key, css[key]],
-              ),
+  return page.evaluate(({ selector, open }) => {
+    const roots = [...document.querySelectorAll(selector)];
+    const nodes = roots.flatMap((root) => [root, ...root.querySelectorAll('*')]).slice(0, 180);
+    return {
+      historyState: history.state,
+      pathname: location.pathname,
+      selector,
+      count: roots.length,
+      openSelector: open ?? null,
+      openCount: open ? document.querySelectorAll(open).length : null,
+      nodes: nodes.map((node) => {
+        const box = node.getBoundingClientRect(),
+          css = getComputedStyle(node);
+        return {
+          tag: node.tagName,
+          id: node.id,
+          class: node.getAttribute('class'),
+          label: node.getAttribute('aria-label'),
+          text: [...node.childNodes]
+            .filter((child) => child.nodeType === Node.TEXT_NODE)
+            .map((child) => child.textContent.slice(0, 300))
+            .join(''),
+          box: [box.x, box.y, box.width, box.height],
+          style: Object.fromEntries(
+            ['display', 'font', 'color', 'backgroundColor', 'gap', 'padding', 'overflow'].map(
+              (key) => [key, css[key]],
             ),
-          };
-        }),
-      };
-    },
-    region,
-  );
+          ),
+        };
+      }),
+    };
+  }, region);
 }
 
 async function regionShot(page, region, key, side) {
@@ -327,7 +319,9 @@ async function regionShot(page, region, key, side) {
       const main = document.querySelector('#main');
       if (main) main.scrollTop = 0;
     });
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    );
     await page.waitForTimeout(120);
   }
   if (region.open) {
@@ -346,9 +340,7 @@ async function regionShot(page, region, key, side) {
     dock = page.locator('.session-dock').first(),
     dockHeight = (await dock.count()) ? ((await dock.boundingBox())?.height ?? 0) : 0,
     expand =
-      region.name === 'transcript' &&
-      box &&
-      box.y + box.height + dockHeight + 80 > viewport.height;
+      region.name === 'transcript' && box && box.y + box.height + dockHeight + 80 > viewport.height;
   let bytes;
   try {
     if (expand) {
@@ -361,7 +353,9 @@ async function regionShot(page, region, key, side) {
         const main = document.querySelector('#main');
         if (main) main.scrollTop = 0;
       });
-      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
       const full = await target.boundingBox();
       if (
         !full ||
@@ -460,7 +454,8 @@ try {
   if (!candidateBinary || !fs.existsSync(candidateBinary))
     throw new Error('Candidate binary is required for exact visual evidence');
   report.candidateFingerprint = sha256(fs.readFileSync(candidateBinary));
-  if (ENV.base === referenceBase) throw new Error('Candidate and reference servers must be independent');
+  if (ENV.base === referenceBase)
+    throw new Error('Candidate and reference servers must be independent');
   browser = await launch();
   const D = await data(),
     original = sample('overhaul.json'),
@@ -468,7 +463,8 @@ try {
     routes = screens(D, original, handoffIds),
     routeByName = new Map();
   for (const route of routes) {
-    if (routeByName.has(route.name)) report.errors.push('Duplicate generated frame route: ' + route.name);
+    if (routeByName.has(route.name))
+      report.errors.push('Duplicate generated frame route: ' + route.name);
     routeByName.set(route.name, route);
   }
   const selectedNames = new Set(expectedFrames);
@@ -485,10 +481,12 @@ try {
       openControl: '#lead-btn',
     });
   for (const name of expectedFrames)
-    if (name !== 'drawer' && !routeByName.has(name)) report.errors.push('Missing generated frame route: ' + name);
+    if (name !== 'drawer' && !routeByName.has(name))
+      report.errors.push('Missing generated frame route: ' + name);
   if (scope === 'main')
     for (const route of routes)
-      if (!selectedNames.has(route.name)) report.errors.push('Unmapped generated frame route: ' + route.name);
+      if (!selectedNames.has(route.name))
+        report.errors.push('Unmapped generated frame route: ' + route.name);
   if (scope === 'two-machines')
     for (const route of routes)
       if (
@@ -541,10 +539,10 @@ try {
           await captureFrame(candidate, reference, key, phone);
           for (const region of coverage.regions
             .map((item) => item.split('|'))
-            .filter(([targetScheme, targetFrame]) => targetScheme === scheme && targetFrame === frame)
-            .map(([, , name]) =>
-              PIXEL_REGIONS.find((item) => item.name === name),
-            )) {
+            .filter(
+              ([targetScheme, targetFrame]) => targetScheme === scheme && targetFrame === frame,
+            )
+            .map(([, , name]) => PIXEL_REGIONS.find((item) => item.name === name))) {
             const regionKey = `${scheme}|${frame}|${region.name}`;
             await captureRegion(candidate, reference, region, regionKey);
           }
@@ -557,7 +555,9 @@ try {
       ...candidate.errors.map((error) => `${scheme} candidate page error: ${error}`),
       ...reference.errors.map((error) => `${scheme} reference page error: ${error}`),
       ...retired
-        .filter((url) => /^\/api\/(?:model|transcript|expand|tx|tool|image)(?:\/|$)/.test(new URL(url).pathname))
+        .filter((url) =>
+          /^\/api\/(?:model|transcript|expand|tx|tool|image)(?:\/|$)/.test(new URL(url).pathname),
+        )
         .map((url) => `${scheme} retired candidate request: ${new URL(url).pathname}`),
     );
     await candidate.context().close();
