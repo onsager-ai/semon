@@ -330,12 +330,22 @@ export function traceHarnessClass(id: string, harness?: string) {
   return harness && Object.hasOwn(HARNESSES, harness) ? 'h-' + harness : undefined;
 }
 
-function traceSessionHarnessClass(data: CausalTrace, id: string) {
+export function traceSessionHarnessClass(data: CausalTrace, id: string) {
   const session = Object.hasOwn(data.sessions, id) ? data.sessions[id] : undefined,
     participant = Object.hasOwn(data.participantSummaries, id)
       ? data.participantSummaries[id]
-      : undefined;
-  return traceHarnessClass(id, session?.harness ?? participant?.harness);
+      : undefined,
+    directHarness = session?.harness ?? participant?.harness;
+  if (directHarness !== undefined) return traceHarnessClass(id, directHarness);
+  const family =
+      Object.hasOwn(data.participants, id) || Object.hasOwn(data.participantSummaries, id)
+        ? data.metadata?.details?.family
+        : undefined,
+    relatives = [...(family?.ancestors ?? []), ...(family?.runs ?? [])].filter(
+      (candidate) => candidate.key === id,
+    ),
+    relative = relatives.length === 1 ? relatives[0] : undefined;
+  return traceHarnessClass(id, relative?.harness);
 }
 
 export function traceHandoffIconKey(edge: Handoff) {

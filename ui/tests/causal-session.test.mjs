@@ -17,6 +17,7 @@ const {
   traceHopActor,
   traceHopClass,
   traceHarnessClass,
+  traceSessionHarnessClass,
   traceHandoffIconKey,
   traceSessionChip,
   traceSessionMeta,
@@ -325,6 +326,50 @@ test('trace harness classes use qualified CSS tokens and leave unknown harnesses
   assert.equal(traceHarnessClass('atlas'), undefined);
   assert.equal(traceHarnessClass('atlas', 'unrecognized'), undefined);
   assert.equal(traceSessionChip({ harness: 'unrecognized' }).chipClass, undefined);
+});
+
+test('root node takes a name-only sender harness from selected-family metadata', () => {
+  const data = {
+      sessions: { 'a-review': { harness: 'claude' } },
+      participants: { 'atlas-ingest': 'atlas ingest' },
+      participantSummaries: {},
+      metadata: {
+        details: {
+          family: {
+            state: 'complete',
+            ancestors: [{ key: 'atlas-ingest', harness: 'claude' }],
+            runs: [],
+          },
+        },
+      },
+    },
+    root = { sid: 'a-review', start: { from: 'atlas-ingest' }, u: null };
+
+  assert.equal(traceRootActor(root), 'atlas-ingest');
+  assert.equal(traceSessionHarnessClass(data, traceRootActor(root)), 'h-claude');
+  assert.equal(traceSessionHarnessClass(data, 'unrecorded'), undefined);
+  assert.equal(traceSessionHarnessClass({ ...data, participants: {} }, 'atlas-ingest'), undefined);
+  assert.equal(
+    traceSessionHarnessClass(
+      {
+        ...data,
+        metadata: {
+          details: {
+            family: {
+              state: 'complete',
+              ancestors: [
+                { key: 'atlas-ingest', harness: 'claude' },
+                { key: 'atlas-ingest', harness: 'codex' },
+              ],
+              runs: [],
+            },
+          },
+        },
+      },
+      'atlas-ingest',
+    ),
+    undefined,
+  );
 });
 
 test('to-you hop metadata keeps its source session, current turn, and harness chip', () => {

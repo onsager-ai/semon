@@ -185,8 +185,59 @@ test(
               'expanded Recent keeps descendant status in its flag, without a rail dot shifting age',
             );
             if (width === 1280 && colorScheme === 'light') {
+              // Leave selected-row discovery to transcript metadata, not Home or page summaries.
+              const withoutHomeSelected = async (route) => {
+                const response = await route.fetch();
+                const body = await response.json();
+                for (const field of ['recent', 'inbox', 'working', 'answered'])
+                  if (Array.isArray(body[field]))
+                    body[field] = body[field].filter((row) => row.catalog_key !== 'a-docs');
+                await route.fulfill({ response, body: JSON.stringify(body) });
+              };
+              const withoutCatalogSelected = async (route) => {
+                const query = new URL(route.request().url()).searchParams;
+                const response = await route.fetch();
+                const body = await response.json();
+                if (!query.has('sid') && Array.isArray(body.items))
+                  body.items = body.items.filter((row) => row.key !== 'a-docs');
+                await route.fulfill({ response, body: JSON.stringify(body) });
+              };
+              const unavailableTranscript = async (route) => {
+                const query = new URL(route.request().url()).searchParams;
+                const response = await route.fetch();
+                const body = await response.json();
+                if (query.get('sid') === 'a-docs' && body.session?.key === 'a-docs') {
+                  body.session.status = { state: null, observation: 'unavailable' };
+                  body.session.details = {
+                    state: 'done',
+                    turns: 0,
+                    calls: null,
+                    errors: null,
+                    tool_calls: {},
+                    signals: {},
+                    cost: { usd: null, unpriced_models: [] },
+                    cwd: null,
+                    copied_usage: false,
+                    reported_runs: [],
+                    cost_check: [],
+                    ...body.session.details,
+                    state: 'done',
+                  };
+                  sawUnavailableStatus = true;
+                }
+                await route.fulfill({ response, body: JSON.stringify(body) });
+              };
+              let sawUnavailableStatus = false;
+              await page.route('**/api/viewer/home?**', withoutHomeSelected);
+              await page.route('**/api/sessions?**', withoutCatalogSelected);
+              await page.route('**/api/session-transcript?**', unavailableTranscript);
               await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2] + '&compat=1');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
+              assert.equal(
+                sawUnavailableStatus,
+                true,
+                'selected metadata reports unavailable status',
+              );
               const selectedRecent = page.locator('#lanes .treeitem[data-id*="a-docs"]');
               await selectedRecent.waitFor({ state: 'visible' });
               assert.match(
@@ -194,6 +245,16 @@ test(
                 /Update the ingest docs/,
                 'Recent keeps the selected child visible on its parent path',
               );
+              assert.equal(
+                await selectedRecent
+                  .locator('.dot')
+                  .evaluate((node) => node.classList.contains('off')),
+                true,
+                'unavailable selected status does not fall back to stale completed details',
+              );
+              await page.unroute('**/api/viewer/home?**', withoutHomeSelected);
+              await page.unroute('**/api/sessions?**', withoutCatalogSelected);
+              await page.unroute('**/api/session-transcript?**', unavailableTranscript);
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
               await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
             }
