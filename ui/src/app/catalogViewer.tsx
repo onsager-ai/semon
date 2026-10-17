@@ -1092,12 +1092,20 @@ export function createCatalogViewer(
                   : sourcesOpen
                     ? 'Choose a machine'
                     : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
-    const recentHeading = document.querySelector('.side-h');
-    if (recentHeading)
-      recentHeading.textContent =
-        viewerHost?.nativePage || ['home', 'analytics', 'machines', 'machine'].includes(route)
-          ? 'Recent'
-          : 'Recent on this machine';
+    const recentHeading = document.querySelector('.side-h'),
+      recentTree = shell.slots.recent.querySelector<HTMLElement>('#lanes'),
+      machineRecent =
+        !viewerHost?.nativePage && !['home', 'analytics', 'machines', 'machine'].includes(route),
+      recentScope = 'Recent sessions on this machine.';
+    if (recentHeading) {
+      recentHeading.textContent = 'Recent';
+      if (machineRecent) recentHeading.setAttribute('data-tip', recentScope);
+      else recentHeading.removeAttribute('data-tip');
+    }
+    if (recentTree) {
+      if (machineRecent) recentTree.setAttribute('aria-description', recentScope);
+      else recentTree.removeAttribute('aria-description');
+    }
     shell.update(
       projectShellNavigation(
         {
