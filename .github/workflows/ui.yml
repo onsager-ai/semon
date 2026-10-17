@@ -25,7 +25,151 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  home-post-tag-sidebar-diagnostic:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'review/380-home-tag-sidebar-diagnostic-20261018' }}
+    name: diagnostic-only exact Home POST owner comparison
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+      SEMON_VISUAL_CANDIDATE_BIN: ${{ github.workspace }}/target/debug/semon
+    steps:
+      - name: Check out diagnostic-only harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify diagnostic source scope and artifact provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BASE: 979117483800327cba8cd374c8cd191c11bcba36
+        run: |
+          mkdir -p tests/ui/out
+          {
+            printf '%s\n' 'mode=diagnostic-only; no acceptance or abort waiver is produced'
+            printf 'harnessCommit=%s\n' "$(git rev-parse HEAD)"
+            printf 'sourceScopeBase=%s\n' "$SOURCE_BASE"
+            printf '%s\n' 'testedPreview=b471fa962feee60edcb8a9932d96c4b8aa639c98'
+            printf '%s\n' 'candidateBinarySource=b471fa962feee60edcb8a9932d96c4b8aa639c98'
+            printf '%s\n' 'candidateBinaryRun=39064931769 artifact=12112353555 sha256=1ed43c3c4755afe3a5f5b5efb7b0e51383355737a83411ac3af21e45262cc4cb'
+            printf '%s\n' 'referenceSource=263a02da278716ab2309b8e34a463419e5c781e5'
+            printf '%s\n' 'referenceBinaryRun=39064931769 artifact=12113475077'
+            printf '%s\n' 'diagnostics=opaque candidate-only Home POST header plus bounded sidebar DOM reads; request bodies are not recorded'
+            printf '%s\n' 'strict visual/API classification, coverage, thresholds, and acceptance registry remain unchanged'
+          } > tests/ui/out/diagnostic-provenance.txt
+          git fetch --no-tags --depth=1 origin "$SOURCE_BASE"
+          git diff --exit-code "$SOURCE_BASE" HEAD -- \
+            Cargo.toml Cargo.lock crates ui/src ui/build.mjs ui/package.json ui/package-lock.json \
+            tests/ui/package.json tests/ui/package-lock.json tests/ui/dom-evidence.mjs \
+            tests/ui/session-trace-evidence.mjs tests/ui/pixel-diff.mjs \
+            tests/ui/preservation-contract.mjs tests/ui/visual-contract.mjs \
+            tests/ui/visual-coverage.json tests/ui/visual-acceptance.json
+          candidate_meta=$(gh api repos/onsager-ai/semon/actions/runs/39064931769/artifacts \
+            --jq '.artifacts[] | select(.id == 12112353555) | .name + " " + .digest + " " + (.expired|tostring)')
+          reference_meta=$(gh api repos/onsager-ai/semon/actions/runs/39064931769/artifacts \
+            --jq '.artifacts[] | select(.id == 12113475077) | .name + " " + .digest + " " + (.expired|tostring)')
+          test "$candidate_meta" = "viewer-test-binaries sha256:0036329d77a10afd63ae245b6bb11fbaa91b6175e53f4b289691b2f99504c74f false"
+          test "$reference_meta" = "viewer-ui-reference-binary sha256:fd9d79a5df9a94c2470584d6dc78059ccacfb043ef87aa60a97f580e4da8a76a false"
+          run_head=$(gh api repos/onsager-ai/semon/actions/runs/39064931769 --jq '.head_sha')
+          test "$run_head" = '979117483800327cba8cd374c8cd191c11bcba36'
+          printf 'candidateArtifactWorkflowRunHead=%s\n' "$run_head" >> tests/ui/out/diagnostic-provenance.txt
+
+      - name: Download the verified current candidate binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39064931769
+          name: viewer-test-binaries
+          path: target/debug
+
+      - name: Download the selected complete reference binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39064931769
+          name: viewer-ui-reference-binary
+          path: target/ui-reference
+
+      - name: Verify the exact candidate binary and selected source
+        run: |
+          printf '%s\n' '1ed43c3c4755afe3a5f5b5efb7b0e51383355737a83411ac3af21e45262cc4cb  target/debug/semon' | sha256sum --check
+          reference=$(node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; console.log(REFERENCE.source)')
+          test "$reference" = '263a02da278716ab2309b8e34a463419e5c781e5'
+          chmod +x target/debug/semon target/ui-reference/semon
+          printf 'referenceBinarySHA256=%s\n' "$(sha256sum target/ui-reference/semon | cut -d' ' -f1)" >> tests/ui/out/diagnostic-provenance.txt
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            tests/ui/package-lock.json
+
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+
+      - name: Install locked test tooling and verify the four-file diagnostic patch
+        run: |
+          npm --prefix tests/ui ci --no-audit --no-fund
+          npm --prefix ui ci --no-audit --no-fund
+          node ui/node_modules/prettier/bin/prettier.cjs --check \
+            tests/ui/lib.mjs tests/ui/pixels.mjs tests/ui/preservation.mjs tests/ui/capture-network.test.mjs
+          node --test tests/ui/capture-network.test.mjs
+          npm --prefix tests/ui exec -- playwright install --with-deps chromium
+
+      - name: Write the bounded sample fixture
+        run: echo "SEMON_NOW=$(node tests/ui/fixture.mjs "$RUNNER_TEMP/sample")" >> "$GITHUB_ENV"
+
+      - name: Serve the exact candidate and reference binaries
+        run: |
+          serve() { # name port binary index
+            SEMON_TEST_NOW="$SEMON_NOW" setsid nohup "$3" sessions --serve --listen "127.0.0.1:$2" \
+              --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" \
+              --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" \
+              --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/$4" \
+              < /dev/null > "$RUNNER_TEMP/$1.log" 2>&1 &
+            for _ in $(seq 1 100); do
+              url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/$1.log" || true)
+              [ -n "$url" ] && break
+              sleep 0.2
+            done
+            [ -n "$url" ] || { cat "$RUNNER_TEMP/$1.log"; exit 1; }
+            echo "${url%%/?t=*} ${url##*t=}"
+          }
+          read -r candidate_base candidate_token < <(serve candidate 8765 "$GITHUB_WORKSPACE/target/debug/semon" candidate-index.json)
+          echo "SEMON_BASE=$candidate_base" >> "$GITHUB_ENV"
+          echo "SEMON_TOKEN=$candidate_token" >> "$GITHUB_ENV"
+          read -r reference_base reference_token < <(serve reference 8770 "$GITHUB_WORKSPACE/target/ui-reference/semon" reference-index.json)
+          echo "SEMON_PRESERVATION_BASE=$reference_base" >> "$GITHUB_ENV"
+          echo "SEMON_PRESERVATION_TOKEN=$reference_token" >> "$GITHUB_ENV"
+          curl -fsS -o /dev/null "$candidate_base/?t=$candidate_token"
+          curl -fsS -o /dev/null "$reference_base/?t=$reference_token"
+
+      - name: Run unchanged 62-state and 113-frame diagnostics
+        env:
+          SEMON_HOME_POST_TAG_DIAGNOSTICS: '1'
+        run: |
+          cd tests/ui
+          failed=0
+          node preservation.mjs || failed=1
+          SEMON_PIXEL_SCOPE=main node pixels.mjs || failed=1
+          exit "$failed"
+
+      - name: Retain diagnostic reports without accepting failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: home-post-tag-sidebar-diagnostic
+          path: tests/ui/out
+          if-no-files-found: error
+
   foundation:
+    if: ${{ github.ref_name != 'review/380-home-tag-sidebar-diagnostic-20261018' }}
     name: UI types and generated assets
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -68,6 +212,7 @@ jobs:
           if-no-files-found: error
 
   build:
+    if: ${{ github.ref_name != 'review/380-home-tag-sidebar-diagnostic-20261018' }}
     name: viewer test binaries
     needs: foundation
     runs-on: ubuntu-latest
@@ -166,6 +311,7 @@ jobs:
           retention-days: 1
 
   checks:
+    if: ${{ github.ref_name != 'review/380-home-tag-sidebar-diagnostic-20261018' }}
     name: viewer / ${{ matrix.suite }}
     needs: build
     runs-on: ubuntu-latest
@@ -508,7 +654,7 @@ jobs:
 
   browser:
     name: viewer browser checks
-    if: ${{ always() }}
+    if: ${{ always() && github.ref_name != 'review/380-home-tag-sidebar-diagnostic-20261018' }}
     needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
