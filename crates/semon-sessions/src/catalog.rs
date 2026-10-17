@@ -823,23 +823,22 @@ fn recorded_status(
     retired_native: bool,
 ) -> Result<Value, serde_json::Error> {
     let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-    if let Some(saved) = &row.query {
-        if crate::model::summary::query_observation_matches(saved, &row.sources, current, runtime)?
-            && cached
-            && (!current || (facts_known && !retired_native))
-        {
-            let status = match saved["state"].as_str() {
-                Some("work" | "wait") if !current => Some("off"),
-                Some("work" | "wait" | "idle" | "done" | "err" | "new" | "read" | "off") => {
-                    saved["state"].as_str()
-                }
-                _ => None,
-            };
-            if let Some(status) = status {
-                return Ok(
-                    json!({"state":status,"observation":if current {"current"} else {"retained"}}),
-                );
+    if let Some(saved) = &row.query
+        && crate::model::summary::query_observation_matches(saved, &row.sources, current, runtime)?
+        && cached
+        && (!current || (facts_known && !retired_native))
+    {
+        let status = match saved["state"].as_str() {
+            Some("work" | "wait") if !current => Some("off"),
+            Some("work" | "wait" | "idle" | "done" | "err" | "new" | "read" | "off") => {
+                saved["state"].as_str()
             }
+            _ => None,
+        };
+        if let Some(status) = status {
+            return Ok(
+                json!({"state":status,"observation":if current {"current"} else {"retained"}}),
+            );
         }
     }
     Ok(json!({"state":null,"observation":"unavailable"}))
