@@ -16,6 +16,7 @@ const {
   traceRootTime,
   traceHopActor,
   traceHopClass,
+  traceHarnessClass,
   traceHandoffIconKey,
   traceSessionChip,
   traceQualifiedUnjoinedRelay,
@@ -172,12 +173,20 @@ test('trace root metadata does not invent time and restores the harness chip', (
   assert.equal(traceRootTime(started, formatTime), 'at:110');
   assert.deepEqual(traceSessionChip({ harness: 'claude' }), {
     chip: 'Claude Code',
-    chipClass: 'claude',
+    chipClass: 'h-claude',
   });
   assert.deepEqual(traceSessionChip({ harness: 'claude', kind: 'Subagent' }), {
     chip: 'Subagent',
-    chipClass: 'claude',
+    chipClass: 'h-claude',
   });
+});
+
+test('trace harness classes use qualified CSS tokens and leave unknown harnesses neutral', () => {
+  assert.equal(traceHarnessClass('atlas', 'claude'), 'h-claude');
+  assert.equal(traceHarnessClass('you'), 'h-you');
+  assert.equal(traceHarnessClass('atlas'), undefined);
+  assert.equal(traceHarnessClass('atlas', 'unrecognized'), undefined);
+  assert.equal(traceSessionChip({ harness: 'unrecognized' }).chipClass, undefined);
 });
 
 test('trace outcomes retain recorded time and distinguish locally viewed results', () => {

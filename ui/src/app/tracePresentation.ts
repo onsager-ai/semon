@@ -311,6 +311,19 @@ export function traceHopActor(edge: Handoff) {
   return edge.kind === 'toyou' ? edge.from : edge.to;
 }
 
+export function traceHarnessClass(id: string, harness?: string) {
+  if (id === 'you') return 'h-you';
+  return harness && Object.hasOwn(HARNESSES, harness) ? 'h-' + harness : undefined;
+}
+
+function traceSessionHarnessClass(data: CausalTrace, id: string) {
+  const session = Object.hasOwn(data.sessions, id) ? data.sessions[id] : undefined,
+    participant = Object.hasOwn(data.participantSummaries, id)
+      ? data.participantSummaries[id]
+      : undefined;
+  return traceHarnessClass(id, session?.harness ?? participant?.harness);
+}
+
 export function traceHandoffIconKey(edge: Handoff) {
   if (edge.kind === 'spawn' || edge.kind === 'relay') return 'out';
   if (edge.kind !== 'toyou') return edge.kind;
@@ -328,7 +341,7 @@ export function traceSessionChip(session?: Pick<Session, 'kind' | 'harness'>) {
   const label = session?.kind ?? HARNESS[session?.harness ?? ''];
   return {
     chip: label || undefined,
-    chipClass: session?.harness,
+    chipClass: traceHarnessClass('', session?.harness),
   };
 }
 
@@ -483,7 +496,7 @@ export function renderCausalTrace(
       costForSession: (id) => data.sessions[id]?.cost ?? { usd: null },
       costText: traceCostText,
       shortMoney: traceShortMoney,
-      hcls: (id) => data.sessions[id]?.harness ?? 'you',
+      hcls: (id) => traceSessionHarnessClass(data, id) ?? '',
       usageTotal: (session) =>
         (session.tokens ?? []).reduce((sum, value) => sum + value, 0) * 1000000,
       nameOf: (id) => causalSessionPart(data, id).text,
@@ -563,7 +576,7 @@ export function renderCausalTrace(
   hops.push({
     key: 'root:' + data.root.id,
     className: 'k-root',
-    nodeClass: data.sessions[traceRootActor(data.root)]?.harness ?? 'you',
+    nodeClass: traceSessionHarnessClass(data, traceRootActor(data.root)) ?? '',
     icon: data.root.start ? I[traceHandoffIconKey(data.root.start)] : data.root.u ? I.ask : I.more,
     handoff: data.root.start?.id,
     turn: data.root.id,
@@ -583,7 +596,7 @@ export function renderCausalTrace(
       hops.push({
         key: edge.id,
         className: traceHopClass(edge, !!child),
-        nodeClass: data.sessions[traceHopActor(edge)]?.harness ?? 'you',
+        nodeClass: traceSessionHarnessClass(data, traceHopActor(edge)) ?? '',
         icon: I[traceHandoffIconKey(edge)],
         handoff: edge.id,
         turn: child?.id,
