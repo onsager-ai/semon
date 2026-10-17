@@ -153,7 +153,12 @@ export function parseCausalTrace(
       entries: [],
       out: sent,
       sent,
-      end: { st: state(end.st), why: text(end.why), at: optionalNumber(end.at) },
+      end: {
+        st: state(end.st),
+        why: text(end.why),
+        h: optionalText(end.h),
+        at: optionalNumber(end.at),
+      },
       last: boolean(value.last),
     };
     byId.set(id, turn);
@@ -217,6 +222,167 @@ export function causalSessionPart(
   };
 }
 
+export function reachableTraceSummary(root: Turn, starts: Map<string, Turn>, incomplete = false) {
+  const visited = new Set<string>(),
+    sessions = new Set([root.sid]);
+  let handoffs = 0;
+  const walk = (turn: Turn) => {
+    if (visited.has(turn.id)) return;
+    visited.add(turn.id);
+    for (const edge of turn.sent) {
+      if (edge.kind === 'move') continue;
+      handoffs++;
+      if (edge.kind === 'toyou') continue;
+      sessions.add(edge.to);
+      if (edge.kind === 'spawn' || edge.kind === 'relay') {
+        const child = starts.get(edge.id);
+        if (child) walk(child);
+      }
+    }
+  };
+  walk(root);
+  return [
+    `${sessions.size} ${sessions.size === 1 ? 'session' : 'sessions'}`,
+    `${handoffs} ${handoffs === 1 ? 'handoff' : 'handoffs'}`,
+    incomplete ? 'some relationship context is unavailable' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+export function traceRootActor(turn: Turn) {
+  return turn.start?.from ?? (turn.u ? 'you' : turn.sid);
+}
+
+export function traceHopActor(edge: Handoff) {
+  return edge.kind === 'toyou' ? edge.from : edge.to;
+}
+
+export function traceSentenceParts(
+  edge: Handoff,
+  session: (id: string, turn?: string) => Hop['parts'][number],
+  starts: Map<string, Turn>,
+  currentTurn?: string,
+  recipientKind?: string,
+): Hop['parts'] {
+  const verb = (text: string): Hop['parts'][number] => ({ className: 'verb', text });
+  if (edge.kind === 'ask')
+    return [
+      session('you'),
+      verb(' asked '),
+      session(edge.to, starts.get(edge.id)?.id ?? currentTurn),
+    ];
+  if (edge.kind === 'spawn' || edge.kind === 'relay') {
+    const text =
+      edge.kind === 'spawn'
+        ? ' handed off to ' +
+          (recipientKind === 'Subagent' ? 'subagent' : (recipientKind ?? '')) +
+          ' '
+        : ' relayed to ';
+    return [session(edge.from, currentTurn), verb(text), session(edge.to, starts.get(edge.id)?.id)];
+  }
+  if (edge.kind === 'move')
+    return [
+      verb('Semon moved '),
+      session(edge.to),
+      verb(' from '),
+      { className: 'verb mach', text: edge.fromMachine },
+      verb(' to '),
+      { className: 'verb mach', text: edge.toMachine },
+    ];
+  const text = {
+    question: ' asked you',
+    result: ' sent you a result',
+    decision: ' needs your decision',
+  }[edge.ask];
+  return [session(edge.from, currentTurn), verb(text)];
+}
+
+export function traceHandoffOutcome(edge: Handoff) {
+  if (edge.kind === 'move') return { state: 'done', text: 'Moved' };
+  if (edge.kind === 'toyou' && edge.ask === 'result')
+    return {
+      state: edge.status,
+      text: {
+        new: 'new',
+        work: 'working',
+        wait: 'waiting on you',
+        err: 'failed',
+        done: 'delivered',
+      }[edge.status],
+    };
+  return {
+    state: edge.status,
+    text: {
+      new: undefined,
+      work: 'working',
+      wait: 'waiting on you',
+      err: 'failed',
+      done: edge.kind === 'toyou' ? 'answered' : edge.result ? 'returned' : 'delivered',
+    }[edge.status],
+  };
+}
+
+export function traceTurnOutcome(
+  turn: Turn,
+  handoffs: Map<string, Handoff>,
+  nameOf: (id: string) => string,
+  formatTime: (at: number) => string,
+) {
+  const end = turn.end,
+    state = end?.st ?? 'idle',
+    handoff = end?.h
+      ? handoffs.get(end.h)
+      : end?.why === 'toyou'
+        ? turn.sent.filter((edge) => edge.kind === 'toyou').length === 1
+          ? turn.sent.find((edge) => edge.kind === 'toyou')
+          : undefined
+        : undefined;
+  const withTime = (label: string, at: number | undefined) =>
+    at == null ? label : `${label} · ${formatTime(at)}`;
+  if (end?.why === 'input') return { state: 'wait', text: 'Waiting for your input' };
+  if (['permission', 'waiting', 'waiting_permission'].includes(end?.why ?? ''))
+    return { state: 'wait', text: 'Waiting on permission' };
+  if (end?.why === 'working') return { state: 'work', text: 'Still working' };
+  if (end?.why === 'toyou' && handoff?.kind === 'toyou') {
+    const outcome = traceHandoffOutcome(handoff),
+      label = [edgeAskLabel(handoff), outcome.text].filter(Boolean).join(' · ');
+    return {
+      state: outcome.state,
+      text: withTime(label, handoff.at),
+    };
+  }
+  if (end?.why === 'failed') return { state: 'err', text: withTime('Failed', turn.start?.done) };
+  if (end?.why === 'unfinished_step')
+    return { state: 'err', text: 'Stopped on a step with no result' };
+  if (end?.why === 'failed_step') return { state: 'err', text: 'Stopped on a failed step' };
+  if (end?.why === 'handoff_failed' && handoff)
+    return { state: 'err', text: `Handoff to ${nameOf(handoff.to)} failed` };
+  if (end?.why === 'returned' && turn.start)
+    return {
+      state: 'done',
+      text: withTime(`Returned to ${nameOf(turn.start.from)}`, turn.start.done),
+    };
+  if (end?.why === 'replied') return { state: 'done', text: 'Replied' };
+  return { state, text: 'No reply in these logs' };
+}
+
+function edgeAskLabel(edge: Extract<Handoff, { kind: 'toyou' }>) {
+  return {
+    question: 'Asked you',
+    result: 'Sent you a result',
+    decision: 'Needs your decision',
+  }[edge.ask];
+}
+
+export function traceCostText(cost: Cost) {
+  return cost.usd == null || cost.unpriced_models?.length ? '—' : '$' + cost.usd.toFixed(2);
+}
+
+export function traceShortMoney(usd: number) {
+  return '$' + usd.toFixed(1);
+}
+
 /** Existing rail/chart presentation, fed by one bounded source query. */
 export function renderCausalTrace(
   root: HTMLElement,
@@ -233,15 +399,13 @@ export function renderCausalTrace(
       ...new Set(sessions.flatMap((session) => session.cost?.unpriced_models ?? [])),
     ],
   });
-  const costText = (cost: Cost) =>
-    cost.usd == null ? 'Cost unavailable' : '$' + cost.usd.toFixed(2);
   const { agentSnapshot } = createTraceCalculations(
     data,
     {
       costForSessions,
       costForSession: (id) => data.sessions[id]?.cost ?? { usd: null },
-      costText,
-      shortMoney: (value) => '$' + value.toFixed(2),
+      costText: traceCostText,
+      shortMoney: traceShortMoney,
       hcls: (id) => data.sessions[id]?.harness ?? 'you',
       usageTotal: (session) =>
         (session.tokens ?? []).reduce((sum, value) => sum + value, 0) * 1000000,
@@ -267,61 +431,64 @@ export function renderCausalTrace(
         }
       : undefined;
   };
-  const endLabel = (turn: Turn) => {
-    if (turn.end?.why === 'toyou') {
-      const edge = [...turn.sent].reverse().find((edge) => edge.kind === 'toyou');
-      if (edge?.kind !== 'toyou') return 'Recorded turn';
-      if (edge.ask === 'result') return 'Sent you a result';
-      if (edge.status === 'wait') return 'Waiting on you';
-      if (edge.declined) return 'You declined';
-      return edge.answer?.length ? 'You answered' : 'Asked you';
-    }
-    const labels: Record<string, string> = {
-      permission: 'Waiting for permission',
-      input: 'Waiting for your input',
-      working: 'Working',
-      failed: 'Failed',
-      failed_step: 'A step failed',
-      unfinished_step: 'Step result not recorded',
-      handoff_failed: 'Handoff failed',
-      returned: 'Returned',
-      replied: 'Replied',
-      no_reply: 'No reply recorded',
+  const meta = (turn: Turn) => {
+    const outcome = traceTurnOutcome(
+      turn,
+      data.handoffs,
+      (id) => causalSessionPart(data, id).text,
+      (at) => clock(at, now),
+    );
+    return {
+      state: outcome.state,
+      stateLabel: STATE[outcome.state] ?? 'Recorded',
+      text: outcome.text,
+      session: turn.sid,
+      turn: turn.id,
+      name: data.sessions[turn.sid]?.name,
+      harness: harness(turn.sid),
+      chip: shortModel(data.sessions[turn.sid]?.model),
     };
-    return labels[turn.end?.why ?? ''] ?? 'Recorded turn';
   };
-  const meta = (turn: Turn) => ({
-    state: turn.end?.st ?? 'done',
-    stateLabel: STATE[turn.end?.st ?? 'done'] ?? 'Recorded',
-    text: endLabel(turn),
-    session: turn.sid,
-    turn: turn.id,
-    name: data.sessions[turn.sid]?.name,
-    harness: harness(turn.sid),
-    chip: shortModel(data.sessions[turn.sid]?.model),
-  });
+  const rootParts: Hop['parts'] = data.root.start
+    ? traceSentenceParts(
+        data.root.start,
+        sessionPart,
+        data.starts,
+        undefined,
+        data.sessions[data.root.start.to]?.kind,
+      )
+    : data.root.u
+      ? traceSentenceParts(
+          {
+            id: data.root.id,
+            kind: 'ask',
+            from: 'you',
+            to: data.key,
+            at: data.root.at ?? now,
+            status: 'done',
+            brief: '',
+          },
+          sessionPart,
+          data.starts,
+          data.root.id,
+        )
+      : [
+          sessionPart(data.key),
+          { className: 'verb', text: " · a turn whose start isn't in these logs" },
+        ];
   hops.push({
     key: 'root:' + data.root.id,
     className: 'k-root',
-    nodeClass: data.root.start ? (data.sessions[data.key]?.harness ?? 'you') : 'you',
-    icon: data.root.start ? (I[data.root.start.kind] ?? I.ask) : I.ask,
+    nodeClass: data.sessions[traceRootActor(data.root)]?.harness ?? 'you',
+    icon: data.root.start ? (I[data.root.start.kind] ?? I.ask) : data.root.u ? I.ask : I.more,
     handoff: data.root.start?.id,
     turn: data.root.id,
-    parts: [
-      sessionPart(data.root.start?.from ?? (data.root.u ? 'you' : data.key)),
-      {
-        className: 'verb',
-        text: data.root.start
-          ? data.root.start.kind === 'spawn'
-            ? ' spawned '
-            : data.root.start.kind === 'relay'
-              ? ' relayed to '
-              : ' started a turn in '
-          : ' started a turn in ',
-      },
-      sessionPart(data.key, data.root.id),
-    ],
-    time: clock(data.root.at ?? data.sessions[data.key].start, now),
+    parts: rootParts,
+    time: data.root.start
+      ? clock(data.root.start.at, now)
+      : data.root.u
+        ? clock(data.root.at ?? now, now)
+        : undefined,
     brief: data.root.u?.text || data.root.start?.brief || undefined,
     meta: meta(data.root),
   });
@@ -329,52 +496,44 @@ export function renderCausalTrace(
     if (seen.has(turn.id)) return;
     seen.add(turn.id);
     for (const edge of turn.sent) {
-      const child = data.starts.get(edge.id);
+      const child = data.starts.get(edge.id),
+        isResult = edge.kind === 'toyou' && edge.ask === 'result',
+        edgeOutcome = traceHandoffOutcome(edge);
       hops.push({
         key: edge.id,
         className: 'child k-' + edge.kind + ' s-' + edge.status,
-        nodeClass: data.sessions[edge.to]?.harness ?? 'you',
+        nodeClass: data.sessions[traceHopActor(edge)]?.harness ?? 'you',
         icon: I[edge.kind] ?? I.result,
         handoff: edge.id,
         turn: child?.id,
-        parts: [
-          sessionPart(edge.from, turn.id),
-          {
-            className: 'verb',
-            text:
-              edge.kind === 'spawn'
-                ? ' spawned '
-                : edge.kind === 'relay'
-                  ? ' relayed to '
-                  : edge.kind === 'toyou'
-                    ? edge.ask === 'result'
-                      ? ' sent a result to '
-                      : ' asked '
-                    : ' sent to ',
-          },
-          sessionPart(edge.to, child?.id),
-        ],
+        parts: isResult
+          ? [{ className: 'verb', text: edgeOutcome.text ?? '' }]
+          : traceSentenceParts(
+              edge,
+              sessionPart,
+              data.starts,
+              turn.id,
+              data.sessions[edge.to]?.kind,
+            ),
         time: clock(edge.at, now),
         brief: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.brief || undefined,
         answers: edge.kind === 'toyou' && Array.isArray(edge.answer) ? edge.answer : undefined,
         result: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.result,
-        meta: child
-          ? meta(child)
+        ...(isResult
+          ? {}
           : {
-              state: edge.status,
-              stateLabel: STATE[edge.status] ?? edge.status,
-              text: edge.declined
-                ? 'Declined'
-                : edge.status === 'done'
-                  ? 'Completed'
-                  : edge.status === 'wait'
-                    ? 'Waiting on you'
-                    : 'Recorded',
-              note:
-                edge.to !== 'you' && !child
-                  ? 'Its turn is not in this source publication'
-                  : undefined,
-            },
+              meta: child
+                ? meta(child)
+                : {
+                    state: edgeOutcome.state,
+                    stateLabel: STATE[edgeOutcome.state] ?? edgeOutcome.state,
+                    text: edgeOutcome.text ?? '',
+                    note:
+                      (edge.kind === 'spawn' || edge.kind === 'relay') && !child
+                        ? "Its turn isn't in these logs"
+                        : undefined,
+                  },
+            }),
       });
       if (child) walk(child);
     }
@@ -384,9 +543,7 @@ export function renderCausalTrace(
     root,
     {
       empty: false,
-      summary:
-        `${Object.keys(data.sessions).length} sessions · ${data.handoffs.size} handoffs` +
-        (data.incomplete ? ' · some relationship context is unavailable' : ''),
+      summary: reachableTraceSummary(data.root, data.starts, data.incomplete),
       hops,
       agents: agentSnapshot(data.root),
       observation: data.observation,
