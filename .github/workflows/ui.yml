@@ -13,19 +13,19 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-test-binaries
-          run-id: 38996740124
+          run-id: 38997873684
           github-token: ${{ github.token }}
           path: target/debug
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-ui-reference-binary
-          run-id: 38996740124
+          run-id: 38997873684
           github-token: ${{ github.token }}
           path: target/ui-reference
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: viewer-ui-before-binary
-          run-id: 38996740124
+          run-id: 38997873684
           github-token: ${{ github.token }}
           path: target/ui-before
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -68,14 +68,14 @@ jobs:
           echo "SEMON_TOKEN=${candidate##*t=}" >> "$GITHUB_ENV"
           echo "SEMON_PRESERVATION_BASE=${reference%%/?t=*}" >> "$GITHUB_ENV"
           echo "SEMON_PRESERVATION_TOKEN=${reference##*t=}" >> "$GITHUB_ENV"
-          git fetch --no-tags --depth=1 origin 63ee524a740f5a9f53315fc378d709bdf97b2e63
-          git show 63ee524a740f5a9f53315fc378d709bdf97b2e63:crates/semon-sessions/src/viewer.generated.js > "$RUNNER_TEMP/current-viewer.js"
+          git fetch --no-tags --depth=1 origin fea65b1ae9fd67d987c41d0cf103e82b57fe8b16
+          git show fea65b1ae9fd67d987c41d0cf103e82b57fe8b16:crates/semon-sessions/src/viewer.generated.js > "$RUNNER_TEMP/current-viewer.js"
           git fetch --no-tags --depth=1 origin eb535ff8920fe9aa54e78babc9649cf6c9400ad6
           git show eb535ff8920fe9aa54e78babc9649cf6c9400ad6:crates/semon-sessions/src/viewer.generated.js > "$RUNNER_TEMP/before-viewer.js"
       - name: Matching before and after, including expanded reading states
         working-directory: tests/ui
         env:
-          SEMON_PRESERVATION_CANDIDATE: 63ee524a740f5a9f53315fc378d709bdf97b2e63
+          SEMON_PRESERVATION_CANDIDATE: fea65b1ae9fd67d987c41d0cf103e82b57fe8b16
         run: |
           SEMON_PRESERVATION_EXPECTED_JS="$RUNNER_TEMP/current-viewer.js" node preservation-state.mjs
           before=$(cat "$RUNNER_TEMP/before.url")
