@@ -488,10 +488,6 @@ test(
                 listedChildIds.some((id) => id.includes('a-docs')),
                 'the selected child remains visible within the capped preview',
               );
-              assert.ok(
-                listedChildIds[0]?.includes('a-docs'),
-                'the selected Recent path leads the freshly ordered child list',
-              );
               assert.match(
                 await selectedRecent.innerText(),
                 /Update the ingest docs/,
@@ -524,6 +520,60 @@ test(
                 'true',
                 'the next navigation opens its required Recent ancestor despite saved collapse',
               );
+
+              // A fresh document preserves the existing ranked order; verify selected-path
+              // promotion separately while the same Recent ordering scope is still alive.
+              await page.route('**/api/viewer/home?**', withoutHomeSelected);
+              await page.route('**/api/sessions?**', withoutCatalogSelected);
+              sawUnavailableStatus = false;
+              await page.route('**/api/session-transcript?**', unavailableTranscript);
+              await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
+              await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+              await ingestRecent.waitFor({ state: 'visible' });
+              if ((await ingestRecent.getAttribute('aria-expanded')) !== 'true') {
+                await ingestToggle.focus();
+                await ingestToggle.press('Enter');
+                await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
+              }
+              const warmListedChildren = ingestRecent.locator(
+                ':scope > .tree-group > .treeitem',
+              );
+              await warmListedChildren.nth(2).waitFor({ state: 'visible' });
+              const warmInitialIds = await warmListedChildren.evaluateAll((nodes) =>
+                nodes.map((node) => node.getAttribute('data-id') ?? ''),
+              );
+              assert.equal(warmInitialIds.length, 3, 'Home starts with three Recent preview rows');
+              assert.equal(
+                warmInitialIds.some((id) => id.includes('a-docs')),
+                false,
+                'the selected session starts outside the filtered Home preview',
+              );
+
+              await page.evaluate((path) => {
+                history.pushState(history.state, '', path);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }, '/s/claude/a-docs?t=' + address[2] + '&compat=1');
+              await page.locator('#page [aria-label="Transcript"]').waitFor();
+              assert.equal(
+                sawUnavailableStatus,
+                true,
+                'the SPA-selected metadata reports unavailable status',
+              );
+              await selectedRecent.waitFor({ state: 'visible' });
+              await warmListedChildren.nth(2).waitFor({ state: 'visible' });
+              const promotedIds = await warmListedChildren.evaluateAll((nodes) =>
+                nodes.map((node) => node.getAttribute('data-id') ?? ''),
+              );
+              assert.equal(promotedIds.length, 3, 'selected promotion keeps the three-row cap');
+              assert.ok(
+                promotedIds.some((id) => id.includes('a-docs')),
+                'the selected child remains within the capped preview',
+              );
+              assert.ok(
+                promotedIds[0]?.includes('a-docs'),
+                'a newly selected child leads a retained Recent ordering scope',
+              );
+              await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
               await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
             }
