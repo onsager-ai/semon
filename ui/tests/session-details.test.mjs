@@ -63,6 +63,12 @@ test('selected usage preserves unknown cost and copied usage while native resume
     true,
   );
   assert.equal(menu.command, "claude --resume 'native;id'");
+  assert.deepEqual(
+    menu.actions.slice(0, 3).map(({ key }) => key),
+    ['trace', 'copy', 'external'],
+  );
+  assert.equal(menu.actions[2].text, 'Open in claude.ai');
+  assert.match(menu.actions[2].unavailable, /external conversation link is unavailable/);
   assert.equal(menu.cost.figure, '—');
   assert.match(menu.cost.note, /Copied usage is excluded.*unknown/);
   assert.equal(menu.cost.models[0].rows[0].count, '7');
