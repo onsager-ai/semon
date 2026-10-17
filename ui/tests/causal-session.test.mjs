@@ -438,3 +438,129 @@ test('causal participant parser rejects unrelated or excessive identity scope', 
       /Invalid causal participant scope/,
     );
 });
+
+test('passive relay summaries are scoped catalog facts and retain safe session navigation', () => {
+  const relay = relationship('relay', 'relay', 'selected', 'harbor'),
+    data = {
+      api: 1,
+      source_key: 'fixture',
+      catalog_key: 'selected',
+      root: 'turn',
+      generation: 'generation',
+      previews: {},
+      participants: { harbor: 'Harbor' },
+      participant_summaries: {
+        harbor: {
+          name: 'Harbor',
+          harness: 'codex',
+          kind: 'Subagent',
+          model: 'model-fixture',
+          tokens: [1.5, 2, 0.5],
+          cost: { usd: null, unpriced_models: ['unknown-model'] },
+        },
+      },
+      handoffs: [relay],
+      sessions: {
+        selected: {
+          name: 'Selected',
+          harness: 'claude',
+          state: 'done',
+          model: 'model-fixture',
+          start: 1,
+          last: 2,
+          cost: { usd: null },
+          tokens: [],
+          busy: [],
+          wait_edges: [],
+          wait_edges_truncated: false,
+        },
+      },
+      turns: [
+        {
+          sid: 'selected',
+          id: 'turn',
+          end: { st: 'done', why: 'replied' },
+          sent: ['relay'],
+          u: true,
+          last: true,
+        },
+      ],
+      frontier: [],
+      incomplete: false,
+      previews_incomplete: false,
+    },
+    parsed = parseCausalTrace(data, 'fixture', 'selected', 'turn');
+
+  assert.deepEqual(parsed.participantSummaries.harbor, {
+    name: 'Harbor',
+    harness: 'codex',
+    kind: 'Subagent',
+    model: 'model-fixture',
+    tokens: [1.5, 2, 0.5],
+    cost: { usd: null, unpriced_models: ['unknown-model'] },
+  });
+  assert.deepEqual(causalSessionPart(parsed, 'harbor'), {
+    className: 'who',
+    text: 'Harbor',
+    action: { kind: 'session', id: 'harbor', turn: undefined },
+  });
+  assert.throws(
+    () =>
+      parseCausalTrace(
+        {
+          ...data,
+          handoffs: [relationship('move', 'move', 'selected', 'harbor')],
+          turns: [{ ...data.turns[0], sent: ['move'] }],
+        },
+        'fixture',
+        'selected',
+        'turn',
+      ),
+    /Invalid causal participant summary scope/,
+  );
+  assert.throws(
+    () =>
+      parseCausalTrace(
+        {
+          ...data,
+          participant_summaries: {
+            harbor: { ...data.participant_summaries.harbor, name: 'Changed identity' },
+          },
+        },
+        'fixture',
+        'selected',
+        'turn',
+      ),
+    /Invalid causal participant summary scope/,
+  );
+  assert.throws(
+    () =>
+      parseCausalTrace(
+        {
+          ...data,
+          participant_summaries: {
+            harbor: { ...data.participant_summaries.harbor, cwd: '/private/path' },
+          },
+        },
+        'fixture',
+        'selected',
+        'turn',
+      ),
+    /Invalid causal participant summary fields/,
+  );
+  assert.throws(
+    () =>
+      parseCausalTrace(
+        {
+          ...data,
+          participant_summaries: {
+            harbor: { ...data.participant_summaries.harbor, tokens: [1, 2] },
+          },
+        },
+        'fixture',
+        'selected',
+        'turn',
+      ),
+    /Invalid causal participant summary metrics/,
+  );
+});

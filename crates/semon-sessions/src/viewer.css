@@ -1192,6 +1192,7 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .agent-relay-icon { width: 12px; height: 12px; flex: none; color: var(--muted); }
 .agent-meta { display: flex; align-items: center; gap: 6px; min-width: 0; height: 13px; padding-left: 13px; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1; }
 .agent-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-peer-qualification { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .agent-status.stat { gap: 3px; font-size: 12px; line-height: 1; }
 .agent-status .dot { width: 6px; height: 6px; }
 .agent-duration, .agent-cost { min-width: 0; color: var(--muted); font: 12px var(--mono); white-space: nowrap; }

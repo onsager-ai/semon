@@ -22,6 +22,14 @@ export interface Cost {
   by_model?: Record<string, ModelCost>;
   by_day?: Record<string, number>;
 }
+export interface TraceParticipantSummary {
+  name: string;
+  harness: string;
+  kind: string;
+  model: string;
+  tokens: readonly [number, number, number];
+  cost: Pick<Cost, 'usd' | 'unpriced_models'>;
+}
 export interface TokenObservation {
   input: number;
   cached_input: number;
