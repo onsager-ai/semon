@@ -316,3 +316,8 @@ before navigating Home. Individual route removal did not wait for in-flight
 handlers and produced a double-handled response during navigation. The correction
 uses the locked browser tool's waiting teardown without changing application
 timers, assertions or the captured reference.
+The catalog-list mock now passes selected lookups through unchanged. On a direct
+session link, selected metadata can precede the existing bounded catalog refresh;
+the test waits for the third preview row before asserting the exact three-row
+cap. Failure-only diagnostics retain bounded public metadata and preserve the
+original exception. No application refresh cadence or wait timeout is changed.
