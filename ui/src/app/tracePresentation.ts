@@ -288,12 +288,16 @@ export function traceSentenceParts(
   recipientKind?: string,
 ): Hop['parts'] {
   const verb = (text: string): Hop['parts'][number] => ({ className: 'verb', text });
+  // Trace sentences are recorded prose in the selected application. Its agent
+  // rows and explicit "Open in" controls own navigation; turning every name
+  // into a touch control changes sentence wrapping and the flow's row pitch.
+  const who = (id: string, turn?: string): Hop['parts'][number] => ({
+    ...session(id, turn),
+    action: undefined,
+    label: undefined,
+  });
   if (edge.kind === 'ask')
-    return [
-      session('you'),
-      verb(' asked '),
-      session(edge.to, starts.get(edge.id)?.id ?? currentTurn),
-    ];
+    return [who('you'), verb(' asked '), who(edge.to, starts.get(edge.id)?.id ?? currentTurn)];
   if (edge.kind === 'spawn' || edge.kind === 'relay') {
     const text =
       edge.kind === 'spawn'
@@ -301,16 +305,16 @@ export function traceSentenceParts(
           (recipientKind === 'Subagent' ? 'subagent' : (recipientKind ?? '')) +
           ' '
         : ' relayed to ';
-    return [session(edge.from, currentTurn), verb(text), session(edge.to, starts.get(edge.id)?.id)];
+    return [who(edge.from, currentTurn), verb(text), who(edge.to, starts.get(edge.id)?.id)];
   }
-  if (edge.kind === 'move') return [verb('Semon moved '), session(edge.to)];
+  if (edge.kind === 'move') return [verb('Semon moved '), who(edge.to)];
   if (edge.kind === 'toyou') {
     const text = {
       question: ' asked you',
       result: ' sent you a result',
       decision: ' needs your decision',
     }[edge.ask];
-    return [session(edge.from, currentTurn), verb(text)];
+    return [who(edge.from, currentTurn), verb(text)];
   }
   throw new Error('Unsupported recorded relationship');
 }
@@ -486,7 +490,7 @@ export function renderCausalTrace(
           data.root.id,
         )
       : [
-          sessionPart(data.key),
+          { ...sessionPart(data.key), action: undefined, label: undefined },
           { className: 'verb', text: " · a turn whose start isn't in these logs" },
         ];
   hops.push({

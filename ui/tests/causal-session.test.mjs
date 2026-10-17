@@ -98,6 +98,23 @@ test('trace relationship sentences preserve recorded ask, subagent, relay and us
   );
 });
 
+test('Trace prose keeps its original static names while qualified navigation remains available', () => {
+  const linkedName = (id, turn) => ({
+      className: 'who',
+      text: id,
+      action: { kind: 'session', id, turn },
+      label: 'Open ' + id,
+    }),
+    parts = traceSentenceParts(
+      relationship('relay', 'relay', 'atlas', 'harbor'),
+      linkedName,
+      new Map(),
+    );
+  assert.equal(parts.map((part) => part.text).join(''), 'atlas relayed to harbor');
+  assert.ok(parts.every((part) => part.action === undefined && part.label === undefined));
+  assert.equal(linkedName('harbor').action.id, 'harbor');
+});
+
 test('trace hops preserve the recorded icons, generic move wording, and missing-child marker', () => {
   const icon = (kind, fields = {}) =>
       traceHandoffIconKey(relationship(kind, kind, 'atlas', 'child', fields)),
