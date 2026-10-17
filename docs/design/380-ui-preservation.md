@@ -14,9 +14,13 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   and existing Filter/Select sheet. Grouping reads no additional data. The earlier
   native-only collapsed child list and inline filter form are not the selected
   complete presentation. Every loaded child now remains individually visible.
+- The shared filter dismissal defers its URL commit until the existing overlay
+  history transaction completes. The native search form retains tablet touch
+  sizing, and native transcripts use the selected 2px page inset.
 - Recent restores duration and machine/repository metadata, recorded state labels,
   failed-descendant flags and the selected ancestry in rail mode. Recorded status
-  does not grant control authority.
+  does not grant control authority. Home retains the original compact ages,
+  plain-text previews and source-qualified parent names.
 - Session headers use the selected complete application's responsive lineage:
   desktop ancestors, no extra Sessions breadcrumb, and no mobile ancestor text
   competing with the name. Sessions navigation retains the reader's existing
@@ -75,10 +79,28 @@ same native fixtures, fixed clock, locked browser/fonts, widths 390/820/1280 and
 both themes against both applications. It retains 38 unmasked pairs, diffs and
 source-readable geometry/text/icon snapshots for Home, Sessions, three transcript
 shapes, Analytics and the phone drawer. The before binary runs the same protocol
-in the same job. Execution errors and missing coverage fail; pixel differences
+in the same job. Both readers receive the same wheel/Home input to cancel initial
+"follow latest" positioning, then must settle at the transcript head before capture.
+Earlier diagnostic transcript frames with a renewed tail-follow transaction are
+not evidence of matching scroll states. Execution errors and missing coverage fail; pixel differences
 remain explicit diagnostics at the unchanged 0.1/0.0001 thresholds. The existing
 strict regions, full-frame ratchets and every required suite remain independent
 gates. Diagnostics do not turn a red gate green.
+
+Remaining differences must be classified against that actual reference:
+
+- Approved pause differences: omitted Composer/New Session and inactive runtime,
+  SSH and control actions, including their occupied space and runtime-only detail.
+- Native read qualification: visible cached/stale/incomplete history, bounded loaded
+  counts, source-specific options and scope. These preserve the non-UI contract;
+  their layout differences are reported separately from approved pause removals.
+- Recorded data/presentation differences: activity wording, duration precision and
+  review-aware visible child counts. These are not automatically approved pixel
+  exceptions. Read the retained DOM/text evidence before attributing a mismatch.
+- Mockup-only divergence: extra Sessions/mobile lineage in the adapter, contrasted
+  with the authoritative complete application. The unchanged gate remains red.
+- Capture or execution failures: for example a missing menu or unsettled scroll;
+  these do not count as successful comparison and must be retained or rerun.
 
 Shared keyboard, touch, focus, scroll, transcript, tools, Thinking, native routes,
 generation and security suites remain required. Hub pins the exact Source commit,
