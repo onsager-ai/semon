@@ -509,6 +509,7 @@ export function createOverviewPages(host: OverviewHost) {
         depth,
         stuck: recentAll.has(row.id),
         flag: (() => {
+          if (rail) return undefined;
           const waiting = descendants.filter((child) => child.session.state === 'wait').length,
             failed = descendants.filter((child) => child.session.state === 'err').length;
           return waiting
@@ -517,11 +518,12 @@ export function createOverviewPages(host: OverviewHost) {
               ? { state: 'err', tip: failed + ' failed' }
               : undefined;
         })(),
-        childState: kids.some((child) => rank(child) === 0)
-          ? 'wait'
-          : kids.some((child) => rank(child) === 1)
-            ? 'work'
-            : undefined,
+        childState:
+          rail && descendants.some((child) => child.session.state === 'wait')
+            ? 'wait'
+            : rail && descendants.some((child) => child.session.state === 'work')
+              ? 'work'
+              : undefined,
         children: kids.length ? shown.map((child) => item(child, depth + 1, next)) : undefined,
         all: shown.length < kids.length ? descendants.length : undefined,
       };
