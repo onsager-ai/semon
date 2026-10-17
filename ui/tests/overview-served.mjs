@@ -300,6 +300,19 @@ test(
             await page.locator('#page [data-session-row="list"][data-id="harbor"]').click();
             await page.locator('[aria-label="Transcript"]').waitFor();
             await page.locator('#page .child-card').first().waitFor();
+            const runView = page.getByRole('button', {
+              name: 'Run view for feat/offline-sync',
+              exact: true,
+            });
+            await runView.waitFor({ state: 'attached' });
+            await runView.click();
+            await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
+            assert.match(new URL(page.url()).pathname, /^\/trace\/native\//);
+            await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
+            await page.goBack();
+            await page.locator('[aria-label="Transcript"]').waitFor();
+            await page.locator('#page .child-card').first().waitFor();
+
             assert.equal(
               await page
                 .getByText('Original action prompt is unavailable.', { exact: true })

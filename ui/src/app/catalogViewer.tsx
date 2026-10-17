@@ -2311,16 +2311,16 @@ export function createCatalogViewer(
         },
         {
           committed() {},
-          trace(turn) {
+          trace(turn, session = view.key) {
             const url =
               '/trace/native/' +
-              encodeURIComponent(view.key) +
+              encodeURIComponent(session) +
               '/' +
               encodeURIComponent(turn) +
               '?' +
               new URLSearchParams({ machine: view.sourceKey });
             history.pushState(null, '', url);
-            goCausal(view.key, turn);
+            goCausal(session, turn);
           },
           session(key) {
             void goSession(key);
@@ -2487,16 +2487,16 @@ export function createCatalogViewer(
         composerClosed(panel) {
           panelClosed(panel);
         },
-        trace(turn) {
+        trace(turn, session = view.key) {
           const url =
             '/trace/native/' +
-            encodeURIComponent(view.key) +
+            encodeURIComponent(session) +
             '/' +
             encodeURIComponent(turn) +
             '?' +
             new URLSearchParams({ machine: view.sourceKey });
           history.pushState(null, '', url);
-          goCausal(view.key, turn);
+          goCausal(session, turn);
         },
         session(key, turn) {
           void goSession(key, undefined, true, turn);

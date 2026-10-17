@@ -29,6 +29,8 @@ The approved feedback-20261015-v6 redesign remains separate work after #380.
   desktop ancestors, no extra Sessions breadcrumb, and no mobile ancestor text
   competing with the name. Sessions navigation retains the reader's existing
   filter/focus/scroll return transaction through native links and the shared drawer.
+  Child cards retain Run view as a passive native Trace link when the recorded
+  relationship identifies its target turn; it never invokes runtime control.
 - Repeated Find publication keeps the focused account widget in its host's Find
   row. Shared chrome does not reparent that widget into the ordinary toolbar.
 
