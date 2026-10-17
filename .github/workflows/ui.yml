@@ -84,6 +84,12 @@ jobs:
           node-version: 22.x
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - name: Verify data-only fixtures against original source
+        env:
+          SEMON_FIXTURE_DATA_SOURCE: bf9190ef2b80fcd56726f61dc480346b698039a2
+        run: |
+          git fetch --no-tags --depth=1 origin "$SEMON_FIXTURE_DATA_SOURCE"
+          node tests/ui/fixture-data-equivalence.mjs
       - name: Install pinned UI tooling
         run: npm --prefix ui ci --no-audit --no-fund
       - name: Type-check, security boundaries, deterministic build and freshness
