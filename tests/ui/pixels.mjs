@@ -187,6 +187,9 @@ async function snapshot(page) {
       '.flow .hop',
       '.hop .sent',
       '.hop .meta',
+      '.hop .node',
+      '.hop .sent > *',
+      '.hop .meta > *',
     ];
     return {
       historyState: history.state,
@@ -196,12 +199,71 @@ async function snapshot(page) {
           selector,
           [...document.querySelectorAll(selector)].slice(0, 60).map((node) => {
             const box = node.getBoundingClientRect(),
-              css = getComputedStyle(node);
+              css = getComputedStyle(node),
+              traceStyleSelector =
+                selector === '.hop .node' ||
+                selector === '.hop .sent > *' ||
+                selector === '.hop .meta > *',
+              styleDetail = (style) => ({
+                fontWeight: style.fontWeight,
+                color: style.color,
+                textDecoration: style.textDecoration,
+                fill: style.fill,
+                stroke: style.stroke,
+                strokeWidth: style.strokeWidth,
+              }),
+              pseudoDetail = (pseudo) => {
+                const style = getComputedStyle(node, pseudo);
+                return {
+                  content: style.content,
+                  display: style.display,
+                  color: style.color,
+                  background: style.backgroundColor,
+                  border: style.border,
+                  boxShadow: style.boxShadow,
+                  fontWeight: style.fontWeight,
+                  textDecoration: style.textDecoration,
+                  fill: style.fill,
+                  stroke: style.stroke,
+                  strokeWidth: style.strokeWidth,
+                };
+              },
+              vectorStyles =
+                traceStyleSelector
+                  ? [...node.querySelectorAll('svg, path, rect, circle, line, polyline, polygon')]
+                      .slice(0, 40)
+                      .map((item) => {
+                        const itemBox = item.getBoundingClientRect(),
+                          itemStyle = getComputedStyle(item);
+                        return {
+                          tag: item.tagName,
+                          class: item.getAttribute('class'),
+                          path: item.getAttribute('d'),
+                          fillAttribute: item.getAttribute('fill'),
+                          strokeAttribute: item.getAttribute('stroke'),
+                          strokeWidthAttribute: item.getAttribute('stroke-width'),
+                          box: [itemBox.x, itemBox.y, itemBox.width, itemBox.height],
+                          ...styleDetail(itemStyle),
+                          opacity: itemStyle.opacity,
+                        };
+                      })
+                  : undefined;
             return {
               text: node.textContent.slice(0, 2000),
               class: node.getAttribute('class'),
               path: node.getAttribute('d'),
               box: [box.x, box.y, box.width, box.height],
+              ...(traceStyleSelector
+                ? {
+                    tag: node.tagName,
+                    traceStyle: {
+                      ...styleDetail(css),
+                      before: pseudoDetail('::before'),
+                      after: pseudoDetail('::after'),
+                    },
+                    ...(vectorStyles?.length ? { vectorStyles } : {}),
+                  }
+                : {}),
               font: css.font,
               color: css.color,
               background: css.backgroundColor,
