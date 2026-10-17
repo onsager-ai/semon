@@ -58,6 +58,11 @@ async function capture(candidate, reference, key) {
     ['candidate', candidate],
     ['reference', reference],
   ]) {
+    // Both readers open at the latest record. Cancel that initial following
+    // transaction with the same real reader input before comparing their heads.
+    await page.mouse.move(page.viewportSize().width - 20, 300);
+    await page.mouse.wheel(0, -100000);
+    await page.keyboard.press('Home');
     await page.evaluate(async () => {
       await document.fonts.ready;
       window.scrollTo(0, 0);
@@ -65,6 +70,9 @@ async function capture(candidate, reference, key) {
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     });
     await page.waitForTimeout(150);
+    await page.waitForFunction(
+      () => scrollY <= 1 && document.querySelector('#main').scrollTop <= 1,
+    );
     const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
     fs.writeFileSync(
