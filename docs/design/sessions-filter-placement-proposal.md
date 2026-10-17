@@ -45,3 +45,15 @@ their current cases, thresholds, references and approval rules. A passing fixtur
 suite or request-budget run does not accept the visual change. Whether moving the
 routine explanation out of the always-visible footer is acceptable remains an
 open placement decision.
+
+Asset preparation at `5ac406349f7a7a933e60fe097d92b8589d8db55a` ran in
+[CI 39074023198](https://github.com/onsager-ai/semon/actions/runs/39074023198).
+Fixture equivalence, formatting, architecture, design and types passed. Of 147
+unit tests, 146 passed; the sole failure was the expected stale generated viewer.
+The subsequent freshness/size and browser checks were unrun. The fallback build
+produced [artifact 12115279867](https://github.com/onsager-ai/semon/actions/runs/39074023198/artifacts/12115279867)
+(160262 bytes; ZIP SHA256
+`4979b409a1e84788d934ab74620386f7d1135421ff46fa5f65a3a097a3d60245`).
+The exact 371606-byte generated viewer is adopted for the next full check, SHA256
+`d1ed3e6927d4a6f143d246a28f7047d9f69101f2e9809d3823ba0bd20f0a3818`.
+Shared and shell bundles are unchanged. Asset preparation is not acceptance.
