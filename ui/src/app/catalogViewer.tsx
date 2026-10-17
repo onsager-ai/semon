@@ -14,6 +14,11 @@ import { object, text } from '../domain/validate';
 import type { ViewerHost } from '../viewer-host';
 import { parseCatalogCapabilities, type CatalogCapabilities } from '../state/catalog-capabilities';
 import { parseCatalogPage, type CatalogPage, type CatalogSession } from '../state/catalog-wire';
+import {
+  catalogCountWitness,
+  completeCatalogCount,
+  type CatalogCountWitness,
+} from '../state/catalog-count';
 import { CatalogSelectionStore, type CatalogSelectionRequest } from '../state/catalog-selection';
 import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catalog-annotations';
 import { CatalogTranscriptStore } from '../state/catalog-transcript';
@@ -187,6 +192,7 @@ export function createCatalogViewer(
     listRetryDelay = 1000;
   let disposed = false,
     page: CatalogPage | null = null,
+    countWitness: CatalogCountWitness | null = null,
     items: CatalogSession[] = [],
     cursor: string | null = null,
     listEpoch = 0,
@@ -214,6 +220,7 @@ export function createCatalogViewer(
     string,
     {
       page: CatalogPage | null;
+      countWitness: CatalogCountWitness | null;
       items: CatalogSession[];
       cursor: string | null;
       harness: string;
@@ -639,6 +646,7 @@ export function createCatalogViewer(
   };
   const saveFilters = () =>
     history.replaceState(history.state, '', '/sessions?' + browsingParams());
+  const countFilters = () => JSON.stringify([harness, repo, model, query]);
   let groupBy = 'recent';
   function applyListFilters(values: CatalogFilters) {
     if (
@@ -1938,6 +1946,16 @@ export function createCatalogViewer(
       root,
       {
         items: ordered,
+        completeCount: completeCatalogCount({
+          page,
+          items,
+          witness: countWitness,
+          source: capabilities.source_key,
+          filters: countFilters(),
+          searchRequested: query !== '',
+          updating,
+          more: cursor !== null,
+        }),
         browser: {
           facets: catalogBrowser.element,
           groupBy,
@@ -2050,7 +2068,8 @@ export function createCatalogViewer(
       return;
     scope.clearTimeout(listRetry);
     const epoch = ++listEpoch,
-      p = params();
+      p = params(),
+      filters = countFilters();
     p.set('limit', '60');
     if (harness) p.set('harness', harness);
     if (repo === '__none__') p.set('no_repo', '1');
@@ -2081,6 +2100,7 @@ export function createCatalogViewer(
       );
       if (!pendingFacts) listRetryDelay = 1000;
       page = next;
+      countWitness = catalogCountWitness(next, filters, !append);
       if (capabilities.source_candidates && !candidateLoaded) void loadCandidates(false);
       cursor = next.next_cursor;
       items = append ? [...items, ...next.items].slice(-300) : next.items;
@@ -3414,7 +3434,8 @@ export function createCatalogViewer(
     focusHeading();
   }
   async function refreshMetadata(sourceKey: string, epoch: number) {
-    const p = params();
+    const p = params(),
+      filters = countFilters();
     p.set('limit', '60');
     if (harness) p.set('harness', harness);
     if (repo === '__none__') p.set('no_repo', '1');
@@ -3485,6 +3506,7 @@ export function createCatalogViewer(
     const changedPage = !page || (page.generation !== value.generation && items.length <= 60);
     if (changedPage) {
       page = value;
+      countWitness = catalogCountWitness(value, filters, true);
       cursor = value.next_cursor;
     }
     let changed = before !== JSON.stringify(items);
@@ -3618,6 +3640,7 @@ export function createCatalogViewer(
     sourceViews.delete(capabilities.source_key);
     sourceViews.set(capabilities.source_key, {
       page,
+      countWitness,
       items,
       cursor,
       harness,
@@ -3663,6 +3686,7 @@ export function createCatalogViewer(
       Object.assign(capabilities, next);
       const retained = sourceViews.get(key);
       page = retained?.page ?? null;
+      countWitness = retained?.countWitness ?? null;
       items = retained?.items ?? [];
       cursor = retained?.cursor ?? null;
       cancelCandidate();

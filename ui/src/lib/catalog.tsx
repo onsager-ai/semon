@@ -26,6 +26,7 @@ export interface CatalogListSnapshot {
     groups: readonly { title: string; items: readonly CatalogListItem[] }[];
   };
   items: readonly CatalogListItem[];
+  completeCount?: boolean;
   groups?: readonly {
     root: CatalogListItem;
     children: readonly CatalogListItem[];
@@ -72,6 +73,7 @@ export function renderCatalogList(
   host: CatalogListHost,
 ) {
   const filtered = !!(snapshot.query || snapshot.harness || snapshot.repo || snapshot.model);
+  const countLabel = `${snapshot.items.length === 1 ? 'session' : 'sessions'}${snapshot.completeCount ? '' : ' loaded'}`;
   function commit(form: HTMLFormElement) {
     const values = new FormData(form);
     host.filters({
@@ -84,7 +86,7 @@ export function renderCatalogList(
   const resultHeader = (
     <div class="catalog-result-header">
       <span>
-        {snapshot.items.length} {snapshot.items.length === 1 ? 'session loaded' : 'sessions loaded'}
+        {snapshot.items.length} {countLabel}
         <span class="catalog-sort"> · Latest recorded activity</span>
       </span>
       {filtered && (
@@ -114,7 +116,8 @@ export function renderCatalogList(
         {snapshot.browser ? (
           <div class="sub">
             <span>
-              <b>{snapshot.items.length}</b>sessions loaded
+              <b>{snapshot.items.length}</b>
+              {countLabel}
             </span>
             <span>
               <b>{snapshot.browser.working}</b>working
