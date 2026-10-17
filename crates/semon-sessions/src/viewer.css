@@ -620,7 +620,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 @media (prefers-reduced-motion: reduce) { .account-switch-row .switch, .account-switch-row .switch-knob { transition: none; } }
 
 /* Transcript, modelled on Claude's chat */
-.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; gap: var(--s1); white-space: nowrap; }
+.divider .dv-text { display: flex; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
 .divider .dv-lead { flex: none; }
 .divider .dv-machine { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Opening a session: the old page is held dimmed and inert, then (after 150 ms, in viewer.js) a skeleton of turn-shaped
