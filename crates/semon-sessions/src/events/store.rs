@@ -840,6 +840,26 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
     tx.commit().map_err(io::Error::other)
 }
 
+/// Fence an existing publication's bounded upgrade before an old subset stage
+/// can publish the current version. Published history remains available while
+/// the ordinary discovery and drain owners rebuild its derived metadata.
+pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Result<bool> {
+    let (store, _) =
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    let unsupported: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation') AND COALESCE((SELECT value FROM meta WHERE key='catalog_version'),'')!=?1 AND NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining'))",
+        [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get(0),
+    ).map_err(io::Error::other)?;
+    if unsupported {
+        tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after',''),('catalog_recovery_reason','unsupported-publication-version');").map_err(io::Error::other)?;
+    }
+    tx.commit().map_err(io::Error::other)?;
+    Ok(unsupported)
+}
+
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
     let (store, _) =
         SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
@@ -2844,8 +2864,8 @@ fn closed_catalog(
     claims: &[(String, Option<i64>)],
 ) -> rusqlite::Result<bool> {
     let complete: bool = connection.query_row(
-        "SELECT COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete'",
-        [], |row| row.get(0),
+        "SELECT COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND COALESCE((SELECT value FROM meta WHERE key='catalog_version'),'')=?1",
+        [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get(0),
     )?;
     if !complete || claims.is_empty() || claims.len() > 64 || publication.rows.len() > 64 {
         return Ok(false);
@@ -6840,6 +6860,49 @@ mod tests {
         );
         drop(disabled);
         drop(enabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_catalog_component_cannot_preserve_complete_before_bounded_upgrade() {
+        let root = scratch("catalog-component-version");
+        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
+        let (mut store, other) = catalog_pair(&options);
+        let publication = crate::slot_projection::Publication {
+            rows: &rows[..1],
+            transcripts: Some(&projections),
+        };
+        let claims = rows[0]
+            .sources
+            .iter()
+            .map(|source| (source.path.to_string_lossy().into_owned(), None))
+            .collect::<Vec<_>>();
+        let before = store.session_catalog_generation().unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value=?1 WHERE key='catalog_version'",
+                [(crate::model::summary::CATALOG_VERSION - 1).to_string()],
+            )
+            .unwrap();
+        assert!(
+            store
+                .publish_closed_catalog_fenced(&publication, before.as_deref(), &claims)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.session_catalog_generation().unwrap(), before);
+        assert!(!store.qualified_catalog().unwrap());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(store);
+        drop(other);
         fs::remove_dir_all(root).unwrap();
     }
 
