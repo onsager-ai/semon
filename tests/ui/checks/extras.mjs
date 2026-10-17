@@ -21,7 +21,16 @@
 //     card names its kind once (in its meta line, after the harness mark, #146) and never uses the person icon or a delegation glyph, and the top bar names the kind as a plain label.
 //   - no page errors.
 import path from 'node:path';
-import { ENV, served, goto, data, reporter, overflow, settled } from '../lib.mjs';
+import {
+  ENV,
+  served,
+  goto,
+  data,
+  reporter,
+  overflow,
+  settled,
+  clickWithFailureDiagnostics,
+} from '../lib.mjs';
 import { XSS, XSS_KEY } from '../fixture.mjs';
 import { catalogPagingCheck } from '../catalog-paging-check.mjs';
 
@@ -875,7 +884,12 @@ export default async function (browser) {
       await page.waitForTimeout(100);
       const btn = page.locator('.step[data-long] .viewall:visible').first();
       r.expect((await btn.count()) === 1, "harbor's server-cut output offers View all");
-      await btn.click();
+      await clickWithFailureDiagnostics(
+        page,
+        '.step[data-long] .viewall',
+        'extras View all',
+        () => btn.click(),
+      );
       await page.waitForSelector('dialog.panel.full[open]');
       await page.waitForTimeout(200);
       return page.evaluate(() => {
