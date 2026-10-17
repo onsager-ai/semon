@@ -645,7 +645,23 @@ export function createCatalogViewer(
     canOpen: () => !disposed && navigation.route.v === 'sessions' && !active && !sourcesOpen,
     opened: panelOpened,
     closed: panelClosed,
-    changed: applyListFilters,
+    changed(values) {
+      const source = capabilities.source_key;
+      const commit = () => {
+        if (
+          !disposed &&
+          navigation.route.v === 'sessions' &&
+          !active &&
+          !sourcesOpen &&
+          capabilities.source_key === source
+        )
+          applyListFilters(values);
+      };
+      // Closing shared Panel chrome pops its overlay history entry. Commit the
+      // native filter URL only after that transaction, so Back cannot erase it.
+      if (overlayBackPending) afterOverlayClose = commit;
+      else commit();
+    },
   });
   const params = () =>
     new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
