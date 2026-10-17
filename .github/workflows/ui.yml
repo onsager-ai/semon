@@ -25,7 +25,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workspace-clock-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'review/380-workspace-clock-diagnostic-20261018'
+    name: bounded workspace publication clock diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Configure Ubuntu browser dependency mirrors
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+      - name: Install the repository's locked browser tooling
+        run: |
+          npm --prefix ui ci --no-audit --no-fund
+          npm --prefix tests/ui ci --no-audit --no-fund
+          npm --prefix tests/ui exec -- playwright install --with-deps chromium
+      - name: Verify all four workspace publication states with a paused product clock
+        run: node --test --test-name-pattern='workspace Recent stays separate' ui/tests/catalog-viewer-browser.mjs
   foundation:
+    if: github.ref_name != 'review/380-workspace-clock-diagnostic-20261018'
     name: UI types and generated assets
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -508,7 +530,7 @@ jobs:
 
   browser:
     name: viewer browser checks
-    if: ${{ always() }}
+    if: ${{ always() && github.ref_name != 'review/380-workspace-clock-diagnostic-20261018' }}
     needs: [foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
