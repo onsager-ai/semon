@@ -227,9 +227,8 @@ async function readinessSnapshot(page) {
           ? {
               box: rect(page),
               ariaBusy: page.hasAttribute('aria-busy'),
-              busyDescendants: page.querySelectorAll(
-                '[aria-busy="true"], [data-loading="true"]',
-              ).length,
+              busyDescendants: page.querySelectorAll('[aria-busy="true"], [data-loading="true"]')
+                .length,
               entryCount: page.querySelectorAll('[data-entry-key]').length,
             }
           : null,
@@ -360,8 +359,7 @@ async function capture(candidate, reference, key) {
       }),
     )
   ).filter(Boolean);
-  if (readinessErrors.length)
-    throw new Error(readinessErrors.join(' | '));
+  if (readinessErrors.length) throw new Error(readinessErrors.join(' | '));
   for (const [name, page] of pages) {
     const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
     fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
