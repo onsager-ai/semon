@@ -19,9 +19,9 @@ import {
 import { parseAnalytics, type AnalyticsData } from '../state/analytics-wire';
 import { renderAnalyticsPresentation } from './analyticsPresentation';
 import { createSeenResults } from './seenResults';
-import { HARNESSES, I } from './registry';
+import { HARNESSES, I, STATE } from './registry';
 import { runningToolLabel } from '../domain/toolNames';
-import { ago, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
+import { ago, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
 import type { EffectScope } from './effects';
 import type { ControlView } from '../lib/control';
 
@@ -440,31 +440,63 @@ export function createOverviewPages(host: OverviewHost) {
       return {
         id: row.id,
         name: row.session.name,
-        label:
-          row.session.name + ', ' + (HARNESSES[row.session.harness]?.name ?? row.session.harness),
+        label: [
+          row.session.name,
+          STATE[row.session.state] ?? 'Status unavailable',
+          HARNESSES[row.session.harness]?.name ?? row.session.harness,
+          home?.machines.find((machine) => machine.key === row.source_key)?.label ?? row.source_key,
+        ].join(', '),
         current: current === row.catalog_key ? 'page' : undefined,
         state: row.session.state,
-        stateLabel:
-          row.session.state === 'work'
-            ? 'Working'
-            : row.session.state === 'wait'
-              ? 'Waiting on you'
-              : 'Recorded history',
+        stateLabel: STATE[row.session.state] ?? 'Status unavailable',
         age: timeText(Math.max(0, recentNow - row.session.last)),
         model: shortModel(row.session.model),
         modelTip: row.session.model,
         harness: mark(row.session.harness),
-        fields: row.session.repo
-          ? [
-              {
-                className: 'repo',
-                text: row.session.repo.split('/').pop() ?? row.session.repo,
-                priority: 1,
-                tip: row.session.repo,
-                icon: I.repo,
-              },
-            ]
-          : [],
+        fields: [
+          ...(row.session.start
+            ? [
+                {
+                  className: 'row-duration',
+                  text: dur(
+                    row.session.start,
+                    ['work', 'wait'].includes(row.session.state) ? null : row.session.last,
+                    recentNow,
+                  ),
+                  priority: 1,
+                  tip: 'Duration',
+                  icon: I.duration,
+                },
+              ]
+            : []),
+          ...((home?.machines.length ?? 0) > 1
+            ? [
+                {
+                  className: 'row-machine host',
+                  text:
+                    home?.machines.find((machine) => machine.key === row.source_key)?.label ??
+                    row.source_key,
+                  priority: 2,
+                  tip:
+                    'Machine: ' +
+                    (home?.machines.find((machine) => machine.key === row.source_key)?.label ??
+                      row.source_key),
+                  icon: I.machine,
+                },
+              ]
+            : []),
+          ...(row.session.repo
+            ? [
+                {
+                  className: 'repo-short',
+                  text: row.session.repo,
+                  priority: 3,
+                  tip: row.session.repo,
+                  icon: I.repo,
+                },
+              ]
+            : []),
+        ],
         rail,
         open,
         depth,
@@ -477,11 +509,11 @@ export function createOverviewPages(host: OverviewHost) {
           };
           const descendants = below(row.id),
             waiting = descendants.filter((child) => child.session.state === 'wait').length,
-            working = descendants.filter((child) => child.session.state === 'work').length;
+            failed = descendants.filter((child) => child.session.state === 'err').length;
           return waiting
             ? { state: 'wait', tip: waiting + ' needs you' }
-            : working
-              ? { state: 'work', tip: working + ' working' }
+            : failed
+              ? { state: 'err', tip: failed + ' failed' }
               : undefined;
         })(),
         childState: kids.some((child) => rank(child) === 0)

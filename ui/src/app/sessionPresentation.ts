@@ -118,28 +118,33 @@ export function catalogSessionRow(session: CatalogSession): SessionRow {
       (session.status?.observation === 'retained' ? 'Recorded history' : 'Status unavailable'),
     age: session.last == null ? '' : ago(session.last, Date.now()),
     harness: mark(session.harness),
+    delegation: session.parent ? I.stack : undefined,
     model: shortModel(session.model),
     modelTip: session.model,
     fields: [
+      ...(session.start !== null
+        ? [
+            {
+              className: 'row-duration',
+              text: dur(
+                session.start,
+                state === 'work' || state === 'wait' ? null : session.last,
+                Date.now(),
+              ),
+              tip: 'Duration',
+              priority: 1,
+              icon: I.duration,
+            },
+          ]
+        : []),
       ...(session.repo
         ? [
             {
               className: 'repo-short',
-              text: session.repo.split('/').at(-1)!,
+              text: session.repo,
               tip: session.repo,
-              priority: 1,
+              priority: 3,
               icon: I.repo,
-            },
-          ]
-        : []),
-      ...(session.branch
-        ? [
-            {
-              className: 'branch',
-              text: session.branch,
-              tip: session.branch,
-              priority: 2,
-              icon: I.branch,
             },
           ]
         : []),

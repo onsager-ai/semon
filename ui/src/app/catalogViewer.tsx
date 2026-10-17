@@ -20,6 +20,7 @@ import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
 import { createRecentRenderer } from '../lib/recent';
 import { renderCatalogList } from '../lib/catalog';
+import { createCatalogBrowser, type CatalogFilters } from './catalogBrowser';
 import {
   renderSessionScreen,
   closeSessionComposer,
@@ -69,7 +70,7 @@ import {
   type CatalogTranscriptEntry,
 } from '../state/catalog-transcript-wire';
 import { parseCatalogField } from '../state/catalog-field-wire';
-import { I, STATE } from './registry';
+import { I, STATE, HARNESS } from './registry';
 import { toolInfo } from '../domain/toolNames';
 import type { ToolData } from '../lib/tool-details';
 import { clock } from '../domain/format';
@@ -626,6 +627,26 @@ export function createCatalogViewer(
   };
   const saveFilters = () =>
     history.replaceState(history.state, '', '/sessions?' + browsingParams());
+  let groupBy = 'recent';
+  function applyListFilters(values: CatalogFilters) {
+    if (
+      harness === values.harness &&
+      repo === values.repo &&
+      model === values.model &&
+      query === values.q
+    )
+      return;
+    cancelCandidate();
+    ({ harness, repo, model, q: query } = values);
+    saveFilters();
+    void loadList(false);
+  }
+  const catalogBrowser = createCatalogBrowser({
+    canOpen: () => !disposed && navigation.route.v === 'sessions' && !active && !sourcesOpen,
+    opened: panelOpened,
+    closed: panelClosed,
+    changed: applyListFilters,
+  });
   const params = () =>
     new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
   const overview = createOverviewPages({
@@ -1076,6 +1097,8 @@ export function createCatalogViewer(
     );
     {
       const session = active?.meta;
+      const ancestors = session?.details?.family?.ancestors ?? [];
+      const phone = matchMedia('(max-width: 760px)').matches;
       const content =
         active && session
           ? sessionBar.update(
@@ -1086,12 +1109,11 @@ export function createCatalogViewer(
                 state: selectedSessionState(session),
                 stateLabel: STATE[selectedSessionState(session)] ?? 'Recorded history',
                 stateTip: 'Status: ' + (STATE[selectedSessionState(session)] ?? 'Recorded history'),
-                showState: true,
-                ancestors: (session.details?.family?.ancestors ?? []).map((row) => ({
+                showState: !(phone && ancestors.length),
+                ancestors: (phone ? [] : ancestors).map((row) => ({
                   id: row.key,
                   name: row.name,
                 })),
-                crumb: 'Sessions',
                 labels: selectedSessionLabels(session, sourceLabel(active!.sourceKey)),
                 trace: false,
                 analytics: false,
@@ -1838,12 +1860,35 @@ export function createCatalogViewer(
         .map((item) => ({ ...item, id: item.key })),
       (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key),
     ).map((item) => ({ ...item, presentation: catalogSessionRow(item) }));
+    catalogBrowser.update({ harness, repo, model, q: query }, items, capabilities.source_key);
+    const groupKey = (item: CatalogSession) =>
+      groupBy === 'project'
+        ? (item.repo ?? 'No repo (roles)')
+        : groupBy === 'harness'
+          ? (HARNESS[item.harness] ?? item.harness)
+          : groupBy === 'machine'
+            ? sourceLabel(capabilities.source_key)
+            : '';
+    const titles = [...new Set(ordered.map(groupKey))].sort(
+      (a, b) =>
+        Number(a.startsWith('No repo')) - Number(b.startsWith('No repo')) || a.localeCompare(b),
+    );
     const keys = new Set(ordered.map((item) => cacheKey(item.key)));
     for (const key of listExpanded) if (!keys.has(key)) listExpanded.delete(key);
     renderCatalogList(
       root,
       {
         items: ordered,
+        browser: {
+          facets: catalogBrowser.element,
+          groupBy,
+          working: ordered.filter((item) => item.status?.state === 'work').length,
+          waiting: ordered.filter((item) => item.status?.state === 'wait').length,
+          groups: titles.map((title) => ({
+            title,
+            items: ordered.filter((item) => groupKey(item) === title),
+          })),
+        },
         groups: catalogSessionGroups(ordered).map((group) => ({
           ...group,
           expanded: listExpanded.has(cacheKey(group.root.key)),
@@ -1876,6 +1921,10 @@ export function createCatalogViewer(
         more: cursor !== null,
       },
       {
+        group(value) {
+          groupBy = value;
+          drawList();
+        },
         session(item) {
           void goSession(
             item.key,
@@ -1910,28 +1959,13 @@ export function createCatalogViewer(
           else draft.delete('q');
           history.replaceState(history.state, '', '/sessions?' + draft);
         },
-        filters(values) {
-          if (
-            harness === values.harness &&
-            repo === values.repo &&
-            model === values.model &&
-            query === values.q
-          )
-            return;
-          cancelCandidate();
-          harness = values.harness;
-          repo = values.repo;
-          model = values.model;
-          query = values.q;
-          saveFilters();
-          void loadList(false);
-        },
+        filters: applyListFilters,
         clearFilters() {
           cancelCandidate();
           harness = repo = model = query = '';
           saveFilters();
           void loadList(false);
-          root.querySelector<HTMLInputElement>('.catalog-filters input')?.focus();
+          root.querySelector<HTMLInputElement>('#sq')?.focus();
         },
         more() {
           void loadList(true);
@@ -3796,6 +3830,7 @@ export function createCatalogViewer(
         render(null, view.root);
       }
       overview.destroy();
+      catalogBrowser.destroy();
       releaseGeometry(shell.slots.recent, ['scrollPaddingTop']);
       recent.destroy();
       releaseScreen(root);
