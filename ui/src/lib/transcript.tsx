@@ -1078,11 +1078,6 @@ export function renderSessionScreen(
               </p>
             )}
           </div>
-          {view.observation === 'Cached history' && (
-            <p class="empty" role="status" data-transcript-observation="">
-              {view.observation}
-            </p>
-          )}
         </section>
         <SessionRuntime owner={state} />
         <div class="session-dock">
@@ -1092,6 +1087,13 @@ export function renderSessionScreen(
               if (node && state.jump && state.jump.parentNode !== node) node.append(state.jump);
             }}
           />
+          {view.observation === 'Cached history' && (
+            <div class="local-control">
+              <div class="composer-unavailable" role="status" data-transcript-observation="">
+                <span>{view.observation}</span>
+              </div>
+            </div>
+          )}
         </div>
         {view.footer && (
           <div class="session-foot">
