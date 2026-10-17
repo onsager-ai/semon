@@ -298,11 +298,65 @@ export default async function (browser) {
       );
       await childRequestsSettled();
       await settled(shot);
-      await shot.evaluate(() =>
+      await shot.evaluate((value) => {
+        // Retain a bounded position trace for this exact capture transaction.
+        // Observe native writes/events without changing scrolling or its waits.
+        const positions = [];
+        const record = (stage, detail = {}) => {
+          const main = document.querySelector('#main'),
+            label = [...document.querySelectorAll('.step .sa.st')].find(
+              (node) => node.textContent === value,
+            ),
+            button = label?.closest('.step')?.querySelector(':scope > button'),
+            rect = button?.getBoundingClientRect();
+          positions.push({
+            stage,
+            at: performance.now(),
+            main: main
+              ? {
+                  top: main.scrollTop,
+                  height: main.scrollHeight,
+                  client: main.clientHeight,
+                }
+              : null,
+            window: { top: scrollY, height: document.documentElement.scrollHeight },
+            selected: rect
+              ? { top: rect.top, bottom: rect.bottom, connected: button.isConnected }
+              : null,
+            ...detail,
+          });
+          if (positions.length > 80) positions.shift();
+        };
+        window.__stepPositionDiagnostics = { positions, record };
+        const scrollTop = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
+        if (scrollTop?.get && scrollTop?.set && scrollTop.configurable) {
+          Object.defineProperty(Element.prototype, 'scrollTop', {
+            ...scrollTop,
+            set(value) {
+              scrollTop.set.call(this, value);
+              if (this.id === 'main')
+                record('scrollTop write', { value, stack: new Error().stack?.slice(0, 1600) });
+            },
+          });
+        }
+        for (const event of ['scroll', 'wheel', 'click'])
+          document.addEventListener(
+            event,
+            (event) =>
+              record(event.type, {
+                trusted: event.isTrusted,
+                target: event.target?.id ?? event.target?.nodeName ?? null,
+              }),
+            { capture: true, passive: true },
+          );
+        record('before unfolding', {
+          scrollTopInstrumented: !!(scrollTop?.get && scrollTop?.set && scrollTop.configurable),
+        });
         document
           .querySelectorAll('.tsum[aria-expanded="false"]')
-          .forEach((button) => button.click()),
-      );
+          .forEach((button) => button.click());
+        record('after unfolding');
+      }, shotTitle);
       const titleLabel = shot.locator('.step .sa.st');
       if (expanded) {
         await titleLabel.evaluate((title) => title.click());
@@ -331,15 +385,27 @@ export default async function (browser) {
       });
       await shot.mouse.move(wheelPoint.x, wheelPoint.y);
       await shot.mouse.wheel(0, 1);
-      const layoutFrames = () =>
+      const layoutFrames = (stage) =>
         shot.evaluate(
-          () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+          (stage) =>
+            new Promise((done) =>
+              requestAnimationFrame(() => {
+                window.__stepPositionDiagnostics.record(stage + ': frame 1');
+                requestAnimationFrame(() => {
+                  window.__stepPositionDiagnostics.record(stage + ': frame 2');
+                  done();
+                });
+              }),
+            ),
+          stage,
         );
-      await layoutFrames();
-      await titleLabel.evaluate((title) =>
-        title.closest('.step').querySelector(':scope > button').scrollIntoView({ block: 'center' }),
-      );
-      await layoutFrames();
+      await layoutFrames('after wheel');
+      await titleLabel.evaluate((title) => {
+        window.__stepPositionDiagnostics.record('before scrollIntoView');
+        title.closest('.step').querySelector(':scope > button').scrollIntoView({ block: 'center' });
+        window.__stepPositionDiagnostics.record('after scrollIntoView');
+      });
+      await layoutFrames('after scrollIntoView');
       const visibleRows = await shot.evaluate((value) => {
         const label = [...document.querySelectorAll('.step .sa.st')].find(
             (node) => node.textContent === value,
@@ -388,8 +454,11 @@ export default async function (browser) {
           neighborButtonRect: buttonRect(neighbor),
           viewport: { width: innerWidth, height: innerHeight },
           scrollY,
+          positions: window.__stepPositionDiagnostics.positions,
         };
       }, shotTitle);
+      R.stepTitle.positions ??= {};
+      R.stepTitle.positions[filename] = visibleRows.positions;
       r.expect(
         visibleRows.title === shotTitle &&
           visibleRows.finished &&
