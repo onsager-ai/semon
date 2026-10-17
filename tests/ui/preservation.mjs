@@ -37,8 +37,6 @@ if (
   throw new Error('Only the pinned before candidate may use --historical-before');
 
 const out = path.join(ENV.out, 'preservation');
-const MAX_CAPTURE_SCROLL_EVIDENCE = 128;
-const MAX_IGNORED_CAPTURE_WHEELS = 16;
 fs.mkdirSync(out, { recursive: true });
 const report = {
   candidate: process.env.SEMON_PRESERVATION_CANDIDATE ?? process.env.GITHUB_SHA,
@@ -51,8 +49,6 @@ const report = {
   results: [],
   errors: [],
   apiDiagnostics: [],
-  captureScrollEvidence: [],
-  captureScrollEvidenceTruncated: 0,
   homePostTagDiagnostics: [],
   domDiffSummary: { casesCompared: 0, casesWithChanges: 0, bySelector: {} },
 };
@@ -315,464 +311,7 @@ function recordApiDiagnostics(pages, key) {
     page.captureApiEventsReported = page.captureApiEvents.length;
   }
 }
-
-function recordCaptureScrollEvidence(evidence) {
-  if (report.captureScrollEvidence.length < MAX_CAPTURE_SCROLL_EVIDENCE)
-    report.captureScrollEvidence.push(evidence);
-  else report.captureScrollEvidenceTruncated++;
-}
-
-async function captureScrollGeometry(page) {
-  return page.evaluate(() => {
-    const round = (value) => Math.round(value * 100) / 100;
-    const box = (node) => {
-      if (!node) return null;
-      const rect = node.getBoundingClientRect();
-      return [rect.x, rect.y, rect.width, rect.height].map(round);
-    };
-    const flag = (selector) => {
-      const node = document.querySelector(selector);
-      if (!node) return { present: false };
-      return {
-        present: true,
-        hidden: !!node.hidden,
-        ariaHidden: node.getAttribute('aria-hidden'),
-        disabled: node.matches(':disabled'),
-        box: box(node),
-      };
-    };
-    const state = history.state,
-      route = {};
-    if (state && typeof state === 'object')
-      for (const key of ['v', 'id', 'sid', 'turn']) {
-        const value = state[key];
-        if (typeof value === 'string' && value.length <= 128) route[key] = value;
-      }
-    const root = document.scrollingElement,
-      main = document.querySelector('#main');
-    const mainClientHeight = main?.clientHeight ?? null;
-    const mainScrollHeight = main?.scrollHeight ?? null;
-    const windowClientHeight = root?.clientHeight ?? null;
-    const windowScrollHeight = root?.scrollHeight ?? null;
-    return {
-      pathname: location.pathname,
-      route,
-      viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
-      scroll: {
-        windowX: round(scrollX),
-        windowY: round(scrollY),
-        mainTop: main ? round(main.scrollTop) : null,
-      },
-      main: {
-        present: !!main,
-        box: box(main),
-        clientHeight: mainClientHeight,
-        scrollHeight: mainScrollHeight,
-        max: main ? Math.max(0, mainScrollHeight - mainClientHeight) : null,
-      },
-      window: {
-        clientHeight: windowClientHeight,
-        scrollHeight: windowScrollHeight,
-        max: root ? Math.max(0, windowScrollHeight - windowClientHeight) : null,
-      },
-      fonts: document.fonts?.status ?? 'unavailable',
-      jumpSlot: flag('.session-jump-slot'),
-      jumpBottom: flag('#jump-bottom'),
-    };
-  });
-}
-
-function fixedCaptureWheelPoint(pages) {
-  const viewports = pages.map(([, page]) => page.viewportSize());
-  const viewport = viewports[0];
-  const width = viewport?.width ?? 0;
-  return {
-    x: Math.max(0, width - 20),
-    y: 300,
-    viewports,
-  };
-}
-
-async function captureWheelPointValidation(page, point) {
-  return page.evaluate(({ x, y }) => {
-    const main = document.querySelector('#main');
-    const target = document.elementFromPoint(x, y);
-    const element = target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
-    const interactive = element?.closest(
-      'button, a, input, textarea, select, summary, dialog, [data-tip], [role="button"], [role="link"], [role="menuitem"], [contenteditable="true"]',
-    );
-    let nestedScroller = null;
-    for (let node = element; node && node !== main; node = node.parentElement) {
-      const style = getComputedStyle(node);
-      if (
-        /^(auto|scroll|overlay)$/.test(style.overflowY) &&
-        node.scrollHeight > node.clientHeight + 1
-      ) {
-        nestedScroller = {
-          tag: node.tagName.toLowerCase(),
-          id: node.id || null,
-          className: (node.getAttribute('class') ?? '').slice(0, 120),
-        };
-        break;
-      }
-    }
-    return {
-      insideMain: !!main && !!element && main.contains(element),
-      inert: !!element && !interactive && !nestedScroller,
-      nestedScroller,
-      target: element
-        ? {
-            tag: element.tagName.toLowerCase(),
-            id: element.id || null,
-            className: (element.getAttribute('class') ?? '').slice(0, 120),
-          }
-        : null,
-    };
-  }, point);
-}
-
-async function armCaptureWheel(page, direction, point, key) {
-  return page.evaluate(
-    ({ direction, point, key, maxIgnored }) => {
-      const previous = window.__semonCaptureWheelState;
-      if (previous?.listener) document.removeEventListener('wheel', previous.listener, true);
-      const routeMarker = () => {
-        const state = history.state;
-        const route = {};
-        if (state && typeof state === 'object')
-          for (const field of ['v', 'id', 'sid']) {
-            const value = state[field];
-            if (typeof value === 'string' && value.length <= 128) route[field] = value;
-          }
-        return JSON.stringify({
-          document: performance.timeOrigin,
-          pathname: location.pathname,
-          route,
-        });
-      };
-      const nonce = (window.__semonCaptureWheelNonce ?? 0) + 1;
-      window.__semonCaptureWheelNonce = nonce;
-      const armedAt = performance.now();
-      const state = {
-        nonce,
-        key,
-        direction,
-        expected: {
-          deltaY: direction === 'down' ? 160 : -100000,
-          deltaMode: 0,
-          clientX: point.x,
-          clientY: point.y,
-          armedAt,
-          routeMarker: routeMarker(),
-        },
-        ignoredCount: 0,
-        ignoredTruncated: false,
-        receipt: null,
-        listener: null,
-      };
-      const listener = (event) => {
-        const currentRouteMarker = routeMarker();
-        const matches =
-          event.isTrusted === true &&
-          event.deltaY === state.expected.deltaY &&
-          event.deltaMode === state.expected.deltaMode &&
-          event.clientX === state.expected.clientX &&
-          event.clientY === state.expected.clientY &&
-          event.timeStamp >= state.expected.armedAt &&
-          currentRouteMarker === state.expected.routeMarker;
-        if (!matches) {
-          if (state.ignoredCount < maxIgnored) state.ignoredCount++;
-          else {
-            state.ignoredTruncated = true;
-            document.removeEventListener('wheel', listener, true);
-            state.listener = null;
-          }
-          return;
-        }
-        const target =
-          event.target?.nodeType === Node.ELEMENT_NODE ? event.target : event.target?.parentElement;
-        state.receipt = {
-          trusted: event.isTrusted,
-          direction,
-          deltaY: event.deltaY,
-          deltaMode: event.deltaMode,
-          clientX: event.clientX,
-          clientY: event.clientY,
-          timeStamp: event.timeStamp,
-          routeMarker: currentRouteMarker,
-          target: target
-            ? {
-                tag: target.tagName.toLowerCase(),
-                id: target.id || null,
-                className: (target.getAttribute('class') ?? '').slice(0, 120),
-              }
-            : null,
-        };
-        document.removeEventListener('wheel', listener, true);
-        state.listener = null;
-      };
-      state.listener = listener;
-      window.__semonCaptureWheelState = state;
-      document.addEventListener('wheel', listener, { capture: true, passive: true });
-      return nonce;
-    },
-    { direction, point: { x: point.x, y: point.y }, key, maxIgnored: MAX_IGNORED_CAPTURE_WHEELS },
-  );
-}
-
-async function finishCaptureWheel(page, nonce) {
-  return page
-    .evaluate((expectedNonce) => {
-      const state = window.__semonCaptureWheelState;
-      if (!state || state.nonce !== expectedNonce) return null;
-      if (state.listener) document.removeEventListener('wheel', state.listener, true);
-      state.listener = null;
-      return {
-        nonce: state.nonce,
-        key: state.key,
-        direction: state.direction,
-        expected: state.expected,
-        ignoredCount: state.ignoredCount,
-        ignoredTruncated: state.ignoredTruncated,
-        receipt: state.receipt,
-      };
-    }, nonce)
-    .catch(() => null);
-}
-
-async function waitForCaptureWheel(page, deadline, predicateLabel, predicate, arg = null) {
-  const timeout = deadline - Date.now();
-  if (timeout <= 0)
-    throw new Error(`capture wheel movement deadline exhausted before ${predicateLabel}`);
-  await page.waitForFunction(predicate, arg, { timeout });
-}
-
-async function normalizeDesktopSessionScroll(pages, key) {
-  // Local expansion can change overflow and reveal derived jump/dock chrome while
-  // scrollTop stays at zero. The reset's upward wheel is then a no-op, so send the
-  // same trusted down/up pair at its fixed inert point on both readers; never
-  // choose whether to send input from one side's geometry or pixel result.
-  const evidenceBySide = new Map();
-  const errors = [];
-  const point = fixedCaptureWheelPoint(pages);
-  const viewportMismatch = point.viewports.some(
-    (viewport) =>
-      !viewport ||
-      viewport.width !== point.viewports[0]?.width ||
-      viewport.height !== point.viewports[0]?.height,
-  );
-  const deadline = Date.now() + 8000;
-  await Promise.all(
-    pages.map(async ([side, page]) => {
-      const entry = { state: key, side, protocol: 'trusted +160 then -100000 in desktop #main' };
-      const sideErrors = [];
-      const fail = (message) => {
-        sideErrors.push(message);
-        errors.push(message);
-      };
-      evidenceBySide.set(side, entry);
-      entry.point = { x: point.x, y: point.y };
-      entry.viewport = page.viewportSize();
-      if (viewportMismatch)
-        fail(`${key} candidate/reference viewports differ before normalization`);
-      entry.pointValidation = await captureWheelPointValidation(page, point).catch((error) => {
-        entry.pointValidationError = safeReadinessError(error);
-        fail(`${key} ${side} capture wheel point inspection: ${entry.pointValidationError}`);
-        return null;
-      });
-      entry.before = await captureScrollGeometry(page).catch((error) => {
-        entry.beforeError = safeReadinessError(error);
-        fail(`${key} ${side} pre-wheel geometry: ${entry.beforeError}`);
-        return null;
-      });
-      const beforeMainTop = entry.before?.scroll?.mainTop;
-      const expectedMainFlow = (entry.before?.main?.max ?? 0) > 1;
-      entry.expectedMainFlow =
-        entry.before?.main?.max === null || entry.before?.main?.max === undefined
-          ? 'unknown'
-          : expectedMainFlow
-            ? 'overflow'
-            : 'no-overflow';
-      entry.noMainFlowAtStart = entry.expectedMainFlow === 'no-overflow';
-      if (entry.expectedMainFlow === 'unknown')
-        fail(`${key} ${side} cannot determine #main overflow before capture wheels`);
-      entry.windowAtTopBefore = Number.isFinite(entry.before?.scroll?.windowY)
-        ? entry.before.scroll.windowY <= 1
-        : null;
-
-      try {
-        await page.mouse.move(point.x, point.y);
-      } catch (error) {
-        entry.pointerMoveError = safeReadinessError(error);
-        fail(`${key} ${side} move to fixed capture wheel point: ${entry.pointerMoveError}`);
-      }
-      let positiveNonce = null;
-      try {
-        positiveNonce = await armCaptureWheel(page, 'down', point, key);
-      } catch (error) {
-        entry.positiveArmError = safeReadinessError(error);
-        fail(`${key} ${side} arm positive capture wheel: ${entry.positiveArmError}`);
-      }
-      try {
-        await page.mouse.wheel(0, 160);
-      } catch (error) {
-        entry.positiveCommandError = safeReadinessError(error);
-        fail(`${key} ${side} send positive capture wheel: ${entry.positiveCommandError}`);
-      }
-      if (positiveNonce !== null && !entry.positiveArmError && !entry.positiveCommandError) {
-        try {
-          await waitForCaptureWheel(
-            page,
-            deadline,
-            'positive movement',
-            ({ beforeMainTop, expectedFlow, nonce }) => {
-              const capture = window.__semonCaptureWheelState;
-              const receipt = capture?.receipt;
-              const mainTop = document.querySelector('#main')?.scrollTop ?? null;
-              return (
-                capture?.nonce === nonce &&
-                receipt?.trusted === true &&
-                receipt.direction === 'down' &&
-                (window.scrollY > 1 ||
-                  !expectedFlow ||
-                  (mainTop !== null && mainTop > beforeMainTop + 1))
-              );
-            },
-            {
-              beforeMainTop: beforeMainTop ?? 0,
-              expectedFlow: expectedMainFlow,
-              nonce: positiveNonce,
-            },
-          );
-        } catch (error) {
-          entry.positiveWaitError = safeReadinessError(error);
-          fail(`${key} ${side} positive capture wheel: ${entry.positiveWaitError}`);
-        }
-      }
-      entry.positiveEvent =
-        positiveNonce === null ? null : await finishCaptureWheel(page, positiveNonce);
-      entry.advanced = await captureScrollGeometry(page).catch((error) => {
-        entry.advancedError = safeReadinessError(error);
-        fail(`${key} ${side} post-positive geometry: ${entry.advancedError}`);
-        return null;
-      });
-
-      let returnNonce = null;
-      try {
-        returnNonce = await armCaptureWheel(page, 'up', point, key);
-      } catch (error) {
-        entry.returnArmError = safeReadinessError(error);
-        fail(`${key} ${side} arm return capture wheel: ${entry.returnArmError}`);
-      }
-      try {
-        await page.mouse.wheel(0, -100000);
-      } catch (error) {
-        entry.returnCommandError = safeReadinessError(error);
-        fail(`${key} ${side} send return capture wheel: ${entry.returnCommandError}`);
-      }
-      if (returnNonce !== null && !entry.returnArmError && !entry.returnCommandError) {
-        try {
-          await waitForCaptureWheel(
-            page,
-            deadline,
-            'return to top',
-            (nonce) =>
-              window.__semonCaptureWheelState?.nonce === nonce &&
-              window.__semonCaptureWheelState?.receipt?.trusted === true &&
-              window.__semonCaptureWheelState?.receipt?.direction === 'up' &&
-              scrollY <= 1 &&
-              (document.querySelector('#main')?.scrollTop ?? 0) <= 1,
-            returnNonce,
-          );
-        } catch (error) {
-          entry.returnWaitError = safeReadinessError(error);
-          fail(`${key} ${side} return capture wheel: ${entry.returnWaitError}`);
-        }
-      }
-      entry.returnEvent = returnNonce === null ? null : await finishCaptureWheel(page, returnNonce);
-      entry.returned = await captureScrollGeometry(page).catch((error) => {
-        entry.returnedError = safeReadinessError(error);
-        fail(`${key} ${side} post-return geometry: ${entry.returnedError}`);
-        return null;
-      });
-      try {
-        await page.mouse.move(Math.max(0, (entry.viewport?.width ?? 20) - 20), 300);
-      } catch (error) {
-        entry.pointerRestoreError = safeReadinessError(error);
-        fail(`${key} ${side} restore capture pointer: ${entry.pointerRestoreError}`);
-      }
-
-      const startMainTop = entry.before?.scroll?.mainTop;
-      const advancedMainTop = entry.advanced?.scroll?.mainTop;
-      const positiveMoved =
-        Number.isFinite(startMainTop) &&
-        Number.isFinite(advancedMainTop) &&
-        advancedMainTop > startMainTop + 1;
-      const positiveChainedToWindow = (entry.advanced?.scroll?.windowY ?? 0) > 1;
-      const returnedMainTop = entry.returned?.scroll?.mainTop;
-      const returnedWindowY = entry.returned?.scroll?.windowY;
-      const returnedToTop =
-        Number.isFinite(returnedMainTop) &&
-        Number.isFinite(returnedWindowY) &&
-        returnedMainTop <= 1 &&
-        returnedWindowY <= 1;
-      entry.flowObserved = positiveMoved;
-      entry.returnedToTop = returnedToTop;
-      if (entry.windowAtTopBefore !== true)
-        fail(`${key} ${side} window was not confirmed at top before capture wheels`);
-      if (!entry.pointValidation?.insideMain || !entry.pointValidation?.inert)
-        fail(`${key} ${side} fixed capture wheel point was not inert inside #main`);
-      const positiveReceipt = entry.positiveEvent?.receipt;
-      const returnReceipt = entry.returnEvent?.receipt;
-      if (
-        !positiveReceipt ||
-        positiveReceipt.trusted !== true ||
-        positiveReceipt.direction !== 'down' ||
-        positiveReceipt.deltaY !== 160 ||
-        positiveReceipt.deltaMode !== 0 ||
-        positiveReceipt.clientX !== point.x ||
-        positiveReceipt.clientY !== point.y ||
-        positiveReceipt.routeMarker !== entry.positiveEvent?.expected?.routeMarker ||
-        entry.positiveEvent?.nonce !== positiveNonce ||
-        entry.positiveEvent?.key !== key
-      )
-        fail(`${key} ${side} positive capture wheel was not a trusted downward event`);
-      if (
-        !returnReceipt ||
-        returnReceipt.trusted !== true ||
-        returnReceipt.direction !== 'up' ||
-        returnReceipt.deltaY !== -100000 ||
-        returnReceipt.deltaMode !== 0 ||
-        returnReceipt.clientX !== point.x ||
-        returnReceipt.clientY !== point.y ||
-        returnReceipt.routeMarker !== entry.returnEvent?.expected?.routeMarker ||
-        entry.returnEvent?.nonce !== returnNonce ||
-        entry.returnEvent?.key !== key
-      )
-        fail(`${key} ${side} return capture wheel was not a trusted upward event`);
-      if (entry.positiveEvent?.ignoredTruncated || entry.returnEvent?.ignoredTruncated)
-        fail(`${key} ${side} nonmatching capture wheel diagnostics truncated`);
-      if (positiveChainedToWindow)
-        fail(`${key} ${side} positive capture wheel chained to window scroll`);
-      if (entry.expectedMainFlow === 'overflow' && !positiveMoved)
-        fail(`${key} ${side} expected #main overflow but +160 did not advance it`);
-      if (entry.expectedMainFlow === 'no-overflow' && positiveMoved)
-        fail(`${key} ${side} unexpected #main movement from a no-overflow start`);
-      if (!returnedToTop)
-        fail(`${key} ${side} capture wheel pair did not return both scrollers to top`);
-      entry.status = sideErrors.length
-        ? 'error'
-        : entry.expectedMainFlow === 'overflow'
-          ? 'main-flow-observed'
-          : entry.expectedMainFlow === 'no-overflow'
-            ? 'explicit-no-main-flow'
-            : 'main-flow-expectation-unknown';
-    }),
-  );
-  for (const entry of evidenceBySide.values()) recordCaptureScrollEvidence(entry);
-  return { errors };
-}
-async function capture(candidate, reference, key, routeHint) {
+async function capture(candidate, reference, key) {
   const images = [],
     artifactDigests = {},
     evidenceBySide = {},
@@ -798,10 +337,7 @@ async function capture(candidate, reference, key, routeHint) {
     recordApiDiagnostics(pages, key);
     throw new Error(preflightErrors.join(' | '));
   }
-  const desktopSessionCapture =
-    routeHint?.v === 'session' &&
-    pages.some(([, page]) => (page.viewportSize()?.width ?? 0) >= 761);
-  const reset = await Promise.allSettled(
+  const readiness = await Promise.allSettled(
     pages.map(async ([name, page]) => {
       // Both readers open at the latest record. Cancel that initial following
       // transaction with the same real reader input before comparing their heads.
@@ -820,9 +356,10 @@ async function capture(candidate, reference, key, routeHint) {
       await waitForCaptureReady(page, `${key} ${name}`);
     }),
   );
-  const resetErrors = (
+  recordApiDiagnostics(pages, key);
+  const readinessErrors = (
     await Promise.all(
-      reset.map(async (result, index) => {
+      readiness.map(async (result, index) => {
         if (result.status !== 'rejected') return null;
         const [name, page] = pages[index],
           state = await readinessSnapshot(page);
@@ -833,31 +370,7 @@ async function capture(candidate, reference, key, routeHint) {
       }),
     )
   ).filter(Boolean);
-  if (desktopSessionCapture) {
-    const captureScrollErrors = (await normalizeDesktopSessionScroll(pages, key)).errors;
-    const readiness = await Promise.allSettled(
-      pages.map(async ([name, page]) => waitForCaptureReady(page, `${key} ${name}`)),
-    );
-    recordApiDiagnostics(pages, key);
-    const readinessErrors = (
-      await Promise.all(
-        readiness.map(async (result, index) => {
-          if (result.status !== 'rejected') return null;
-          const [name, page] = pages[index],
-            state = await readinessSnapshot(page);
-          return (
-            `${key} ${name} after scroll normalization readiness failed: ${safeReadinessError(result.reason)}; ` +
-            `snapshot=${JSON.stringify(state)}`
-          );
-        }),
-      )
-    ).filter(Boolean);
-    const errors = [...resetErrors, ...captureScrollErrors, ...readinessErrors];
-    if (errors.length) throw new Error(errors.join(' | '));
-  } else {
-    recordApiDiagnostics(pages, key);
-    if (resetErrors.length) throw new Error(resetErrors.join(' | '));
-  }
+  if (readinessErrors.length) throw new Error(readinessErrors.join(' | '));
   if (key.endsWith('-' + FILTER_STATE)) {
     for (const [name, page] of pages) {
       const state = await filterCaptureState(page);
@@ -1025,24 +538,23 @@ try {
           candidate,
           reference,
           prefix + '-' + route.v + (route.id ? '-' + route.id : ''),
-          route,
         );
         if (route.v === 'sessions' && !historical) {
           for (const page of [candidate, reference]) await prepareFilterCapture(page);
-          await capture(candidate, reference, prefix + '-' + FILTER_STATE, { v: 'sessions' });
+          await capture(candidate, reference, prefix + '-' + FILTER_STATE);
           for (const page of [candidate, reference]) await closeFilterCapture(page);
         }
         if (route.id === 'harbor') {
           for (const page of [candidate, reference])
             await page.locator('.think-disclosure').first().click();
-          await capture(candidate, reference, prefix + '-harbor-thinking-open', route);
+          await capture(candidate, reference, prefix + '-harbor-thinking-open');
           for (const page of [candidate, reference]) await page.locator('.tsum').first().click();
-          await capture(candidate, reference, prefix + '-harbor-tools-open', route);
+          await capture(candidate, reference, prefix + '-harbor-tools-open');
           for (const page of [candidate, reference]) {
             await page.locator('.tgroup .steps .step > button').first().click();
             await page.locator('.tgroup .steps .out:not([hidden])').first().waitFor();
           }
-          await capture(candidate, reference, prefix + '-harbor-tool-output-open', route);
+          await capture(candidate, reference, prefix + '-harbor-tool-output-open');
         }
       }
       if (width === 390) {
@@ -1053,7 +565,7 @@ try {
           dispatchEvent(new PopStateEvent('popstate', { state: { v: 'home' } }));
         });
         for (const page of [candidate, reference]) await page.click('#lead-btn');
-        await capture(candidate, reference, prefix + '-drawer', { v: 'home' });
+        await capture(candidate, reference, prefix + '-drawer');
       }
       report.errors.push(
         ...candidate.errors.map((error) => prefix + ' candidate: ' + error),
@@ -1089,12 +601,6 @@ try {
     ...homePostTagDiagnostics(page),
   }));
   await browser?.close();
-  report.captureScrollEvidenceEntries = report.captureScrollEvidence.length;
-  if (report.captureScrollEvidenceTruncated)
-    report.errors.push(
-      `capture scroll evidence truncated after ${MAX_CAPTURE_SCROLL_EVIDENCE} entries ` +
-        `(${report.captureScrollEvidenceTruncated} omitted)`,
-    );
   report.failures = assessPreservation(report);
   report.acceptance = assessVisualAcceptances(report, 'preservation', report.failures);
   fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2) + '\n');
@@ -1114,8 +620,6 @@ console.log(
         event.event === 'failed' ||
         (event.event === 'response' && !event.ok && event.status !== 304),
     ).length,
-    captureScrollEvidenceEntries: report.captureScrollEvidenceEntries,
-    captureScrollEvidenceTruncated: report.captureScrollEvidenceTruncated,
     errors: report.errors.length,
   }),
 );
