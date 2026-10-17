@@ -1204,6 +1204,10 @@ for (const width of [390, 1280])
         assert.equal(await group.evaluate((node) => node === document.activeElement), true);
         assert.equal(await page.locator('[data-session-row="list"]').count(), 9);
         await page.getByRole('button', { name: 'Recent', exact: true }).press('Enter');
+        await parent.evaluate((node) => {
+          window.parentRow = node;
+        });
+        await page.getByRole('button', { name: 'Recent', exact: true }).press('Enter');
         assert.equal(
           await page.evaluate(
             () =>

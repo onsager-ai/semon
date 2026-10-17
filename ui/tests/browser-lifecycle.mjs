@@ -515,6 +515,28 @@ for (const width of [390, 1280])
                   document.activeElement === trigger,
                 'published chrome replaced the focused desktop account trigger',
               );
+              const findMode = document.createElement('div'),
+                accountTarget = document.createElement('div');
+              findMode.append(accountTarget);
+              const findProps = {
+                mode: [findMode],
+                accountTarget,
+                account: {
+                  account: AccountExample.parsed,
+                  compact: false,
+                  wide: false,
+                  onWideChange() {},
+                },
+              };
+              chrome.topbar(findProps);
+              trigger.focus();
+              chrome.topbar(findProps);
+              assert(
+                trigger.closest('.account-widget-desktop').parentElement === accountTarget &&
+                  accountTarget.parentElement === findMode &&
+                  document.activeElement === trigger,
+                'repeated Find publication moved the focused account out of its host slot',
+              );
               trigger.click();
               assert(chrome.account.open, 'account did not open');
               const action = instance.action;

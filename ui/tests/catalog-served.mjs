@@ -246,7 +246,7 @@ test(
       await page.goto(url[1] + '/sessions?t=' + url[2]);
       await page.locator('#page [data-id]').first().waitFor({ timeout: 60000 });
       const firstList = performance.now() - start;
-      const query = page.getByRole('textbox', { name: 'Search session details', exact: true });
+      const query = page.getByRole('searchbox', { name: 'Search session details', exact: true });
       const beforeTyping = requests.length;
       await query.fill('backlog');
       assert.equal(
