@@ -36,7 +36,30 @@ export interface SessionRelative {
   kind: string;
   parent: string | null;
   last?: number | null;
+  status?: RecordedStatus;
   cost: Cost;
+}
+export interface RecordedStatus {
+  state: 'work' | 'wait' | 'idle' | 'done' | 'err' | 'new' | 'read' | 'off' | null;
+  observation: 'current' | 'retained' | 'unavailable';
+}
+/** Shared Catalog observation validation; retained activity never claims to be current. */
+export function parseRecordedStatus(value: unknown): RecordedStatus | undefined {
+  if (value === undefined) return undefined;
+  const row = object(value),
+    state = row.state,
+    observation = row.observation;
+  if (
+    !(
+      state === null ||
+      ['work', 'wait', 'idle', 'done', 'err', 'new', 'read', 'off'].includes(text(state))
+    ) ||
+    !(observation === 'current' || observation === 'retained' || observation === 'unavailable') ||
+    (observation === 'unavailable') !== (state === null) ||
+    (observation === 'retained' && (state === 'work' || state === 'wait'))
+  )
+    throw new Error('Invalid catalog status observation');
+  return { state: state as RecordedStatus['state'], observation };
 }
 const optionalNumber = (value: unknown) => (value == null ? undefined : number(value));
 const nullableText = (value: unknown) => (value == null ? null : text(value));
@@ -90,6 +113,7 @@ function parseRelative(value: unknown): SessionRelative {
     kind: text(row.kind),
     parent: nullableText(row.parent),
     last: row.last == null ? null : number(row.last),
+    status: parseRecordedStatus(row.status) ?? { state: null, observation: 'unavailable' },
     cost: parseCost(row.cost),
   };
 }
