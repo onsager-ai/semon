@@ -115,8 +115,11 @@ test(
             timezoneId: 'UTC',
           });
           let captureServedFixtureFailure;
+          let page;
+          let journeyFailed = false;
+          let releaseHeldPreviews;
           try {
-            const page = await context.newPage();
+            page = await context.newPage();
             page.setDefaultTimeout(60000);
             await page.clock.setFixedTime(Number(fixture.stdout.trim()));
             const requests = [],
@@ -391,11 +394,15 @@ test(
             const delayed = width === 390 && colorScheme === 'light';
             let holdPreviews = delayed;
             const held = [];
+            releaseHeldPreviews = () => {
+              holdPreviews = false;
+              for (const release of held.splice(0)) release();
+            };
             if (delayed)
               await page.route('**/api/session-home?**', async (route) => {
                 const response = await route.fetch();
                 if (holdPreviews) await new Promise((resolve) => held.push(resolve));
-                await route.fulfill({ response }).catch(() => {});
+                await route.fulfill({ response });
               });
             await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
             await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
@@ -599,8 +606,7 @@ test(
               assert.equal(await page.getByText(question.brief, { exact: true }).count(), 0);
               await navigate('analytics');
               await page.locator('#page h1').filter({ hasText: 'Analytics' }).waitFor();
-              holdPreviews = false;
-              for (const release of held) release();
+              releaseHeldPreviews();
               await page.locator('.analytics-metrics').waitFor();
               assert.equal(
                 await page.locator('#page .ib').count(),
@@ -840,6 +846,7 @@ test(
             assert.deepEqual(errors, []);
             evidence.push({ width, colorScheme, requests, errors });
           } catch (error) {
+            journeyFailed = true;
             if (captureServedFixtureFailure)
               await captureServedFixtureFailure('context journey failure', {
                 error:
@@ -851,7 +858,31 @@ test(
               });
             throw error;
           } finally {
-            await context.close();
+            let cleanupError;
+            const reportCleanupError = (stage, error) => {
+              const message =
+                error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+              console.error(
+                `[served fixture ${stage} failed ${width} ${colorScheme}] ${message.slice(0, 1000)}`,
+              );
+            };
+            releaseHeldPreviews?.();
+            if (page) {
+              try {
+                await page.unrouteAll({ behavior: 'wait' });
+              } catch (error) {
+                cleanupError = error;
+                reportCleanupError('route drain', error);
+              }
+            }
+            try {
+              await context.close();
+            } catch (error) {
+              cleanupError ??= error;
+              reportCleanupError('context close', error);
+            }
+            // Preserve a failed journey; otherwise route-handler and close errors fail the test.
+            if (cleanupError && !journeyFailed) throw cleanupError;
           }
         }
       if (captures)
