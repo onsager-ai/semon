@@ -20,7 +20,19 @@
 //  - a machine page's "up" link goes back to Machines (backTo === "Machines"), and every machine page carries no
 //    sideways overflow.
 import path from 'node:path';
-import { ENV, served, data, reporter, overflow, settled, goto, wide } from '../lib.mjs';
+import {
+  ENV,
+  served,
+  data,
+  reporter,
+  overflow,
+  settled,
+  goto,
+  wide,
+  filterSheet,
+  doneFilterSheet,
+  pickFilter,
+} from '../lib.mjs';
 
 // The title is in the bar as soon as a session is clicked; the page is ready once it is no longer aria-busy.
 const afterTitle = (page, text) =>
@@ -260,14 +272,19 @@ export default async function homeCheck(browser) {
     }));
     await page.locator('[data-session-row="list"]').first().waitFor();
     out.sessionsFilters = {};
-    for (const name of ['Harness', 'Repository', 'Model', 'Search session details']) {
-      out.sessionsFilters[name] = await page.getByRole('textbox', { name, exact: true }).count();
+    await filterSheet(page);
+    for (const name of ['Harness', 'Repo', 'Model', 'Machine']) {
+      out.sessionsFilters[name] = await page
+        .locator(`.filters-sheet .sh-select[data-label="${name}"] .sh-select-trigger`)
+        .count();
     }
+    out.sessionsFilters.search = await page
+      .getByRole('searchbox', { name: 'Search session details', exact: true })
+      .count();
+    await doneFilterSheet(page);
     out.sessionsPage.rows = await page.locator('[data-session-row="list"]').count();
     // Browse one machine's bounded catalog; clearing metadata filters restores its rows.
-    const filter = page.getByRole('textbox', { name: 'Harness', exact: true });
-    await filter.fill('codex');
-    await filter.press('Enter');
+    await pickFilter(page, 'Harness', 'codex');
     await page.waitForFunction(
       () =>
         location.search.includes('harness=codex') &&
