@@ -1263,3 +1263,631 @@ for (const width of [390, 1280])
         await browser.close();
       }
     });
+
+async function fulfillCatalogStatic(route, url) {
+  const font = url.pathname.match(
+    /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
+  );
+  if (font)
+    return route.fulfill({
+      contentType: 'font/woff2',
+      body: await readFile(
+        new URL(
+          '../../crates/semon-sessions/src/fonts/' + font[1] + '/' + font[2] + '.woff2',
+          import.meta.url,
+        ),
+      ),
+    });
+  return route.fulfill({
+    contentType: url.pathname === '/viewer.css' ? 'text/css' : 'text/html',
+    body: url.pathname === '/viewer.css' ? css : html,
+  });
+}
+
+function withDeadline(promise, label, timeoutMs = 10000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Timed out waiting for ' + label)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+test('same-projection turn anchors retain loaded fields, focus and the anchor inside the bounded cache', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }),
+      requests = [],
+      transcriptReads = [];
+    let anchorReads = 0,
+      anchorRangeReads = 0,
+      releaseFirstAnchor,
+      signalFirstAnchor,
+      releaseStaleAnchor,
+      signalStaleAnchor;
+    const firstAnchorStarted = new Promise((resolve) => {
+      signalFirstAnchor = resolve;
+    });
+    const staleAnchorStarted = new Promise((resolve) => {
+      signalStaleAnchor = resolve;
+    });
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url());
+      requests.push(url.pathname + url.search);
+      if (url.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: { ...capabilities(true), selected_entry: true } });
+      if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
+      if (url.pathname === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
+      if (url.pathname === '/api/session-anchor') {
+        const call = ++anchorReads;
+        if (call === 1) {
+          signalFirstAnchor();
+          await new Promise((resolve) => {
+            releaseFirstAnchor = resolve;
+          });
+        }
+        if (call === 3) {
+          signalStaleAnchor();
+          await new Promise((resolve) => {
+            releaseStaleAnchor = resolve;
+          });
+        }
+        const newer = call === 4;
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            catalog_key: 'one',
+            turn: url.searchParams.get('turn'),
+            slot: newer ? 20 : 0,
+            generation: (newer ? 'd' : 'b').repeat(64),
+          },
+        });
+      }
+      if (url.pathname === '/api/session-transcript') {
+        const query = url.searchParams,
+          after = query.get('after'),
+          generation = query.get('generation') === 'd'.repeat(64) ? 'd' : 'b';
+        transcriptReads.push({
+          after,
+          limit: query.get('limit'),
+          generation,
+          errorsGeneration: query.get('errors_generation'),
+        });
+        if (anchorReads > 0 && after === '0' && ++anchorRangeReads === 1)
+          return route.fulfill({ status: 409, json: { error: 'stale_projection' } });
+        const errorsGeneration =
+          query.get('errors_generation') === 'c'.repeat(64) || (anchorReads === 2 && after === '0')
+            ? 'c'
+            : generation;
+        const value = transcript('one', query, 600, generation);
+        value.projection.errors_generation = errorsGeneration.repeat(64);
+        for (const row of value.entries) {
+          if (row.slot === 0) {
+            row.turn = 'anchor-turn';
+            row.text = 'Anchor target record';
+          }
+          if (generation === 'd' && row.slot === 20) {
+            row.turn = 'anchor-turn';
+            row.text = 'New generation anchor slot';
+          }
+          if (row.slot === 400) {
+            row.clipped = true;
+            row.field = { name: 'text', chunks: 2, complete: false };
+          }
+        }
+        if (value.entries.some((row) => row.turn === 'anchor-turn'))
+          value.relationship_context = {
+            state: 'complete',
+            turn_ids: ['anchor-turn'],
+            turns: [
+              {
+                sid: 'one',
+                id: 'anchor-turn',
+                u: false,
+                end: { st: 'done', why: 'complete' },
+                sent: [],
+                last: true,
+              },
+            ],
+            handoffs: [],
+            sessions: {},
+            previews: {},
+          };
+        value.identity.source_key = query.get('machine') ?? 'source';
+        return route.fulfill({ json: value });
+      }
+      if (url.pathname === '/api/session-entry') {
+        const chunk = Number(url.searchParams.get('field_chunk'));
+        return route.fulfill({
+          json: {
+            api: 1,
+            identity: { ...identity('one'), read_scope: 'retained_history' },
+            projection: { version: 5, generation: 'b'.repeat(64) },
+            slot: 400,
+            field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
+            text: chunk === 0 ? 'First expansion chunk ' : 'Final field segment.',
+            freshness: { state: 'cached' },
+            provenance: { source: source('one'), offset: 400, block: 0, native_event_id: null },
+          },
+        });
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    await page.locator('#page [data-id="one"]').click();
+    await page.locator('#page [data-entry-key="one:599"]').waitFor();
+    for (const first of [440, 340]) {
+      await page.getByRole('button', { name: 'Load earlier records' }).click();
+      await page.locator(`#page [data-entry-key="one:${first}"]`).waitFor();
+    }
+    const field = page.locator('#page [data-entry-key="one:400"]');
+    await field.getByRole('button', { name: 'Load recorded text', exact: true }).click();
+    await field.getByRole('button', { name: 'Load more text', exact: true }).click();
+    await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Load earlier records' }).click();
+    await page.locator('#page [data-entry-key="one:240"]').waitFor();
+    assert.equal(await page.locator('#page [data-entry-key]').count(), 300);
+    await page.locator('#main').evaluate((node) => {
+      node.scrollTop = 500;
+    });
+    const scrollBefore = await page.locator('#main').evaluate((node) => node.scrollTop);
+    await page.evaluate(() => {
+      const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
+      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      dispatchEvent(new PopStateEvent('popstate', { state }));
+    });
+    await withDeadline(firstAnchorStarted, 'first turn anchor request');
+    await page.clock.runFor(34);
+    assert.equal(
+      await page.evaluate(
+        () => document.activeElement === document.querySelector('#page .ph > h1'),
+      ),
+      true,
+    );
+    assert.equal(await page.locator('#main').evaluate((node) => node.scrollTop), scrollBefore);
+    const menu = page.getByRole('button', { name: 'Session menu: details, cost and actions' });
+    await menu.focus();
+    releaseFirstAnchor();
+    await page.locator('#page [data-entry-key="one:0"]').waitFor();
+    assert.match(
+      await page.locator('#page [data-entry-key="one:0"]').innerText(),
+      /Anchor target record/,
+    );
+    assert.match(await field.innerText(), /Final field segment\./);
+    assert.equal(anchorReads, 2, 'one 409 may re-resolve the same turn once');
+    assert.equal(await menu.evaluate((node) => node === document.activeElement), true);
+    assert.deepEqual(
+      transcriptReads
+        .filter((read) => read.errorsGeneration === 'c'.repeat(64))
+        .map(({ after, limit }) => [after, limit]),
+      [
+        ['240', '100'],
+        ['340', '100'],
+        ['440', '100'],
+      ],
+    );
+    assert.ok(
+      transcriptReads
+        .filter((read) => read.errorsGeneration === 'c'.repeat(64))
+        .every((read) => read.generation === 'b'),
+      'range recovery keeps the same native generation while accepting the new errors generation',
+    );
+    assert.equal(
+      transcriptReads.filter((read) => read.after === '0').length,
+      2,
+      're-accepting the validated anchor must not issue another transcript read',
+    );
+    assert.equal(await page.locator('#page [data-entry-key]').count(), 300);
+
+    // A stale response for this same turn must not survive a session-list round trip.
+    await page.evaluate(() => {
+      const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
+      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      dispatchEvent(new PopStateEvent('popstate', { state }));
+    });
+    await withDeadline(staleAnchorStarted, 'superseded turn anchor request');
+    await page.evaluate(() => document.querySelector('#nav [data-go="sessions"]')?.click());
+    await page.locator('#page [data-id="one"]').waitFor();
+    await page.evaluate(() => {
+      const state = { v: 'session', id: 'one', turn: 'anchor-turn' };
+      history.pushState(state, '', '/s/claude/one?machine=source#turn=anchor-turn');
+      dispatchEvent(new PopStateEvent('popstate', { state }));
+    });
+    await page.getByText('New generation anchor slot', { exact: true }).waitFor();
+    assert.equal(anchorReads, 4);
+    const readsBeforeStaleResponse = transcriptReads.length;
+    releaseStaleAnchor();
+    await page.clock.runFor(34);
+    assert.equal(anchorReads, 4, 'the older same-turn navigation did not resolve again');
+    assert.equal(transcriptReads.length, readsBeforeStaleResponse);
+    assert.equal(await page.getByText('New generation anchor slot', { exact: true }).count(), 1);
+    await page.evaluate(() => window.app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a lost transcript capability cancels a pending turn anchor before any range request', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage(),
+      requests = [];
+    let capabilityReads = 0,
+      releaseAnchor,
+      signalAnchorStarted,
+      signalMetadataAfterLoss;
+    const anchorStarted = new Promise((resolve) => {
+        signalAnchorStarted = resolve;
+      }),
+      metadataAfterLoss = new Promise((resolve) => {
+        signalMetadataAfterLoss = resolve;
+      });
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url());
+      requests.push(url.pathname + url.search);
+      if (url.pathname === '/api/session-capabilities') {
+        const selected = ++capabilityReads === 1;
+        return route.fulfill({ json: capabilities(selected) });
+      }
+      if (url.pathname === '/api/sessions') {
+        if (capabilityReads > 1) signalMetadataAfterLoss();
+        return route.fulfill({ json: list([meta('one')]) });
+      }
+      if (url.pathname === '/api/session-anchor') {
+        signalAnchorStarted();
+        await new Promise((resolve) => {
+          releaseAnchor = resolve;
+        });
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            catalog_key: 'one',
+            turn: url.searchParams.get('turn'),
+            slot: 12,
+            generation: 'b'.repeat(64),
+          },
+        });
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/s/claude/one?machine=source#turn=pending-turn');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    await withDeadline(anchorStarted, 'pending turn anchor request');
+    await page.clock.runFor(8100);
+    await withDeadline(metadataAfterLoss, 'metadata read after capability loss');
+    releaseAnchor();
+    await page.clock.runFor(34);
+    assert.equal(capabilityReads, 2);
+    assert.equal(
+      requests.some((request) => request.startsWith('/api/session-transcript')),
+      false,
+      'a superseded anchor did not issue a transcript read after capability loss',
+    );
+    await page.evaluate(() => window.app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
+test('child activity reads stay separate from event previews and honor participant state and generation', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }),
+      edges = [
+        {
+          id: 'activity',
+          sid: 'active-child',
+          name: 'Active child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'unavailable',
+          sid: 'unavailable-child',
+          name: 'Unavailable preview child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'tool-mismatch',
+          sid: 'tool-mismatch-child',
+          name: 'Wrong tool child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'since-mismatch',
+          sid: 'since-mismatch-child',
+          name: 'Wrong time child',
+          state: 'work',
+          preview: 'brief',
+        },
+        {
+          id: 'result',
+          sid: 'result-child',
+          name: 'Result child',
+          state: 'work',
+          preview: 'result',
+        },
+        { id: 'done', sid: 'done-child', name: 'Done child', state: 'done' },
+      ],
+      participantActivity = {
+        'active-child': { tool: 'Bash', since: 1000 },
+        'unavailable-child': { tool: 'Read', since: 2000 },
+        'tool-mismatch-child': { tool: 'Bash', since: 3000 },
+        'since-mismatch-child': { tool: 'Bash', since: 4000 },
+        'result-child': { tool: 'Bash', since: 5000 },
+        'done-child': { tool: 'Edit', since: 6000 },
+      },
+      activityTuples = {
+        'active-child': ['Bash', 'echo active work', null, 1000],
+        'unavailable-child': ['Read', 'cat active work', null, 2000],
+        'tool-mismatch-child': ['Read', 'wrong tool', null, 3000],
+        'since-mismatch-child': ['Bash', 'wrong since', null, 4999],
+        'result-child': ['Bash', 'result already recorded', null, 5000],
+      },
+      homeRequests = [],
+      anchorTurns = [];
+    let homeResponses = 0,
+      signalHomeResponses,
+      signalParentAnchor,
+      signalActivityEvent,
+      releaseActivityEvent;
+    const allHomeResponses = new Promise((resolve) => {
+      signalHomeResponses = resolve;
+    });
+    const parentAnchorStarted = new Promise((resolve) => {
+      signalParentAnchor = resolve;
+    });
+    const activityEventStarted = new Promise((resolve) => {
+      signalActivityEvent = resolve;
+    });
+    const previewGeneration = 'c'.repeat(64),
+      childDetails = {
+        state: 'done',
+        turns: 1,
+        calls: 0,
+        errors: 0,
+        tool_calls: {},
+        signals: {},
+        cost: { usd: null, unpriced_models: [] },
+        copied_usage: false,
+        copilot: null,
+        reported_runs: [],
+        cost_check: [],
+      },
+      relationships = edges.map(({ id, sid, preview }, index) => ({
+        id,
+        kind: 'spawn',
+        from: 'parent',
+        to: sid,
+        at: index + 1,
+        ...(id === 'done' ? { done: 20 } : {}),
+        status: id === 'done' ? 'done' : 'work',
+        declined: false,
+        ...(preview === 'brief' ? { brief_session: sid } : {}),
+        ...(preview === 'result' ? { result_session: sid } : {}),
+        source_turn: 'parent-turn',
+        target_turn: sid + '-turn',
+      })),
+      sessions = Object.fromEntries(
+        edges.map(({ sid, name, state }) => [
+          sid,
+          {
+            name,
+            harness: 'claude',
+            model: 'native-model',
+            kind: 'subagent',
+            state,
+            live_observation: state === 'work',
+            activity: participantActivity[sid],
+          },
+        ]),
+      ),
+      previews = Object.fromEntries(edges.map(({ sid }) => [sid, previewGeneration]));
+    await page.route('http://catalog.test/**', async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/api/session-capabilities')
+        return route.fulfill({ json: capabilities(true) });
+      if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('parent')]) });
+      if (url.pathname === '/api/session-identity') return route.fulfill({ status: 404, body: '' });
+      if (url.pathname === '/api/session-anchor') {
+        const turn = url.searchParams.get('turn');
+        anchorTurns.push(turn);
+        if (turn === 'parent-turn') signalParentAnchor();
+        return route.fulfill({
+          json: {
+            api: 1,
+            source_key: 'source',
+            catalog_key: url.searchParams.get('sid'),
+            turn,
+            slot: 0,
+            generation: 'b'.repeat(64),
+          },
+        });
+      }
+      if (url.pathname === '/api/session-transcript') {
+        const sid = url.searchParams.get('sid');
+        if (sid === 'done-child') {
+          const value = transcript(sid, url.searchParams, 1, 'b');
+          value.session = { ...meta(sid), details: childDetails };
+          Object.assign(value.entries[0], { k: 'h', id: 'done', turn: 'done-child-turn' });
+          delete value.entries[0].text;
+          value.relationship_context = {
+            state: 'complete',
+            turn_ids: ['done-child-turn'],
+            turns: [
+              {
+                sid,
+                id: 'done-child-turn',
+                u: false,
+                end: { st: 'done', why: 'complete' },
+                sent: [],
+                last: true,
+              },
+            ],
+            handoffs: [relationships.find((edge) => edge.id === 'done')],
+            sessions: {
+              parent: {
+                name: 'Parent run',
+                harness: 'claude',
+                model: 'native-model',
+                kind: 'codex-run',
+                state: 'done',
+              },
+              'done-child': sessions['done-child'],
+            },
+            previews: {},
+          };
+          return route.fulfill({ json: value });
+        }
+        const value = transcript('parent', url.searchParams, edges.length, 'b');
+        value.entries.forEach((row, index) => {
+          Object.assign(row, { k: 'h', id: edges[index].id, turn: 'parent-turn' });
+          delete row.text;
+        });
+        value.relationship_context = {
+          state: 'complete',
+          turn_ids: ['parent-turn'],
+          turns: [
+            {
+              sid: 'parent',
+              id: 'parent-turn',
+              start: 'activity',
+              u: false,
+              end: { st: 'done', why: 'complete' },
+              sent: edges.map((edge) => edge.id),
+              last: true,
+            },
+          ],
+          handoffs: relationships,
+          sessions,
+          previews,
+        };
+        return route.fulfill({ json: value });
+      }
+      if (url.pathname === '/api/session-home') {
+        const sid = url.searchParams.get('sid'),
+          eventIds = JSON.parse(url.searchParams.get('events') ?? '[]'),
+          sessionFields = JSON.parse(url.searchParams.get('session_fields') ?? '[]'),
+          unavailable = eventIds.includes('unavailable');
+        homeRequests.push({ sid, eventIds, sessionFields, unavailable });
+        const events = {};
+        for (const id of eventIds) {
+          if (id === 'activity') {
+            signalActivityEvent();
+            await new Promise((resolve) => {
+              releaseActivityEvent = resolve;
+            });
+            events[id] = { brief: 'Native event brief' };
+          } else if (id === 'tool-mismatch' || id === 'since-mismatch')
+            events[id] = { brief: 'Mismatch preview' };
+          else if (id === 'result') events[id] = { result: 'Recorded child result' };
+        }
+        const response = {
+          api: 1,
+          identity: { ...identity(sid), read_scope: 'retained_history' },
+          generation: previewGeneration,
+          incomplete: unavailable,
+          events,
+          session: sessionFields.includes('activity') ? { activity: activityTuples[sid] } : {},
+        };
+        await route.fulfill({ json: response });
+        if (++homeResponses === 10) signalHomeResponses();
+        return;
+      }
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/sessions');
+    await page.clock.install({ time: new Date('2026-10-17T00:00:00Z') });
+    await page.clock.pauseAt(new Date('2026-10-17T00:01:00Z'));
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => {
+      window.app = CatalogViewer.mountViewerApplication();
+    });
+    await page.locator('#page [data-id="parent"]').click();
+    await withDeadline(activityEventStarted, 'native edge event preview request');
+    await page.locator('.child-card[data-h="activity"] .cc-now').waitFor({ state: 'attached' });
+    releaseActivityEvent();
+    await withDeadline(allHomeResponses, 'child event and activity home responses');
+    const expand = async (id) => {
+      const card = page.locator(`.child-card[data-h="${id}"]`);
+      await card.locator('.cc-toggle').click();
+      return card;
+    };
+    const active = await expand('activity');
+    assert.match(await active.locator('.cc-brief').innerText(), /Native event brief/);
+    assert.match(await active.locator('.cc-now').innerText(), /echo active work/);
+    const unavailable = await expand('unavailable');
+    assert.match(await unavailable.locator('.cc-now').innerText(), /cat active work/);
+    const wrongTool = await expand('tool-mismatch');
+    assert.equal(await wrongTool.locator('.cc-now').count(), 0);
+    const wrongSince = await expand('since-mismatch');
+    assert.equal(await wrongSince.locator('.cc-now').count(), 0);
+    const result = await expand('result');
+    assert.match(await result.locator('.cc-result').innerText(), /Recorded child result/);
+    assert.equal(await result.locator('.cc-now').count(), 0);
+    const done = await expand('done');
+    assert.equal(await done.locator('.cc-now').count(), 0);
+    const activityReads = homeRequests.filter(
+      ({ eventIds, sessionFields }) => eventIds.length === 0 && sessionFields.includes('activity'),
+    );
+    assert.deepEqual(activityReads.map((request) => request.sid).sort(), [
+      'active-child',
+      'result-child',
+      'since-mismatch-child',
+      'tool-mismatch-child',
+      'unavailable-child',
+    ]);
+    assert.equal(
+      homeRequests.some(
+        (request) => request.sid === 'done-child' && request.sessionFields.includes('activity'),
+      ),
+      false,
+    );
+    assert.equal(
+      homeRequests.some(
+        (request) =>
+          request.sid === 'unavailable-child' &&
+          request.eventIds.length === 1 &&
+          request.unavailable,
+      ),
+      true,
+      'an unavailable event preview is independent from the child activity read',
+    );
+    assert.equal(
+      homeRequests.some(
+        (request) => request.sid === 'active-child' && request.eventIds.includes('activity'),
+      ),
+      true,
+      'the native edge named activity keeps its event read alongside the separate activity read',
+    );
+    await done.locator('.cc-name').click();
+    await page.getByRole('button', { name: 'Open in Parent run', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Open in Parent run', exact: true }).click();
+    await withDeadline(parentAnchorStarted, 'parent turn anchor request');
+    await page.locator('#page [data-entry-key="parent:0"]').waitFor();
+    assert.deepEqual(anchorTurns, ['done-child-turn', 'parent-turn']);
+    assert.equal(new URL(page.url()).hash, '#turn=parent-turn');
+    await page.evaluate(() => window.app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
