@@ -168,6 +168,15 @@ test(
               });
             await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
             await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+            // The sample's six direct ingest children include one nested child.
+            // The published All action opens all seven recorded descendants.
+            await page
+              .locator('[aria-label="All 7 sessions under atlas ingest"]')
+              .waitFor({ state: 'attached' });
+            assert.equal(
+              await page.locator('[aria-label="All 7 sessions under atlas ingest"]').count(),
+              1,
+            );
             await page.locator('#page .ib').first().waitFor();
             await page.locator('#lanes .srow').first().waitFor({ state: 'attached' });
             if (delayed) {

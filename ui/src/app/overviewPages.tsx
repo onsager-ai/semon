@@ -437,6 +437,12 @@ export function createOverviewPages(host: OverviewHost) {
         (a, b) => rank(a) - rank(b) || b.session.last - a.session.last,
         { must: path, quiet: !open, seed: recentAll.has(row.id) || !visibleParents.has(row.id) },
       );
+      const below = (id: string, seen = new Set<string>()): HomeRow[] => {
+        if (seen.has(id)) return [];
+        seen.add(id);
+        return (children.get(id) ?? []).flatMap((child) => [child, ...below(child.id, seen)]);
+      };
+      const descendants = below(row.id);
       return {
         id: row.id,
         name: row.session.name,
@@ -503,13 +509,7 @@ export function createOverviewPages(host: OverviewHost) {
         depth,
         stuck: recentAll.has(row.id),
         flag: (() => {
-          const below = (id: string, seen = new Set<string>()): HomeRow[] => {
-            if (seen.has(id)) return [];
-            seen.add(id);
-            return (children.get(id) ?? []).flatMap((child) => [child, ...below(child.id, seen)]);
-          };
-          const descendants = below(row.id),
-            waiting = descendants.filter((child) => child.session.state === 'wait').length,
+          const waiting = descendants.filter((child) => child.session.state === 'wait').length,
             failed = descendants.filter((child) => child.session.state === 'err').length;
           return waiting
             ? { state: 'wait', tip: waiting + ' needs you' }
@@ -523,7 +523,7 @@ export function createOverviewPages(host: OverviewHost) {
             ? 'work'
             : undefined,
         children: kids.length ? shown.map((child) => item(child, depth + 1, next)) : undefined,
-        all: shown.length < kids.length ? kids.length : undefined,
+        all: shown.length < kids.length ? descendants.length : undefined,
       };
     }
     const orderedRoots = orderRows(
