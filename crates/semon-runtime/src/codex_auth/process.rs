@@ -20,6 +20,17 @@ use tokio::{
 const MAX_FRAME: u64 = 65536;
 const MAX_PENDING: usize = 8;
 
+// Temporary CI-only observability: never print paths, arguments, environment,
+// protocol frames or vendor text. This branch is not a product change.
+fn unavailable(stage: &'static str, error: Option<std::io::Error>) -> ProcessError {
+    eprintln!(
+        "codex-process diagnostic stage={stage} kind={:?} errno={:?}",
+        error.as_ref().map(std::io::Error::kind),
+        error.as_ref().and_then(std::io::Error::raw_os_error),
+    );
+    ProcessError::Unavailable
+}
+
 /// No Debug implementation: messages and challenge contain owner-only material.
 pub struct DeviceLogin {
     child: Child,
@@ -100,7 +111,7 @@ impl DeviceLogin {
         )
         .await
         .map_err(|_| ProcessError::Timeout)?
-        .map_err(|_| ProcessError::Unavailable)?;
+        .map_err(|error| unavailable("version-output", Some(error)))?;
         if !version.status.success()
             || version.stdout != format!("codex-cli {CODEX_VERSION}\n").as_bytes()
         {
@@ -111,9 +122,17 @@ impl DeviceLogin {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .map_err(|_| ProcessError::Unavailable)?;
-        let input = child.stdin.take().ok_or(ProcessError::Unavailable)?;
-        let output = BufReader::new(child.stdout.take().ok_or(ProcessError::Unavailable)?);
+            .map_err(|error| unavailable("app-server-spawn", Some(error)))?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| unavailable("app-server-stdin", None))?;
+        let output = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| unavailable("app-server-stdout", None))?,
+        );
         let mut login = Self {
             child,
             input,
@@ -149,7 +168,7 @@ impl DeviceLogin {
         })
         .await
         .map_err(|_| ProcessError::Timeout)?
-        .map_err(|_| ProcessError::Unavailable)
+        .map_err(|error| unavailable("send", Some(error)))
     }
 
     async fn receive(&mut self) -> Result<Value, ProcessError> {
@@ -162,7 +181,7 @@ impl DeviceLogin {
         )
         .await
         .map_err(|_| ProcessError::Timeout)?
-        .map_err(|_| ProcessError::Unavailable)?;
+        .map_err(|error| unavailable("receive", Some(error)))?;
         if length == 0 || length as u64 > MAX_FRAME || bytes.last() != Some(&b'\n') {
             return Err(ProcessError::Protocol);
         }
@@ -239,13 +258,13 @@ impl DeviceLogin {
         if self
             .child
             .try_wait()
-            .map_err(|_| ProcessError::Unavailable)?
+            .map_err(|error| unavailable("shutdown-try-wait", Some(error)))?
             .is_none()
         {
             self.child
                 .kill()
                 .await
-                .map_err(|_| ProcessError::Unavailable)?;
+                .map_err(|error| unavailable("shutdown-kill", Some(error)))?;
         }
         Ok(())
     }

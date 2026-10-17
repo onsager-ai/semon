@@ -98,7 +98,7 @@ async fn malformed_frames_untrusted_url_and_vendor_secrets_fail_closed() {
     ] {
         let fixture = Fixture::new(mode);
         let error = fixture.start(Duration::from_secs(5)).await.err().unwrap();
-        assert_eq!(error, expected);
+        assert_eq!(error, expected, "mode={mode}");
         assert!(!error.to_string().contains("fixture-sensitive-error"));
     }
 }
@@ -174,7 +174,7 @@ async fn managed_refresh_rejection_mismatch_malformed_response_and_timeout_reap(
     ] {
         let fixture = Fixture::new(mode);
         let error = fixture.refresh(lifetime).await.unwrap_err();
-        assert_eq!(error, expected);
+        assert_eq!(error, expected, "mode={mode}");
         assert!(!error.to_string().contains("fixture-sensitive"));
         let pid = std::fs::read_to_string(fixture.root.join("pid")).unwrap();
         assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
