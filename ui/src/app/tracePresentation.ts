@@ -504,7 +504,7 @@ export function renderCausalTrace(
         ? data.participantSummaries[sid].harness
         : undefined,
       harnessId = sessionHarness ?? peerHarness,
-      known = HARNESSES[harnessId ?? ''];
+      known = harnessId && Object.hasOwn(HARNESSES, harnessId) ? HARNESSES[harnessId] : undefined;
     if (!known || !harnessId) return undefined;
     return {
       name: known.name,
