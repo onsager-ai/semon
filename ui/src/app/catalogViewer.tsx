@@ -3172,6 +3172,19 @@ export function createCatalogViewer(
     }
     sessionPanel?.destroy();
     active = view;
+    const turn =
+      anchor ??
+      (push ? undefined : (new URLSearchParams(location.hash.slice(1)).get('turn') ?? undefined));
+    if (turn) {
+      // An anchored reader must not inherit or start the delayed tail pin. The
+      // first render happens before its generation-bound range is available.
+      view.following = false;
+      view.opening = false;
+      pinUntil = 0;
+    } else if (push) {
+      view.following = true;
+      view.opening = true;
+    }
     view.errorMode = undefined;
     view.annotationsEpoch = (view.annotationsEpoch ?? 0) + 1;
     view.annotationsLoading = false;
@@ -3182,10 +3195,6 @@ export function createCatalogViewer(
     view.renderedRevision = -1;
     for (const node of view.root.querySelectorAll('.err-current'))
       node.classList.remove('err-current');
-    if (push && !anchor) {
-      view.following = true;
-      view.opening = true;
-    }
     sourcesOpen = false;
     view.ticket = selection.begin({ source_key: capabilities.source_key, catalog_key: key });
     overview.leave();
@@ -3194,9 +3203,7 @@ export function createCatalogViewer(
     navigation.route = {
       v: 'session',
       id: key,
-      turn:
-        anchor ??
-        (push ? undefined : (new URLSearchParams(location.hash.slice(1)).get('turn') ?? undefined)),
+      turn,
     };
     releaseScreen(root);
     render(null, root);
@@ -3234,11 +3241,8 @@ export function createCatalogViewer(
       }
     };
     focusHeading();
-    const turn = new URLSearchParams(location.hash.slice(1)).get('turn');
     view.anchorNote = undefined;
     if (turn) {
-      view.following = false;
-      view.opening = false;
       const sourceKey = view.sourceKey;
       const p = params();
       p.set('sid', key);
