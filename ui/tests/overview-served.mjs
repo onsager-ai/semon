@@ -280,6 +280,8 @@ test(
                 false,
                 'a keyboard collapse stays closed for the current navigation',
               );
+              // Drain active async routes before navigation so no handler races its response.
+              await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/s/claude/a-review?t=' + address[2] + '&compat=1');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
@@ -288,8 +290,6 @@ test(
                 'true',
                 'the next navigation opens its required Recent ancestor despite saved collapse',
               );
-              // Drain active async routes before navigation so no handler races its response.
-              await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
               await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
             }
