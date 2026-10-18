@@ -1111,6 +1111,7 @@ mod tests {
         let mut head = if replace { Vec::new() } else { before.to_vec() };
         head.extend_from_slice(bytes);
         Append {
+            relocation: None,
             generation: None,
             root: "claude".into(),
             path: path.into(),
@@ -1666,6 +1667,7 @@ mod status_tests {
     }
     fn request(bytes: &[u8], generation: &str) -> Append {
         Append {
+            relocation: None,
             root: "codex".into(),
             path: "sessions/native.jsonl".into(),
             generation: Some(generation.into()),

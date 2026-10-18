@@ -1,4 +1,9 @@
 import { array, boolean, number, object, text } from '../domain/validate';
+import {
+  parseRecordedStatus,
+  parseSessionDetails,
+  type SessionDetails,
+} from '../domain/sessionDetails';
 
 import type {
   CatalogFreshness,
@@ -15,12 +20,20 @@ export type {
   CatalogNativeSelection,
 } from '../domain/catalog';
 
-/** Metadata is a partial read view, independent of runtime status and model deltas. */
+/** Metadata and fenced recorded status are partial observations, never control authority. */
 export interface CatalogSession {
+  lifecycle: 'current' | 'retained';
+  transcript?: { generation: string; errorsGeneration: string; total: number };
+  details?: SessionDetails;
+  status?: {
+    state: 'work' | 'wait' | 'idle' | 'done' | 'err' | 'new' | 'read' | 'off' | null;
+    observation: 'current' | 'retained' | 'unavailable';
+  };
   key: string;
   name: string;
   harness: string;
   kind: string;
+  presentation_kind?: string | null;
   native_ids: string[];
   parent: string | null;
   parent_source: string | null;
@@ -41,7 +54,7 @@ export interface CatalogPage {
   api: 1;
   machine: string;
   read_scope: CatalogReadScope;
-  machine_info: { key: string; label: string; freshness: 'cached' };
+  machine_info: { key: string; label: string | null; freshness: 'cached' | 'unavailable' };
   generation: string;
   observed_at: number | null;
   freshness: CatalogFreshness | 'updating';
@@ -132,11 +145,33 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     tokens = array(row.tokens, number);
   if (tokens.length !== 3 || tokens.some((token) => token < 0))
     throw new Error('Invalid catalog tokens');
+  if (row.lifecycle !== 'current' && row.lifecycle !== 'retained')
+    throw new Error('Invalid catalog lifecycle');
   return {
+    lifecycle: row.lifecycle,
+    details: row.details == null ? undefined : parseSessionDetails(row.details),
+    status: parseRecordedStatus(row.status),
+    transcript:
+      row.transcript == null
+        ? undefined
+        : (() => {
+            const projection = object(row.transcript),
+              generation = text(projection.generation),
+              errorsGeneration = text(projection.errors_generation),
+              total = integer(projection.total);
+            if (
+              !/^[a-f0-9]{64}$/.test(generation) ||
+              !/^[a-f0-9]{64}$/.test(errorsGeneration) ||
+              total < 0
+            )
+              throw Error('Invalid selected transcript observation');
+            return { generation, errorsGeneration, total };
+          })(),
     key: text(row.key),
     name: text(row.name),
     harness: text(row.harness),
     kind: text(row.kind),
+    presentation_kind: row.presentation_kind == null ? null : text(row.presentation_kind),
     native_ids: strings(row.native_ids),
     parent: nullable(row.parent, text),
     parent_source: nullable(row.parent_source, text),
@@ -196,7 +231,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     (completeness !== 'partial' && completeness !== 'complete') ||
     (collectionFreshness === 'updating' && completeness !== 'partial') ||
     info.key !== machine ||
-    info.freshness !== 'cached' ||
+    (info.freshness !== 'cached' && info.freshness !== 'unavailable') ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
     items.length > 100 ||
     new Set(items.map((item) => item.key)).size !== items.length ||
@@ -207,7 +242,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     api: 1,
     machine,
     read_scope: readScope(page.read_scope),
-    machine_info: { key: machine, label: text(info.label), freshness: 'cached' },
+    machine_info: { key: machine, label: nullable(info.label, text), freshness: info.freshness },
     generation,
     observed_at: nullable(page.observed_at, integer),
     freshness: collectionFreshness,

@@ -1,12 +1,12 @@
-//! Read-only readiness of retained native source projections. No body reads,
+//! Readiness and explicit archive retention of native source metadata. No body reads,
 //! provider credentials, archive locations, native selection or control grant.
 use crate::{
-    Options, SessionSourceRef,
+    Options, SessionSourceProof, SessionSourceRef,
     catalog::CatalogIdentityError,
     events::EventCache,
     model::summary::{CatalogRow, CatalogSource},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -73,6 +73,16 @@ pub fn source_projection_ready(
     let transaction = connection
         .unchecked_transaction()
         .map_err(|_| Unavailable)?;
+    projection_ready(&transaction, root, path, full)
+}
+
+fn projection_ready(
+    transaction: &Connection,
+    root: &str,
+    path: &str,
+    full: &str,
+) -> Result<Option<SourceProjectionReady>, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, Unavailable};
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_version'",
@@ -205,4 +215,106 @@ pub fn source_projection_ready(
         return Ok(result);
     }
     Ok(None)
+}
+
+fn same_projection(left: &SourceProjectionReady, right: &SourceProjectionReady) -> bool {
+    left.source == right.source
+        && left.projection_version == right.projection_version
+        && left.projection_generation == right.projection_generation
+}
+
+fn archive_index_path(
+    options: &Options,
+    proof: &SessionSourceProof,
+    projection: &SourceProjectionReady,
+) -> Result<std::path::PathBuf, CatalogIdentityError> {
+    use CatalogIdentityError::InvalidArguments;
+    let source = &proof.source;
+    let root = crate::InputRoot::parse(&source.root).ok_or(InvalidArguments)?;
+    if source != &projection.source
+        || !source.path.ends_with(".jsonl")
+        || source.path.len() > 4096
+        || !crate::is_input_path(&source.root, &source.path)
+        || source.native_id.is_empty()
+        || source.native_id.len() > 256
+    {
+        return Err(InvalidArguments);
+    }
+    Ok(crate::Input {
+        root,
+        path: source.path.clone(),
+    }
+    .full_path(options))
+}
+
+/// Retain one existing, decodable Session Event Index generation for a verified
+/// archive. The host owns archive authorization, verifies the original bytes,
+/// drains producers and rechecks physical identity before removing local bytes.
+/// This metadata-only operation neither verifies an archive nor permits deletion.
+/// It cannot initialize or migrate an index, and refuses changed catalog, slot or
+/// source generations. No source bodies, provider keys or runtime facts are copied.
+/// Ordinary missing sources remain subject to normal index removal.
+pub fn retain_source_event_index(
+    options: &Options,
+    proof: &SessionSourceProof,
+    projection: &SourceProjectionReady,
+) -> Result<(), CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
+    let path = archive_index_path(options, proof, projection)?;
+    let full = path.to_str().ok_or(InvalidArguments)?;
+    let mut connection = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| Unavailable)?;
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(|_| Unavailable)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| Unavailable)?;
+    if !projection_ready(&transaction, &proof.source.root, &proof.source.path, full)?
+        .is_some_and(|ready| same_projection(&ready, projection))
+        || !crate::events::retain_archive_index(&transaction, full, proof, projection)
+            .map_err(|_| Unavailable)?
+    {
+        return Err(ScopeChanged);
+    }
+    transaction.commit().map_err(|_| Unavailable)
+}
+
+/// Recheck the explicit retention marker and its exact committed ledger under
+/// one read transaction. The host uses this after its durable recovery marker
+/// and before local removal. A native index write clears the marker; unsupported
+/// versions and changed projections cannot qualify another eviction. Historical
+/// lifecycle alone does not change the source-bound projection generation.
+pub fn source_event_index_retained(
+    options: &Options,
+    proof: &SessionSourceProof,
+    projection: &SourceProjectionReady,
+) -> Result<bool, CatalogIdentityError> {
+    use CatalogIdentityError::{InvalidArguments, Unavailable};
+    let path = archive_index_path(options, proof, projection)?;
+    let full = path.to_str().ok_or(InvalidArguments)?;
+    let connection = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| Unavailable)?;
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(|_| Unavailable)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|_| Unavailable)?;
+    Ok(
+        projection_ready(&transaction, &proof.source.root, &proof.source.path, full)?
+            .is_some_and(|ready| same_projection(&ready, projection))
+            && crate::events::archive_index_retained(&transaction, full, proof, projection)
+                .map_err(|_| Unavailable)?,
+    )
 }

@@ -149,8 +149,8 @@ but narrows the reader and requires new pane/focus ownership. It is deferred.
 - Keep existing long-message clamps, tool expansion/copy and recorded-text
   paging. Failed tool summaries expose recorded exit status, not an inferred
   session failure. Partial history remains explicit. Expand in place without
-  dropping the surrounding messages; compatibility view alone supplies full
-  relationship context.
+  dropping the surrounding messages. Read relationship context through the
+  bounded native causal API and keep incomplete context explicit.
 
 Preferred patterns: `label.search` contains the inline label and named input;
 `facet-filters` owns wrapping; `nrow` contains one name line and one metadata line; native

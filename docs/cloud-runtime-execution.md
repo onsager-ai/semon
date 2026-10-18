@@ -1,5 +1,7 @@
 # Explicit E2B execution transport (candidate)
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+
 `e2b::execution` is a bounded private stdio transport. `scripts/e2b-runtime.py`
 uses E2B SDK 2.52.0 and an explicit embedding-supplied profile to create compute, install the embedding's
 pinned Codex and Semon binaries, bootstrap Push, dispatch one initial task, and

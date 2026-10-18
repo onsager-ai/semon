@@ -119,16 +119,25 @@ impl CatalogLifecycle {
     }
 }
 
-/// Stable metadata used by focused cold list queries. No clock or process facts.
+/// Stable source descriptions and exact Query observations for focused lists.
+/// Query process fields carry their own runtime fence; they grant no control authority.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogRow {
+    #[serde(skip)]
+    pub(crate) overview: Option<crate::overview::Summary>,
+    #[serde(skip)]
+    pub(crate) trace: Option<crate::causal_trace::Projection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) query: Option<Value>,
     #[serde(default)]
     pub(crate) lifecycle: CatalogLifecycle,
     pub(crate) key: String,
     pub(crate) name: String,
     pub(crate) harness: String,
     pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) presentation_kind: Option<String>,
     pub(crate) native_ids: Vec<String>,
     pub(crate) parent: Option<String>,
     pub(crate) parent_source: Option<String>,
@@ -141,6 +150,19 @@ pub(crate) struct CatalogRow {
     pub(crate) tokens: [f64; 3],
     pub(crate) cost: crate::pricing::Cost,
     pub(crate) sources: Vec<CatalogSource>,
+}
+
+/// Shared qualification for exact native Query publication fields. These are
+/// recorded observations, never a grant of process or credential authority.
+pub(crate) fn query_observation_matches(
+    saved: &Value,
+    sources: &[CatalogSource],
+    current: bool,
+    runtime: Option<&str>,
+) -> Result<bool, serde_json::Error> {
+    Ok(saved["version"] == 1
+        && saved["source_generation"] == crate::retention::source_generation(sources)?
+        && (!current || (runtime.is_some() && saved["runtime"].as_str() == runtime)))
 }
 
 /// Native source identity and last observed generation. `prefix_sha256` hashes
@@ -162,9 +184,30 @@ pub(crate) struct CatalogSource {
     pub(crate) offset: u64,
     pub(crate) prefix_sha256: [u8; 32],
     pub(crate) tail_sha256: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_role: Option<Value>,
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 3;
+pub(crate) const CATALOG_VERSION: u32 = 5;
+
+pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
+    let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
+    CatalogSource {
+        path: file.path.clone(),
+        native_id: file.id.clone(),
+        dev,
+        ino,
+        size: file.stamp.size,
+        modified_ns: file.stamp.modified_ns,
+        changed_ns,
+        offset,
+        prefix_sha256,
+        tail_sha256,
+        native_role: serde_json::to_value(&file.role)
+            .ok()
+            .filter(|role| serde_json::to_vec(role).is_ok_and(|bytes| bytes.len() <= 64 * 1024)),
+    }
+}
 
 pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<CatalogRow> {
     let mut rows = Vec::new();
@@ -176,22 +219,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
         let mut sources: Vec<_> = session
             .files
             .iter()
-            .map(|position| {
-                let file = &builder.files[*position];
-                let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
-                CatalogSource {
-                    path: file.path.clone(),
-                    native_id: file.id.clone(),
-                    dev,
-                    ino,
-                    size: file.stamp.size,
-                    modified_ns: file.stamp.modified_ns,
-                    changed_ns,
-                    offset,
-                    prefix_sha256,
-                    tail_sha256,
-                }
-            })
+            .map(|position| source(&builder.files[*position]))
             .collect();
         sources.sort_by(|a, b| a.path.cmp(&b.path));
         let native_ids = sources
@@ -201,10 +229,14 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .into_iter()
             .collect();
         rows.push(CatalogRow {
+            overview: None,
+            trace: None,
+            query: None,
             lifecycle: CatalogLifecycle::Current,
             key: session.key.clone(),
             name: out.name.clone(),
             harness: out.harness.into(),
+            presentation_kind: out.kind.map(str::to_owned),
             kind: match session.kind {
                 SessKind::Lineage => "session",
                 SessKind::Agent => "subagent",

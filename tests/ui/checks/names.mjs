@@ -171,7 +171,7 @@ export default async function namesCheck(browser) {
       await goto(page, { v: 'session', id: s.id }, D);
       await page.waitForTimeout(200);
       // A session bar names its harness in the kind label of its meta line: plain text, no glyph.
-      const top = await measure(page, '#topbar', '.meta-line .lab[data-drop="2"]');
+      const top = await measure(page, '#topbar', '.meta-line .lab.hname');
       // A session's top bar always shows its harness. If the line fitter dropped the label, nothing was audited, so fail.
       // A child's own top bar keeps its kind chip first, so its model label may be dropped there.
       // (A phone's bar is one row and does not draw the line: there the harness is a row of the ⋯ menu's Details, audited here instead.)
@@ -214,7 +214,7 @@ export default async function namesCheck(browser) {
       if (s === kinded) {
         // A child's kind ("Subagent", "Codex run") is a plain label of the meta line: no fill, the neutral ink.
         const chip = await page.evaluate(() => {
-          const c = document.querySelector('#topbar .meta-line .lab[data-drop="2"]');
+          const c = document.querySelector('#topbar .meta-line .lab.hname');
           if (!c) return null;
           const probe = document.createElement('span');
           probe.style.color = 'var(--muted)';

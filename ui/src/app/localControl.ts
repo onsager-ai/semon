@@ -1,12 +1,12 @@
 import type { EffectScope } from './effects';
-import type { JsonObject } from '../lib/model';
+import type { JsonObject } from '../lib/api';
 import { parseControl, unavailableControl } from '../lib/control';
 import type { ControlSnapshot, ControlView } from '../lib/control';
 export type { ControlView } from '../lib/control';
 function record(value: unknown): value is JsonObject {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
-/** Live control owner. Uses accepted model transactions and the existing effect scope; no poller. */
+/** Live control owner. Uses native observations and the existing effect scope; no poller. */
 export function createLocalControl(scope: EffectScope, refresh: () => void) {
   const drafts = new Map<string, string>();
   let current: ControlSnapshot | null = null;
@@ -60,6 +60,7 @@ export function createLocalControl(scope: EffectScope, refresh: () => void) {
         generation: target.generation,
         activeTurn: target.activeTurn,
         expires: Date.now() + 25_000,
+        ...(target.launch ? { launch: true } : {}),
         ...extra,
       };
       const response = await fetch('/api/control', {

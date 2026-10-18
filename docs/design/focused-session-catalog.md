@@ -1,8 +1,8 @@
 # Focused session catalog reads
 
 `GET /api/sessions` reads a persisted metadata catalog before constructing any
-conversation graph or opening the event cache. This is an additive contract;
-`/api/model` remains the compatibility full-model path. Hosts can call
+conversation graph or opening the event cache. Viewer and MCP use the native
+Catalog; the experimental full-model routes are retired. Hosts can call
 `session_catalog_page(options, machine_key, query)` before constructing a core.
 The host selects the authorized tenant, machine configuration and credential
 policy. Public source references contain logical roots and relative paths.
@@ -11,21 +11,35 @@ policy. Public source references contain logical roots and relative paths.
 
 Select a stable caller machine key with `machine`. Multiple configured machines
 require an explicit key; display hostnames are not authority. `limit` is 1–100
-(default 60). Exact `harness` and `repo` filters use dedicated indexes.
+(default 60). Exact `harness` and `repo` filters use dedicated indexes; `model`
+selects recorded models and `no_repo=1` selects sessions without a repository.
+`scope` selects current or retained history.
 `sid` selects one canonical catalog key through the primary key and cannot be
 combined with filters or a cursor. An absent selected key returns 404.
-`q` returns `unsupported_filter`; this endpoint does not silently search or
-return an unfiltered result for a requested text search.
+`q` performs bounded Unicode-lowercase substring search over recorded name, key,
+repository, branch, model and harness metadata. It does not search transcripts.
+The search report exposes candidate/byte budgets and incomplete index or result
+coverage; an unavailable search projection returns an explicit retryable error.
 
 The response includes `api:1`, `machine`, `machine_info`, `capabilities`, the
 catalog `generation`, `observed_at`, `items` and `next_cursor`. Machine metadata
 and session summaries are explicitly cached. No process, runtime or harness
 readiness is invented from persistent metadata. Nullable source timestamps
 remain nullable. Capabilities advertise exact filters, direct selected metadata,
-ordering and pagination; full-text search, runtime status and global union paging
-remain unsupported. The list is ordered by last observation descending and
+ordering and pagination. Qualified native runtime status is supported;
+transcript full-text search and global union paging remain outside this endpoint.
+The list is ordered by last observation descending and
 canonical key ascending. A machine-local catalog includes native sessions and
 subagents, without whole-model union copy deduplication.
+
+An exact `sid` selection also returns generation-bound `details`. Recorded
+per-model tokens, rate windows, lane/role flags and busy intervals come from the
+existing native publication; list pages do not load these breakdowns. The
+selected `content_generation` identifies the original native preview recipes.
+Prompt, answer and running-tool argument text stays source-backed and is read
+through `/api/session-home` with that generation. Recorded details grant no
+current runtime or control authority. Retained details keep their original
+source proof and explicitly disable current live observation.
 
 Each item retains canonical and native identities, parent provenance, stable
 summary fields and `source_refs`. Each reference contains logical `root`, relative
@@ -50,21 +64,24 @@ catalog returns 409 `stale_cursor`. Both explicitly request cursor reset.
 Unavailable catalogs return retryable 503; read-only lookup never creates a DB.
 A ViewerCore request schedules observation on its existing background worker;
 OnRead mode requires explicit observation and reports manual refresh. First
-catalog demand can publish even before any full model was served. Background
-observation still builds the full compatible model: its global CPU/memory is a
-remaining limitation, distinct from the bounded first response.
+catalog demand publishes a bounded, explicitly partial discovery batch before
+complete native reconciliation. Background reconciliation still scans the
+selected machine and derives its native relationships; that cost is distinct
+from the bounded first response. It does not construct a compatibility model.
 
 ## Measured workload
 
 `cargo run --release --locked -p semon-sessions --example catalog-workload --
 1000 4` seeds four deterministic machine catalogs, closes the writer, then
-measures full-model and catalog reads in independent fresh child processes.
+measures native Catalog reads in a fresh child process.
 Each session contains two synthetic user records. All source timestamps tie;
 the first 60 canonical keys on machine 0 stay identical while unrelated history
 grows. Core construction is included. No source text, credentials or private
 host policy is used. The cache is persistent and warm from the seed process;
 these are process-restart reads, not an initial unindexed import.
 
+The following historical comparison predates compatibility retirement. Its
+full-model endpoint and binary are retired; it is not final integration evidence.
 Measurements on this shared Linux x86-64 container, optimized Rust 1.99 build.
 Measured executable SHA-256:
 `fd055f5ff0ab9013394a0fd00a49a2adf4a145e8f301f53c72859ae58014bb86`.
@@ -82,9 +99,8 @@ assuming these are exact final-bundle measurements:
 The model response is the compatibility endpoint's complete result; the catalog
 response is the requested 60 metadata rows. This is an endpoint comparison for
 the same first-list intent, not an equivalence claim for transcript or runtime
-semantics. The default UI still consumes the full model until the separate
-paged-list/selected-conversation consumer lands. No browser latency improvement
-is claimed by this server contract alone.
+semantics. The current UI consumes native pages and selected conversation reads.
+No browser latency improvement is established by this historical server workload.
 
 Catalog warm p50/p95 across 20 requests: 4.43/9.82 ms, 3.33/6.17 ms,
 3.27/5.32 ms respectively. Full-model warm observations use one request

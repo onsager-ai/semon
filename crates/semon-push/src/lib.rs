@@ -16,6 +16,7 @@
 //! implementation: [`mirror::Receiver`] over a directory, its tokens
 //! ([`tokens`]) and `semon receive`'s listener ([`serve`]).
 
+use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, fs,
@@ -881,6 +882,7 @@ impl Client {
                 known.generation.clone()
             };
             let bind = Append {
+                relocation: None,
                 generation: Some(generation.clone()),
                 root: input.root.as_str().into(),
                 path: input.path.clone(),
@@ -909,6 +911,7 @@ impl Client {
         }
         let generation = wire::new_generation().map_err(Failure::Local)?;
         let append = Append {
+            relocation: None,
             generation: Some(generation.clone()),
             root: input.root.as_str().into(),
             path: input.path.clone(),
@@ -950,8 +953,66 @@ impl Client {
     fn sync_log(&mut self, input: &Input, path: &Path, target: u64) -> Synced {
         let key = Self::key(input);
         let stat = FileStat::from_metadata(&fs::metadata(path).map_err(local)?);
-        let known = self.state.files.get(&key).cloned().unwrap_or_default();
-        if known.has_stat()
+        let mut relocation = None;
+        let mut known = self.state.files.get(&key).cloned().unwrap_or_default();
+        if known.generation.is_empty() && input.root == semon_sessions::InputRoot::Codex {
+            let candidates = self
+                .state
+                .files
+                .iter()
+                .filter(|(old, state)| {
+                    old.starts_with("codex/")
+                        && old.as_str() != key
+                        && state.confirmed
+                        && wire::is_generation(&state.generation)
+                        && state.dev == stat.dev
+                        && state.ino == stat.ino
+                        && state.sent > 0
+                        && state.sent <= stat.len
+                        && old.starts_with("codex/archived_sessions/")
+                            != key.starts_with("codex/archived_sessions/")
+                })
+                .collect::<Vec<_>>();
+            if let [(old, state)] = candidates.as_slice() {
+                let old_path = path
+                    .ancestors()
+                    .find(|parent| {
+                        parent
+                            .file_name()
+                            .is_some_and(|name| name == "sessions" || name == "archived_sessions")
+                    })
+                    .and_then(Path::parent)
+                    .map(|home| home.join(old.trim_start_matches("codex/")));
+                if old_path.is_some_and(|old| !old.exists())
+                    && let Some(native_id) =
+                        semon_sessions::codex_native_id_prefix(path, stat.len).map_err(local)?
+                {
+                    let mut digest = sha2::Sha256::new();
+                    let mut at = 0;
+                    while at < state.sent {
+                        let (mut bytes, end) = complete_lines_to(path, at, self.chunk, state.sent)
+                            .map_err(Failure::Local)?;
+                        if end <= at {
+                            return Err(Failure::Local(
+                                "relocation prefix ends inside a record".into(),
+                            ));
+                        }
+                        redact::redact(&mut bytes);
+                        digest.update(&bytes);
+                        at = end;
+                    }
+                    relocation = Some(wire::Relocation {
+                        from_path: old.trim_start_matches("codex/").to_owned(),
+                        native_id,
+                        prefix_sha256: hex::encode(digest.finalize()),
+                    });
+                    known = (*state).clone();
+                    known.set_stat(stat);
+                }
+            }
+        }
+        if relocation.is_none()
+            && known.has_stat()
             && known.matches_stat(stat)
             && known.sent == stat.len
             && !self.needs_generation_probe(&known)
@@ -999,7 +1060,11 @@ impl Client {
             }
             let (mut data, end) = complete_lines_to(path, sent, self.chunk, target.min(stat.len))
                 .map_err(Failure::Local)?;
-            if data.is_empty() && !replace && !self.needs_generation_probe(&known) {
+            if data.is_empty()
+                && !replace
+                && relocation.is_none()
+                && !self.needs_generation_probe(&known)
+            {
                 break;
             }
             if replace {
@@ -1024,6 +1089,7 @@ impl Client {
                     head.extend_from_slice(&piece[..take]);
                 }
                 let append = Append {
+                    relocation: relocation.clone(),
                     generation: Some(generation.clone()),
                     root: input.root.as_str().into(),
                     path: input.path.clone(),
@@ -1038,6 +1104,7 @@ impl Client {
                         let length = ack.length;
                         replaced |= replace;
                         replace = false;
+                        relocation = None;
                         offset = length;
                         total += piece.len() as u64;
                         self.heads.insert(key.clone(), head.clone());
@@ -1056,6 +1123,7 @@ impl Client {
                 }
             }
             if let Some(theirs) = conflict {
+                relocation = None;
                 conflicts += 1;
                 if conflicts > 3 {
                     return Err(Failure::Remote(format!(
@@ -2475,6 +2543,7 @@ mod tests {
         let reference = mirror::Receiver::new(&mirror);
         let bytes = b"already sent\n";
         let existing = Append {
+            relocation: None,
             root: "claude".into(),
             path: "projects/-work/old.jsonl".into(),
             offset: 0,

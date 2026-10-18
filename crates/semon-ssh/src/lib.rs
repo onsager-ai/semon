@@ -5,6 +5,23 @@
 pub mod controller;
 pub mod execution;
 
+/// SSH transport is unavailable in the collection-focused product.
+pub const COLLECTION_SSH_PAUSED: bool = true;
+
+/// Refuse before credentials, temporary files, process admission or networking.
+pub fn require_collection_ssh() -> Result<(), Error> {
+    if COLLECTION_SSH_PAUSED {
+        Err(Error::Unavailable)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRANSPORT_ADMISSIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 use std::{net::IpAddr, process::Stdio, time::Duration};
@@ -62,6 +79,8 @@ impl HostKey {
 pub struct Credential(pub Zeroizing<String>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    #[error("capability_unavailable: SSH is paused in the collection configuration")]
+    Unavailable,
     #[error("Enter a valid target and an unencrypted SSH private key.")]
     Invalid,
     #[error("Execution authority is missing, expired or revoked. Request separate authorization.")]
@@ -99,6 +118,11 @@ async fn run(
     limit: usize,
     lifetime: Duration,
 ) -> Result<Vec<u8>, Error> {
+    #[cfg(test)]
+    TRANSPORT_ADMISSIONS.with(|counts| {
+        let (files, processes) = counts.get();
+        counts.set((files, processes + 1));
+    });
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
@@ -180,6 +204,7 @@ async fn run(
 }
 /// Unauthenticated discovery only; this does not trust a key or transmit credentials.
 pub async fn discover(target: &Target) -> Result<HostKey, Error> {
+    require_collection_ssh()?;
     target.validate()?;
     let mut cmd = Command::new("/usr/bin/ssh-keyscan");
     cmd.args([
@@ -214,6 +239,11 @@ struct PrivateFiles {
 }
 impl PrivateFiles {
     fn new(key: &HostKey, credential: &Credential) -> Result<Self, Error> {
+        #[cfg(test)]
+        TRANSPORT_ADMISSIONS.with(|counts| {
+            let (files, processes) = counts.get();
+            counts.set((files + 1, processes));
+        });
         use std::{
             fs,
             io::Write,
@@ -299,6 +329,7 @@ pub async fn check(
     key: &HostKey,
     credential: &Credential,
 ) -> Result<Check, Error> {
+    require_collection_ssh()?;
     target.validate()?;
     let files = PrivateFiles::new(key, credential)?;
     let out = run(
@@ -332,6 +363,7 @@ pub async fn bootstrap(
     credential: &Credential,
     setup: Bootstrap<'_>,
 ) -> Result<Setup, Error> {
+    require_collection_ssh()?;
     bootstrap_inner(target, key, credential, setup, None, false).await
 }
 /// Scope mirror checkpoints to the stable logical receiver. Reuse this identity
@@ -344,6 +376,7 @@ pub async fn bootstrap_for_receiver(
     setup: Bootstrap<'_>,
     receiver_identity: &str,
 ) -> Result<Setup, Error> {
+    require_collection_ssh()?;
     if receiver_identity.is_empty()
         || receiver_identity.len() > 256
         || receiver_identity.bytes().any(|b| b.is_ascii_control())
@@ -370,6 +403,7 @@ pub async fn bootstrap_native_receiver(
     setup: Bootstrap<'_>,
     receiver_identity: &str,
 ) -> Result<Setup, Error> {
+    require_collection_ssh()?;
     if receiver_identity.is_empty()
         || receiver_identity.len() > 256
         || receiver_identity.bytes().any(|b| b.is_ascii_control())
@@ -422,6 +456,85 @@ async fn bootstrap_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn collection_ssh_refuses_before_credentials_processes_or_network() {
+        let target = Target {
+            address: "127.0.0.1".parse().unwrap(),
+            port: 0,
+            username: "invalid target".into(),
+        };
+        let pin = HostKey {
+            algorithm: String::new(),
+            key: String::new(),
+        };
+        let credential = Credential(Zeroizing::new(String::new()));
+        let setup = || Bootstrap {
+            operation: "invalid",
+            destination: "",
+            token: "",
+            binary: &[],
+        };
+        TRANSPORT_ADMISSIONS.with(|counts| counts.set((0, 0)));
+        assert_eq!(require_collection_ssh(), Err(Error::Unavailable));
+        assert!(matches!(discover(&target).await, Err(Error::Unavailable)));
+        assert!(matches!(
+            check(&target, &pin, &credential).await,
+            Err(Error::Unavailable)
+        ));
+        assert!(matches!(
+            bootstrap(&target, &pin, &credential, setup()).await,
+            Err(Error::Unavailable)
+        ));
+        assert!(matches!(
+            bootstrap_for_receiver(&target, &pin, &credential, setup(), "").await,
+            Err(Error::Unavailable)
+        ));
+        assert!(matches!(
+            bootstrap_native_receiver(&target, &pin, &credential, setup(), "").await,
+            Err(Error::Unavailable)
+        ));
+        let binding = controller::Binding {
+            owner: String::new(),
+            workspace: String::new(),
+            connection: String::new(),
+            session: String::new(),
+            model_connection: String::new(),
+            model_generation: 0,
+            epoch: 0,
+        };
+        assert!(matches!(
+            controller::install(
+                &target,
+                &pin,
+                &credential,
+                controller::Install {
+                    enrollment: "",
+                    launch: "",
+                    expires: 0,
+                    binding: binding.clone(),
+                    native_directory: "",
+                    controller: &[],
+                    model_config: "",
+                    model_key: ""
+                }
+            )
+            .await,
+            Err(Error::Unavailable)
+        ));
+        assert!(matches!(
+            controller::observe(&target, &pin, &credential, "", "", &binding).await,
+            Err(Error::Unavailable)
+        ));
+        assert!(matches!(
+            controller::stop(&target, &pin, &credential, "", "", &binding).await,
+            Err(Error::Unavailable)
+        ));
+        assert_eq!(TRANSPORT_ADMISSIONS.with(|counts| counts.get()), (0, 0));
+        assert_eq!(
+            Error::Unavailable.to_string(),
+            "capability_unavailable: SSH is paused in the collection configuration"
+        );
+    }
     #[test]
     fn target_and_host_key_validation() {
         let mut t = Target {

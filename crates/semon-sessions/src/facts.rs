@@ -141,8 +141,8 @@ impl Facts {
 }
 
 /// Reads this machine's facts for the homes `options` names. The working
-/// directories come from the same metadata scan the model builder runs (its
-/// event cache is used and saved, as `model_json` does); repositories are
+/// directories come from the shared native metadata scan and reusable Event
+/// Index; repositories are
 /// found by walking up from each one to a `.git` (a linked worktree resolves
 /// to the repository it was made from).
 pub fn local_facts(options: &Options) -> io::Result<Facts> {
@@ -403,6 +403,7 @@ impl MachineFacts {
     }
 
     /// When the machine was last seen, if its facts say it's offline.
+    #[cfg(test)]
     pub(crate) fn offline_since(&self) -> Option<i64> {
         match self {
             Self::Local => None,

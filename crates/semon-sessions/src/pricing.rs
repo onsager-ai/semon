@@ -39,6 +39,7 @@ pub struct FastPrice {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg(test)]
 struct LegacyPrice {
     input: f64,
     output: f64,
@@ -47,15 +48,19 @@ struct LegacyPrice {
 }
 
 #[derive(Clone, Serialize)]
+#[cfg(test)]
 struct PricedModel {
     #[serde(flatten)]
     price: LegacyPrice,
-    source: String,
+    #[serde(rename = "source")]
+    _source: String,
 }
 
 #[derive(Serialize)]
+#[cfg(test)]
 pub(crate) struct Pricing {
-    as_of: String,
+    #[serde(rename = "as_of")]
+    _as_of: String,
     models: BTreeMap<String, PricedModel>,
 }
 
@@ -63,15 +68,18 @@ pub(crate) struct Pricing {
 struct PriceRow {
     #[serde(flatten)]
     price: Price,
+    #[cfg(test)]
     legacy: LegacyPrice,
-    source: String,
+    #[serde(rename = "source")]
+    _source: String,
     #[serde(default, rename = "sync")]
     _sync: bool,
 }
 
 #[derive(Deserialize)]
 struct PriceTableData {
-    as_of: String,
+    #[serde(rename = "as_of")]
+    _as_of: String,
     models: BTreeMap<String, PriceRow>,
 }
 
@@ -108,12 +116,13 @@ fn price_for(model: &str) -> Option<Price> {
         .map(|(_, row)| row.price)
 }
 
+#[cfg(test)]
 pub(crate) fn table() -> Pricing {
     let mut models = BTreeMap::new();
     for (model, row) in &price_data().models {
         let priced = PricedModel {
             price: row.legacy,
-            source: row.source.clone(),
+            _source: row._source.clone(),
         };
         models.insert(model.clone(), priced.clone());
         let alias = normalize_model_id(model);
@@ -122,7 +131,7 @@ pub(crate) fn table() -> Pricing {
         }
     }
     Pricing {
-        as_of: price_data().as_of.clone(),
+        _as_of: price_data()._as_of.clone(),
         models,
     }
 }
@@ -480,7 +489,7 @@ mod tests {
         assert!(!parsed.models.is_empty());
         for (model, row) in &parsed.models {
             assert!(
-                !row.source.trim().is_empty(),
+                !row._source.trim().is_empty(),
                 "{model} has no pricing source"
             );
         }

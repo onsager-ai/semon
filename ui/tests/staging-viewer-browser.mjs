@@ -8,7 +8,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "export {renderSessionScreen,updateSessionControl,updateSessionRuntime,updateSessionJump,updateSessionName} from './src/lib/transcript'; export {createLocalControl} from './src/app/localControl'; export {EffectScope} from './src/app/effects';",
+      "export {renderSessionScreen,updateSessionControl,updateSessionRuntime,updateSessionJump,updateSessionName} from './src/lib/transcript'; export {createLocalControl} from './src/app/localControl'; export {EffectScope} from './src/app/effects'; export {createPanelChrome} from './src/lib/panel';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -30,6 +30,41 @@ const css = (
 ).join('\n');
 const out = new URL('../../tests/ui/out-staging-viewer/', import.meta.url);
 await mkdir(out, { recursive: true });
+test('panel cancellation releases focus before the next keyboard interaction', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<button id="next">Thinking</button>');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    const result = await page.evaluate(() => {
+      let closed = 0;
+      const next = document.querySelector('#next');
+      const panel = ViewerFixes.createPanelChrome(
+        { title: 'Composer' },
+        {
+          opened() {},
+          closed() {
+            closed++;
+            next.focus();
+          },
+        },
+      );
+      panel.show();
+      panel.dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+      return {
+        connected: panel.dialog.isConnected,
+        closed,
+        focused: document.activeElement === next,
+      };
+    });
+    assert.deepEqual(result, { connected: false, closed: 1, focused: true });
+    await page.locator('#next').press('Enter');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    assert.equal(await page.locator('dialog').count(), 0);
+  } finally {
+    await browser.close();
+  }
+});
 for (const width of [390, 820, 1280])
   for (const colorScheme of ['light', 'dark'])
     test(`approved reading and availability states ${width} ${colorScheme}`, async () => {
@@ -96,6 +131,7 @@ for (const width of [390, 820, 1280])
             actions: {},
           };
           window.snapshot = {
+            composerTarget: document.querySelector('#topbar'),
             id: 'native',
             name: 'Initial session',
             order: [],
@@ -178,6 +214,7 @@ for (const width of [390, 820, 1280])
           target.className = 'jump-wrap';
           ViewerFixes.updateSessionJump(root, true, 2, false, target);
         });
+        await page.getByRole('button', { name: 'Open Composer' }).click();
         const row = page.locator('.composer-unavailable'),
           input = page.getByLabel('Message to Codex');
         assert.equal(await row.isVisible(), true);
@@ -187,6 +224,7 @@ for (const width of [390, 820, 1280])
         assert.equal(await input.getAttribute('readonly'), '');
         await row.click();
         assert.equal(await input.isVisible(), false);
+        await page.keyboard.press('Escape');
         assert.equal(
           await page.locator('.think-disclosure').getAttribute('aria-expanded'),
           'false',
@@ -228,6 +266,7 @@ for (const width of [390, 820, 1280])
           control.adopt(native);
           ViewerFixes.updateSessionControl(root, control.view('native', 'source:native'));
         });
+        await page.getByRole('button', { name: 'Open Composer' }).click();
         const compact = await input.boundingBox();
         await input.focus();
         await input.fill('Retained draft\nSecond line\nThird line');
@@ -260,10 +299,7 @@ for (const width of [390, 820, 1280])
         });
         assert.equal(await input.isVisible(), true);
         assert.equal(await input.getAttribute('readonly'), '');
-        await page.locator('#page h1').evaluate((node) => {
-          node.tabIndex = -1;
-          node.focus();
-        });
+        await page.getByRole('button', { name: 'Close', exact: true }).focus();
         await page.waitForTimeout(40);
         assert.equal(await input.isVisible(), false);
         assert.match(await row.innerText(), /controller is disconnected.*Draft saved/);
@@ -294,10 +330,12 @@ for (const width of [390, 820, 1280])
         await page.waitForTimeout(30);
         const geometry = await page.evaluate(() => {
           const b = document.querySelector('#jump-bottom').getBoundingClientRect(),
-            c = document.querySelector('.sh-composer').getBoundingClientRect(),
+            c = document.querySelector('dialog.session-composer-panel').getBoundingClientRect(),
             d = document.querySelector('.session-dock').getBoundingClientRect();
           return {
-            clear: b.bottom <= c.top,
+            readingEmpty: !document.querySelector('#page [aria-label="Conversation controls"]'),
+            trigger: !!document.querySelector('#topbar .session-composer-trigger'),
+            panelInside: c.top >= 0 && c.bottom <= innerHeight,
             center: Math.abs((b.left + b.right - d.left - d.right) / 2) < 1,
             inside: b.top >= 0 && b.bottom <= innerHeight,
             header: !!document.querySelector('#topbar #jump-bottom'),
@@ -305,7 +343,9 @@ for (const width of [390, 820, 1280])
           };
         });
         assert.deepEqual(geometry, {
-          clear: true,
+          readingEmpty: true,
+          trigger: true,
+          panelInside: true,
           center: true,
           inside: true,
           header: false,

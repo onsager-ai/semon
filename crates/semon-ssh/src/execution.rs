@@ -1,7 +1,7 @@
 //! Separately authorized private-driver dispatch. Enrollment alone is insufficient.
 //! The embedding commits coordinator intent before calls and owns current authority
 //! and outbound policy. This adapter never launches compute or installs a harness.
-use crate::{Credential, Error, HostKey, PrivateFiles, Target, run};
+use crate::{Credential, Error, HostKey, PrivateFiles, Target, require_collection_ssh, run};
 use semon_runtime::{OwnerId, Progress, Session};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,10 +22,10 @@ pub struct Capabilities {
 }
 /// Private-driver transport qualification is distinct from native/hosted adoption.
 pub const CAPABILITIES: Capabilities = Capabilities {
-    dispatch: true,
-    reconcile: true,
-    credential_repair: true,
-    revoke_execution: true,
+    dispatch: false,
+    reconcile: false,
+    credential_repair: false,
+    revoke_execution: false,
     pause: false,
     snapshot: false,
     restore: false,
@@ -205,6 +205,7 @@ impl Execution {
         id: &str,
         payload: serde_json::Value,
     ) -> Result<Vec<u8>, Error> {
+        require_collection_ssh()?;
         target.validate()?;
         if id.len() != 32
             || !id
@@ -311,6 +312,7 @@ impl Execution {
         key: &Credential,
         generation: &str,
     ) -> Result<Receipt, Error> {
+        require_collection_ssh()?;
         // Reconstructing uncertain or completed coordinator work grants inspection,
         // never a fresh side effect even if remote evidence is missing.
         if !self.dispatch_fresh {
@@ -347,6 +349,7 @@ impl Execution {
         generation: u64,
         model: &ModelCredential,
     ) -> Result<Receipt, Error> {
+        require_collection_ssh()?;
         if model.0.is_empty()
             || model.0.len() > 4096
             || model.0.bytes().any(|b| b.is_ascii_control())

@@ -22,3 +22,9 @@ authority.
 The regression restores modification time after an in-place, equal-length
 rewrite, verifies that cached local ranges become incomplete, and confirms that
 producer refresh exposes the new body under a new projection generation.
+
+Native refresh snapshots use the Event Index's same stat generation, including
+device/inode and change time. Equal-size rewrites with restored modification time
+therefore invalidate a previously complete Catalog observation and trigger native
+republication. The production refresh-pool regression verifies the new transcript
+becomes readable without constructing a compatibility model.

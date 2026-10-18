@@ -14,7 +14,14 @@ export { createPanelChrome } from './panel';
 export type { PanelChrome, PanelHost, PanelOptions } from './panel';
 
 export { createFacetChrome } from './facets';
-export type { FacetChrome, FacetHost, FacetField, FacetOption, FacetSelect } from './facets';
+export type {
+  FacetChrome,
+  FacetChromeOptions,
+  FacetHost,
+  FacetField,
+  FacetOption,
+  FacetSelect,
+} from './facets';
 export {
   renderSessionsScreen,
   renderMachinesScreen,
@@ -35,7 +42,7 @@ export type {
 } from './screens';
 export { createMarkdown, createRich, Inline, Markdown } from './richtext';
 export { renderUserBody, createImageViewer } from './attachments';
-export { createStepDetail, renderFullTool } from './tool-details';
+export { createStepDetail, renderFullTool, FullTool } from './tool-details';
 export { createToolStep } from './tool-step';
 export { renderSessionMenu } from './session-menu';
 export { createKidsSheet, createNativeSheet } from './sheets';
@@ -60,15 +67,10 @@ export { mountComposers } from './composer';
 
 export { renderPlaceholder, createStatusNote } from './placeholder';
 
-export { requestJson, ModelStore } from './model';
-export { createLiveController, createPagingStore } from './live';
+export { requestJson } from './api';
 
 export { setGeometry, releaseGeometry, revealMeasuredTurn } from './geometry';
 export { createLiveRegion } from './placeholder';
-
-export { routeUrl, parseRoute, TranscriptCache } from './routes';
-
-export { createPagerController } from './paging';
 
 export { createOrdering, orderRows } from './ordering';
 
@@ -120,18 +122,8 @@ export type { BarLabel, ViewerBarSnapshot, ViewerBarHost } from './viewer-bar';
 export type { SelectOption, SelectConfig, SelectController } from './select';
 export type { LayoutProperty } from './layout';
 export type { OrderScope } from './ordering';
-export type {
-  Json,
-  JsonObject,
-  MachineWire,
-  SessionWire,
-  HandoffWire,
-  TurnWire,
-  ModelWire,
-} from './model';
-export type { LiveState, LiveHost, PagingState } from './live';
-export type { ViewerRoute, RouteModel } from './routes';
-export type { PagingDirection, PagingRange, PagerHost } from './paging';
+export type { Json, JsonObject } from './api';
+export type { ViewerRoute } from './routes';
 export { measureViewerBar } from './viewer-bar';
 
 export { projectShellNavigation, parseShellNavigation, type ShellNavigation } from './navigation';

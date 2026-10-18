@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { launch, served, data, goto } from '../lib.mjs';
+import { selectedFixture } from '../selected-fixture.mjs';
 
 export default async function stepNames(browser) {
   const D = await data(),
@@ -10,11 +11,8 @@ export default async function stepNames(browser) {
     const page = await served(browser, { size: 'desktop' });
     try {
       await page.waitForFunction(() => history.state?.v === 'home');
-      await page.route('**/api/tx?**', async (route) => {
-        if (new URL(route.request().url()).searchParams.get('sid') !== sid) return route.continue();
-        const response = await route.fetch(),
-          tx = await response.json(),
-          tool = tx.entries.find((e) => e.k === 'tool');
+      await selectedFixture(page, sid, (tx) => {
+        const tool = tx.entries.find((e) => e.k === 'tool');
         Object.assign(tool, {
           title: 'Review command output',
           live,
@@ -23,7 +21,7 @@ export default async function stepNames(browser) {
           unfinished: false,
           exit: null,
         });
-        await route.fulfill({ json: tx });
+        tx.session.details.live_observation = true;
       });
       await goto(page, { v: 'session', id: sid }, D);
       const button = page.locator('.step > button').filter({ hasText: 'Review command output' });

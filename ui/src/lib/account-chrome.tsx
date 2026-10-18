@@ -17,6 +17,7 @@ export interface AccountChromeHost {
 export interface AccountChrome {
   readonly open: boolean;
   mount(props: AccountMenuProps): HTMLElement;
+  update(root: HTMLElement, props: AccountMenuProps): void;
   close(options?: AccountCloseOptions): void;
   updateWide(wide: boolean): void;
   unmount(root: HTMLElement): void;
@@ -174,6 +175,12 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
       startListening();
       commit(widget);
       return root;
+    },
+    update(root, props) {
+      const widget = widgets.get(root);
+      if (destroyed || !widget) throw new Error('Account widget is not mounted');
+      widget.props = props;
+      commit(widget);
     },
     close,
     escape: () => close(),

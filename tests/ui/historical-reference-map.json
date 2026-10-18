@@ -1,0 +1,57 @@
+{
+  "references": {
+    "sample": "reference/semon-sample.html",
+    "overhaul": "reference/overhaul.html"
+  },
+  "screens": {
+    "home": "pending",
+    "analytics": "pending",
+    "sessions": "pending",
+    "machines": "pending",
+    "machine": "pending",
+    "session": "pending",
+    "trace": "pending",
+    "drawer": "pending",
+    "loading": null,
+    "empty": null,
+    "error": null,
+    "not-found": null
+  },
+  "regions": [
+    {
+      "name": "machine-content",
+      "selector": "#page",
+      "top": true,
+      "screens": ["machine-"]
+    },
+    {
+      "name": "topbar",
+      "selector": "#topbar",
+      "top": true,
+      "screens": [
+        "home",
+        "sessions",
+        "machines",
+        "machine-",
+        "session-"
+      ]
+    },
+    {
+      "name": "menu",
+      "selector": "dialog.panel",
+      "open": "#more-btn",
+      "screens": [
+        "session-harbor",
+        "session-atlas-ingest",
+        "session-deps"
+      ]
+    },
+    {
+      "name": "transcript",
+      "selector": "#page section[aria-label=\"Transcript\"]",
+      "screens": [
+        "session-"
+      ]
+    }
+  ]
+}

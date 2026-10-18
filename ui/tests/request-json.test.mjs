@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const { outputFiles } = await build({
-  entryPoints: [new URL('../src/lib/model.ts', import.meta.url).pathname],
+  entryPoints: [new URL('../src/lib/api.ts', import.meta.url).pathname],
   bundle: true,
   write: false,
   format: 'esm',
