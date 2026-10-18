@@ -531,8 +531,12 @@ mod tests {
             crate::events::set_claude_sidecar_hook(move || {
                 let mut metadata = metadata();
                 metadata["description"] = json!(format!("Generation {remaining}"));
-                std::thread::sleep(std::time::Duration::from_millis(2));
-                fs::write(&path, metadata.to_string()).unwrap();
+                // The hook runs at the actual observation boundary. Replace
+                // the inode so equal-length generations cannot share a coarse
+                // filesystem timestamp; the race needs no scheduling sleep.
+                let replacement = path.with_extension("race.json");
+                fs::write(&replacement, metadata.to_string()).unwrap();
+                fs::rename(replacement, &path).unwrap();
                 if remaining > 1 {
                     arm(path, remaining - 1);
                 }
