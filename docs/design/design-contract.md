@@ -14,7 +14,7 @@ it complements the existing title and figure roles. Phone and coarse-pointer
 controls use 44px targets. Product-specific layout does not require pixel-identical
 pages, but shared controls keep their appearance and interaction contract.
 
-The user-requested composer dropdown refinement in `.stitch/DESIGN.md` section 9
+The user-requested composer dropdown refinement in `docs/design/ui-design-brief.md` section 9
 is a scoped exception: enhanced composer select triggers/options and their
 sheet close control use 40px narrow/coarse-pointer targets with 13px text.
 Generic controls, composer toolbar actions and native fallback keep 44px targets.
@@ -103,13 +103,13 @@ suite does not replace Hub acceptance. Preserve same-origin forms, no-JS content
 host/chrome ownership, focus and scroll behavior.
 
 The explicitly requested Codex/ChatGPT unified composer variant is documented in
-`.stitch/DESIGN.md` section 10. It uses 12px prompt padding, a 45px desktop/48px
+`docs/design/ui-design-brief.md` section 10. It uses 12px prompt padding, a 45px desktop/48px
 native-touch initial height, a 280px scroll cap, an 8px toolbar bottom inset and
 13px visual edge insets. Other composer variants retain their existing geometry;
 44px touch toolbar targets and native 16px mobile input text remain required.
 
 
-The approved staging conversation-reader changes are recorded in `.stitch/DESIGN.md`
+The approved staging conversation-reader changes are recorded in `docs/design/ui-design-brief.md`
 section 11. They retain category/tool styling and shared tokens while adding
 collapsed Thinking, one-line summaries, a lower reading dock and an availability
 disclosure for retained drafts. `ui/tests/staging-viewer-browser.mjs` covers

@@ -3,7 +3,7 @@
 Baseline: `defe9d791a197902c5bebcba2e2b7fe87dd9a075`. The user requested linked
 sessions that match the existing tool-call density and a Codex/ChatGPT-style
 composer with tighter spacing. The authoritative intent is
-[DESIGN.md section 10](../../../../.stitch/DESIGN.md#10-annotation-refinement-compact-related-sessions).
+[DESIGN.md section 10](../../ui-design-brief.md#10-annotation-refinement-compact-related-sessions).
 
 [session-inspection.pen](../session-inspection.pen) contains the native reusable
 compact row and [collapsed/expanded state board](canvas/pkKQT.png), exported at

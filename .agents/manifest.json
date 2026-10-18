@@ -2,7 +2,7 @@
   "schema": 1,
   "source": {
     "repository": "onsager-ai/dev-skills",
-    "revision": "7f523363746b8a2a5fa5638870f1b567fb41e6b9"
+    "revision": "a6fc52f4bf01c9ae97b108d2e8adc7662a40f199"
   },
   "skills": [
     "issue-spec",
