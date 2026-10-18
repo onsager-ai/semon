@@ -23,7 +23,9 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
 
 ## Procedure
 
-1. Identify affected screens, interactions and shared components. Select suites
+1. Reconcile the current decisions, affected states and reference disposition in
+   the existing issue/PR using the [baseline scope](../../../docs/design/ai-design-workflow.md#baseline-scope-and-review).
+   Identify affected screens, interactions and shared components. Select suites
    from the owning workflow and record the fixture cases/viewport/theme coverage.
 2. Edit canonical ui/src/ sources, not generated bundles. Run the architecture
    check and verify ownership/dependency changes against the canonical contract.
@@ -31,9 +33,13 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
    build/regeneration and UI foundation commands. Verify type/security checks,
    deterministic bundle freshness and sizes before browser evidence.
 3. Prepare the tests/ui fixture servers and tooling using the workflow's exact
-   environment/setup. Run affected functional, touch, transport, accessibility,
+   environment/setup. Inspect representative affected states early; then run
+   the required final coverage. Run affected functional, touch, transport, accessibility,
    lifecycle and visual checks; identify unselected suites explicitly.
-4. Review screenshots/diffs before updating only justified baseline entries.
+4. View actual reference/candidate screenshots and diffs for each change family;
+   classify implementation, reference and fixture defects separately from unresolved
+   product choices. Verify interaction/source-scope claims against behavior and
+   fixture setup. Update only baseline entries justified by settled requirements.
    Preserve pixel thresholds and required assertions. A historical sample-mockup
    report is separate from the required served-fixture comparisons.
 5. Read the aggregate job's actual result. A single suite pass does not establish
@@ -43,6 +49,6 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
 
 For refactors, record ownership/dependency changes, checklist evidence and any
 justified contract exceptions in the PR. Report selected coverage, setup,
-commands/results, reviewed baseline changes,
+commands/results, inspected image families, classified differences, reviewed baseline changes,
 source/bundle freshness and unrun/blocked suites. Keep generation commands and
 exact CI flags in their owning references rather than copying another toolchain.
