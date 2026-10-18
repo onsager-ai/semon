@@ -226,6 +226,8 @@ pub struct SessionFactsWrite {
 }
 impl SessionFactsWrite {
     pub fn begin(options: &Options, wanted: &crate::Facts) -> io::Result<Self> {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::run(options, "facts_write_wait");
         let source_lock = SourceLock::acquire(options, "facts", true)?;
         let before = options
             .facts
