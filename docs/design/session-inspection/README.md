@@ -17,7 +17,11 @@ metadata search and ranged native records, not global conversation search or a
 complete agent graph. The explicit compatibility reader retains its existing
 complete-model capabilities.
 
-## Design evidence
+## Historical design evidence
+
+Stitch is retired. Generation records below describe past exploration and do
+not authorize future use or replace current product requirements.
+
 
 Review images now retain native source resolution: Stitch originals are 2560px
 wide (downloaded with `=s0`), canvas exports use pen.dev `scale: 2`, and product
@@ -30,7 +34,7 @@ bitmap was enlarged. Open the linked PNG at original size to inspect text.
 The high-resolution baseline captures were reproduced with the baseline JS/CSS
 against the same synthetic source. Original 1x captures remain in Git history.
 
-The authoritative specification is [DESIGN.md](../../../.stitch/DESIGN.md).
+The current applicable specification is [the UI design brief](../ui-design-brief.md).
 Exact CSS values remain implementation authority; the specification defines
 intent and reuse. The [existing workflow brief](../ai-design-workflow.md) links
 these artifacts through the pinned ui-design skill.
@@ -39,14 +43,14 @@ Stitch project `4096612056644866749` generated two actual directions:
 
 | Direction | Screen | Preview | Decision |
 | --- | --- | --- | --- |
-| A: search-first reader | `3e0ca02d8a604ba2932095cee5879661` | [Rendered A](../../../.stitch/designs/direction-a-0.png) | Selected: preserves reading width, existing host ownership and phone navigation |
-| B: retained three-pane context | `ee33d0e2514041ef9eb45e91c917f401` | [Rendered B](../../../.stitch/designs/direction-b-0.png) | Deferred: useful simultaneous context, but narrower reading area and new pane/focus ownership |
+| A: search-first reader | `3e0ca02d8a604ba2932095cee5879661` | [Rendered A](../../history/stitch/designs/direction-a-0.png) | Selected: preserves reading width, existing host ownership and phone navigation |
+| B: retained three-pane context | `ee33d0e2514041ef9eb45e91c917f401` | [Rendered B](../../history/stitch/designs/direction-b-0.png) | Deferred: useful simultaneous context, but narrower reading area and new pane/focus ownership |
 
 The uploaded specification was used by Stitch's design-system workflow to create
 `assets/4efd29b1bcee4cccbe2a54657836d9ce`. Returned design-system text is retained
-as generation evidence in `.stitch/designs/stitch-system-output.md`. Its invented
+as generation evidence in `docs/history/stitch/designs/stitch-system-output.md`. Its invented
 Material colors and capability assumptions were rejected during reconciliation.
-Metadata and returned HTML are in `.stitch/`; only synthetic records were uploaded.
+Metadata and returned HTML are in `docs/history/stitch/`; only synthetic records were uploaded.
 
 [session-inspection.pen](session-inspection.pen) is a native schema 2.20 document,
 edited and rendered with pen.dev CLI 0.3.10. It contains named frames, editable
