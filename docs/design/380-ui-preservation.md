@@ -623,3 +623,30 @@ links final commit/pin identities, required-check results, runtime and exact
 artifact bindings, explicit human visual decisions, preserved failure history
 and release-only limitations. Historical runs in this document are not
 acceptance of a later pair.
+
+
+## Concurrent main integration — 2026-10-18
+
+Source main advanced to `f3ed65450a10b309fe577478db7b4407f371b832` via
+Source #440, while Hub main advanced to
+`039a3d2d4fcbb1a2f1ac8af377e14d53cc8c3c0a` via Hub #271.
+Those separately landed reference/workflow updates are integrated without
+reverting the collection pause, native ownership, acceptance records or required
+coverage. Their pinned dev-skills revision is
+`a6fc52f4bf01c9ae97b108d2e8adc7662a40f199`. Shared generated workflows are
+adopted from those landed commits, not redesigned or hand-edited here. The new
+UI design brief and archived Stitch history retain their owning paths.
+
+No runtime source, generated asset, comparator, capture input or reference change
+is introduced by this integration. The existing Source/Hub pair and its check
+results are historical after the new merge commits; fresh final-head checks and
+an exact Hub Source pin are mandatory. The six compact Filter states remain a
+settled user decision. The earlier Source byte-binding failures (three, then four
+PNG hashes on an unchanged retry) remain retained under the unchanged policy;
+matching runtime/DOM/measurements is not silently treated as PNG equivalence.
+
+Local thermal restrictions still prohibit local builds, tests, browser captures
+and image analysis. Actual image review by the user is recorded above; local
+agent inspection uses bounded source/CI JSON and does not claim independent final
+image review. CI supplies execution and raster comparison. No merge of either
+recovery PR, application deployment or full release is performed.
