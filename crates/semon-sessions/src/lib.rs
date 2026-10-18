@@ -98,6 +98,8 @@ pub use transcript_range::{
     session_transcript_range, session_transcript_range_with_mode, session_turn_anchor,
 };
 mod native_evidence;
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
 mod native_timing;
 pub use native_evidence::SessionSources;
 mod query_source;

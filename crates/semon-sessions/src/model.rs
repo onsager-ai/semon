@@ -7292,6 +7292,8 @@ fn build_sources_inner(
         }
     );
     let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "runtime_captured");
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
@@ -7829,6 +7831,8 @@ fn build_sources_inner(
             "Native Query runtime observations changed",
         ));
     }
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "runtime_checked");
     if !target.reference_model() && history_records.is_none() {
         measured!("sidecars_after", files.len(), verify_sidecars(&files)?);
     }

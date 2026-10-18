@@ -22,6 +22,8 @@ zstd.workspace = true
 test-clock = []
 # Builds the UI check's embedding-server example; not used by the viewer CLI.
 test-ui-account-server = []
+# Scoped deterministic receiver/producer integration tests; absent in production.
+test-hooks = []
 
 [[example]]
 name = "ui-account-server"
