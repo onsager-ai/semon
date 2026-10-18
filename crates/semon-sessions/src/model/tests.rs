@@ -9987,6 +9987,119 @@ fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
     assert_eq!(value["matches"], json!([]));
 }
 
+#[test]
+fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
+    let mut home = acknowledged_semantic_family();
+    let inputs = crate::inputs(&home.options).unwrap();
+    let paths = inputs
+        .iter()
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut facts = crate::Facts {
+        version: crate::FACTS_VERSION,
+        hostname: "synthetic-stage".into(),
+        codex_rollouts: Some(
+            inputs
+                .iter()
+                .filter(|input| input.root == crate::InputRoot::Codex)
+                .map(|input| input.path.clone())
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    home.options.facts = Some(home.root.join("facts.json"));
+    let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
+    crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
+    intent.complete().unwrap();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    for page in paths.chunks(64) {
+        assert_eq!(
+            cache.begin_semantic_stage(page, &runtime).unwrap(),
+            crate::events::Outcome::Written
+        );
+    }
+    drop(cache);
+    let mut phases = BTreeSet::new();
+    let mut injected = false;
+    let mut complete = false;
+    for step in 0..512 {
+        // A fresh owner each time must accept the previous batch's own Index
+        // writes rather than reject its ledger/claim witnesses after restart.
+        let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let done = evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap();
+        evidence.retire();
+        drop(evidence);
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let phase: Option<String> = db
+            .query_row("SELECT phase FROM catalog_semantic_stage", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap();
+        if let Some(phase) = phase {
+            phases.insert(phase);
+        }
+        if !injected && phases.contains("identity") {
+            // Interrupt an existing persistent stage with both a Raw intent
+            // and an actual hosted runtime update. Neither journal is cleared.
+            let input = &inputs[0];
+            let path = input.full_path(&home.options);
+            let from = fs::metadata(&path).unwrap().len();
+            let intent =
+                crate::SessionSourceWrite::begin(&home.options, input, None, from).unwrap();
+            let line = format!(
+                "{}\n",
+                codex_reply(ts(14, 3), "Synthetic persisted backlog update")
+            );
+            let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(line.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+            intent.complete(from + line.len() as u64).unwrap();
+            facts.codex_locks.insert("ack-root".into(), 42);
+            facts.proc_starts.insert(42, 100);
+            let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
+            crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
+            intent.complete().unwrap();
+            injected = true;
+        }
+        if done {
+            complete = true;
+            eprintln!(
+                "semantic-restart-backlog steps={} phases={phases:?}",
+                step + 1
+            );
+            break;
+        }
+    }
+    assert!(
+        injected && complete,
+        "persistent stage/backlog did not recover: {phases:?}"
+    );
+    assert!(
+        phases.contains("indexing")
+            && phases.contains("identity")
+            && phases.contains("relations")
+            && phases.contains("publication")
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let pending: i64 = db
+        .query_row(
+            "SELECT count(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+}
+
 fn acknowledged_semantic_family() -> Home {
     let home = Home::new();
     home.codex(
