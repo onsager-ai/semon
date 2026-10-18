@@ -6,7 +6,7 @@ subagent titles and filesystem stamp correction, #375). Its instructions and des
 artifacts are unchanged. The source candidate includes this update alongside the UI
 fixes; compiled before/after evidence uses this latest baseline.
 Branch: `codex/ui-continuity-refinement`. The approved authority is
-[DESIGN sections 9–10](../../../../.stitch/DESIGN.md), the
+[DESIGN sections 9–10](../../ui-design-brief.md), the
 [design contract](../../design-contract.md), [viewer ownership](../../viewer-ownership.md),
 and [session-inspection.pen](../session-inspection.pen). The annotation-refinement
 directory is prior evidence; exploratory Stitch/ImageGen iterations are not targets.

@@ -30,6 +30,8 @@ cargo test --locked
 
 Viewer changes require applicable fixture/browser suites and reviewed pixel
 baselines. Do not loosen existing thresholds or remove required checks.
+Reconcile current product decisions with the baseline scope before UI work;
+follow docs/design/ai-design-workflow.md for actual-image review and classification.
 Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci
 --no-audit --no-fund`, then `npm --prefix ui run typecheck`, `npm --prefix ui test`,
 `npm --prefix ui run check:bundle` and `npm --prefix ui run sizes`.
@@ -47,7 +49,7 @@ The temporary collection configuration pauses control delivery, broad full-text 
   tests/ui/README.md and viewer-verification skill. Viewer refactors must follow
   the ownership contract and complete its refactoring review checklist.
 - AI-assisted UI/UX: docs/design/ai-design-workflow.md and ui-design skill.
-  User-level Stitch/pen.dev tooling is optional; keep vendor skills and credentials
+  User-level pen.dev tooling is optional; keep vendor skills and credentials
   outside the checkout and preserve the existing visual/implementation contract.
 - Relay/protocol changes: docs/mirror-protocol.md and
   docs/design/session-foundation-retirement.md.
