@@ -1,5 +1,6 @@
 import { setGeometry, releaseGeometry } from './geometry';
 import { LocalControl } from './localControl';
+import { createPanelChrome, type PanelChrome } from './panel';
 import { unavailableControl, type ControlView } from './control';
 import type { RuntimeObservationView } from './runtimeObservation';
 import { commitApplicationView } from './application-view';
@@ -42,6 +43,7 @@ export interface ToolView extends Identity {
 }
 export interface BackgroundView extends Identity {
   kind: 'background';
+  state?: string;
   failed: boolean;
   label: string;
   call: string;
@@ -129,6 +131,7 @@ export interface FooterView {
   parent?: { id: string; turn?: string; name: string };
 }
 export interface SessionSnapshot {
+  composerTarget?: HTMLElement;
   control?: ControlView;
   runtime?: RuntimeObservationView;
   id: string;
@@ -139,12 +142,15 @@ export interface SessionSnapshot {
   before?: PagerView;
   after?: PagerView;
   empty?: string;
+  retry?: { label: string; run(): void };
   footer?: FooterView;
   dirty?: ReadonlySet<string>;
   order: readonly string[];
 }
 export interface TranscriptHost extends SentenceHost {
   committed(): void;
+  composerOpened?(panel: { destroy(): void }): void;
+  composerClosed?(panel: { destroy(): void }): void;
   trace(id: string): void;
   toolAll(key: string, label: string): void;
   script(key: string): void;
@@ -154,6 +160,9 @@ export interface TranscriptHost extends SentenceHost {
   jump(): void;
 }
 interface SessionOwner {
+  composer: HTMLElement;
+  composerTrigger: HTMLElement;
+  composerPanel: PanelChrome | null;
   disposed: boolean;
   snapshot: SessionSnapshot;
   host: TranscriptHost;
@@ -178,6 +187,37 @@ interface SessionOwner {
   change(key: string): void;
 }
 const owners = new WeakMap<HTMLElement, SessionOwner>();
+/** Saved reading needs no control owner, discovery, draft or delivery action. */
+class PassiveReadingNotice extends Component<{ owner: SessionOwner }, { disclosed: boolean }> {
+  state = { disclosed: false };
+  render() {
+    const { disclosed } = this.state;
+    return (
+      <section class="local-control" aria-label="Saved session availability">
+        <button
+          type="button"
+          class="composer-unavailable"
+          aria-label="Native session controls are unavailable."
+          aria-expanded={disclosed}
+          onClick={(event) => {
+            if (!this.props.owner.disposed && event.currentTarget.isConnected)
+              this.setState({ disclosed: !disclosed });
+          }}
+        >
+          <span role="status" data-transcript-observation="">
+            Native session controls are unavailable.
+          </span>
+          <span aria-hidden="true">{disclosed ? '⌃' : '⌄'}</span>
+        </button>
+        {disclosed && (
+          <p role="status">
+            Saved session history remains readable. Session controls are unavailable here.
+          </p>
+        )}
+      </section>
+    );
+  }
+}
 /** The existing page tree owns this leaf; status never walks transcript blocks. */
 class SessionControls extends Component<{ owner: SessionOwner }> {
   componentDidMount() {
@@ -188,9 +228,8 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
   }
   render() {
     const snapshot = this.props.owner.snapshot;
-    let view =
-      snapshot.control ??
-      unavailableControl(snapshot.id, 'Native session controls are unavailable.');
+    if (!snapshot.control) return null;
+    let view = snapshot.control;
     const runtime = snapshot.runtime?.observation;
     if (runtime?.freshness === 'current' && ['ended', 'failed'].includes(runtime.state)) {
       const blocked = unavailableControl(
@@ -201,8 +240,12 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
             ? 'This environment needs attention.'
             : 'Current environment controls are unavailable.',
       );
+      const retained = view;
       view = {
         ...view,
+        get draft() {
+          return retained.draft;
+        },
         canReconnect: false,
         snapshot: blocked.snapshot,
         send: blocked.send,
@@ -213,6 +256,64 @@ class SessionControls extends Component<{ owner: SessionOwner }> {
     }
     return <LocalControl view={view} runtimeObserved={!!snapshot.runtime} />;
   }
+}
+
+/** The transcript owner retains the existing input root across panel dismissal. */
+function paintComposer(owner: SessionOwner) {
+  if (owner.disposed) return;
+  if (!owner.snapshot.control) {
+    owner.composerPanel?.destroy();
+    render(null, owner.composerTrigger);
+    return;
+  }
+  const pending =
+    owner.snapshot.control?.snapshot.requests.filter(
+      (request) => request.state.state === 'open' || request.state.state === 'claimed',
+    ).length ?? 0;
+  render(
+    <button
+      type="button"
+      class="btn sh-quiet session-composer-trigger"
+      aria-label={pending ? 'Composer; ' + pending + ' pending requests' : 'Open Composer'}
+      aria-haspopup="dialog"
+      aria-expanded={!!owner.composerPanel}
+      onClick={(event) => {
+        if (owner.disposed || !event.currentTarget.isConnected || owner.composerPanel) return;
+        const trigger = event.currentTarget;
+        const panel = createPanelChrome(
+          {
+            title: 'Composer',
+            label: 'Session Composer',
+            className: 'anchored session-composer-panel',
+          },
+          {
+            opened() {
+              owner.host.composerOpened?.(panel);
+              paintComposer(owner);
+              owner.composer
+                .querySelector<HTMLTextAreaElement>('textarea')
+                ?.focus({ preventScroll: true });
+            },
+            closed() {
+              owner.host.composerClosed?.(panel);
+              owner.composer.remove();
+              owner.composerPanel = null;
+              if (!owner.disposed) {
+                paintComposer(owner);
+                if (trigger.isConnected) trigger.focus({ preventScroll: true });
+              }
+            },
+          },
+        );
+        owner.composerPanel = panel;
+        panel.body.append(owner.composer);
+        panel.show();
+      }}
+    >
+      Composer{pending ? ' · ' + pending : ''}
+    </button>,
+    owner.composerTrigger,
+  );
 }
 /** Durable status stays observable even when no current native control identity exists. */
 class SessionRuntime extends Component<{ owner: SessionOwner }> {
@@ -838,6 +939,9 @@ export function renderSessionScreen(
   }
   if (!owner) {
     const state: SessionOwner = {
+      composer: document.createElement('div'),
+      composerTrigger: document.createElement('span'),
+      composerPanel: null,
       snapshot,
       host,
       disposed: false,
@@ -863,6 +967,7 @@ export function renderSessionScreen(
     };
     owner = state;
     owners.set(root, state);
+    render(<SessionControls owner={state} />, state.composer);
     state.measure = () => {
       if (state.disposed) return;
       let changed = false;
@@ -889,7 +994,7 @@ export function renderSessionScreen(
     let dockFrame = 0;
     const fitDock = () => {
       const dock = root.querySelector<HTMLElement>('.session-dock');
-      if (!dock || !root.isConnected || !root.getClientRects().length) return;
+      if (state.disposed || !dock || !root.isConnected || !root.getClientRects().length) return;
       const note = document.querySelector<HTMLElement>(
         'body > .livenote, body > .viewer-status-slot > .livenote',
       );
@@ -903,7 +1008,7 @@ export function renderSessionScreen(
       );
       const transcript = root.querySelector<HTMLElement>('.transcript');
       if (transcript) {
-        // Paint only the reading region, keeping the host's existing scroll height and anchors.
+        // Keep the transcript's scroll height and anchors while clipping content under the dock.
         const clipped =
           getComputedStyle(dock).position === 'sticky'
             ? Math.max(
@@ -915,6 +1020,7 @@ export function renderSessionScreen(
       }
     };
     const scheduleDock = () => {
+      if (state.disposed) return;
       cancelAnimationFrame(dockFrame);
       dockFrame = requestAnimationFrame(fitDock);
     };
@@ -935,10 +1041,15 @@ export function renderSessionScreen(
     claimScreen(root, 'session', () => {
       cancelAnimationFrame(dockFrame);
       document.removeEventListener('scroll', scheduleDock, true);
+      notices.disconnect();
       viewport?.removeEventListener('resize', fitDock);
       viewport?.removeEventListener('scroll', fitDock);
       dockObserver.disconnect();
-      notices.disconnect();
+      state.disposed = true;
+      state.composerPanel?.destroy();
+      render(null, state.composer);
+      render(null, state.composerTrigger);
+      state.composerTrigger.remove();
       releaseGeometry(root);
       state.disposed = true;
       state.observer.disconnect();
@@ -954,6 +1065,10 @@ export function renderSessionScreen(
   state.host = host;
   state.blocks = mergeBlocks(state.blocks, snapshot);
   state.snapshot = snapshot;
+  if (snapshot.composerTarget && state.composerTrigger.parentElement !== snapshot.composerTarget)
+    snapshot.composerTarget.replaceChildren(state.composerTrigger);
+  state.controls?.();
+  paintComposer(state);
   state.change = (key) => {
     for (const block of state.blocks)
       if (
@@ -983,7 +1098,7 @@ export function renderSessionScreen(
           <h1>{screenText(view.name)}</h1>
         </div>
         <section class="transcript" aria-label="Transcript">
-          {view.observation && (
+          {view.observation && view.observation !== 'Cached history' && (
             <p class="empty" role="status" data-transcript-observation="">
               {screenText(view.observation)}
             </p>
@@ -1007,7 +1122,22 @@ export function renderSessionScreen(
               ),
             )}
             <SessionPager owner={state} where="after" />
-            {view.empty && <p class="empty">{screenText(view.empty)}</p>}
+            {view.empty && (
+              <p class="empty">
+                {screenText(view.empty)}{' '}
+                {view.retry && (
+                  <button
+                    type="button"
+                    class="link"
+                    onClick={() => {
+                      if (!state.disposed) state.snapshot.retry?.run();
+                    }}
+                  >
+                    {view.retry.label}
+                  </button>
+                )}
+              </p>
+            )}
           </div>
         </section>
         <SessionRuntime owner={state} />
@@ -1018,7 +1148,16 @@ export function renderSessionScreen(
               if (node && state.jump && state.jump.parentNode !== node) node.append(state.jump);
             }}
           />
-          <SessionControls owner={state} />
+          {view.observation === 'Cached history' &&
+            (view.control ? (
+              <div class="local-control">
+                <div class="composer-unavailable" role="status" data-transcript-observation="">
+                  <span>{view.observation}</span>
+                </div>
+              </div>
+            ) : (
+              <PassiveReadingNotice owner={state} />
+            ))}
         </div>
         {view.footer && (
           <div class="session-foot">
@@ -1088,7 +1227,13 @@ export function updateSessionControl(root: HTMLElement, control: ControlView | u
   const owner = owners.get(root);
   if (!owner || owner.disposed) return;
   owner.snapshot = { ...owner.snapshot, control };
+  if (
+    owner.snapshot.composerTarget &&
+    owner.composerTrigger.parentElement !== owner.snapshot.composerTarget
+  )
+    owner.snapshot.composerTarget.replaceChildren(owner.composerTrigger);
   owner.controls?.();
+  paintComposer(owner);
 }
 export function updateSessionRuntime(
   root: HTMLElement,
@@ -1161,6 +1306,14 @@ export function updateSessionClock(
 }
 
 export function measureSessionScreen(root: HTMLElement) {
+  // A retained content-visibility subtree can briefly report zero geometry
+  // when reattached. Commit bounded loaded turns before restoring reading position.
+  const turns = [...root.querySelectorAll<HTMLElement>('.turn')];
+  for (const turn of turns) turn.classList.add('semon-measuring-turn');
+  for (const turn of turns) {
+    if (turn.isConnected) setGeometry(turn, 'intrinsicHeight', turn.getBoundingClientRect().height);
+    turn.classList.remove('semon-measuring-turn');
+  }
   owners.get(root)?.measure();
 }
 
@@ -1171,4 +1324,9 @@ export function updateSessionName(root: HTMLElement, name: string) {
   owner.snapshot = { ...owner.snapshot, name };
   const heading = root.querySelector('.ph > h1');
   if (heading) heading.textContent = screenText(name);
+}
+
+/** Close the contextual controls when the reader leaves this session. */
+export function closeSessionComposer(root: HTMLElement) {
+  owners.get(root)?.composerPanel?.destroy();
 }

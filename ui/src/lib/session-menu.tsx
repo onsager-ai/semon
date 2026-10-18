@@ -9,6 +9,7 @@ export interface MenuAction {
   dot?: string;
   note?: string;
   checked?: boolean;
+  unavailable?: string;
 }
 export interface MenuDetail {
   label: string;
@@ -143,8 +144,10 @@ export function renderSessionMenu(
                 type="button"
                 role={action.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
                 aria-checked={action.checked === undefined ? undefined : wide}
+                aria-disabled={action.unavailable ? true : undefined}
+                data-tip={action.unavailable}
                 onClick={() => {
-                  if (!live()) return;
+                  if (!live() || action.unavailable) return;
                   if (action.key === 'copy') {
                     navigator.clipboard?.writeText(snapshot.command).then(
                       () => {

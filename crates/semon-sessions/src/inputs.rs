@@ -9,6 +9,8 @@
 //! - `claude/sessions/<pid>.json`: a running Claude process's record;
 //! - `codex/sessions/**/*.jsonl` and `codex/archived_sessions/**/*.jsonl`: Codex rollouts.
 
+#[cfg(test)]
+thread_local! { pub(crate) static DISCOVERY_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 use std::{fs, io, path::PathBuf};
 
 use crate::Options;
@@ -133,6 +135,119 @@ pub(crate) fn codex_rollout_dirs(options: &Options) -> [PathBuf; 2] {
     ]
 }
 
+/// A traversal cursor owned by the native producer. Each step bounds both
+/// accepted sources and directory entries, including unrelated files. ReadDir
+/// handles are retained only along the current path (at most MAX_DEPTH), so a
+/// large flat directory does not become an in-memory listing.
+pub(crate) struct Discovery {
+    roots: std::vec::IntoIter<(InputRoot, String)>,
+    stack: Vec<DiscoveryDir>,
+    complete: bool,
+}
+struct DiscoveryDir {
+    root: InputRoot,
+    relative: String,
+    entries: fs::ReadDir,
+}
+pub(crate) struct DiscoveryPage {
+    pub(crate) inputs: Vec<Input>,
+    pub(crate) examined: usize,
+    pub(crate) complete: bool,
+}
+impl Default for Discovery {
+    fn default() -> Self {
+        Self {
+            roots: vec![
+                (InputRoot::Claude, "projects".into()),
+                (InputRoot::Claude, "sessions".into()),
+                (InputRoot::Codex, "sessions".into()),
+                (InputRoot::Codex, "archived_sessions".into()),
+                (InputRoot::Copilot, "session-state".into()),
+            ]
+            .into_iter(),
+            stack: Vec::new(),
+            complete: false,
+        }
+    }
+}
+impl Discovery {
+    fn open(&mut self, options: &Options, root: InputRoot, relative: String) -> io::Result<()> {
+        let path = root.home(options).join(&relative);
+        // Match native discovery's custody boundary: never follow symlinks.
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Ok(());
+        }
+        match fs::read_dir(path) {
+            Ok(entries) => self.stack.push(DiscoveryDir {
+                root,
+                relative,
+                entries,
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+    pub(crate) fn next(
+        &mut self,
+        options: &Options,
+        sources: usize,
+        entries: usize,
+    ) -> io::Result<DiscoveryPage> {
+        if sources == 0 || entries == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Native discovery requires a positive budget",
+            ));
+        }
+        let mut page = DiscoveryPage {
+            inputs: Vec::new(),
+            examined: 0,
+            complete: self.complete,
+        };
+        while !self.complete && page.inputs.len() < sources && page.examined < entries {
+            if self.stack.is_empty() {
+                let Some((root, relative)) = self.roots.next() else {
+                    self.complete = true;
+                    break;
+                };
+                page.examined += 1;
+                self.open(options, root, relative)?;
+                continue;
+            }
+            let directory = self.stack.last_mut().expect("directory exists");
+            let Some(entry) = directory.entries.next() else {
+                self.stack.pop();
+                continue;
+            };
+            page.examined += 1;
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let root = directory.root;
+            let relative = format!("{}/{name}", directory.relative);
+            let kind = entry.file_type()?;
+            if kind.is_dir() && relative.split('/').count() < MAX_DEPTH {
+                self.open(options, root, relative)?;
+            } else if kind.is_file()
+                && relative.ends_with(".jsonl")
+                && is_input_path(root.as_str(), &relative)
+            {
+                page.inputs.push(Input {
+                    root,
+                    path: relative,
+                });
+            }
+        }
+        page.inputs.sort();
+        page.complete = self.complete;
+        #[cfg(test)]
+        DISCOVERY_ENTRIES.with(|count| count.set(count.get() + page.examined as u64));
+        Ok(page)
+    }
+}
+
 /// Every input file under the homes `options` names, sorted. Directories are
 /// walked without following symbolic links, and only regular files whose
 /// path passes [`is_input_path`] are listed.
@@ -186,4 +301,111 @@ fn walk(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture {
+        root: PathBuf,
+        options: Options,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "semon-discovery-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let options = Options {
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                ..Options::default()
+            };
+            Self { root, options }
+        }
+        fn write(&self, path: &str) {
+            let path = self.root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "native bytes are not read during discovery").unwrap();
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+    #[test]
+    fn discovery_bounds_unrelated_directory_work_and_resumes_without_losing_sources() {
+        let fixture = Fixture::new();
+        for index in 0..1000 {
+            fixture.write(&format!("claude/projects/project/unrelated-{index}.txt"));
+        }
+        for index in 0..43 {
+            fixture.write(&format!("claude/projects/project/session-{index}.jsonl"));
+        }
+        fixture.write("claude/projects/project/session-1/subagents/agent-child.jsonl");
+        fixture.write("claude/projects/project/session-1/subagents/agent-child.meta.json");
+        fixture.write("codex/archived_sessions/2026/rollout.jsonl");
+        fixture.write("copilot/session-state/session/events.jsonl");
+        let expected: Vec<_> = inputs(&fixture.options)
+            .unwrap()
+            .into_iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .collect();
+        let mut discovery = Discovery::default();
+        let mut found = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = discovery.next(&fixture.options, 3, 17).unwrap();
+            assert!(page.examined <= 17);
+            assert!(page.inputs.len() <= 3);
+            pages += 1;
+            found.extend(page.inputs);
+            if page.complete {
+                break;
+            }
+            assert!(
+                pages < 200,
+                "traversal must make progress even through unrelated entries"
+            );
+        }
+        assert!(pages > 50, "unrelated entries must consume the work budget");
+        found.sort();
+        assert_eq!(found, expected);
+        let done = discovery.next(&fixture.options, 3, 17).unwrap();
+        assert!(done.complete && done.inputs.is_empty() && done.examined == 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn discovery_never_follows_directory_or_file_symlinks() {
+        let fixture = Fixture::new();
+        fixture.write("outside/hidden.jsonl");
+        fixture.write("claude/projects/real/session.jsonl");
+        std::os::unix::fs::symlink(
+            fixture.root.join("outside"),
+            fixture.options.claude_home.join("projects/linked"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            fixture.root.join("outside/hidden.jsonl"),
+            fixture.options.claude_home.join("projects/link.jsonl"),
+        )
+        .unwrap();
+        let page = Discovery::default()
+            .next(&fixture.options, 64, 512)
+            .unwrap();
+        assert!(page.complete);
+        assert_eq!(
+            page.inputs,
+            vec![Input {
+                root: InputRoot::Claude,
+                path: "projects/real/session.jsonl".into()
+            }]
+        );
+    }
 }

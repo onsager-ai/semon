@@ -23,7 +23,11 @@ export function Sentence({ parts, host }: { parts: readonly SentencePart[]; host
         part.action ? (
           <button
             key={i}
-            class={part.className}
+            class={
+              part.className.split(/\s+/).includes('who')
+                ? part.className + ' who-link'
+                : part.className
+            }
             type="button"
             aria-label={part.label}
             data-tip={part.tip}
@@ -38,7 +42,14 @@ export function Sentence({ parts, host }: { parts: readonly SentencePart[]; host
             {screenText(part.text)}
           </button>
         ) : (
-          <span key={i} class={part.className} data-tip={part.tip}>
+          <span
+            key={i}
+            class={part.className
+              .split(/\s+/)
+              .filter((name) => name !== 'who-link')
+              .join(' ')}
+            data-tip={part.tip}
+          >
             {screenText(part.text)}
           </span>
         ),

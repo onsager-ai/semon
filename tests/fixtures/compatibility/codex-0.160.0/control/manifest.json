@@ -14,7 +14,7 @@
       "sha256": "0746e801cddeae9872eba0f01c1996e8df2904879e0e649c87a856bd2ad3c5a5"
     },
     {
-      "path": "tests/spikes/codex-local.py",
+      "path": "tests/fixtures/compatibility/codex-0.160.0/control/codex-local.probe",
       "sha256": "0e641011ee46762c3b4057e122b83541f2a0a90efd813ec3ca8970b8135fbcd0"
     },
     {

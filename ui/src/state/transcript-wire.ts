@@ -161,7 +161,10 @@ export function parseEntry(value: unknown): Entry {
         ),
         more: optional(v.more, strings),
         script: v.script,
+        scriptText: optional(v.scriptText, text),
+        scriptTruncated: optional(v.scriptTruncated, boolean),
         cut: optional(v.cut, cut),
+        outputTruncated: optional(v.outputTruncated, boolean),
       };
     default:
       throw new Error('Invalid transcript entry');

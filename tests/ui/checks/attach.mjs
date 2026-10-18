@@ -1,6 +1,6 @@
 // Images a prompt attaches, on the extras fixture's `attach` lane (fixture.mjs), at 390 and 1280 px, light and dark:
-//   - /api/tx names each image (its line's offset and block, type, size, content version, width and height) and holds none
-//     of its bytes, and no "[Image #1]" placeholder or "[image]" text; /api/attachment serves one as image/png with nosniff,
+//   - the native transcript names each image (its line's offset and block, type, size, content version, width and height) and holds none
+//     of its bytes, and no "[Image #1]" placeholder or "[image]" text; the native entry serves one as image/png with nosniff,
 //     a private one-day cache and a CSP of its own, and refuses a block that isn't an image, another session's offset, a
 //     version that isn't the content's and the masked image;
 //   - the transcript shows a thumbnail for each image (loaded, at most 200×160, its shape kept, alt "Attached image N (PNG,
@@ -17,6 +17,80 @@ import path from 'node:path';
 import { ENV, served, settled, reporter, overflow } from '../lib.mjs';
 
 const SID = 'attach';
+
+// The browser and embedding host use the same source/slot/generation contract.
+async function attachmentApi(sid) {
+  const inventory = await (await fetch('/api/session-sources')).json();
+  if (inventory.items.length !== 1) throw Error('Attachment fixture must admit one source');
+  const machine = inventory.items[0].source_key;
+  const overview = await fetch('/api/viewer/home?source=' + encodeURIComponent(machine), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seen: [] }),
+  });
+  if (!overview.ok) throw Error('Embedding Home read: ' + overview.status);
+  const home = await overview.json();
+  if (home.machines.length !== 1 || home.machines[0].key !== machine)
+    throw Error('Embedding Home source changed');
+  const args = new URLSearchParams({ machine, sid, scope: 'retained_history', limit: '100' });
+  const response = await fetch('/api/session-transcript?' + args);
+  if (!response.ok)
+    throw Error('Attachment transcript read: ' + response.status + ' ' + (await response.text()));
+  const text = await response.text();
+  const page = JSON.parse(text),
+    generation = page.projection.generation;
+  if (
+    page.identity.source_key !== machine ||
+    page.identity.catalog_key !== sid ||
+    !/^[a-f0-9]{64}$/.test(generation) ||
+    page.range.has_more
+  )
+    throw Error('Attachment fixture transcript identity or range changed');
+  const entries = page.entries;
+  const images = entries
+    .filter((entry) => entry.img)
+    .map((entry) => ({ k: entry.k, img: entry.img }));
+  const references = entries.flatMap((entry) =>
+    (entry.img ?? []).map((image, ordinal) => ({ slot: entry.slot, ordinal, image })),
+  );
+  const first = references.find((reference) => !reference.image.na),
+    masked = references.find((reference) => reference.image.na);
+  const head = async (url) => {
+    const response = await fetch(url);
+    return {
+      status: response.status,
+      type: response.headers.get('content-type'),
+      nosniff: response.headers.get('x-content-type-options'),
+      cache: response.headers.get('cache-control'),
+      csp: response.headers.get('content-security-policy'),
+      bytes: (await response.arrayBuffer()).byteLength,
+    };
+  };
+  const url = (reference, changes = {}) =>
+    '/api/session-entry?' +
+    new URLSearchParams({
+      machine,
+      sid,
+      scope: 'retained_history',
+      after: String(reference.slot),
+      limit: '1',
+      generation,
+      part: 'attachment',
+      image: String(reference.ordinal),
+      ...changes,
+    });
+  return {
+    images,
+    bytesInPage: /iVBORw0KGgo/.test(text),
+    placeholders: /\[Image #\d+\]|\[image\]/.test(text),
+    ok: first ? await head(url(first)) : null,
+    textBlock: first ? await head(url(first, { image: String(first.ordinal + 1) })) : null,
+    otherSession: first ? await head(url(first, { sid: 'harbor' })) : null,
+    otherVersion: first ? await head(url(first, { generation: '0'.repeat(64) })) : null,
+    masked: masked ? await head(url(masked)) : null,
+    size: first?.image.size,
+  };
+}
 
 // The transcript's images and chips, and what the page says in text.
 const census = (page) =>
@@ -70,45 +144,16 @@ export default async function attachCheck(browser) {
 
   // ---- The API: references in the page JSON, bytes by reference, validation -------------------------------------------
   {
-    const page = await served(browser, { extras: true, size: 'desktop' });
-    const api = await page.evaluate(async (sid) => {
-      const text = await (await fetch('/api/tx?sid=' + sid)).text();
-      const entries = JSON.parse(text).entries,
-        images = entries.filter((e) => e.img).map((e) => ({ k: e.k, img: e.img }));
-      const first = images[0]?.img[0];
-      const head = async (url) => {
-        const res = await fetch(url);
-        return {
-          status: res.status,
-          type: res.headers.get('content-type'),
-          nosniff: res.headers.get('x-content-type-options'),
-          cache: res.headers.get('cache-control'),
-          csp: res.headers.get('content-security-policy'),
-          bytes: (await res.arrayBuffer()).byteLength,
-        };
-      };
-      const url = (o, b, v, s = sid) =>
-        '/api/attachment?sid=' + encodeURIComponent(s) + '&o=' + o + '&b=' + b + '&v=' + v;
-      const masked = images.flatMap((e) => e.img).find((i) => i.na);
-      return {
-        images,
-        bytesInPage: /iVBORw0KGgo/.test(text),
-        placeholders: /\[Image #\d+\]|\[image\]/.test(text),
-        ok: first ? await head(url(first.o, first.b, first.v)) : null,
-        textBlock: first ? await head(url(first.o, first.b + 1, first.v)) : null,
-        otherSession: first ? await head(url(first.o, first.b, first.v, 'harbor')) : null,
-        otherVersion: first ? await head(url(first.o, first.b, '0123456789abcdef')) : null,
-        masked: masked ? await head(url(masked.o, masked.b, '0123456789abcdef')) : null,
-        size: first?.size,
-      };
-    }, SID);
+    const page = await served(browser, { extras: true, size: 'desktop', path: '/s/claude/' + SID });
+    await page.waitForFunction(() => document.querySelectorAll('button.attach').length === 4);
+    const api = await page.evaluate(attachmentApi, SID);
     R.api = api;
     const refs = api.images.flatMap((e) => e.img);
     r.expect(
       api.images.length === 5 &&
         refs.filter((i) => !i.na).length === 4 &&
         refs.filter((i) => i.na).length === 1,
-      '/api/tx names 4 servable images and 1 unavailable in 5 prompts: ' +
+      'native transcript names 4 servable images and 1 unavailable in 5 prompts: ' +
         JSON.stringify(api.images),
     );
     r.expect(
@@ -130,7 +175,7 @@ export default async function attachCheck(browser) {
     );
     r.expect(
       !api.bytesInPage && !api.placeholders,
-      '/api/tx holds no image bytes and no placeholder text',
+      'native transcript holds no image bytes and no placeholder text',
     );
     r.expect(
       api.ok?.status === 200 &&
@@ -140,13 +185,14 @@ export default async function attachCheck(browser) {
         /private/.test(api.ok.cache ?? '') &&
         /default-src 'none'/.test(api.ok.csp ?? '') &&
         api.ok.bytes === api.size,
-      '/api/attachment serves the PNG with its headers: ' + JSON.stringify(api.ok),
+      'native entry serves the PNG with its headers: ' + JSON.stringify(api.ok),
     );
     r.expect(
-      [api.textBlock, api.otherSession, api.otherVersion, api.masked].every(
-        (x) => x?.status === 404,
-      ),
-      '/api/attachment refuses a text block, another session, another version and the masked image: ' +
+      api.textBlock?.status === 404 &&
+        api.otherSession?.status === 409 &&
+        api.otherVersion?.status === 409 &&
+        api.masked?.status === 404,
+      'native entries refuse missing images, foreign session generations, stale generations and masked images: ' +
         JSON.stringify([
           api.textBlock?.status,
           api.otherSession?.status,
@@ -172,7 +218,7 @@ export default async function attachCheck(browser) {
     const gate = new Promise((done) => {
       release = done;
     });
-    await page.route(/\/api\/attachment\?/, async (route) => {
+    await page.route(/\/api\/session-entry\?.*part=attachment/, async (route) => {
       await gate;
       await route.continue();
     });
@@ -239,11 +285,14 @@ export default async function attachCheck(browser) {
         JSON.stringify(c.thumbs.map((t) => t.alt)),
     );
     r.expect(
-      c.thumbs.every((t) =>
-        /^\/api\/attachment\?sid=attach&o=\d+&b=\d+&v=[0-9a-f]{16}$/.test(t.src ?? ''),
+      c.thumbs.every(
+        (t) =>
+          t.src?.startsWith('/api/session-entry?') &&
+          new URLSearchParams(t.src.split('?')[1]).get('part') === 'attachment' &&
+          /^[a-f0-9]{64}$/.test(new URLSearchParams(t.src.split('?')[1]).get('generation') ?? ''),
       ),
       tag +
-        ": each thumbnail's src is its /api/attachment URL: " +
+        ': each thumbnail uses a generation-fenced native entry URL: ' +
         JSON.stringify(c.thumbs.map((t) => t.src)),
     );
     r.expect(
@@ -343,21 +392,7 @@ export default async function attachCheck(browser) {
       size: 'desktop',
       path: '/s/claude/' + SID,
     });
-    const got = await page.evaluate(async (sid) => {
-      const img = (await (await fetch('/api/tx?sid=' + sid)).json()).entries.find((e) => e.img)
-        ?.img[0];
-      if (!img) return null;
-      const res = await fetch(
-        '/api/attachment?sid=' + sid + '&o=' + img.o + '&b=' + img.b + '&v=' + img.v,
-      );
-      return {
-        status: res.status,
-        type: res.headers.get('content-type'),
-        nosniff: res.headers.get('x-content-type-options'),
-        cache: res.headers.get('cache-control'),
-        csp: res.headers.get('content-security-policy'),
-      };
-    }, SID);
+    const got = (await page.evaluate(attachmentApi, SID)).ok;
     R.embedding = got;
     r.expect(
       got?.status === 200 &&

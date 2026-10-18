@@ -1,0 +1,17 @@
+[package]
+name = "semon-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Session discovery, synchronization, viewing, query and control CLI."
+
+[[bin]]
+name = "semon"
+path = "src/main.rs"
+
+[dependencies]
+semon-control = { path = "../semon-control" }
+semon-push = { path = "../semon-push" }
+semon-sessions = { path = "../semon-sessions" }
+serde_json.workspace = true

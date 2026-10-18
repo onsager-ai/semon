@@ -11,9 +11,17 @@ export default async function models(browser) {
     const page = await served(browser, { size });
     try {
       await page.waitForFunction(() => history.state?.v === 'home');
-      const actual = await (await page.request.get(ENV.base + '/api/analytics?range=7d')).json();
+      const actual = await (
+        await page.request.get(ENV.base + '/api/viewer/analytics?range=7d')
+      ).json();
+      const selected = Object.entries(actual.selections).find(
+        ([, value]) =>
+          value.catalog_key === sid &&
+          value.source_key === (D.SOURCES[D.SESS[sid].machine] ?? D.SESS[sid].machine),
+      );
+      assert.ok(selected, 'model drilldown retains its source-qualified session selection');
       const item = {
-        sid,
+        sid: selected[0],
         machine: D.SESS[sid].machine,
         harness: D.SESS[sid].harness,
         band: 'easy',
@@ -65,7 +73,7 @@ export default async function models(browser) {
           },
         },
       };
-      await page.route('**/api/analytics?**', (route) => route.fulfill({ json: answer }));
+      await page.route('**/api/viewer/analytics?**', (route) => route.fulfill({ json: answer }));
       await goto(page, { v: 'analytics' }, D);
       await page.waitForSelector('.models-panel');
       assert.equal(await page.locator('.models-panel .model-table tbody tr').count(), 2);

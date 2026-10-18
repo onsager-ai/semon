@@ -29,6 +29,8 @@ jobs:
       - name: Install Rust toolchain
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry and target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -42,7 +44,7 @@ jobs:
             ${{ runner.os }}-release-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Build semon
-        run: cargo build --locked --release -p semon-store --bin semon
+        run: cargo build --locked --release -p semon-cli --bins
 
       # `--help` prints the usage and exits nonzero, so only the grep's status counts.
       - name: Smoke test

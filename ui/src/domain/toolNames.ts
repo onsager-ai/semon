@@ -69,3 +69,20 @@ export function toolInfo(name: string): string[] {
     ? ['ext', name, name, 'time', 'times']
     : ['run', name, name, 'step', 'steps'];
 }
+
+export function runningToolLabel(name: string): string {
+  const label = toolInfo(name)[1];
+  return (
+    (
+      {
+        Ran: 'Running',
+        Read: 'Reading',
+        Edited: 'Editing',
+        Wrote: 'Writing',
+        Patched: 'Patching',
+        'Searched for': 'Searching for',
+        'Sent input to': 'Sending input to',
+      } as Record<string, string>
+    )[label] ?? label
+  );
+}

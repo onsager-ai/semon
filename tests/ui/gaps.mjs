@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sample, BASE } from './fixture.mjs';
+import { data as nativeFixtureData } from './lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const J = JSON.stringify;
@@ -22,25 +23,11 @@ const wallMinute = (value) => {
     : value;
 };
 
-// A served transcript in full: every page, back from the last.
+// The fixture oracle uses the same generation-fenced native transcript paging
+// as the browser suites.
 export async function served(base, token) {
-  const get = async (p) => {
-    const r = await fetch(base + p + (p.includes('?') ? '&' : '?') + 't=' + token);
-    if (!r.ok) throw new Error(p + ': ' + r.status);
-    return r.json();
-  };
-  const model = await get('/api/model'),
-    tx = {};
-  for (const sid of Object.keys(model.sessions)) {
-    let page = await get('/api/tx?sid=' + encodeURIComponent(sid)),
-      entries = page.entries;
-    while (page.from > 0) {
-      page = await get('/api/tx?sid=' + encodeURIComponent(sid) + '&before=' + page.from);
-      entries = page.entries.concat(entries);
-    }
-    tx[sid] = entries;
-  }
-  return { model, tx };
+  const fixture = await nativeFixtureData({ base, token });
+  return { model: fixture.model, tx: fixture.TX };
 }
 
 // The longest common subsequence of two lists of strings, as [kept, removed from a, added in b].
@@ -229,6 +216,14 @@ export function gaps({ model, tx }) {
   const norm = (e) => {
     const k = e.k === 'reasoning' ? 'think' : e.k;
     const x = { k };
+    // Native focused headers carry their prompt directly. The reference draws
+    // it from its turn; require the same text before comparing their header IDs.
+    if (e.k === 'h' && e.text !== undefined) {
+      const prompt =
+        model.handoffs.find((event) => event.id === e.id)?.brief ??
+        model.turns.find((turn) => turn.start === e.id)?.text;
+      if (prompt !== e.text) say('native header ' + e.id + ': prompt differs from its turn');
+    }
     for (const f of [
       'text',
       'label',
@@ -243,6 +238,7 @@ export function gaps({ model, tx }) {
       'unfinished',
     ]) {
       if (f === 'secs' && k === 'think') continue;
+      if (f === 'text' && k === 'h') continue;
       if (e[f] !== undefined) x[f] = e[f];
     }
     if (e.k === 'signal') x.signal = e.signal;

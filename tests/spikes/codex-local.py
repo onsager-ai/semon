@@ -5,6 +5,7 @@ Linux bwrap required. No mocks substitute for native outcomes; no personal auth 
 
 import argparse, importlib.util, json, os, signal, subprocess, tempfile, threading, time, http.server, http.client, re, socket, uuid, shutil
 from pathlib import Path
+from urllib.parse import urlencode
 
 spec = importlib.util.spec_from_file_location(
     "probe", Path(__file__).with_name("codex-control.py")
@@ -145,16 +146,53 @@ def main():
             assert cookie != "semon_session=" + token
             assert request("GET", "/?t=" + token, headers={})[0] == 403
             assert request("GET", "/?t=" + token)[0] == 200
-            snap = lambda: request("GET", "/api/model")[1]["control"]
-            target = lambda op, **extra: dict(
-                id=uuid.uuid4().hex,
-                op=op,
-                thread=snap()["thread"],
-                generation=snap()["generation"],
-                activeTurn=snap()["activeTurn"],
-                expires=int(time.time() * 1000) + 25000,
-                **extra,
-            )
+            assert request("GET", "/api/model")[0] == 404
+            # Launch authority creates history; it supplies neither Catalog
+            # ownership nor approval capabilities.
+            tid = json.loads((state / "session.json").read_text())["thread"]
+            selection = urlencode({"machine": "local", "sid": tid})
+            identity_status, initial_identity = request("GET", "/api/session-identity?" + selection)
+            assert identity_status in (404, 503), (identity_status, initial_identity)
+            assert initial_identity["error"]["code"] == ("session_not_found" if identity_status == 404 else "catalog_unavailable"), initial_identity
+            assert request("GET", "/api/session-control?" + selection)[1]["control"] is None
+            assert not list((state / "home" / "sessions").rglob("*.jsonl"))
+            _, home = request("GET", "/api/viewer/home")
+            launch = home["launch_control"]
+            assert launch["launch"] is True and launch["thread"] == tid, launch
+            assert launch["capabilities"] == dict(input=True, steer=False, interrupt=False,
+                commandApproval=False, fileApproval=False, questions=False), launch
+            report["cases"]["native_bootstrap"] = {
+                "thread": tid, "initial_identity_status": identity_status,
+                "initial_catalog_control": None, "initial_native_rollout_count": 0,
+                "launch_input_only": True,
+            }
+
+            def snap():
+                def selected_control():
+                    status, result = request("GET", "/api/session-control?" + selection)
+                    assert status == 200, (status, result)
+                    snapshot = result.get("control")
+                    if snapshot is None:
+                        status, home = request("GET", "/api/viewer/home")
+                        assert status == 200, (status, home)
+                        snapshot = home.get("launch_control")
+                    if snapshot is not None:
+                        assert snapshot["thread"] == tid, snapshot
+                    return snapshot
+                return until(selected_control)
+
+            def target(op, **extra):
+                snapshot = snap()
+                return dict(
+                    id=uuid.uuid4().hex,
+                    op=op,
+                    thread=snapshot["thread"],
+                    generation=snapshot["generation"],
+                    activeTurn=snapshot["activeTurn"],
+                    expires=int(time.time() * 1000) + 25000,
+                    **({"launch": True} if snapshot.get("launch") else {}),
+                    **extra,
+                )
             send = lambda text: request(
                 "POST", "/api/control", target("send", text=text)
             )
@@ -196,9 +234,33 @@ def main():
             )
             clients.append(c)
             tid = snap()["thread"]
-            assert send("LOCAL_INPUT")[0] == 200
+            if a.browser:
+                browser = subprocess.run([
+                    "node", str(a.browser.resolve()), f"http://127.0.0.1:{port}",
+                    cookie.split("=", 1)[1], str(a.output.parent / "native-launch-browser"),
+                    tid, "bootstrap",
+                ], capture_output=True, text=True, timeout=60)
+                assert browser.returncode == 0, browser.stdout + browser.stderr
+                report["cases"]["native_bootstrap"]["browser"] = browser.stdout
+            else:
+                first = send("LOCAL_INPUT")
+                assert first[0] == 200, first
+            _, home = request("GET", "/api/viewer/home")
+            assert home["launch_control"] is None, "launch authority survived first input"
             until(lambda: snap()["activeTurn"] is None)
             until(lambda: c.rpc("thread/resume", {"threadId": tid}).get("result"))
+            status, identity = request("GET", "/api/session-identity?" + selection)
+            assert status == 200, (status, identity)
+            identity = identity["identity"]
+            assert identity["source_key"] == "local" and identity["harness"] == "codex", identity
+            assert identity["native_id"] == tid and identity["owner_qualification"] == "qualified", identity
+            report["cases"]["native_read_contract"] = {
+                "retired_model_status": 404, "qualified_selected_identity": identity,
+                "session_control_thread": tid,
+            }
+            replay = dict(cmd, id=uuid.uuid4().hex, text="MUST_NOT_APPEAR")
+            assert request("POST", "/api/control", replay)[0] == 409
+            report["cases"]["native_bootstrap"]["creation_withdrawn"] = True
             stale = target("send", text="MUST_NOT_APPEAR")
             stale["activeTurn"] = "stale"
             assert request("POST", "/api/control", stale)[0] == 409
@@ -412,6 +474,7 @@ def main():
                         f"http://127.0.0.1:{port}",
                         cookie.split("=", 1)[1],
                         str(a.output.parent / "local-control-browser"),
+                        tid,
                     ],
                     capture_output=True,
                     text=True,

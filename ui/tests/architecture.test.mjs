@@ -7,60 +7,59 @@ const files = (entries) =>
   new Map(Object.entries(entries).map(([name, text]) => [path.join(root, name), text]));
 
 test(
-  'current viewer respects composition ownership and has no runtime import cycles',
+  'current viewer respects canonical reader ownership and has no runtime import cycles',
   checkSources,
 );
 
-test('composition accepts mount construction, but rejects feature imports of every kind', () => {
+test('canonical reader accepts mount construction, but rejects feature imports of every kind', () => {
   checkArchitecture(
     files({
-      'app/composition.ts': 'export class ViewerComposition {}',
-      'app/viewer.ts':
-        "import { ViewerComposition } from './composition'; new ViewerComposition();",
+      'app/catalogViewer.tsx': 'export class CatalogReader {}',
+      'app/viewer.ts': "import { CatalogReader } from './catalogViewer'; new CatalogReader();",
     }),
   );
   for (const source of [
-    "import type { ViewerComposition } from './composition';",
-    "import { ViewerComposition } from './composition.js'; new ViewerComposition();",
-    "export * from './composition';",
-    "export type { ViewerComposition } from './composition';",
-    "type Host = import('./composition').ViewerComposition;",
-    "const owner = import('./composition');",
-    "const owner = require('./composition');",
-    "import Owner = require('./composition');",
+    "import type { CatalogReader } from './catalogViewer';",
+    "import { CatalogReader } from './catalogViewer.js'; new CatalogReader();",
+    "export * from './catalogViewer';",
+    "export type { CatalogReader } from './catalogViewer';",
+    "type Host = import('./catalogViewer').CatalogReader;",
+    "const owner = import('./catalogViewer');",
+    "const owner = require('./catalogViewer');",
+    "import Owner = require('./catalogViewer');",
   ]) {
     assert.throws(
       () =>
         checkArchitecture(
           files({
-            'app/composition.ts': 'export class ViewerComposition {}',
+            'app/catalogViewer.tsx': 'export class CatalogReader {}',
             'app/feature.ts': source,
           }),
         ),
-      /only app\/viewer.ts may import composition/,
+      /only app\/viewer.ts may import canonical reader/,
     );
   }
   assert.throws(
     () =>
       checkArchitecture(
         files({
-          'app/composition.ts': 'export class ViewerComposition {}',
-          'app/viewer.ts': "export * from './composition';",
+          'app/catalogViewer.tsx': 'export class CatalogReader {}',
+          'app/viewer.ts': "export * from './catalogViewer';",
         }),
       ),
     /must not be re-exported/,
   );
 });
 
-test('TypeScript path aliases cannot conceal composition dependencies', () => {
+test('TypeScript path aliases cannot conceal canonical reader dependencies', () => {
   assert.throws(
     () =>
       checkArchitecture(
         files({
-          'app/composition.ts': 'export class ViewerComposition {}',
-          'app/feature.ts': "import type { ViewerComposition } from '@owner';",
+          'app/catalogViewer.tsx': 'export class CatalogReader {}',
+          'app/feature.ts': "import type { CatalogReader } from '@owner';",
         }),
-        { baseUrl: root, paths: { '@owner': ['app/composition.ts'] } },
+        { baseUrl: root, paths: { '@owner': ['app/catalogViewer.tsx'] } },
       ),
     /only app\/viewer.ts/,
   );
@@ -109,24 +108,24 @@ test('nonliteral module loads cannot bypass the statically checked graph', () =>
   }
 });
 
-test('local mount re-exports and JavaScript barrels cannot expose composition', () => {
+test('local mount re-exports and JavaScript barrels cannot expose canonical reader', () => {
   assert.throws(
     () =>
       checkArchitecture(
         files({
-          'app/composition.ts': 'export class ViewerComposition {}',
+          'app/catalogViewer.tsx': 'export class CatalogReader {}',
           'app/viewer.ts':
-            "import { ViewerComposition as Owner } from './composition'; export { Owner };",
+            "import { CatalogReader as Owner } from './catalogViewer'; export { Owner };",
         }),
       ),
-    /composition must not be re-exported/,
+    /canonical reader must not be re-exported/,
   );
   assert.throws(
     () =>
       checkArchitecture(
         files({
-          'app/composition.ts': 'export class ViewerComposition {}',
-          'app/barrel.js': "export * from './composition';",
+          'app/catalogViewer.tsx': 'export class CatalogReader {}',
+          'app/barrel.js': "export * from './catalogViewer';",
           'app/feature.ts': "import './barrel.js';",
         }),
       ),
@@ -159,8 +158,8 @@ test('declaration files contribute type boundaries without runtime generation', 
     () =>
       checkArchitecture(
         files({
-          'app/composition.ts': 'export class ViewerComposition {}',
-          'app/feature.d.ts': "import type { ViewerComposition } from './composition';",
+          'app/catalogViewer.tsx': 'export class CatalogReader {}',
+          'app/feature.d.ts': "import type { CatalogReader } from './catalogViewer';",
         }),
       ),
     /only app\/viewer.ts/,

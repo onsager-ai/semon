@@ -1,16 +1,9 @@
 # Viewer shell
 
-The shell gives server-rendered pages the viewer's visual language and reusable form components.
-
-## Typed application shell
-
-The source library now exposes `createShellChrome` for an application frame with
-host content slots; see [ui/README.md](../ui/README.md) for the implemented API.
-The full viewer consumes it. Sidebar-only pages keep the server shell/drawer owner
-below and share its keyed native navigation renderer. Existing Rust shell exports,
-asset URLs, CSP, embedding prelude and lifecycle events remain supported. Hub's
-own chrome has not adopted this controller yet; Recent/consumer build and Hub
-navigation integration remain separate source/consumer stages.
+Semon owns the reusable Viewer chrome, native form components and bounded reader.
+Every hosted reading route uses `mountViewerApplication`; query parameters never
+choose another application. Native administration pages adopt the same chrome
+through its typed host and keep their server forms and content.
 
 ## Assets
 
@@ -18,78 +11,61 @@ Serve the viewer's base stylesheet at `/viewer.css`, the component stylesheet at
 
 The brand mark is an image too. `.mark` paints `/mark.svg` as a CSS mask in the current text colour (`var(--ink)`), so a page that uses `.mark` must serve `semon_sessions::shell::MARK_SVG` at `/mark.svg` as `image/svg+xml`, or the mark is invisible. Serve `semon_sessions::shell::FAVICON_SVG` at `/favicon.svg` as `image/svg+xml` too and link it from the page's `<head>` with `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`; its fill switches between light and dark with the browser's colour scheme. Serve both from the page's own origin: the content security policy allows same-origin assets only, so a `data:` URI or another host will not load.
 
-The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, the sidebar's header and navigation as `sidebar_head` and `NAV` (see [Signed-in page skeleton](#signed-in-page-skeleton)), the viewer's own sidebar with its session list as `session_sidebar` and `SIDEBAR_ONLY` (see [The viewer's sidebar on an embedding page](#the-viewers-sidebar-on-an-embedding-page)), and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
+The Rust API exposes `semon_sessions::shell::{VIEWER_CSS, CSS, JS, MARK_SVG, FAVICON_SVG, FONT_FILES, font}`, the sidebar's header and navigation as `sidebar_head` and `NAV` (see [Signed-in page skeleton](#signed-in-page-skeleton)), the viewer's own sidebar with its session list as `session_sidebar` (see [Native pages with Viewer chrome](#native-pages-with-viewer-chrome)), and for the viewer page itself `VIEWER_JS`, `PAGE_HTML` and `is_page_path` (see [Embedding the viewer page](#embedding-the-viewer-page)). An embedding server can serve these bytes directly and use `font(name)` for font requests.
 
 ## Embedding the viewer page
 
-An embedding server that serves the viewer itself, without a `ViewerCore`, serves `semon_sessions::shell::PAGE_HTML` for every path `semon_sessions::shell::is_page_path` accepts and `semon_sessions::shell::VIEWER_JS` at `/viewer.js`, alongside `/viewer.css`, the fonts, `/mark.svg` and `/favicon.svg` above, and the `/api/model` and `/api/tx` answers.
+Serve `shell::PAGE_HTML` on paths accepted by `shell::is_page_path`,
+`VIEWER_JS` at `/viewer.js` and the same-origin assets below. Implement authorized
+source inventory/capability, catalog, identity, range, field, anchor, Home,
+Analytics and causal APIs documented in `ui/README.md`. Viewer browsing never
+uses the standalone `/api/model` or `/api/tx` endpoints.
 
-### Adding the embedding page's own script
+A customized host compiles one consumer entry with Semon's owning build tool:
 
-The page is served verbatim, and its content security policy is `script-src 'self'`, so an inline script or a second `<script>` tag is not an option. The supported way is a prelude: the embedding server answers `/viewer.js` with its own script followed by `VIEWER_JS`, in one response. The prelude runs before the viewer's code, so it can set `window.semonEmbed` before the viewer reads it and add its event listeners; afterwards it dispatches events whenever it learns something.
-
-- End the prelude with a semicolon and a newline. `VIEWER_JS` starts with `(`, so a prelude ending in an expression would call it.
-- Wrap the prelude in its own function so its names stay out of the page's global scope, and keep it to the events and `window.semonEmbed` below; everything else in the viewer's script is private and may change.
-- Anything the prelude loads must come from the page's own origin (`default-src 'self'`).
-
-```js
-(() => {
-  window.semonEmbed = { account: accountFromServer };
-  window.addEventListener("semon:ended", (e) => { e.preventDefault(); showOwnNote(e.detail.status); });
-  window.addEventListener("semon:polled", (e) => markStale(!e.detail.ok));
-  onServerSaysChanged(() => window.dispatchEvent(new Event("semon:refresh")));
-})();
+```sh
+node ui/build.mjs --entry /absolute/host.ts --output /absolute/host.generated.js
+node ui/build.mjs --entry /absolute/host.ts --output /absolute/host.generated.js --check
 ```
 
-### Events
+Serve that generated bundle directly, including its guarded shared runtime.
+Account data enters through `ViewerHost.account` and is validated before rendering.
+Host links and machine paths must be safe same-origin paths. The old global
+embedding object, model lifecycle events and sidebar compatibility attributes
+have been retired; use the typed lifecycle and selected observers instead.
 
-All three are on `window`.
+## Native pages with Viewer chrome
 
-- `semon:refresh` (dispatched by the embedding page): ask for a poll of `/api/model` soon. A refresh starts a poll no sooner than one second after the previous poll started; refreshes inside that second merge into one poll at its end, and refreshes while a poll is in flight add one follow-up. A refresh never changes the error backoff (2 s, doubling to 30 s): only a poll's own answer does, so a refresh-driven poll that succeeds resets it and one that fails doubles it. A listener that refreshes on every `semon:polled` therefore polls at most once a second, even against a failing server. Ignored before the first model has loaded and after the session ended.
-- `semon:polled` (from the viewer), `detail: {ok}`: fired once after every poll. `ok` is true when the server answered 200 or 304 and the update drew; false after an error or a 403.
-- `semon:ended` (from the viewer), `detail: {status}`, cancelable: the server answered 403 and polling has stopped. Fired before the viewer draws its "Session ended" note; cancel it to draw your own instead.
+Use the complete `.app` frame from the signed-in skeleton, including `#sidebar`,
+`#nav`, `#lanes`, `#main`, `#topbar` and `#page`. `shell::session_sidebar` provides
+the server fallback header, navigation and Recent container. Add the native page's
+content inside `#page`; the canonical reader never renders into its descendants.
 
-### Account menu
+Compile a consumer entry equivalent to `tests/ui/sidebar-host.ts`:
 
-`window.semonEmbed.account` gives the account menu when the server's model carries none (a valid `account` in `/api/model` wins). It has the same shape and rules as that `account` field (see `docs/design/session-viewer.md`), and one invalid field or path rejects the whole menu, with a console warning. The viewer reads it each time it takes a new model (at load and on every changed update), keeps a validated copy, and renders it as text only; a getter that throws counts as no menu.
+```ts
+import { mountViewerApplication, mountNativeShell } from './semon/ui/src/application';
 
-## The viewer's sidebar on an embedding page
-
-A page of the embedding server's own, served beside the viewer on the same origin, can show the viewer's sidebar: the navigation with its badges (Home's count of what needs you, Machines' offline count), and the Recent list of sessions with its tree and state dots, drawn by the viewer's own script from `/api/model` and kept live as on the viewer's pages. Everything outside the sidebar stays the page's. A tap on a session opens its page in the viewer; the navigation's rows open the viewer's pages.
-
-- Draw the sidebar with `semon_sessions::shell::session_sidebar(name, nav)` inside `<aside class="sidebar" id="sidebar">`: the header `sidebar_head` draws, `<nav id="nav" aria-label="Pages">` holding `nav`, and the Recent heading with its list, as `viewer.html` has them (a test holds them together). `name` is escaped; `nav` is the page's own rows, drawn with `NavLink::html`, which stay if the script can't load and are replaced by the viewer's navigation when it does. Anything of the page's own, such as an account row, goes after it in the `<aside>`.
-- Mark the `.app` with `semon_sessions::shell::SIDEBAR_ONLY` (`data-viewer="sidebar"`), and name the current row with `data-viewer-nav`: `home`, `sessions` or `machines` (a page that is none of them leaves it out, and no row is current).
-- Load `/viewer.js` as a deferred script after `/shell.js`. Both scripts carry the tooltip and the Select, which run once however many pages load them. The embedding server serves `/viewer.js` and `/api/model` as it does for the viewer's own pages, behind the same access checks, so the list shows exactly what the viewer's pages would show that reader.
-- The rest of the page is free: it needs no `#main`, `#page` or `#topbar`. With the [signed-in skeleton](#signed-in-page-skeleton)'s top bar and menu button, `shell.js` opens and closes the drawer on a phone, and fires `semon:drawer-open` on `window` as it opens.
-
-This is the whole of a page that shows the sidebar beside its own content (`tests/ui/checks/embedsidebar.mjs` serves it, with the comment replaced by `session_sidebar`'s markup):
-
-```html
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Devices</title>
-<link rel="stylesheet" href="/viewer.css">
-<link rel="stylesheet" href="/shell.css">
-<script src="/shell.js" defer></script>
-<script src="/viewer.js" defer></script>
-</head>
-<body>
-<div class="app" data-viewer="sidebar" data-viewer-nav="machines">
-<aside class="sidebar" id="sidebar" aria-label="Navigation">
-<!-- session_sidebar("Semon", nav) -->
-<div class="account"><span class="account-login">sample.user@example.invalid</span></div>
-</aside>
-<div class="scrim" id="scrim"></div>
-<main class="main"><p class="own">The page's own content.</p></main>
-</div>
-</body>
-</html>
+const native = mountNativeShell({ chrome: false });
+const viewer = mountViewerApplication({
+  machinesPath: '/machines',
+  catalogSources: true,
+  nativePage: { title: 'Devices', nav: 'machines' },
+  account: validatedServerAccount,
+});
+// Before replacing the document-owned frame:
+viewer.destroy();
+native.destroy();
 ```
 
-The viewer's script changes nothing outside the sidebar's own parts (its header, navigation and Recent list): it does not route, touch the address or the history, bind keys, add anything to the body, draw an account menu (the page has its own) or apply the viewer's wide-page or collapsed-rail settings (the sidebar stays whole, with no collapse toggle). The phone's "All N" sheet opens over the page as a dialog and leaves the history alone. When `/api/model` can't be loaded, the Recent list says so and the page's own navigation rows stay; when a poll is refused (403), polling stops and a note under the list says the sessions stopped updating (after `semon:ended`, which the page can cancel to show its own). `tests/ui/shell-sidebar.html` is a fuller example with a top bar, and `tests/ui/checks/embedsidebar.mjs` holds both pages' sidebars to the viewer's.
+Mount once after the frame exists. The Viewer owns chrome, navigation, bounded
+Recent metadata and its refresh lifetime; native enhancements own confirmation,
+copy and readiness controls. Links and submissions retain server behavior.
+Load the single consumer bundle instead of also loading `/viewer.js` and
+`/shell.js`. Without JavaScript, fallback links and forms remain usable.
+Sidebar fragments without an application frame can use the pure shared
+navigation/Recent renderers under an explicit host owner; they do not mount a
+second reader. The former sidebar-only model application is removed.
 
 ## Signed-in page skeleton
 
@@ -97,7 +73,7 @@ Keep the sidebar, scrim, and main content as siblings inside `.app`. The menu bu
 
 The sidebar starts with the viewer's header: `.sidebar-head` holding the `.brandrow` (the mark, the `.brandname`, and the drawer's `#drawer-close` button). Inside `.sidebar-head` the row has the viewer's own size and padding at every width, and the close button is the viewer's 44 × 44 at the drawer's right edge. `semon_sessions::shell::sidebar_head(name)` returns exactly that markup, the same bytes `viewer.html` uses (a test holds them together), with `name` escaped; the viewer adds its collapse toggle after the brand row, and a shell page has none (the header keeps the same height without it).
 
-The viewer's own nav rows are `<button class="nav-item">` with a leading 18px icon (`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`, then a `<span>` label). A served page links between pages instead, so it uses `<a class="nav-item">` with the same icon and label markup; `shell.css` gives `a.nav-item` the viewer's `.nav-item` colours without the browser's underline, and `a.nav-item[aria-current="page"]` the active row's ink colour.
+The viewer's nav rows are `<a class="nav-item">` with a leading 18px icon (`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`, then a `<span>` label). A served page links between pages instead, so it uses `<a class="nav-item">` with the same icon and label markup; `shell.css` gives `a.nav-item` the viewer's `.nav-item` colours without the browser's underline, and `a.nav-item[aria-current="page"]` the active row's ink colour.
 
 A page that links to the viewer's own destinations draws them from `semon_sessions::shell::NAV`: Home, Sessions, Analytics and Machines, in the viewer's order, each with its label, the viewer's path and its icon (a test checks that the viewer's script draws the same rows with the same icons). `NavLink::html(href, current)` returns the row as `<a class="nav-item">`, with `href` escaped and `aria-current="page"` when `current`; pass the viewer's `path`, or the page's own path for a destination it serves elsewhere.
 
@@ -329,32 +305,11 @@ Classes prefixed `sh-` are renamed from a shorter name because `viewer.css` alre
 
 Everything else in `viewer.css` is private to the viewer and may change.
 
-## Typed application source
+## Typed lifecycle
 
 `ui/src/application.ts` exports `mountViewerApplication` and `mountNativeShell`.
 Each returns an idempotent destroy owner and replaces its previous document owner.
-The application owns model/transcript state, navigation, roots and document effects;
-the native shell owns Rust-page enhancements. A host using viewer chrome mounts
-native controls with `{ chrome: false }` to avoid duplicate drawer/bar handlers.
-The handwritten application scripts and internal bridge are removed. Served paths,
-embedding prelude, `window.semonEmbed` and events above remain supported. Checked-in
-generated production assets keep Cargo builds independent of Node. See
-[the current source decision](design/tsx.md) and [UI README](../ui/README.md).
-
-### Persistent document host
-
-`ui/src/viewer-host.ts` exports `configureViewerHost(ViewerHost)` and
-`ViewerContent`. Configure synchronously from the consumer entry before the
-queued viewer bootstrap. This narrow port keeps the existing viewer router and
-single model poller: hosts supply a safe Machines path, validated account data,
-an optional native page title/current destination, and an abortable Machines
-content loader. Content has one element and an explicit `destroy()` lifecycle.
-The host must validate transport and authorization before returning detached
-content; the viewer commits it only if the navigation is still current. Native
-page links remain native. Failed Machines navigation falls back to its server
-route; leaving it destroys host controls/dialogs. Back/Forward restore scroll
-and saved host focus. Live model redraws preserve the host content element.
-
-`COMPONENT_JS` exposes the Tooltip/Select prefixes for a single consumer bundle
-that includes the viewer. Do not load that bundle alongside `VIEWER_JS` or the
-legacy signed-in `shell.js`; those would create duplicate document owners.
+The canonical application owns source selection, bounded reading state, one
+navigation controller, roots and effects. Native descendants remain host-owned.
+See [UI README](../ui/README.md) and [Viewer ownership](design/viewer-ownership.md)
+for acceptance, disposal, selected observation and consumer verification contracts.

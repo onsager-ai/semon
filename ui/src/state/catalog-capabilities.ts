@@ -33,7 +33,9 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
     row.global_union !== false ||
     metadataSearch !== filters.includes('q') ||
     filters.some(
-      (filter) => filter !== 'harness' && filter !== 'repo' && !(metadataSearch && filter === 'q'),
+      (filter) =>
+        !['harness', 'repo', 'no_repo', 'model'].includes(filter) &&
+        !(metadataSearch && filter === 'q'),
     ) ||
     new Set(filters).size !== filters.length
   )

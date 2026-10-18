@@ -256,8 +256,11 @@ export default async function turnsCheck(browser) {
       await goto(page, { v: 'session', id: sid }, D0);
       await page.click('.turn[data-turn="' + tid + '"] > .turn-end .link');
       await page.waitForFunction(
-        (t) => document.querySelector('#topbar .t')?.textContent === t,
-        'Trace',
+        (turn) =>
+          document.querySelector('#topbar .t')?.textContent === 'Trace' &&
+          document.querySelector('.hop.k-root')?.dataset.turn === turn &&
+          !document.querySelector('#page')?.hasAttribute('aria-busy'),
+        tid,
       );
       await page.waitForTimeout(120);
       const t = await page.evaluate(() => ({
@@ -266,7 +269,13 @@ export default async function turnsCheck(browser) {
         title: document.querySelector('.topbar .t')?.textContent,
         root: (() => {
           const r = document.querySelector('.hop.k-root');
-          return r && { turn: r.dataset.turn, h: r.dataset.h ?? null };
+          return (
+            r && {
+              turn: r.dataset.turn,
+              h: r.dataset.h ?? null,
+              sender: r.querySelector('.who')?.textContent,
+            }
+          );
         })(),
         nodes: [...document.querySelectorAll('.hop.child')].map((x) => ({
           h: x.dataset.h,
@@ -283,6 +292,12 @@ export default async function turnsCheck(browser) {
         t.crumb !== D.SESS[sid].name
       )
         TR.bad = (TR.bad ?? 0) + 1;
+      const incoming = D.turns[sid].find((turn) => turn.id === tid)?.start;
+      if (incoming) {
+        const expectedSender = incoming.from === 'you' ? 'You' : D.SESS[incoming.from]?.name;
+        if (t.root?.h !== incoming.id || (expectedSender && t.root.sender !== expectedSender))
+          TR.badSender = (TR.badSender ?? 0) + 1;
+      }
       TR.traces++;
       TR.roots++;
       TR.nodes += 1 + t.nodes.length;
@@ -452,9 +467,15 @@ export default async function turnsCheck(browser) {
       const hasHome = !!hid;
       D1.hadHome = hasHome;
       if (hasHome) {
+        const homeTurn = D.holds.get(JSON.parse(hid)[1])?.id;
         await page.click('.ib .q');
         await page.waitForTimeout(250);
-        D1.fromHome = { h: hid, expectTurn: D.holds.get(hid)?.id, ...(await landed()) };
+        const fromHome = {
+          h: hid,
+          expectTurn: homeTurn,
+          ...(await landed()),
+        };
+        D1.fromHome = fromHome;
         await page.goBack();
         await page.waitForTimeout(200);
         D1.fromHome.backTo = await page.evaluate(
@@ -596,6 +617,166 @@ export default async function turnsCheck(browser) {
     await page.context().close();
   }
 
+  // Hold the real anchored range until its generation-bound scroll has run,
+  // then release the pending animation frames. A stale opening pin must not
+  // pull a newly anchored Home turn back to the transcript tail.
+  const anchorPage = await served(browser, { size: 'phone' });
+  const anchorPin = { passed: false };
+  let releaseRange = () => {};
+  try {
+    const hid = await anchorPage.evaluate(() => document.querySelector('.ib')?.dataset.h);
+    const edgeId = hid ? JSON.parse(hid)[1] : undefined;
+    const started = edgeId ? D.holds.get(edgeId) : undefined;
+    if (!started) throw Error('Home fixture has no model turn for its first Needs you item');
+    const sid = D.KEYS?.[started.sid] ?? started.sid;
+    let fetchedResolve;
+    const fetched = new Promise((resolve) => (fetchedResolve = resolve));
+    let releaseResolve;
+    const held = new Promise((resolve) => (releaseResolve = resolve));
+    releaseRange = () => releaseResolve();
+    let range = null;
+    await anchorPage.evaluate(() => {
+      const queued = new Map();
+      let nextId = 0x40000000;
+      const writes = [];
+      const nativeCancel = window.cancelAnimationFrame.bind(window);
+      const nativeScrollTo = window.scrollTo;
+      window.requestAnimationFrame = (callback) => {
+        const id = ++nextId;
+        queued.set(id, callback);
+        return id;
+      };
+      window.cancelAnimationFrame = (id) => {
+        if (!queued.delete(id)) nativeCancel(id);
+      };
+      window.scrollTo = function (...args) {
+        writes.push(args);
+        return nativeScrollTo.apply(window, args);
+      };
+      Object.defineProperty(window, '__homeAnchorPinControl', {
+        value: {
+          flush() {
+            let count = 0;
+            for (let round = 0; round < 3 && queued.size; round++) {
+              const callbacks = [...queued.values()];
+              queued.clear();
+              count += callbacks.length;
+              for (const callback of callbacks) callback(performance.now());
+            }
+            return { count, pending: queued.size, writes: [...writes] };
+          },
+          writes() {
+            return writes.length;
+          },
+        },
+      });
+    });
+    await anchorPage.route(/\/api\/session-transcript\?/, async (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      if (query.get('sid') !== sid || range) return route.continue();
+      range = {
+        sid: query.get('sid'),
+        after: query.get('after'),
+        limit: query.get('limit'),
+        generation: query.get('generation'),
+      };
+      try {
+        const response = await route.fetch();
+        fetchedResolve({ status: response.status() });
+        await held;
+        await route.fulfill({ response });
+      } catch (error) {
+        fetchedResolve({ error: String(error) });
+        await route.abort().catch(() => {});
+      }
+    });
+    const bounded = (promise, label) => {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error(label + ' timed out')), 5000);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    };
+    await anchorPage.click('.ib .q');
+    const fetchedRange = await bounded(fetched, 'anchored transcript range');
+    if (fetchedRange.status !== 200)
+      throw Error('anchored transcript range failed: ' + JSON.stringify(fetchedRange));
+    releaseRange();
+    await anchorPage.waitForFunction(
+      (turn) =>
+        [...document.querySelectorAll('.turn')].some(
+          (node) => node.dataset.turn === turn && node.classList.contains('flash'),
+        ),
+      started.id,
+      { polling: 50 },
+    );
+    const before = await anchorPage.evaluate((turn) => {
+      const target = [...document.querySelectorAll('.turn')].find(
+        (node) => node.dataset.turn === turn,
+      );
+      const bar = document.querySelector('#topbar').getBoundingClientRect();
+      return {
+        found: !!target,
+        top: target ? Math.round(target.getBoundingClientRect().top) : null,
+        barBottom: Math.round(bar.bottom),
+        writes: window.__homeAnchorPinControl.writes(),
+      };
+    }, started.id);
+    const flushed = await anchorPage.evaluate(() => window.__homeAnchorPinControl.flush());
+    const after = await anchorPage.evaluate((turn) => {
+      const target = [...document.querySelectorAll('.turn')].find(
+        (node) => node.dataset.turn === turn,
+      );
+      const bar = document.querySelector('#topbar').getBoundingClientRect();
+      const top = target ? Math.round(target.getBoundingClientRect().top) : null;
+      return {
+        found: !!target,
+        top,
+        barBottom: Math.round(bar.bottom),
+        inView: top !== null && top >= bar.bottom - 1 && top < innerHeight - 40,
+        scrollY: Math.round(scrollY),
+      };
+    }, started.id);
+    const tailWrites = flushed.writes.slice(before.writes);
+    anchorPin.passed =
+      range?.sid === sid &&
+      range.after !== null &&
+      Number.isSafeInteger(Number(range.after)) &&
+      Number(range.after) >= 0 &&
+      Number(range.limit) === 100 &&
+      /^[a-f0-9]{64}$/.test(range.generation ?? '') &&
+      before.found &&
+      after.found &&
+      after.inView &&
+      tailWrites.length === 0;
+    anchorPin.result = {
+      turn: started.id,
+      range,
+      before,
+      after,
+      framesFlushed: flushed.count,
+      pendingFrames: flushed.pending,
+      tailWrites,
+    };
+  } catch (error) {
+    anchorPin.error = String(error);
+  } finally {
+    releaseRange();
+    anchorPin.errors = anchorPage.errors;
+    await anchorPage.context().close();
+  }
+  out.homeAnchorPin = anchorPin;
+  r.expect(
+    anchorPin.passed,
+    'anchored Home navigation was moved by a pending tail pin: ' + JSON.stringify(anchorPin),
+  );
+  r.expect(
+    anchorPin.errors.length === 0,
+    'Home anchor pin page errors: ' + anchorPin.errors.join(' | '),
+  );
+
   // Handoff content stays on the page; only its names navigate.
   out.handoffCards = {};
   for (const size of ['phone', 'desktop'])
@@ -680,6 +861,7 @@ export default async function turnsCheck(browser) {
     'buttonWithoutOnward=' + light.turns.buttonWithoutOnward,
   );
   r.expect(!light.traces.bad, 'bad traces=' + light.traces.bad);
+  r.expect(!light.traces.badSender, 'incorrect incoming trace sender=' + light.traces.badSender);
   r.expect(
     light.deepLinks.hadPick === true,
     'no trace child node with its own turn was found for the fromTrace/crumb deep-link test',

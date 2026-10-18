@@ -10,7 +10,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-use semon_sessions::{Options, collect, model_json, render_json, render_text};
+use semon_sessions::{Options, Query, ViewerCore, collect, render_json, render_text};
 use serde_json::{Value, json};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -33,16 +33,10 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
     assert_eq!(child.tokens.input, 5);
     assert_eq!(child.tokens.output, 3);
     assert_eq!(child.tokens.total, 8);
-    let mut old: Value =
-        serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
-    old["version"] = json!(3);
-    for entry in old["files"].as_object_mut().unwrap().values_mut() {
-        entry["summary"]
-            .as_object_mut()
-            .unwrap()
-            .remove("codex_native_usage");
-    }
-    fs::write(&fixture.options.cache, serde_json::to_vec(&old).unwrap()).unwrap();
+    // A pre-migration tree cache has no authority over native evidence. Keep
+    // the historical file byte-for-byte, including its older usage semantics.
+    let old = br#"{"version":3,"files":{"child":{"summary":{"codex_tokens":{"input":999,"output":999}}}}}"#;
+    fs::write(&fixture.options.cache, old).unwrap();
     let reread = collect(&fixture.options).unwrap();
     assert_eq!(
         reread
@@ -52,9 +46,7 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
             .tokens,
         child.tokens
     );
-    let current: Value =
-        serde_json::from_slice(&fs::read(&fixture.options.cache).unwrap()).unwrap();
-    assert_eq!(current["version"], 5);
+    assert_eq!(fs::read(&fixture.options.cache).unwrap(), old);
 }
 
 struct Fixture {
@@ -63,6 +55,20 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn tree_metadata(&self) -> String {
+        let connection =
+            rusqlite::Connection::open(self.options.cache.with_extension("sqlite3")).unwrap();
+        let mut statement = connection
+            .prepare("SELECT value FROM meta WHERE key GLOB 'native_tree_summary:*' ORDER BY key")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn new() -> Self {
         let suffix = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -224,7 +230,7 @@ fn claude_liveness_dedup_tools_and_secret_boundary() {
     for output in [
         render_text(&nodes),
         render_json(&nodes),
-        fs::read_to_string(&fixture.options.cache).unwrap(),
+        fixture.tree_metadata(),
     ] {
         assert!(!output.contains("SECRET_TEXT_42"));
         assert!(!output.contains("SECRET_INPUT_42"));
@@ -359,11 +365,7 @@ fn claude_skips_and_counts_nul_filled_complete_lines() {
             .malformed_lines,
         1
     );
-    assert!(
-        fs::read_to_string(&fixture.options.cache)
-            .unwrap()
-            .contains("\"malformed_lines\":1")
-    );
+    assert!(fixture.tree_metadata().contains("\"malformed_lines\":1"));
 }
 
 #[test]
@@ -591,7 +593,7 @@ fn links_new_and_old_markers_and_leaves_unmarked_unlinked() {
             .unwrap()
             .unlinked
     );
-    let cache = fs::read_to_string(&fixture.options.cache).unwrap();
+    let cache = fixture.tree_metadata();
     assert!(!cache.contains(prompt));
     assert_eq!(
         collect(&fixture.options)
@@ -899,44 +901,154 @@ fn write_model_home(fixture: &Fixture, secrets: bool) {
 }
 
 #[test]
-fn model_json_matches_the_golden_file() {
+fn native_query_and_catalog_preserve_the_independent_session_reference() {
     let fixture = model_home();
     write_model_home(&fixture, false);
-    let json = model_json(&fixture.options).unwrap();
-    let mut model: Value = serde_json::from_str(&json).unwrap();
-    assert!(model["now"].as_i64().unwrap() > 1_790_000_000_000);
-    let model_version = model["version"].clone();
-    model["now"] = json!(0);
-    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/model.json");
-    let update = std::env::var_os("SEMON_UPDATE_GOLDEN").is_some();
-    // This fixture covers the compatibility model surface. Cost output and
-    // the transcript totals are asserted by focused synthetic tests and stay
-    // out of this baseline.
-    if let Some(sessions) = model["sessions"].as_object_mut() {
-        for session in sessions.values_mut() {
-            if let Some(session) = session.as_object_mut() {
-                session.shift_remove("cost");
-                session.shift_remove("reported_runs");
-                session.shift_remove("cost_check");
-                session.shift_remove("calls");
-                session.shift_remove("errors");
-                session.shift_remove("tool_calls");
+    // Preserve the native semantics from the former golden; the retired
+    // model envelope, pricing transport and transcript growth marks are gone.
+    let expected: Value =
+        serde_json::from_str(include_str!("golden/native-session-evidence.json")).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let mut query = Query::new(fixture.options.clone());
+    let listed = query
+        .call_at("list_sessions", &json!({"limit":1000}), now)
+        .unwrap();
+    assert_eq!(listed["truncated"], false);
+    let ids: BTreeSet<_> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        expected["sessions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect()
+    );
+    let core = ViewerCore::new(fixture.options.clone());
+    let read_catalog = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let reply = core.respond("GET", "/api/sessions", "machine=local&limit=100", None);
+            let value = serde_json::from_slice::<Value>(&reply.body).unwrap();
+            if reply.status == 200 && value["completeness"]["state"] == "complete" {
+                break value;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native fixture publication: {value}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let catalog = read_catalog();
+    assert_eq!(catalog["completeness"]["state"], "complete");
+    assert!(catalog["next_cursor"].is_null());
+    assert_eq!(catalog["items"].as_array().unwrap().len(), ids.len());
+    let mut intervals = Vec::new();
+    for id in ids {
+        let selected = query
+            .call_at("get_session", &json!({"id":id}), now)
+            .unwrap();
+        let session = &selected["session"];
+        let prior = &expected["sessions"][id];
+        let row = catalog["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == id)
+            .unwrap();
+        for field in [
+            "name", "harness", "machine", "model", "repo", "branch", "parent", "start", "busy",
+            "signals",
+        ] {
+            assert_eq!(session[field], prior[field], "{id}: {field}");
+        }
+        assert_eq!(
+            session["last_activity"], prior["last"],
+            "{id}: last activity"
+        );
+        let state = match prior["state"].as_str().unwrap() {
+            "done" => "ended",
+            "idle" => "idle",
+            state => panic!("unexpected pinned state: {state}"),
+        };
+        assert_eq!(session["state"], state, "{id}: state");
+        let kind = match prior["kind"].as_str() {
+            Some("Subagent") => "subagent",
+            Some("Codex run") => "codex-run",
+            None => "session",
+            kind => panic!("unexpected pinned kind: {kind:?}"),
+        };
+        assert_eq!(session["kind"], kind, "{id}: native kind");
+        assert_eq!(row["kind"], kind);
+        assert_eq!(row["presentation_kind"], prior["kind"]);
+        assert_eq!(row["parent_source"], prior["parent_source"]);
+        assert_eq!(row["tokens"], prior["tokens"], "{id}: displayed usage");
+        let models: serde_json::Map<String, Value> = row["cost"]["by_model"].as_object().unwrap().iter()
+            .map(|(model, cost)| {
+                let tokens=&cost["tokens"];
+                (model.clone(), json!({"input":tokens["input"],"output":tokens["output"],
+                    "cache_write":tokens["cache_write_5m"].as_u64().unwrap()+tokens["cache_write_1h"].as_u64().unwrap(),
+                    "cache_read":tokens["cache_read"]}))
+            }).collect();
+        assert_eq!(
+            Value::Object(models),
+            prior["tokens_by_model"],
+            "{id}: exact per-model native usage"
+        );
+        for field in ["turns", "handoffs"] {
+            let rows: Vec<_> = expected[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| {
+                    if field == "turns" {
+                        row["sid"] == id
+                    } else {
+                        row["from"] == id || row["to"] == id
+                    }
+                })
+                .cloned()
+                .collect();
+            assert_eq!(session[field], Value::Array(rows), "{id}: {field}");
+        }
+        intervals.extend(
+            session["busy"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|range| (range[0].as_i64().unwrap(), range[1].as_i64().unwrap())),
+        );
+    }
+    intervals.sort_unstable();
+    let mut busy: Vec<(i64, i64)> = Vec::new();
+    // Native machine activity uses the Event Index's existing five-minute
+    // clustering rule. Keep its independently captured aggregate interval.
+    for (start, end) in intervals {
+        if let Some(last) = busy
+            .last_mut()
+            .filter(|last| start - last.1 <= 5 * 60 * 1000)
+        {
+            last.1 = last.1.max(end);
+        } else {
+            busy.push((start, end));
         }
     }
-    let expected = fs::read_to_string(&golden).unwrap();
-    if !update {
-        let previous: Value = serde_json::from_str(&expected).unwrap();
-        model["version"] = previous["version"].clone();
-    }
-    let actual = serde_json::to_string_pretty(&model).unwrap() + "\n";
-    if update {
-        fs::write(&golden, &actual).unwrap();
-    }
-    assert_eq!(actual, expected);
-    // A second run from the warm cache gives the same model and version.
-    let again: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
-    assert_eq!(again["version"], model_version);
+    assert_eq!(json!(busy), expected["busy"]["testbox"]);
+    // Warm native publication retains its exact generation and evidence.
+    assert_eq!(read_catalog(), catalog);
+    core.close();
 }
 
 /// Every other content path the model reads: task-notification results,
@@ -1065,13 +1177,38 @@ fn strings(value: &Value, path: String, output: &mut Vec<(String, String)>) {
 }
 
 #[test]
-fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_session() {
+fn planted_secrets_never_reach_the_cache_and_reach_native_query_only_as_their_session() {
     let fixture = model_home();
     write_model_home(&fixture, true);
     write_more_secrets(&fixture);
-    let model: Value = serde_json::from_str(&model_json(&fixture.options).unwrap()).unwrap();
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let mut query = Query::new(fixture.options.clone());
+    let listed = query
+        .call_at("list_sessions", &json!({"limit": 1000}), now)
+        .unwrap();
+    assert_eq!(listed["truncated"], false, "inspect every fixture session");
+    let mut sessions = serde_json::Map::new();
+    let mut handoffs = std::collections::BTreeMap::new();
+    for row in listed["sessions"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        let selected = query
+            .call_at("get_session", &json!({"id": id}), now)
+            .unwrap();
+        for handoff in selected["session"]["handoffs"].as_array().unwrap() {
+            handoffs.insert(handoff["id"].as_str().unwrap().to_owned(), handoff.clone());
+        }
+        sessions.insert(id.to_owned(), selected["session"].clone());
+    }
+    let evidence =
+        json!({"sessions": sessions, "handoffs": handoffs.into_values().collect::<Vec<_>>()});
     let nodes = collect(&fixture.options).unwrap();
-    let cache = fs::read_to_string(&fixture.options.cache).unwrap();
+    let cache = fixture.tree_metadata();
     // The event index's bytes, and its WAL's if it has one: a secret stored
     // in any row would show here as plain UTF-8.
     let index = fixture.options.cache.with_extension("sqlite3");
@@ -1111,7 +1248,7 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
     for (label, _) in owners {
         let secret = format!("SECRET_{label}_42");
         for (name, output) in [
-            ("V1 cache", &cache),
+            ("native tree metadata", &cache),
             ("event cache", &events),
             ("tree text", &render_text(&nodes)),
             ("tree json", &render_json(&nodes)),
@@ -1119,10 +1256,9 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
             assert!(!output.contains(&secret), "{secret} in the {name}");
         }
     }
-    // The model's content fields are the handoffs' briefs, results, targets
-    // and answers, and a running tool's argument in `sessions[].activity`
-    // (content too, covered by the model's activity test). Nothing else in it
-    // carries text: not ids, turns, busy or the rest of a session.
+    // Native Query exposes selected handoff content and its owning session's
+    // open question. Neither metadata caches nor unrelated identity/fact fields
+    // may retain that content.
     let content = |path: &str| {
         let parts: Vec<&str> = path.split('.').collect();
         matches!(
@@ -1131,11 +1267,31 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
                 | ["", "handoffs", _, "answer", _]
                 | ["", "handoffs", _, "answers", _, "question" | "preview"]
                 | ["", "handoffs", _, "answers", _, "values", _]
-                | ["", "sessions", _, "activity", "1"]
+                | ["", "sessions", _, "open_question", "text"]
+                | [
+                    "",
+                    "sessions",
+                    _,
+                    "handoffs",
+                    _,
+                    "brief" | "result" | "target"
+                ]
+                | ["", "sessions", _, "handoffs", _, "answer", _]
+                | [
+                    "",
+                    "sessions",
+                    _,
+                    "handoffs",
+                    _,
+                    "answers",
+                    _,
+                    "question" | "preview"
+                ]
+                | ["", "sessions", _, "handoffs", _, "answers", _, "values", _]
         )
     };
     let mut found = Vec::new();
-    strings(&model, String::new(), &mut found);
+    strings(&evidence, String::new(), &mut found);
     let mut seen = BTreeSet::new();
     for (path, text) in found {
         for (label, owner) in owners {
@@ -1143,13 +1299,22 @@ fn planted_secrets_never_reach_the_cache_and_reach_the_model_only_as_their_sessi
                 continue;
             }
             assert!(content(&path), "{label} at {path}");
-            let owner = owner.unwrap_or_else(|| panic!("{label} must not reach the model: {path}"));
-            let index: usize = path.split('.').nth(2).unwrap().parse().unwrap();
-            let handoff = &model["handoffs"][index];
-            assert!(
-                handoff["from"] == owner || handoff["to"] == owner,
-                "{label} left {owner}: {handoff}"
-            );
+            let owner =
+                owner.unwrap_or_else(|| panic!("{label} must not reach native Query: {path}"));
+            let parts: Vec<_> = path.split('.').collect();
+            if parts[1] == "sessions" && parts[3] == "open_question" {
+                assert_eq!(parts[2], owner, "{label} left {owner}: {path}");
+            } else {
+                let handoff = if parts[1] == "sessions" {
+                    &evidence["sessions"][parts[2]]["handoffs"][parts[4].parse::<usize>().unwrap()]
+                } else {
+                    &evidence["handoffs"][parts[2].parse::<usize>().unwrap()]
+                };
+                assert!(
+                    handoff["from"] == owner || handoff["to"] == owner,
+                    "{label} left {owner}: {handoff}"
+                );
+            }
             seen.insert(label);
         }
     }

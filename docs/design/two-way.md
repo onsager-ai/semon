@@ -1,5 +1,7 @@
 # Two-way control: one local Codex session
 
+Current collection scope: two-way control, managed runtime delivery and broad full-text find are paused. The optional engine contracts and qualification evidence below do not advertise active product delivery. See the [temporary collection scope](session-foundation-retirement.md#temporary-collection-scope).
+
 Updated October 4, 2026. [#293](https://github.com/onsager-ai/semon/issues/293)
 is Codex-first. This replaces the earlier Claude-first delivery order and
 ancestry-based owner check. The landed `semon-control` foundations remain the
@@ -130,9 +132,28 @@ journal zero peer fields mean unknown, never root authorization.
 
 ## Typed viewer ownership
 
-The existing model transport prepares control data before its coherent model commit.
-One local control owner uses the application effect scope, current page commits and
-existing model poller. It owns write intent/busy/uncertain state; shared screens
+First input has a separate native creation witness: the confined launcher has
+created a new private thread whose native `thread/start` receipt contains no
+turns. The existing Home response may expose `launch_control`, with input as its
+only capability. It supplies no Catalog row, unique-owner qualification,
+relationship proof or archive readiness. Observation-only attachments, resumed
+threads, native turns, recorded operation intents and lost/replaced controllers
+cannot expose it. `launch=true` commands are fenced under the driver's live
+state lock and permit only the initial input. Recording any operation withdraws
+creation authority, including uncertain outcomes; exact duplicate IDs still
+read their saved receipt and never dispatch again. The first real message creates
+native Raw, after which normal incremental publication qualifies selected reads.
+No transcript is seeded and no model/indexing architecture is added.
+
+The existing control owner and Home component consume this witness under the
+canonical reader's route/effect lifetime. Drafts use the future source-qualified
+native key. Publication cannot clear a busy or uncertain creation operation.
+HTTP receipts confirm only the requested operation's saved native acceptance;
+they provide no new control selection or unrelated operation history.
+
+Qualified source-selected native identity gates `/api/session-control`. Partial
+Catalog ownership cannot select a writable native thread. One local control owner
+uses the application effect scope, selected-page commits and native read cadence. It owns write intent/busy/uncertain state; shared screens
 receive a narrow typed view. No extra router, poller, document handler or transcript
 cache is installed. Each capability is exposed individually. Unsupported requests
 show their reason. After uncertain browser delivery, writes stay blocked until an

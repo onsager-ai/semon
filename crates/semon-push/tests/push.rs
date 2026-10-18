@@ -24,6 +24,153 @@ use tiny_http::{Header, Response, Server};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const TOKEN: &str = "test-token-0123456789";
 
+/// Compare supported native reads after transport redaction and source
+/// selection, including every transcript page and Catalog usage/cost metadata.
+fn native_query_corpus(options: &Options, now: i64) -> serde_json::Value {
+    let sources = Arc::new(semon_sessions::SessionSources::with_machines(vec![(
+        String::new(),
+        options.clone(),
+    )]));
+    let mut query = semon_sessions::Query::from_sources(sources);
+    let paused_find = query
+        .call_at("find", &json!({"text":"session"}), now)
+        .unwrap_err();
+    assert_eq!(paused_find.code, "capability_unavailable");
+    let malformed_find = query.call_at("find", &json!(null), now).unwrap_err();
+    assert_eq!(malformed_find.to_json(), paused_find.to_json());
+    let listing = query
+        .call_at("list_sessions", &json!({"limit":1000}), now)
+        .unwrap();
+    assert_eq!(
+        listing["truncated"], false,
+        "fixture must cover all sessions"
+    );
+    let mut sessions = serde_json::Map::new();
+    let mut transcripts = serde_json::Map::new();
+    for row in listing["sessions"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        sessions.insert(
+            id.into(),
+            query
+                .call_at("get_session", &json!({"id":id}), now)
+                .unwrap()["session"]
+                .clone(),
+        );
+        let mut pages = Vec::new();
+        let mut after = 0;
+        loop {
+            match query.call_at("read_transcript", &json!({"id":id,"after":after}), now) {
+                Ok(page) => {
+                    let to = page["to"].as_u64().unwrap();
+                    let total = page["total"].as_u64().unwrap();
+                    assert!(to > after || to == total, "paging must advance");
+                    pages.push(page);
+                    if to == total {
+                        break;
+                    }
+                    after = to;
+                }
+                Err(error) => {
+                    assert_eq!(row["kind"], "stub");
+                    assert_eq!(error.code, "unknown_session");
+                    pages.push(json!({"error":error.code,"message":error.message}));
+                    break;
+                }
+            }
+        }
+        transcripts.insert(id.into(), json!(pages));
+    }
+    let catalog = semon_sessions::session_catalog_page(options, "local", "limit=100");
+    assert_eq!(catalog.status, 200);
+    let catalog: serde_json::Value = serde_json::from_slice(&catalog.body).unwrap();
+    assert!(
+        catalog["next_cursor"].is_null(),
+        "fixture must cover all Catalog rows"
+    );
+    let metrics: Vec<_> = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let mut metrics = row.as_object().unwrap().clone();
+            if let Some(context) = metrics.remove("summary_context") {
+                assert_eq!(context["state"], "incomplete");
+                assert_eq!(context["scope"], "current_observation");
+            }
+            // Physical custody observations legitimately differ across copies.
+            // The native summary, identity, lineage, tokens and cost stay exact.
+            for field in [
+                "freshness",
+                "facts_observation",
+                "native_selection",
+                "transcript",
+                "details",
+            ] {
+                metrics.remove(field);
+            }
+            metrics
+        })
+        .collect();
+    json!({"listing":listing,"sessions":sessions,"transcripts":transcripts,"catalog":metrics,
+        "stalls":query.call_at("stalls", &json!({"idle_minutes":1}), now).unwrap(),
+        "paused_find":paused_find.to_json()})
+}
+
+fn native_reply_content(reply: &semon_sessions::ViewerReply) -> serde_json::Value {
+    assert_eq!(reply.status, 200);
+    let mut body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["api"], 1);
+    let generation = body["identity"]["generation"].as_str().unwrap();
+    assert_eq!(generation.len(), 64);
+    assert!(generation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(body["identity"]["observed_at"].as_i64().unwrap() > 0);
+    if body.get("projection").is_some() {
+        let generation = body["projection"]["generation"].as_str().unwrap();
+        assert_eq!(generation.len(), 64);
+        assert!(generation.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if let Some(transcript) = body["session"].get("transcript") {
+            assert_eq!(transcript["generation"], generation);
+        }
+        let errors_generation = body["projection"]["errors_generation"].as_str().unwrap();
+        assert_eq!(errors_generation.len(), 64);
+        assert!(
+            errors_generation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        if let Some(transcript) = body["session"].get("transcript") {
+            assert_eq!(transcript["errors_generation"], errors_generation);
+        }
+        // Runtime paging proofs bind each copy's source generation; independent
+        // redacted copies keep exact content, not equal physical custody proofs.
+        body["projection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("errors_generation");
+        body["projection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generation");
+        // Optional summary headers describe this copy's retained history
+        // readiness. The requested current projection/body is checked above;
+        // summary readiness can differ when only one copy has earlier custody.
+        let session = body["session"].as_object_mut().unwrap();
+        session.remove("transcript");
+        session.remove("details");
+        if let Some(context) = session.remove("summary_context") {
+            assert_eq!(context["state"], "incomplete");
+            assert_eq!(context["scope"], "current_observation");
+        }
+    }
+    // Independent native copies have separate physical source/publication
+    // generations and observation times. Compare all content and provenance
+    // after checking each reply's own generation bindings above.
+    let identity = body["identity"].as_object_mut().unwrap();
+    identity.remove("generation");
+    identity.remove("observed_at");
+    body
+}
+
 #[derive(Default)]
 struct Received {
     files: BTreeMap<String, Vec<u8>>,
@@ -42,6 +189,8 @@ struct Received {
     status_redirect: Option<String>,
     status_refuse: bool,
     omit_generations: bool,
+    relocation_supported: bool,
+    relocation_requests: Vec<(Append, usize)>,
     grow_source: Option<PathBuf>,
     discover_source: Option<(PathBuf, String)>,
     move_source: Option<(String, PathBuf, PathBuf)>,
@@ -215,7 +364,27 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
         return json_response(500, json!({"error":"down"}));
     }
     let key = format!("{}/{}", append.root, append.path);
-    let current = received.files.get(&key).cloned().unwrap_or_default();
+    let mut current = received.files.get(&key).cloned().unwrap_or_default();
+    if let Some(relocation) = &append.relocation {
+        received
+            .relocation_requests
+            .push((append.clone(), bytes.len()));
+        if received.relocation_supported && current.is_empty() && !append.replace {
+            let old_key = format!("codex/{}", relocation.from_path);
+            if let Some(old) = received.files.get(&old_key)
+                && received.generations.get(&old_key) == append.generation.as_ref()
+                && append.offset == old.len() as u64
+                && semon_push::wire::sha256_hex(old) == relocation.prefix_sha256
+                && serde_json::from_slice::<serde_json::Value>(
+                    old.split(|byte| *byte == b'\n').next().unwrap(),
+                )
+                .ok()
+                .is_some_and(|header| header["payload"]["id"] == relocation.native_id)
+            {
+                current = old.clone();
+            }
+        }
+    }
     let conflict = |received: &mut Received, current: &[u8]| {
         received.conflicts += 1;
         json_response(
@@ -536,6 +705,77 @@ fn a_long_line_is_redacted_whole_before_it_is_cut_into_chunks() {
 }
 
 #[test]
+fn native_relocation_sender_reuses_redacted_prefix_and_replays_lost_ack() {
+    for supported in [false, true] {
+        let home = Home::new();
+        let receiver = receiver();
+        receiver.state.lock().unwrap().relocation_supported = supported;
+        let active = "codex/sessions/2026/10/01/rollout-native.jsonl";
+        let archived = "codex/archived_sessions/rollout-native.jsonl";
+        let initial = format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"native","cwd":"/synthetic/project"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"synthetic sk-ant-api03-SECRETSECRETSECRETSECRET"}})
+        );
+        home.write(active, &initial);
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        fs::create_dir_all(home.root.join("codex/archived_sessions")).unwrap();
+        fs::rename(home.root.join(active), home.root.join(archived)).unwrap();
+        let append = format!(
+            "{}\n",
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"synthetic append"}})
+        );
+        home.append(archived, &append);
+        if supported {
+            receiver.state.lock().unwrap().drop_ack_once = true;
+            assert!(semon_push::push(&home.push_options(&receiver.url), false).is_err());
+        }
+        let report = home.client(&receiver).pass(&home.options).unwrap();
+        let state = receiver.state.lock().unwrap();
+        assert!(
+            !state.relocation_requests.is_empty(),
+            "sender missed native move"
+        );
+        let (request, bytes) = &state.relocation_requests[0];
+        assert_eq!(request.offset, redacted(&initial).len() as u64);
+        assert_eq!(
+            *bytes,
+            redacted(&append).len(),
+            "native move retransferred history"
+        );
+        assert_eq!(
+            request.relocation.as_ref().unwrap().prefix_sha256,
+            semon_push::wire::sha256_hex(&redacted(&initial))
+        );
+        assert_eq!(
+            state.files[archived],
+            redacted(&(initial.clone() + &append))
+        );
+        assert_eq!(
+            state.files[active],
+            redacted(&initial),
+            "stale mirror was deleted or overwritten"
+        );
+        if supported {
+            assert_eq!(
+                report.bytes, 0,
+                "lost ACK replay retransferred accepted history"
+            );
+        } else {
+            assert!(
+                state.conflicts > 0,
+                "legacy receiver did not use conservative fallback"
+            );
+        }
+        drop(state);
+        fs::rename(home.root.join(archived), home.root.join(active)).unwrap();
+        let report = home.client(&receiver).pass(&home.options).unwrap();
+        assert!(report.bytes <= append.len() as u64);
+        assert_eq!(copy(&receiver, active), redacted(&(initial + &append)));
+    }
+}
+
+#[test]
 fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copies() {
     let mut home = Home::new();
     home.options.all = true;
@@ -597,21 +837,31 @@ fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copi
         )
         .unwrap();
         let now = 1_790_208_000_000;
-        assert_eq!(
-            semon_sessions::model_json_at(&mirrored_options, now).unwrap(),
-            semon_sessions::model_json_at(&expected_options, now).unwrap(),
-            "pass {pass}"
-        );
+        let actual_corpus = native_query_corpus(&mirrored_options, now);
+        let expected_corpus = native_query_corpus(&expected_options, now);
+        assert_eq!(actual_corpus, expected_corpus, "pass {pass}");
         let core = semon_sessions::ViewerCore::new(mirrored_options.clone());
         let expected_core = semon_sessions::ViewerCore::new(expected_options);
         for (path, query) in [
-            ("/api/tx", "sid=archive-root"),
-            ("/api/transcript", "harness=codex&id=archive-root"),
+            (
+                "/api/session-transcript",
+                "machine=local&sid=archive-root&limit=100",
+            ),
+            ("/api/session-identity", "machine=local&sid=archive-root"),
         ] {
             let actual = core.respond("GET", path, query, None);
             let wanted = expected_core.respond("GET", path, query, None);
-            assert_eq!(actual.status, 200, "{path} pass {pass}");
-            assert_eq!(actual.body, wanted.body, "{path} pass {pass}");
+            assert_eq!(
+                actual.status,
+                200,
+                "{path} pass {pass}: {}",
+                String::from_utf8_lossy(&actual.body)
+            );
+            assert_eq!(
+                native_reply_content(&actual),
+                native_reply_content(&wanted),
+                "{path} pass {pass}"
+            );
         }
         assert_eq!(
             fs::read(home.root.join(current)).unwrap(),
@@ -1115,11 +1365,10 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
         let remote = configure(&mirrored);
         let now = 1_791_072_000_000;
         assert_eq!(
-            semon_sessions::model_json_at(&local, now).unwrap(),
-            semon_sessions::model_json_at(&remote, now).unwrap()
+            native_query_corpus(&local, now),
+            native_query_corpus(&remote, now)
         );
-        let json: serde_json::Value =
-            serde_json::from_str(&semon_sessions::model_json_at(&remote, now).unwrap()).unwrap();
+        let json = native_query_corpus(&remote, now);
         assert_eq!(
             json["sessions"]["native-claude-child"]["claude_usage"]["exclusive"]["input"],
             5
@@ -1129,13 +1378,16 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
         let expected_core = semon_sessions::ViewerCore::new(local);
         for id in ["native-claude-parent", "native-claude-child"] {
             for (path, query) in [
-                ("/api/tx", format!("sid={id}")),
-                ("/api/transcript", format!("harness=claude&id={id}")),
+                (
+                    "/api/session-transcript",
+                    format!("machine=local&sid={id}&limit=100"),
+                ),
+                ("/api/session-identity", format!("machine=local&sid={id}")),
             ] {
                 let actual = core.respond("GET", path, &query, None);
                 let wanted = expected_core.respond("GET", path, &query, None);
                 assert_eq!(actual.status, 200);
-                assert_eq!(actual.body, wanted.body);
+                assert_eq!(native_reply_content(&actual), native_reply_content(&wanted));
             }
         }
     }
@@ -1147,6 +1399,7 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
         let mut home = Home::new();
         home.options.all = true;
         let receiver = receiver();
+        let options = home.push_options(&receiver.url);
         let mirrored = Home::new();
         let expected = Home::new();
         let read = |name: &str| {
@@ -1175,27 +1428,32 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
         );
         receiver.state.lock().unwrap().drop_ack_once = true;
         assert!(
-            semon_push::push(&home.push_options(&receiver.url), false).is_err(),
+            semon_push::push(&options, false).is_err(),
             "lost ACK is not acknowledged state"
         );
         assert_eq!(copy(&receiver, &path), redacted(&initial));
-        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        assert_lock_freed(&options);
+        semon_push::push(&options, false).unwrap();
         assert!(
             receiver.state.lock().unwrap().conflicts > 0,
             "restart reconciles the committed unacknowledged prefix"
         );
+        assert_lock_freed(&options);
         let partial = resumed.len() - resumed.lines().last().unwrap().len() / 2;
         home.write(&path, &resumed[..partial]);
-        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        semon_push::push(&options, false).unwrap();
         assert!(copy(&receiver, &path).ends_with(b"\n"));
+        assert_lock_freed(&options);
         for source in [
             &resumed,
             &resumed.replace("SEMON_SYNTHETIC_resumed", "SEMON_SYNTHETIC_changed"),
         ] {
             home.write(&path, source);
-            semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+            semon_push::push(&options, false).unwrap();
+            assert_lock_freed(&options);
             // A fresh Client/cursor-state load tests restart and duplicate replay.
-            semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+            semon_push::push(&options, false).unwrap();
+            assert_lock_freed(&options);
             let (received, facts) = {
                 let state = receiver.state.lock().unwrap();
                 (state.files.clone(), state.facts.clone().unwrap())
@@ -1229,24 +1487,28 @@ fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
             let remote = configure(&mirrored);
             let now = 1_791_072_000_000;
             assert_eq!(
-                semon_sessions::model_json_at(&local, now).unwrap(),
-                semon_sessions::model_json_at(&remote, now).unwrap()
+                native_query_corpus(&local, now),
+                native_query_corpus(&remote, now)
             );
             let local = semon_sessions::ViewerCore::new(local);
             let remote = semon_sessions::ViewerCore::new(remote);
             for (route, query) in [
-                ("/api/tx", format!("sid={id}")),
-                ("/api/transcript", format!("harness=copilot&id={id}")),
+                (
+                    "/api/session-transcript",
+                    format!("machine=local&sid={id}&limit=100"),
+                ),
+                ("/api/session-identity", format!("machine=local&sid={id}")),
             ] {
                 let actual = remote.respond("GET", route, &query, None);
                 let wanted = local.respond("GET", route, &query, None);
                 assert_eq!(actual.status, 200);
-                assert_eq!(actual.body, wanted.body);
+                assert_eq!(native_reply_content(&actual), native_reply_content(&wanted));
             }
         }
         let retained = copy(&receiver, &path);
         fs::remove_file(home.root.join(&path)).unwrap();
-        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        semon_push::push(&options, false).unwrap();
+        assert_lock_freed(&options);
         assert_eq!(
             copy(&receiver, &path),
             retained,

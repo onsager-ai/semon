@@ -26,8 +26,11 @@ export interface ToolData {
   scriptTruncated?: boolean;
   scriptFailed?: boolean;
   more?: readonly string[];
+  expandable?: boolean;
   cut?: { original_tokens?: number; parts?: readonly { gap?: OutputGap; text?: string }[] };
   fullFailed?: boolean;
+  boundedPreview?: boolean;
+  outputTruncated?: boolean;
   fullCut?: readonly string[];
   bg?: { summary?: string };
 }
@@ -165,7 +168,7 @@ export function ToolPreview({
     cut = lines.length > 12,
     tail = data.ok === false,
     parts = !!data.cut?.parts?.length,
-    more = !!data.more?.length;
+    more = !!data.more?.length || data.expandable === true;
   const shown = !cut || parts ? lines : tail ? lines.slice(-12) : lines.slice(0, 12);
   const changed = !!data.changes || !!data.diff;
   const all = () => host.all(inputLabel);
@@ -294,7 +297,7 @@ export function createStepDetail(
 function Note({ data, text }: { data: ToolData; text?: string }) {
   return data.cut ? (
     <p class="vnote">{screenText(cutNoteText(data.cut))}</p>
-  ) : !data.fullFailed && /…(\(truncated\))?\s*$/.test(text ?? '') ? (
+  ) : !data.fullFailed && !data.boundedPreview && /…(\(truncated\))?\s*$/.test(text ?? '') ? (
     <p class="vnote">Cut short in this copy of the logs.</p>
   ) : null;
 }
@@ -304,13 +307,26 @@ export function renderFullTool(
   inputLabel: string,
   waiting: boolean,
 ) {
-  render(
+  render(<FullTool data={data} inputLabel={inputLabel} waiting={waiting} />, root);
+}
+export function FullTool({
+  data,
+  inputLabel,
+  waiting,
+}: {
+  data: ToolData;
+  inputLabel: string;
+  waiting: boolean;
+}) {
+  return (
     <>
       {data.scriptText !== undefined ? (
         <>
           <Header className="vs" label="Script" text={data.scriptText} />
           <pre class="script">{data.scriptText}</pre>
-          {data.scriptTruncated && <p class="vnote">Cut at 8 MB: the rest isn't shown.</p>}
+          {data.scriptTruncated && (
+            <p class="vnote">The script preview is bounded; the remaining text is not shown.</p>
+          )}
         </>
       ) : data.scriptFailed ? (
         <p class="vnote">Couldn't load the script from these logs.</p>
@@ -374,8 +390,9 @@ export function renderFullTool(
         </>
       )}
       {data.fullFailed && <p class="vnote">Couldn't load the full text: this is the preview.</p>}
-      {!!data.fullCut?.length && <p class="vnote">Cut at 8 MB: the rest isn't shown.</p>}
-    </>,
-    root,
+      {!!data.fullCut?.length && (
+        <p class="vnote">The script preview is bounded; the remaining text is not shown.</p>
+      )}
+    </>
   );
 }

@@ -2,6 +2,9 @@
 # Run a qualification command against an isolated real OpenSSH server.
 # Only synthetic keys are created. No external TCP connection is needed.
 set -eu
+# Real-SSH feature qualification is deferred while product transport is paused.
+printf '%s\n' 'capability_unavailable: SSH qualification is paused in the collection configuration' >&2
+exit 1
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 fixture=$(mktemp -d)
 name="semon-ssh-fixture-$$"

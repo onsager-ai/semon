@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 const { outputFiles } = await build({
-  entryPoints: [new URL('../src/lib/routes.ts', import.meta.url).pathname],
+  entryPoints: [new URL('../src/lib/navigation.ts', import.meta.url).pathname],
   bundle: true,
   write: false,
   format: 'esm',
   platform: 'node',
 });
-const { routeUrl } = await import(
+const { projectShellNavigation } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
 test('Rust native navigation paths agree with the Viewer router defaults', async () => {
@@ -17,8 +17,13 @@ test('Rust native navigation paths agree with the Viewer router defaults', async
     await readFile(new URL('../src/lib/navigation.json', import.meta.url), 'utf8'),
   );
   assert.equal(rows.length, 4);
-  const model = { session: () => undefined, machine: () => false, turn: () => undefined };
+  const destinations = projectShellNavigation(undefined, 'home');
   for (const { key, path } of rows)
-    assert.equal(routeUrl({ v: key }, model), path, key + ' route contract');
-  assert.equal(routeUrl({ v: 'machines' }, { ...model, machinesPath: '/devices' }), '/devices');
+    assert.equal(destinations.find((row) => row.key === key)?.href, path, key + ' route contract');
+  assert.equal(
+    projectShellNavigation({ paths: { machines: '/devices' } }, 'machines').find(
+      (row) => row.key === 'machines',
+    ).href,
+    '/devices',
+  );
 });

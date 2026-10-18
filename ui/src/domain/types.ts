@@ -1,3 +1,4 @@
+import type { RecordedStatus } from './sessionDetails';
 /** Validated data consumed by domain calculations; no document or JSON bag types. */
 export type SessionState = 'work' | 'wait' | 'idle' | 'done' | 'err';
 export type HandoffStatus = 'work' | 'wait' | 'done' | 'err' | 'new';
@@ -21,6 +22,26 @@ export interface Cost {
   split_unknown_messages?: number;
   by_model?: Record<string, ModelCost>;
   by_day?: Record<string, number>;
+}
+export interface TraceParticipantSummary {
+  name: string;
+  harness: string;
+  kind: string;
+  model: string;
+  tokens: readonly [number, number, number];
+  cost: Pick<Cost, 'usd' | 'unpriced_models'>;
+  observedExtent?: {
+    scope: 'whole_session';
+    last: number | null;
+    status: RecordedStatus;
+    recordedActivity?:
+      | {
+          state: 'available';
+          kind: 'timestamp_clusters';
+          intervals: readonly (readonly [number, number])[];
+        }
+      | { state: 'unavailable' };
+  };
 }
 export interface TokenObservation {
   input: number;
@@ -58,6 +79,7 @@ export interface Session {
   name: string;
   harness: string;
   state: SessionState;
+  liveObservation?: boolean;
   machine: string;
   start: number;
   last: number;
@@ -197,26 +219,4 @@ export interface Turn {
   sent: Handoff[];
   end?: TurnEnd;
   last?: boolean;
-}
-export interface TranscriptMeta {
-  from: number;
-  to: number;
-  total: number;
-  calls?: number;
-  errors?: number;
-  tok?: string;
-  watchTok?: string;
-  newer?: number;
-  origin?: boolean;
-}
-export interface DomainState {
-  sessions: Record<string, Session>;
-  machines: Record<string, string>;
-  handoffs: Handoff[];
-  turns: Record<string, Turn[]>;
-  turn: Map<string, Turn>;
-  starts: Map<string, Turn>;
-  holds: Map<string, Turn>;
-  handoff: Map<string, Handoff>;
-  transcriptMeta: Record<string, TranscriptMeta>;
 }

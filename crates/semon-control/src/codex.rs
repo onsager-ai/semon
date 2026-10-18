@@ -33,6 +33,8 @@ pub struct Codex {
 }
 struct Live {
     thread: String,
+    /// A new, isolated launcher-owned thread, before any native turn or intent.
+    launch_pending: bool,
     active: Option<String>,
     last_turn: Option<Value>,
     generation: String,
@@ -233,6 +235,9 @@ impl Codex {
             socket: socket.to_owned(),
             inner: Mutex::new(Live {
                 thread: id,
+                launch_pending: writable
+                    && thread_id.is_none()
+                    && native["turns"].as_array().is_some_and(Vec::is_empty),
                 active,
                 last_turn: native["turns"]
                     .as_array()
@@ -360,6 +365,29 @@ impl Codex {
         let requests: Vec<_> = self.store.snapshot(monotonic_ms()).requests.iter().filter(|r| r.session == live.thread).map(|r| json!({"id":r.id.to_string(),"kind":r.kind.as_str(),"payload":if r.payload.is_null(){json!({})}else{r.payload.clone()},"hash":r.payload_sha256,"state":r.state.to_json(),"reason":match &r.answerable {crate::Answerable::Yes=>None,crate::Answerable::No(reason)=>Some(reason)},"remainingMs":r.expires_ms.saturating_sub(monotonic_ms())})).collect();
         json!({"thread":live.thread,"generation":live.generation,"activeTurn":live.active,"lastTurn":live.last_turn,"connected":live.connected,"capabilities":{"input":enabled,"steer":enabled,"interrupt":enabled,"commandApproval":enabled,"fileApproval":enabled,"questions":enabled},"reason":reason,"requests":requests,"actions":live.actions})
     }
+    /// First input creates native history. This is isolated launch authority,
+    /// never a Catalog identity, relationship proof, or approval capability.
+    pub fn launch_snapshot(&self) -> Option<Value> {
+        let live = lock(&self.inner);
+        if !self.writable
+            || !live.connected
+            || !live.launch_pending
+            || !live.requests.is_empty()
+            || self
+                .server
+                .as_ref()
+                .is_none_or(|(pid, stamp)| process_stamp(*pid).as_ref().ok() != Some(stamp))
+        {
+            return None;
+        }
+        Some(
+            json!({"launch":true,"thread":live.thread,"generation":live.generation,"activeTurn":null,"connected":true,"capabilities":{"input":true,"steer":false,"interrupt":false,"commandApproval":false,"fileApproval":false,"questions":false},"reason":null,"requests":[],"actions":{}}),
+        )
+    }
+    /// One bound operation's saved outcome, without cloning unrelated actions.
+    pub fn operation_receipt(&self, id: &str) -> Option<Value> {
+        lock(&self.inner).actions.get(id).cloned()
+    }
     fn queue(
         &self,
         frame: Value,
@@ -415,11 +443,24 @@ impl Codex {
             if !matches!(value["op"].as_str(), Some("send" | "interrupt" | "answer")) {
                 return Err(error("unsupported operation"));
             }
+            if let Some(launch) = value.get("launch")
+                && (launch != true
+                    || !live.launch_pending
+                    || value["op"] != "send"
+                    || value["text"]
+                        .as_str()
+                        .is_none_or(|text| text.trim().is_empty() || text.len() > 65536))
+            {
+                return Err(error("initial native input is no longer available"));
+            }
             if live.actions.len() >= 1024 {
                 return Err(error(
                     "control operation budget exhausted; restart explicitly",
                 ));
             }
+            // An uncertain first input cannot regain creation authority. Exact
+            // duplicate IDs still read their original receipt above this guard.
+            live.launch_pending = false;
             live.actions.insert(
                 id.clone(),
                 json!({"command":value,"delivery":"dispatching"}),
@@ -548,9 +589,11 @@ impl Codex {
         let now = monotonic_ms();
         match frame["method"].as_str() {
             Some("turn/started") => {
+                live.launch_pending = false;
                 live.active = p["turn"]["id"].as_str().map(str::to_owned);
             }
             Some("turn/completed") => {
+                live.launch_pending = false;
                 live.last_turn = Some(p["turn"].clone());
                 if p["turn"]["id"].as_str() == live.active.as_deref() {
                     live.active = None;
@@ -692,6 +735,89 @@ mod tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     #[test]
+    fn isolated_new_thread_creation_is_once_only_and_never_lends_approval_authority() {
+        let root = crate::journal::tests::scratch("native-launch");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("native.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let (received, frames) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let read = |socket: &mut WebSocket<UnixStream>| -> Value {
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap()
+            };
+            let initialize = read(&mut socket);
+            send(&mut socket, &json!({"id":initialize["id"],"result":{}})).unwrap();
+            assert_eq!(read(&mut socket)["method"], "initialized");
+            let attach = read(&mut socket);
+            assert_eq!(attach["method"], "thread/start");
+            send(
+                &mut socket,
+                &json!({"id":attach["id"],"result":{"thread":{"id":"new-thread","turns":[]}}}),
+            )
+            .unwrap();
+            let input = read(&mut socket);
+            received.send(input.clone()).unwrap();
+            send(
+                &mut socket,
+                &json!({"id":input["id"],"result":{"turn":{"id":"first-turn"}}}),
+            )
+            .unwrap();
+            // Keep the verified native connection alive until the test retires it.
+            let _ = socket.read();
+        });
+        let store = Arc::new(RequestStore::new(
+            crate::Journal::open(&root.join("journal.jsonl")).unwrap(),
+        ));
+        let driver =
+            Codex::connect(&path, None, Some(&root), store, Some(std::process::id())).unwrap();
+        let launch = driver.launch_snapshot().unwrap();
+        assert_eq!(launch["launch"], true);
+        assert_eq!(launch["activeTurn"], Value::Null);
+        assert_eq!(launch["capabilities"]["input"], true);
+        for key in [
+            "steer",
+            "interrupt",
+            "commandApproval",
+            "fileApproval",
+            "questions",
+        ] {
+            assert_eq!(launch["capabilities"][key], false);
+        }
+        let mut command = json!({"id":RequestId::random().unwrap().to_string(),"launch":true,"op":"interrupt","thread":launch["thread"],"generation":launch["generation"],"activeTurn":null,"expires":crate::wall_ms()+25_000,"text":"first input"});
+        let source = Source {
+            window: "native-launch-test".into(),
+            peer_pid: 0,
+            peer_uid: 0,
+        };
+        assert!(driver.command(&command, source.clone()).is_err());
+        assert!(
+            driver.launch_snapshot().is_some(),
+            "refused non-input consumed launch authority"
+        );
+        command["op"] = json!("send");
+        let receipt = driver.command(&command, source.clone()).unwrap();
+        assert_eq!(receipt["result"]["turn"]["id"], "first-turn");
+        assert_eq!(
+            frames.recv_timeout(Duration::from_secs(2)).unwrap()["method"],
+            "turn/start"
+        );
+        assert!(driver.launch_snapshot().is_none());
+        let saved = driver.command(&command, source.clone()).unwrap();
+        assert_eq!(saved["delivery"], "accepted");
+        assert_eq!(saved["command"], command);
+        command["id"] = json!(RequestId::random().unwrap().to_string());
+        command["activeTurn"] = driver.snapshot()["activeTurn"].clone();
+        assert!(driver.command(&command, source).is_err());
+        driver.lost();
+        drop(driver);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn a_zombie_controller_cannot_supply_live_authority() {
         let mut child = std::process::Command::new("/usr/bin/sleep")
             .arg("30")
@@ -796,6 +922,10 @@ mod tests {
         )
         .unwrap();
         driver.event(&json!({"id":99,"method":"item/future/requestApproval","params":{"threadId":"native-thread"}}));
+        assert!(
+            driver.launch_snapshot().is_none(),
+            "resumed threads cannot gain launch authority"
+        );
         let snap = driver.snapshot();
         assert!(
             snap["requests"][0]["reason"]

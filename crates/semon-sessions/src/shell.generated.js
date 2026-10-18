@@ -1720,7 +1720,11 @@ globalThis.__semonUIShared = __semonUIShared;
     body.tabIndex = -1;
     let disposed = false, shown = false;
     const close = () => {
-      if (!disposed && dialog.open) dialog.close();
+      if (!disposed && dialog.open) destroy();
+    };
+    const cancel = (event) => {
+      event.preventDefault();
+      close();
     };
     render(/* @__PURE__ */ jsx(PanelHeader, { heading: options2.title, sub: options2.sub, close }), header);
     dialog.append(header, body);
@@ -1742,6 +1746,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (disposed) return;
       disposed = true;
       dialog.removeEventListener("click", backdrop);
+      dialog.removeEventListener("cancel", cancel);
       dialog.removeEventListener("close", destroy);
       for (const type of ["wheel", "touchmove"])
         document.removeEventListener(type, hold, { capture: true });
@@ -1751,6 +1756,7 @@ globalThis.__semonUIShared = __semonUIShared;
       if (shown) host.closed();
     }
     dialog.addEventListener("click", backdrop);
+    dialog.addEventListener("cancel", cancel);
     dialog.addEventListener("close", destroy);
     return {
       dialog,

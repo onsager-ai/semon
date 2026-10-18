@@ -14,13 +14,16 @@ use std::{
 
 use serde_json::{Map, Value, json};
 
+#[cfg(test)]
+use crate::model::Built;
+
 use crate::{
     attachments,
     events::{self, Reply, ScriptArg},
     field,
     model::{
-        self, Built, MSG_MAX, Shown, Slot, SlotFile, SlotKind, arg_summary, cap, content_text,
-        one_line, patch_text, prompt_text, tool_input, tool_result_text,
+        self, MSG_MAX, Shown, Slot, SlotFile, SlotKind, arg_summary, cap, content_text, one_line,
+        patch_text, prompt_text, tool_input, tool_result_text,
     },
 };
 
@@ -73,6 +76,7 @@ impl Anchor {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_record(path: &Path, offset: u64) -> Option<Value> {
     read_sized(path, offset).0
 }
@@ -101,16 +105,27 @@ pub(crate) fn parse_native_record(bytes: &[u8]) -> Option<Value> {
 }
 
 type NativeLineReader<'a> = dyn FnMut(&Path, u64) -> io::Result<(Option<Value>, u64)> + 'a;
+type NativePromptReader<'a> = dyn FnMut(&SlotFile, u64) -> Option<(Value, u64)> + 'a;
 
 /// Source lines read for one page: a line holding several blocks, or a call
 /// and its result, is read once. Only the last few lines are kept.
 #[derive(Default)]
 pub(crate) struct Lines<'a> {
     provider: Option<&'a mut NativeLineReader<'a>>,
+    prompt_provider: Option<&'a mut NativePromptReader<'a>>,
     pub(crate) failures: usize,
     recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
     /// Bytes read from source files so far.
     pub(crate) bytes: u64,
+}
+
+/// The same bounded line cache can cross selected native session reads in one
+/// search. It contains no provider or credentials and never escapes the call.
+#[derive(Default)]
+pub(crate) struct LineCache {
+    recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
+    pub(crate) bytes: u64,
+    failures: usize,
 }
 
 /// A source line: its file and byte offset.
@@ -121,6 +136,36 @@ impl<'a> Lines<'a> {
         Self {
             provider: Some(reader),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn provider_with_cache(
+        reader: &'a mut NativeLineReader<'a>,
+        cache: LineCache,
+    ) -> Self {
+        Self {
+            provider: Some(reader),
+            recent: cache.recent,
+            bytes: cache.bytes,
+            failures: cache.failures,
+            ..Self::default()
+        }
+    }
+    pub(crate) fn into_cache(self) -> LineCache {
+        LineCache {
+            recent: self.recent,
+            bytes: self.bytes,
+            failures: self.failures,
+        }
+    }
+
+    pub(crate) fn provider_with_prompts(
+        reader: &'a mut NativeLineReader<'a>,
+        prompts: &'a mut NativePromptReader<'a>,
+    ) -> Self {
+        Self {
+            prompt_provider: Some(prompts),
+            ..Self::provider(reader)
         }
     }
     const KEEP: usize = 16;
@@ -585,18 +630,23 @@ fn put_out(
 /// One part's whole text for "View all": `text`, whether semon cut it here
 /// (`truncated`, or `cut_before`), and for a Codex output that Codex cut,
 /// `cut`. A gap Codex made is never `truncated`.
+#[cfg(test)]
 fn text_json(text: &str, source: Source, cut_before: bool) -> String {
+    text_value(text, source, cut_before, FULL_MAX).to_string()
+}
+
+fn text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
     let (plain, cut) = split_cut(text, source);
-    let (shown, truncated) = clip(&plain, FULL_MAX);
+    let (shown, truncated) = clip(&plain, limit);
     let mut fields = json!({"text": shown});
     if let Some(cut) = cut {
         // Each side may take up to the cap itself: whether semon cut the text
         // is `truncated`'s to say, from the text as a whole.
-        let (cut, _) = cut.json(FULL_MAX * 2);
+        let (cut, _) = cut.json(limit * 2);
         fields["cut"] = cut;
     }
     fields["truncated"] = json!(truncated || cut_before);
-    fields.to_string()
+    fields
 }
 
 /// A step's duration: tenths of a second under a minute, then minutes.
@@ -619,6 +669,7 @@ fn running(ms: i64) -> String {
     }
 }
 
+#[cfg(test)]
 fn tool_name(record: &Value, block: usize) -> Option<String> {
     if field(record, "type") == Some("assistant.message") {
         return record
@@ -922,6 +973,65 @@ fn item_command(item: &Value) -> Option<String> {
 fn script_at(lines: &mut Lines, path: &Path, offset: u64) -> Option<String> {
     let record = lines.get(path, offset)?;
     model::tool_input(&record, 0).and_then(|input| input.as_str().map(str::to_owned))
+}
+
+pub(crate) fn selected_image(
+    lines: &mut Lines,
+    slot: &Slot,
+    image: &Value,
+) -> Option<(&'static str, Vec<u8>)> {
+    let file = slot.file.as_ref()?;
+    if !matches!(&slot.kind, SlotKind::U | SlotKind::H(_)) {
+        return None;
+    }
+    let offset = image["o"].as_u64()?;
+    let block = usize::try_from(image["b"].as_u64()?).ok()?;
+    let version = u64::from_str_radix(image["v"].as_str()?, 16).ok()?;
+    let record = lines.get(&file.path, offset)?;
+    attachments::image(&record, block, version)
+}
+
+/// Read one recorded script through the caller's qualified, budgeted source reader.
+pub(crate) fn selected_script(lines: &mut Lines, slot: &Slot) -> Option<(String, bool)> {
+    let file = slot.file.as_ref()?;
+    let offset = match slot.kind {
+        SlotKind::Operation {
+            script_offset: Some(offset),
+            ..
+        } => offset,
+        SlotKind::Yielded { .. } | SlotKind::Sent { .. } => slot.offset,
+        _ => return None,
+    };
+    let mut script = script_at(lines, &file.path, offset)?;
+    let truncated = script.len() > 64 * 1024;
+    if truncated {
+        let mut end = 64 * 1024;
+        while !script.is_char_boundary(end) {
+            end -= 1;
+        }
+        script.truncate(end);
+    }
+    Some((script, truncated))
+}
+
+/// Expand one structured tool result through the selected, budgeted reader.
+/// Large plain strings use scalar checkpoints instead of this record path.
+pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
+    let file = slot.file.as_ref()?;
+    let (text, source) = match &slot.kind {
+        SlotKind::Tool { reply, item, .. } => {
+            tool_output(lines, &file.path, reply.as_ref(), *item)?
+        }
+        SlotKind::Operation { kind, .. } if kind == "CommandExecution" => {
+            let record = lines.get(&file.path, slot.offset)?;
+            let output = record
+                .pointer("/payload/item/aggregated_output")?
+                .as_str()?;
+            (output.to_owned(), Source::Collected)
+        }
+        _ => return None,
+    };
+    Some(text_value(&text, source, false, 64 * 1024))
 }
 
 /// A yielded command's line: from the item that completed it, else from
@@ -1544,6 +1654,20 @@ pub(crate) fn render(
     index: usize,
     now: i64,
 ) -> Option<Value> {
+    render_at(context, lines, slots, slot, index, index, now)
+}
+
+/// A selected window keeps local neighbor indices and original slot addresses
+/// separate. All consumers retain the same native entry rendering rules.
+pub(crate) fn render_at(
+    context: &RenderContext<'_>,
+    lines: &mut Lines,
+    slots: &[Slot],
+    slot: &Slot,
+    index: usize,
+    absolute: usize,
+    now: i64,
+) -> Option<Value> {
     let file = slot.file.as_deref();
     let mut record = || file.and_then(|file| lines.get(&file.path, slot.offset));
     let mut entry = match &slot.kind {
@@ -1592,7 +1716,7 @@ pub(crate) fn render(
         }
         SlotKind::Harness(label) => json!({"k": "harness", "label": label}),
         SlotKind::Signal(signal) => {
-            json!({"k": "signal", "signal": signal, "at": slot.t, "turn":slot.turn,"slot":index})
+            json!({"k": "signal", "signal": signal, "at": slot.t, "turn":slot.turn,"slot":absolute})
         }
         SlotKind::Gap => {
             json!({"k": "end", "text": "Some entries not included: the log has unreadable lines here"})
@@ -1641,7 +1765,7 @@ pub(crate) fn render(
                 lines,
                 file?,
                 slot,
-                index,
+                absolute,
                 *shown,
                 name,
                 reply.as_ref(),
@@ -1659,7 +1783,7 @@ pub(crate) fn render(
             kind,
             ok,
             script_offset,
-        } => operation_entry(lines, file?, slot, index, kind, *ok, *script_offset)?,
+        } => operation_entry(lines, file?, slot, absolute, kind, *ok, *script_offset)?,
         SlotKind::Yielded {
             shown,
             first,
@@ -1670,7 +1794,7 @@ pub(crate) fn render(
             lines,
             file?,
             slot,
-            index,
+            absolute,
             *shown,
             *first,
             polls,
@@ -1687,7 +1811,7 @@ pub(crate) fn render(
             lines,
             file?,
             slot,
-            index,
+            absolute,
             *shown,
             reply.as_ref(),
             *start,
@@ -1738,6 +1862,11 @@ pub(crate) fn render(
 /// that long, and its text and images still show.
 fn prompt_record(lines: &mut Lines, file: Option<&SlotFile>, offset: u64) -> Option<Rc<Value>> {
     let file = file?;
+    if let Some(provider) = lines.prompt_provider.as_mut() {
+        let (record, bytes) = provider(file, offset)?;
+        lines.bytes += bytes;
+        return Some(Rc::new(record));
+    }
     if lines.provider.is_some() {
         return lines.get(&file.path, offset);
     }
@@ -1768,7 +1897,7 @@ fn with_images(
     entry
 }
 
-fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {
+pub(crate) fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {
     let before = slots.get(index.checked_sub(1)?)?.t?;
     let at = slots.get(index)?.t?;
     let elapsed = at.checked_sub(before)?;
@@ -1795,11 +1924,7 @@ fn strings(value: &Value, out: &mut String) {
 /// same parts a page shows (`text`, or a call's `in` and `out`), uncapped.
 /// A handoff's text is the model's (its brief, result and answer), so a
 /// handoff slot has none here; neither do markers.
-pub(crate) fn slot_texts(
-    _built: &Built,
-    lines: &mut Lines,
-    slot: &Slot,
-) -> Vec<(&'static str, String)> {
+pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, String)> {
     let Some(file) = slot.file.as_deref() else {
         return Vec::new();
     };
@@ -1905,12 +2030,14 @@ pub(crate) fn slot_texts(
 
 /// A page of `sid`'s transcript as JSON. Each entry that starts a turn, and
 /// the page's first entry, carries its turn's id as `turn`.
+#[cfg(test)]
 pub(crate) fn page(built: &Built, sid: &str, anchor: &Anchor, now: i64) -> io::Result<String> {
     page_limited(built, sid, anchor, now, PAGE_ENTRIES)
 }
 
 /// [`page`] with at most `limit` entries (1 to [`PAGE_ENTRIES`]); the byte
 /// bound is the same.
+#[cfg(test)]
 pub(crate) fn page_limited(
     built: &Built,
     sid: &str,
@@ -1918,8 +2045,54 @@ pub(crate) fn page_limited(
     now: i64,
     limit: usize,
 ) -> io::Result<String> {
-    let limit = limit.clamp(1, PAGE_ENTRIES);
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
+    page_from(
+        &RenderContext {
+            home: built.home.as_deref(),
+            harness: built.sessions.get(sid).map(|session| session.harness),
+            bounded: false,
+        },
+        transcript,
+        sid,
+        anchor,
+        now,
+        limit,
+    )
+}
+
+/// The shared source-backed pager needs one transcript and its native rendering
+/// context. Query callers do not need a workspace transport model.
+#[cfg(test)]
+pub(crate) fn page_from(
+    context: &RenderContext<'_>,
+    transcript: &model::Transcript,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+) -> io::Result<String> {
+    page_from_lines(
+        context,
+        transcript,
+        sid,
+        anchor,
+        now,
+        limit,
+        &mut Lines::default(),
+    )
+}
+
+/// The native pager with request-owned source access. Its slots, rendering,
+/// anchors and wire contract are shared with the existing local pager.
+pub(crate) fn page_from_lines(
+    context: &RenderContext<'_>,
+    transcript: &model::Transcript,
+    sid: &str,
+    anchor: &Anchor,
+    now: i64,
+    limit: usize,
+    lines: &mut Lines<'_>,
+) -> io::Result<String> {
     let slots = &transcript.slots;
     let total = slots.len();
     let first_of = |turn: &str| {
@@ -1933,46 +2106,111 @@ pub(crate) fn page_limited(
         Anchor::After(after) => (true, (*after).min(total)),
         Anchor::Turn(turn) => (true, first_of(turn).ok_or(io::ErrorKind::NotFound)?),
     };
-    let mut lines = Lines::default();
+    // The background calls still running anywhere in the session: a viewer
+    // that loaded one on an earlier page learns it stopped without its
+    // process writing a line (and without fetching that page again).
+    let bg_running: Vec<String> = slots
+        .iter()
+        .filter_map(|slot| match &slot.kind {
+            SlotKind::Tool {
+                bg:
+                    Some(model::Background {
+                        tid,
+                        live: true,
+                        end: None,
+                    }),
+                ..
+            } => Some(tid.clone()),
+            _ => None,
+        })
+        .collect();
+    page_from_window(
+        context,
+        PageWindow {
+            sid,
+            slots,
+            start: 0,
+            total,
+            from,
+            forward,
+            calls: transcript.calls,
+            errors: transcript.errors,
+            bg_running: &bg_running,
+        },
+        now,
+        limit,
+        lines,
+    )
+    .map(|page| page.to_string())
+}
+
+/// Original slot coordinates and exact totals for one request-owned window.
+pub(crate) struct PageWindow<'a> {
+    pub(crate) sid: &'a str,
+    pub(crate) slots: &'a [Slot],
+    pub(crate) start: usize,
+    pub(crate) total: usize,
+    pub(crate) from: usize,
+    pub(crate) forward: bool,
+    pub(crate) calls: usize,
+    pub(crate) errors: usize,
+    pub(crate) bg_running: &'a [String],
+}
+
+pub(crate) fn page_from_window(
+    context: &RenderContext<'_>,
+    window: PageWindow<'_>,
+    now: i64,
+    limit: usize,
+    lines: &mut Lines<'_>,
+) -> io::Result<Value> {
+    let PageWindow {
+        sid,
+        slots,
+        start,
+        total,
+        from,
+        forward,
+        calls,
+        errors,
+        bg_running,
+    } = window;
+    let limit = limit.clamp(1, PAGE_ENTRIES);
     let mut picked: Vec<(usize, Value)> = Vec::new();
     let mut bytes = 0;
     let (mut low, mut high) = (from, from);
-    let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> bool {
-        let Some(entry) = render(
-            &RenderContext {
-                home: built.home.as_deref(),
-                harness: built.sessions.get(sid).map(|session| session.harness),
-                bounded: false,
-            },
-            &mut lines,
-            slots,
-            &slots[index],
-            index,
-            now,
-        ) else {
-            return true;
+    let mut take = |index: usize, picked: &mut Vec<(usize, Value)>| -> io::Result<bool> {
+        let local = index.checked_sub(start).ok_or(io::ErrorKind::WouldBlock)?;
+        let slot = slots.get(local).ok_or(io::ErrorKind::WouldBlock)?;
+        // Thinking duration uses the preceding original slot. If paging reaches
+        // the context row of a partial window, extend it before rendering.
+        if index > 0 && local == 0 && matches!(slot.kind, SlotKind::Think) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let Some(entry) = render_at(context, lines, slots, slot, local, index, now) else {
+            return Ok(true);
         };
         let size = entry.to_string().len() + 1;
         if !picked.is_empty() && (picked.len() >= limit || bytes + size > PAGE_BYTES) {
-            return false;
+            return Ok(false);
         }
         bytes += size;
         picked.push((index, entry));
-        true
+        Ok(true)
     };
     if forward {
-        while high < total && take(high, &mut picked) {
+        while high < total && take(high, &mut picked)? {
             high += 1;
         }
     } else {
-        while low > 0 && take(low - 1, &mut picked) {
+        while low > 0 && take(low - 1, &mut picked)? {
             low -= 1;
         }
         picked.reverse();
     }
     let mut entries = Vec::with_capacity(picked.len());
     for (position, (index, mut entry)) in picked.into_iter().enumerate() {
-        let slot = &slots[index];
+        let slot = &slots[index - start];
         if let Some(turn) = &slot.turn
             && (slot.first || position == 0)
         {
@@ -1985,35 +2223,18 @@ pub(crate) fn page_limited(
         "from": low,
         "to": high,
         "total": total,
-        "calls": transcript.calls,
-        "errors": transcript.errors,
+        "calls": calls,
+        "errors": errors,
         "entries": entries,
     });
-    // The background calls still running anywhere in the session: a viewer
-    // that loaded one on an earlier page learns it stopped without its
-    // process writing a line (and without fetching that page again).
-    let bg_running: Vec<&str> = slots
-        .iter()
-        .filter_map(|slot| match &slot.kind {
-            SlotKind::Tool {
-                bg:
-                    Some(model::Background {
-                        tid,
-                        live: true,
-                        end: None,
-                    }),
-                ..
-            } => Some(tid.as_str()),
-            _ => None,
-        })
-        .collect();
     if !bg_running.is_empty() {
         page["bg_running"] = json!(bg_running);
     }
-    Ok(page.to_string())
+    Ok(page)
 }
 
 /// `/api/tx?errors=1` lists at most this many failed steps.
+#[cfg(test)]
 pub(crate) const ERRORS_MAX: usize = 10_000;
 
 /// Where `sid`'s failed steps are, so the viewer can step through them
@@ -2022,6 +2243,7 @@ pub(crate) const ERRORS_MAX: usize = 10_000;
 /// holding slot `s` is `after=s` (it starts there) or `before=s+1` (it ends
 /// there). `errors` is the whole count; `truncated` says the list stops
 /// short of it, at [`ERRORS_MAX`]. `version` is the model's, for `since=`.
+#[cfg(test)]
 pub(crate) fn signals(built: &Built, sid: &str) -> io::Result<String> {
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
     let count: usize = transcript.signals.values().sum();
@@ -2040,11 +2262,13 @@ pub(crate) fn signals(built: &Built, sid: &str) -> io::Result<String> {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn errors(built: &Built, sid: &str) -> io::Result<String> {
     errors_limited(built, sid, ERRORS_MAX)
 }
 
 /// [`errors`] listing at most `limit` slots.
+#[cfg(test)]
 pub(crate) fn errors_limited(built: &Built, sid: &str, limit: usize) -> io::Result<String> {
     let transcript = built.tx.get(sid).ok_or(io::ErrorKind::NotFound)?;
     let slots: Vec<usize> = transcript
@@ -2067,6 +2291,7 @@ pub(crate) fn errors_limited(built: &Built, sid: &str, limit: usize) -> io::Resu
 
 /// The whole of one part of a session's tool call, by its slot, for "View
 /// all": what it was asked (`in`), what came back (`out`) or its diff.
+#[cfg(test)]
 pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> io::Result<String> {
     let slot = built
         .tx
@@ -2166,6 +2391,7 @@ pub(crate) fn full_slot(built: &Built, sid: &str, index: usize, part: &str) -> i
 
 /// The whole of one part of a yielded command's step or a poll's: its
 /// script, its command line or input (`in`), or its output (`out`).
+#[cfg(test)]
 fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> {
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "entry is not expandable");
     let mut lines = Lines::default();
@@ -2222,6 +2448,7 @@ fn full_yielded(file: &SlotFile, slot: &Slot, part: &str) -> io::Result<String> 
 
 /// The whole of one part of a tool call at a line: what it was asked (`in`),
 /// what came back (`out`, the result's line), or its diff.
+#[cfg(test)]
 fn full(path: &Path, offset: u64, block: usize, part: &str) -> io::Result<String> {
     let record = read_record(path, offset)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "entry"))?;

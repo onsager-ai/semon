@@ -1,4 +1,5 @@
-# Explicit native qualification, separate from offline fixture and mock regressions.
+# Historical optional native qualification, separate from collection candidate gates.
+# The local product-control step is intentionally unavailable during the collection pause.
 name: Native local Codex control
 on:
   workflow_dispatch:
@@ -26,7 +27,7 @@ jobs:
           "$RUNNER_TEMP/probe/bin/pip" install -r tests/spikes/requirements-control.txt
           npm --prefix tests/ui ci --no-audit --no-fund
           npm --prefix tests/ui exec -- playwright install --with-deps chromium
-          cargo build --locked -p semon-store
+          cargo build --locked -p semon-cli
           cargo build --locked -p semon-control --example standalone-qualification
       - name: Real native attachment, product and authority tests
         run: |
