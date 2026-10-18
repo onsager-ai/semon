@@ -1,5 +1,30 @@
 # Sessions Filter presentation decision
 
+## Latest user decision — neutral Machine facet and retained Welcome
+
+After reviewing the [five-state follow-up Site](https://semon-380-stale-state-review.tikazyq.chatgpt.site/),
+the user asked to restore the original `Machine: All machines` presentation.
+Their later clarification keeps the current Welcome page and removes only the
+cloud-runtime invitation; it does not remove the page, header or machine cards.
+This supersedes the earlier choice of the selected-source label in Filter, while
+preserving the removal of routine explanatory prose and all source/query bounds.
+
+`All machines` is the neutral machine facet within the reader's selected source;
+it is not a workspace union or new source admission. The selected source remains
+qualified by the existing reader route, count and search tooltip/accessibility
+context. The one-option field does not add a machine subset, a transport query or
+new capability. Metadata-only search, native source identity, paging, keyboard,
+focus and exceptional notices retain their owners and behavior.
+
+The six earlier intentional-difference bindings are archived in
+[the superseded exact registry](evidence/380-compact-filter-acceptance-superseded-20261018.json),
+also retained in Source `bd30f088e5a8a9a5f8ec1c4889be8d54d4962ed1`.
+The active registry is empty because the restored compact Filter must compare
+normally against the original reference in all six viewport/theme states. No
+PNG-equivalence/carry-forward change, threshold/mask relaxation, reference
+replacement, capture-input change or removed state is authorized. Fresh CI and
+an exact Hub pin remain required; the earlier pair is historical evidence only.
+
 ## Authoritative user review — 2026-10-18
 
 The user reviewed the [22-state comparison Site](https://semon-380-visual-review.tikazyq.chatgpt.site/)

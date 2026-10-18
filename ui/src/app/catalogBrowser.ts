@@ -54,7 +54,6 @@ export function createCatalogBrowser(host: {
       values: CatalogFilters,
       rows: readonly CatalogSession[],
       source: string,
-      sourceLabel: string,
       context: CatalogFilterDescription,
     ) {
       // Options are observations of the loaded source, never a workspace census.
@@ -96,13 +95,14 @@ export function createCatalogBrowser(host: {
           ],
         };
       });
-      // A selected source never advertises an unavailable workspace union.
+      // The neutral facet does not narrow machines within the selected source.
+      // Source selection and its request/accessibility scope stay with the reader.
       fields.splice(1, 0, {
         key: 'machine',
         label: 'Machine',
         value: '',
-        display: sourceLabel,
-        options: [{ value: '', label: sourceLabel }],
+        display: 'All machines',
+        options: [{ value: '', label: 'All machines' }],
       });
       const filtered = !!(values.harness || values.repo || values.model || values.q);
       owner.update(fields, {

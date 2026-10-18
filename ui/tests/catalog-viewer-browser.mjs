@@ -1887,12 +1887,12 @@ for (const { width, colorScheme } of [
           path: `${process.env.SEMON_UI_OUT}/sessions-filter-placement-sheet-${width}-${colorScheme}.png`,
         });
       const machine = page.locator('.sh-select[data-label="Machine"]');
-      assert.match(await machine.locator('.sh-select-trigger').innerText(), /Fixture source/);
+      assert.match(await machine.locator('.sh-select-trigger').innerText(), /All machines/);
       await machine.locator('.sh-select-trigger').click();
       const machineOptions = page.locator('[role="listbox"][aria-label="Machine"] [role="option"]');
       await machineOptions.first().waitFor();
       assert.equal(await machineOptions.count(), 1);
-      assert.equal((await machineOptions.first().innerText()).trim(), 'Fixture source');
+      assert.equal((await machineOptions.first().innerText()).trim(), 'All machines');
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !history.state?.shSelect);
       for (const [label, value] of [
