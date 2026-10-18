@@ -255,8 +255,8 @@ field names the selected source rather than advertising an unavailable global
 union. The reader retains filter requests, cursor generations, row focus and
 scroll; `catalogBrowser` owns only the bounded filter choices and shared sheet
 lifetime. Native completeness/retry notices remain explicit. The list retains a
-single qualified count summary; routine source/cache/search/order explanations
-use the existing Filter scroll body and shared tooltips. Nonroutine freshness and
+single qualified count summary. The Filter sheet stays compact without routine
+source/cache/search/order prose; existing shared tooltips retain their scope. Nonroutine freshness and
 bounded-search warnings stay in the page flow. The independent compact Catalog component retains its optional grouped
 snapshot contract; no route selects another application or transport.
 

@@ -106,7 +106,6 @@ export function createCatalogBrowser(host: {
       });
       const filtered = !!(values.harness || values.repo || values.model || values.q);
       owner.update(fields, {
-        description: context.description,
         tooltip: context.searchQualification,
         action: filtered ? { label: 'Clear filters', run: host.clearFilters } : undefined,
       });

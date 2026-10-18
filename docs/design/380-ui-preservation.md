@@ -7,6 +7,32 @@ Source `263a02da278716ab2309b8e34a463419e5c781e5`, captured with Hub
 source-derived DOM. Pen reconstruction exports are not pixel authority.
 The approved feedback-20261015-v6 redesign remains separate work after #380.
 
+## Authoritative visual review — 2026-10-18
+
+The [user-reviewed comparison Site](https://semon-380-visual-review.tikazyq.chatgpt.site/)
+binds the decisions to reviewed Source `903a853dee60deb809b3af992ae5302c1162446f`
+and Hub `dd969648ce6c780adacc9ec450fe07496cc8e02b`.
+
+- Remove the routine source/cache/search/order paragraph from Filter, restore
+  its compact presentation, and do not relocate it. Preserve truthful selected
+  source, metadata-only search, controls, focus, paging and exceptional notices.
+  All six Filter states remain unapproved and must be recaptured and investigated.
+- Correct Hub's reference expectation to omit New Session in the twelve reviewed
+  sidebar-only states and the desktop first-run sidebar, including resulting
+  navigation positioning. The implementation's removal is explicitly approved.
+- Correct only the four reviewed first-run invitation expectations to omit
+  “or prepare your connections for a cloud runtime”, including resulting wrapping
+  and layout. Preserve the remaining onboarding cards and machine enrollment.
+
+The [Filter decision](sessions-filter-placement-proposal.md) supersedes earlier
+paragraph-placement proposals in this historical record. Hub uses its existing
+exact artifact-bound acceptance registry for the explicitly approved differences.
+Original reference pins, raw comparisons and failures remain retained. No broad
+masks, tolerance changes, dropped states, capture-input changes or general
+PNG-equivalence/carry-forward policy is authorized. Fresh exact-pair evidence
+is required after asset regeneration and Hub repinning. No merge/deploy is
+part of this acceptance work.
+
 ## Acceptance contract repair — 2026-10-17
 
 This section records the earlier adapter repair. The continuation policy below

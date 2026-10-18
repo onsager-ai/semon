@@ -1832,29 +1832,26 @@ for (const { width, colorScheme } of [
       assert.equal(await query.getAttribute('data-tip'), searchQualification);
       // Filter choices commit together when the existing shared sheet closes.
       await page.locator('.facet-btn').click();
-      const filterInfo = page.locator('.filters-sheet .facet-info');
-      await filterInfo.waitFor();
-      assert.equal(
-        await filterInfo.evaluate((node) => node.parentElement?.classList.contains('vb')),
-        true,
+      const filterBody = page.locator('.filters-sheet .vb');
+      await filterBody.waitFor();
+      assert.equal(await page.locator('.filters-sheet .facet-info').count(), 0);
+      assert.doesNotMatch(
+        await filterBody.innerText(),
+        /Selected source:|Cached history|Metadata search checks|Ordered by latest recorded activity/,
       );
-      assert.match(await filterInfo.innerText(), /Selected source: Fixture source/);
-      assert.match(await filterInfo.innerText(), /Cached history/);
-      assert.match(await filterInfo.innerText(), /Ordered by latest recorded activity/);
       if (width === 390) {
-        const scrollable = await filterInfo.evaluate((node) => {
-          const body = node.closest('.vb');
-          return !!body && body.scrollHeight > body.clientHeight + 1;
-        });
-        assert.equal(scrollable, true, 'phone Filter context shares the scrollable .vb owner');
+        const scrollable = await filterBody.evaluate(
+          (body) => body.scrollHeight > body.clientHeight + 1,
+        );
+        assert.equal(scrollable, true, 'phone Filter fields share the scrollable .vb owner');
         assert.equal(
           await page.evaluate(() => {
             const event = new Event('touchmove', { bubbles: true, cancelable: true });
-            document.querySelector('.filters-sheet .facet-info').dispatchEvent(event);
+            document.querySelector('.filters-sheet .sh-select').dispatchEvent(event);
             return event.defaultPrevented;
           }),
           false,
-          'touch scrolling is allowed from the Filter context inside .vb',
+          'touch scrolling is allowed from the Filter fields inside .vb',
         );
         assert.equal(
           await page.evaluate(() => {
@@ -1865,9 +1862,9 @@ for (const { width, colorScheme } of [
           true,
           'touch scrolling remains held outside the Filter scroll owner',
         );
-        const infoBox = await filterInfo.boundingBox();
-        assert.ok(infoBox);
-        await page.mouse.move(infoBox.x + 8, infoBox.y + 8);
+        const bodyBox = await filterBody.boundingBox();
+        assert.ok(bodyBox);
+        await page.mouse.move(bodyBox.x + 8, bodyBox.y + 8);
         await page.mouse.wheel(0, 180);
         await page.waitForFunction(
           () => document.querySelector('.filters-sheet .vb')?.scrollTop > 0,
