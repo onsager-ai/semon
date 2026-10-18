@@ -38,6 +38,31 @@ This decision supersedes the placement proposal below. Final commits and check
 results belong to the #380 acceptance record and PR updates; preparation is not
 acceptance or release.
 
+## Fresh compact-state review and approval — 2026-10-18
+
+[Source UI run39101911725](https://github.com/onsager-ai/semon/actions/runs/39101911725)
+at head `8f417ac3ad1e34d66c339f913360b1ad4e0676b0`, merge preview
+`6673c8abb8ae7ae3a327866fce39a7a2c827fbe5`, retains
+[artifact12127077386](https://github.com/onsager-ai/semon/actions/runs/39101911725/artifacts/12127077386).
+All113 frames/162 regions pass; the expanded report has62 exact and six residual
+Filter differences, with zero execution/coverage/acceptance-contract errors.
+The removed paragraph no longer contributes any height. Dialog geometry is
+identical:390 `[0,468,390,376]`,820 `[200,264,420,332]`,1280
+`[430,264,420,332]`, in both themes. Dialog fonts, padding, icons and paths match.
+Only `Machine: laptop` replaces historical `Machine: All machines`; CI bounds
+are confined to that value. Differing pixels are495/492 at390,211/206 at820
+and211/206 at1280 (light/dark); all remain raw strict failures before approval.
+The selected native source must not advertise an unavailable workspace union.
+This is a correctly scoped value, not an implementation defect.
+
+The user reviewed the six fresh candidate/reference/diff pairs and explicitly
+answered **“Approve the six compact states with the correct source value”**.
+`tests/ui/visual-acceptance.json` records only those six exact runtime/image/diff/
+DOM bindings through the existing mechanism. Original reference identity and raw
+failures remain retained. The user did not authorize a general PNG-equivalence
+or carry-forward policy, and the comparator is unchanged. Final exact-head checks
+must match these bindings and pass every nonvisual gate independently.
+
 ## Superseded proposal and preparation evidence
 
 
