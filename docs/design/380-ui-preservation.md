@@ -32,6 +32,20 @@ Source `263a02da278716ab2309b8e34a463419e5c781e5`, captured with Hub
 source-derived DOM. Pen reconstruction exports are not pixel authority.
 The approved feedback-20261015-v6 redesign remains separate work after #380.
 
+### Neutral-facet asset preparation
+
+[CI run 39135887535](https://github.com/onsager-ai/semon/actions/runs/39135887535)
+prepared authored change `637b18e865cecf3003e08b48b653802a86af7684`.
+Formatting, architecture, design and types passed; 146 of 147 unit checks passed,
+with the expected sole stale-generated-viewer failure. That failure is retained,
+not counted as validation success. The fallback normal build produced
+[artifact 12138973968](https://github.com/onsager-ai/semon/actions/runs/39135887535/artifacts/12138973968).
+Adopt its viewer bytes unchanged: 372,056 bytes, SHA256
+`2251e2ad5291b351676297b7f24427beba87d9b0e16470f71115e9a98a1f2eff`.
+Shared and shell assets are byte-identical to the prior head. Final committed
+freshness, Rust/security and all browser/pixel suites must run anew. No local
+build, typecheck, browser, screenshot or image analysis was performed.
+
 ## Authoritative visual review — 2026-10-18
 
 The [user-reviewed comparison Site](https://semon-380-visual-review.tikazyq.chatgpt.site/)
