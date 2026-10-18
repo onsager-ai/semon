@@ -381,7 +381,10 @@ mod tests {
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         for _ in 0..64 {
             if evidence
-                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), crate::unix_now())
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
                 .unwrap()
             {
                 break;
