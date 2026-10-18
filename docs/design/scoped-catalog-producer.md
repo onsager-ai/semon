@@ -37,6 +37,16 @@ changes, including native names, lock holders, process starts, runs, ancestors,
 repositories and source inventory. Heartbeat sequence and naming observation
 timestamps alone do not stale runtime summaries.
 
+Every receiver-owned facts file used by a producer follows `SessionFactsWrite`:
+take the exclusive facts SourceLock and persist invalidation before publication,
+then complete the intent after writing the facts and its authority projection.
+This includes the reference viewer's normalized `ReceivedMachines` copy; the
+incoming mirror file is transport input, while that copy is a producer input.
+An identical normalized heartbeat preserves the copy and creates no new work.
+The reference viewer holds its discovery mutex before the facts lock; producers
+do not take that discovery mutex. A failed publication leaves durable dirty work
+and does not grant a successful journaled notification.
+
 Runtime recipes use per-row fingerprints of those dependencies. Local observations
 use the same native process/lock/name inputs and existing allowlisted reported-run
 parser. Hosted upgrade witnesses preserve qualified legacy recipes across verified
