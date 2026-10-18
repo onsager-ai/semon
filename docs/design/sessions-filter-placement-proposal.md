@@ -20,7 +20,12 @@ reference, threshold, mask, capture input or acceptance policy changes. Residual
 mismatches must distinguish defects from correct source-scoped values; do not
 replace the reference with the candidate. The browser regression now requires
 absence of the paragraph and retains its sheet-scroll, touch, focus, clear,
-source-option and request assertions.
+source-option and request assertions. Run39101911725 identified the old phone
+assertion's dependence on the paragraph: the compact sheet naturally fits in the
+unchanged 480px interaction viewport. The regression now requires that fit,
+briefly exercises the same scroll owner at 320px, and restores 480px before its
+diagnostic capture. Required preservation/pixel capture inputs are untouched.
+The two obsolete-overflow failures remain recorded, not counted as passes.
 
 The same review approves only Hub's omitted New Session and resulting navigation
 positioning in the twelve sidebar-only states and desktop first-run sidebars,
