@@ -1,7 +1,7 @@
 # AI-assisted design in Semon
 
 Use the pinned ui-design workflow from `.agents/skills/ui-design/SKILL.md`
-(Claude's discovery projection is generated). Optional Stitch/pen.dev tooling is
+(Claude's discovery projection is generated). Optional pen.dev tooling is
 configured once at user level by its integration setup reference. Do not add
 repository MCP files, duplicate vendor skills or personal credentials here.
 
@@ -11,19 +11,19 @@ projection remains for future compatibility.
 
 ## Source and design ownership
 
-Read the [DESIGN.md](../../.stitch/DESIGN.md) design brief before UI edits, and
+Read the [UI design brief](ui-design-brief.md) before UI edits, and
 reconcile its applicable scope with the current task and settled product decisions.
 The editable [session inspection canvas](session-inspection/session-inspection.pen)
 records layout and interaction intent; [delivery evidence](session-inspection/README.md)
-links the actual Stitch screens, before/after captures and checks.
+links historical explorations, actual before/after captures and checks.
 Reuse semantic tokens and established components. Update the canvas when layout
 or interaction intent changes, compare representative implementation screenshots
 at matching widths/themes/states, and explain intentional deviations in the PR.
 Review visual diffs before updating baselines. These controls extend this existing
 brief and the pinned skill; they do not create another instruction system.
 
-Preserve the applicable parts of the existing rendered viewer as the default visual baseline. Stitch
-explorations and pen.dev canvases describe workflow intent within that foundation;
+Preserve the applicable parts of the existing rendered viewer as the default
+visual baseline. Pen.dev canvases describe workflow intent within that foundation;
 they do not replace its fonts, type scale, controls or compact spacing. Calibrate
 design artifacts from computed product styles and use actual UI screenshots for
 visual review. Document an intentional foundation change separately when the
@@ -87,22 +87,17 @@ machine-enforced semantic-review gate is introduced here.
 
 ## Tool workflow
 
-Start with source extraction, not a new visual identity. Stitch's
-extract-design-md/design-md and pen.dev variables/components can describe the
-current tokens. Treat `.stitch/DESIGN.md` or a .pen library as a derived snapshot:
-record the Semon source commit, exact token roles/values and both themes, and
-reconcile it with the contract before reuse. Keep artifacts in an explicit design
-work directory. Synthetic fixtures may be exported to design tools under the
-task's scope; real logs and credential-bearing forensic content must stay out.
+Start with source extraction, not a new visual identity. Read semantic roles
+from the current production CSS and components. A derived design brief or .pen
+library records its source commit and both themes, and must be reconciled with
+the shared contract and current requirements before reuse.
 
-Use Stitch for alternative layouts/screens and pen.dev for canvas refinement,
-variables, reusable components and screenshots. Each harness can use the same
-user tooling independently, with separate scratch documents/output paths.
-Desktop MCP requires the app on that machine; cloud sessions use pen's Headless
-CLI. Confirm the active document and inspect exported images. Implement only
-authorized design changes in authored Preact/CSS, preserving existing component
-APIs, native links/forms and host/chrome lifecycles. Framework-specific vendor
-build examples do not change the production stack.
+Use pen.dev for editable canvas refinement, variables, reusable components and
+exports. Desktop MCP requires the same-host app; cloud sessions use the supported
+headless CLI. Confirm the document, save deliberately and inspect actual exported
+images. Implement authorized changes in authored Preact/CSS using existing owners.
+Stitch is retired; its archived outputs are historical evidence and cannot become
+new design or pixel authority. Do not run its setup, generation or MCP workflows.
 
 ## Sharing and acceptance
 

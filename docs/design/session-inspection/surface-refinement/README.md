@@ -2,7 +2,7 @@
 
 Baseline: `bcc0a7624e753a818665518837d050af13395bef` on
 `codex/compact-composer-typography`. The authoritative intent is
-[DESIGN.md section 9](../../../../.stitch/DESIGN.md#9-restrained-surface-refinement).
+[DESIGN.md section 9](../../ui-design-brief.md#9-restrained-surface-refinement).
 
 The user rejected the first Image Gen whole-page reflow. The retained-layout
 proposal keeps the existing viewer and reduces repeated informational outlines.
