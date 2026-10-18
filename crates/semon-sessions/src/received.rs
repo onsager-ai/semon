@@ -351,16 +351,22 @@ mod tests {
         ));
         let incoming = root.join("input/machines/synthetic");
         fs::create_dir_all(&incoming).unwrap();
+        let selected = "sessions/2026/10/19/selected.jsonl";
+        let log = incoming.join("codex").join(selected);
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(&log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-19T00:00:00Z\",\"payload\":{\"id\":\"selected\"}}\n").unwrap();
         let receiver = ReceivedMachines::new(
             root.join("input"),
             &Options {
                 cache: root.join("reader/sessions-index.json"),
+                all: true,
                 ..Options::default()
             },
         );
         let mut facts = Facts {
             version: FACTS_VERSION,
             hostname: "synthetic".into(),
+            codex_rollouts: Some([selected.to_owned()].into()),
             ..Facts::default()
         };
         let mut warned = BTreeSet::new();
@@ -372,6 +378,22 @@ mod tests {
             receiver.options("synthetic", seen)
         };
         let options = copy(&facts, &mut warned);
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        for _ in 0..64 {
+            if evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), crate::unix_now())
+                .unwrap()
+            {
+                break;
+            }
+        }
+        assert!(
+            crate::source_projection_ready(&options, "codex", selected)
+                .unwrap()
+                .is_some(),
+            "fixture did not publish its runtime owner"
+        );
+        drop(evidence);
         let revision = || {
             let path = options.cache.with_extension("sqlite3");
             if !path.exists() {
