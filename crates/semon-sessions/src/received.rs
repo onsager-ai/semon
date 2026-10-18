@@ -335,3 +335,82 @@ fn read_facts(path: &Path) -> io::Result<Facts> {
     serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn received_runtime_copy_journals_changes_but_not_heartbeats() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "semon-received-facts-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let incoming = root.join("input/machines/synthetic");
+        fs::create_dir_all(&incoming).unwrap();
+        let receiver = ReceivedMachines::new(
+            root.join("input"),
+            &Options {
+                cache: root.join("reader/sessions-index.json"),
+                ..Options::default()
+            },
+        );
+        let mut facts = Facts {
+            version: FACTS_VERSION,
+            hostname: "synthetic".into(),
+            ..Facts::default()
+        };
+        let mut warned = BTreeSet::new();
+        let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
+            crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
+            let listing = receiver.scan();
+            let seen = listing["synthetic"].as_ref().unwrap();
+            receiver.copy_facts("synthetic", seen, &[], warned);
+            receiver.options("synthetic", seen)
+        };
+        let options = copy(&facts, &mut warned);
+        let revision = || {
+            let path = options.cache.with_extension("sqlite3");
+            if !path.exists() {
+                return 0_i64;
+            }
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .query_row(
+                    "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_source_revision'),0)",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let before = revision();
+        facts.codex_locks.insert("selected".into(), 42);
+        facts.proc_starts.insert(42, 100);
+        copy(&facts, &mut warned);
+        let changed = revision();
+        assert!(
+            changed > before,
+            "received runtime bypassed durable facts invalidation"
+        );
+        let facts_path = options.facts.as_ref().unwrap();
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(facts_path).unwrap().ino()
+        };
+        copy(&facts, &mut warned);
+        assert_eq!(revision(), changed, "heartbeat dirtied unchanged facts");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(facts_path).unwrap().ino(), inode);
+        }
+        facts.proc_starts.insert(42, 101);
+        copy(&facts, &mut warned);
+        assert!(revision() > changed, "process replacement was lost");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
