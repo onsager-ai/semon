@@ -293,7 +293,8 @@ impl ReceivedMachines {
         // acquire that mutex. Serialize publication under the same facts fence
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
-            let intent = crate::SessionFactsWrite::begin(&self.options(name, seen), &facts)?;
+            let intent =
+                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), &facts)?;
             crate::write_facts(&copy, &facts)?;
             intent.complete()
         };
@@ -387,6 +388,10 @@ mod tests {
             receiver.options("synthetic", seen)
         };
         let options = copy(&facts, &mut warned);
+        assert!(
+            !crate::events::store::push_driven(&options).unwrap(),
+            "facts alone must not claim a journaled Raw transport"
+        );
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         for _ in 0..64 {
             if evidence
@@ -445,6 +450,49 @@ mod tests {
         facts.proc_starts.insert(42, 101);
         copy(&facts, &mut warned);
         assert!(revision() > changed, "process replacement was lost");
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        for _ in 0..64 {
+            if evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap()
+            {
+                break;
+            }
+        }
+        // Reference transport appends Raw without SessionSourceWrite. A
+        // byte-identical facts heartbeat must not disable ordinary discovery.
+        use std::io::Write;
+        let appended = b"{\"type\":\"response_item\",\"timestamp\":\"2026-10-19T00:00:01Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"synthetic reference append\"}]}}\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .unwrap()
+            .write_all(appended)
+            .unwrap();
+        copy(&facts, &mut warned);
+        let length = fs::metadata(&log).unwrap().len();
+        let mut discovered = false;
+        for _ in 0..64 {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap();
+            discovered = crate::source_projection_ready(&options, "codex", selected)
+                .unwrap()
+                .is_some_and(|ready| ready.source.offset == length);
+            if discovered {
+                break;
+            }
+        }
+        assert!(
+            discovered,
+            "reference Raw append lost ordinary metadata discovery"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
