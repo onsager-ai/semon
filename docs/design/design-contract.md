@@ -74,6 +74,12 @@ invent model/effort choices to make the panel look more sophisticated.
 
 ## Intentional visual changes
 
+First reconcile the current requirement and applicable reference using the
+[baseline scope and review](ai-design-workflow.md#baseline-scope-and-review).
+Distinguish an implementation regression, obsolete reference and incorrect
+fixture state before deciding what to change. Apply settled product decisions
+without treating a historical screenshot as authority to reverse them.
+
 Run the normal checks first. Inspect the actual images and diffs before accepting
 a changed baseline. `node tests/ui/gallery.mjs --update-baselines` is an explicit
 local operation and is forbidden in CI. Review the resulting PNG changes and

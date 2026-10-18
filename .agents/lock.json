@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "45cb5ff2d9652ede5c9297650ab1baada1c06017e91c20a63bae1011b86d249f",
+  "manifest_sha256": "d345588e46e519d53fd7f4f7fa6ea6d1c8286fbebe38614ce10762aa86945f6f",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -73,7 +73,7 @@
       "mode": "100644"
     },
     ".agents/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "41669b001109f4181dd93e14871b23e3d445cf95da39bb80133d8cba0c012f30",
+      "sha256": "bd4bd6fbd8aab970057c4e2cb252d1a2115d3649d59602ffc82d31d2361d9d31",
       "owner": "shared",
       "mode": "100644"
     },
@@ -128,7 +128,7 @@
       "mode": "100755"
     },
     ".agents/skills/ui-design/SKILL.md": {
-      "sha256": "6fd036f14bd71c6cdbe2302e95301812d52ad240be2ea39fe2e33ff989a1ebb1",
+      "sha256": "53517fa7cac18714ecd0df4a50f716eceb17dd17aa8c5db89f94c5e7d3a252e8",
       "owner": "shared",
       "mode": "100644"
     },
@@ -198,7 +198,7 @@
       "mode": "100644"
     },
     ".claude/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "41669b001109f4181dd93e14871b23e3d445cf95da39bb80133d8cba0c012f30",
+      "sha256": "bd4bd6fbd8aab970057c4e2cb252d1a2115d3649d59602ffc82d31d2361d9d31",
       "owner": "shared",
       "mode": "100644"
     },
@@ -253,12 +253,12 @@
       "mode": "100755"
     },
     ".claude/skills/ui-design/SKILL.md": {
-      "sha256": "6fd036f14bd71c6cdbe2302e95301812d52ad240be2ea39fe2e33ff989a1ebb1",
+      "sha256": "53517fa7cac18714ecd0df4a50f716eceb17dd17aa8c5db89f94c5e7d3a252e8",
       "owner": "shared",
       "mode": "100644"
     },
     ".claude/skills/viewer-verification/SKILL.md": {
-      "sha256": "cd8f429e669ed91e13873120c3a59077c67e36c47fb0c50ae9e135f94a428d0f",
+      "sha256": "b280a7586c456db016f58a16b7368e59cab8268bf3f952a42f5d31570dcf05a5",
       "owner": "local-projection",
       "mode": "100644"
     },

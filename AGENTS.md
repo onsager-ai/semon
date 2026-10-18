@@ -31,6 +31,8 @@ cargo test --locked
 Installer changes also require `sh -n scripts/install-user-timer.sh`.
 Viewer changes require applicable fixture/browser suites and reviewed pixel
 baselines. Do not loosen existing thresholds or remove required checks.
+Reconcile current product decisions with the baseline scope before UI work;
+follow docs/design/ai-design-workflow.md for actual-image review and classification.
 Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci
 --no-audit --no-fund`, then `npm --prefix ui run typecheck`, `npm --prefix ui test`,
 `npm --prefix ui run check:bundle` and `npm --prefix ui run sizes`.
