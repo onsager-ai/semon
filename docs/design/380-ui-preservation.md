@@ -33,6 +33,18 @@ PNG-equivalence/carry-forward policy is authorized. Fresh exact-pair evidence
 is required after asset regeneration and Hub repinning. No merge/deploy is
 part of this acceptance work.
 
+### Follow-up compact Filter decision
+
+After paragraph removal and fresh capture, the user explicitly approved the six
+compact states with the correct selected-source value. The [Filter review and
+approval record](sessions-filter-placement-proposal.md#fresh-compact-state-review-and-approval--2026-10-18)
+retains the exact run, merge preview, raw pixel differences and geometry. Only
+six exact bindings are added to the existing registry; no Filter golden is
+replaced and no comparator or PNG-equivalence policy changes. The two obsolete
+paragraph-dependent interaction overflow failures remain historical; the fixture
+now checks compact fit and stresses the same scroll owner separately before
+restoring its original capture viewport. Final required checks remain pending.
+
 ## Acceptance contract repair — 2026-10-17
 
 This section records the earlier adapter repair. The continuation policy below
