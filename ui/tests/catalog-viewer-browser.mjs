@@ -1840,6 +1840,13 @@ for (const { width, colorScheme } of [
         /Selected source:|Cached history|Metadata search checks|Ordered by latest recorded activity/,
       );
       if (width === 390) {
+        assert.equal(
+          await filterBody.evaluate((body) => body.scrollHeight > body.clientHeight + 1),
+          false,
+          'compact phone Filter fits without the removed paragraph',
+        );
+        // Stress the existing scroll owner, then restore the original capture viewport.
+        await page.setViewportSize({ width, height: 320 });
         const scrollable = await filterBody.evaluate(
           (body) => body.scrollHeight > body.clientHeight + 1,
         );
@@ -1870,6 +1877,10 @@ for (const { width, colorScheme } of [
           () => document.querySelector('.filters-sheet .vb')?.scrollTop > 0,
         );
         assert.ok(await page.locator('.filters-sheet .vb').evaluate((node) => node.scrollTop > 0));
+        await page.setViewportSize({ width, height: 480 });
+        await page.waitForFunction(
+          () => document.querySelector('.filters-sheet .vb')?.scrollTop === 0,
+        );
       }
       if (process.env.SEMON_UI_OUT)
         await page.screenshot({
