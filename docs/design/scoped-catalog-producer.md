@@ -42,6 +42,8 @@ take the exclusive facts SourceLock and persist invalidation before publication,
 then complete the intent after writing the facts and its authority projection.
 This includes the reference viewer's normalized `ReceivedMachines` copy; the
 incoming mirror file is transport input, while that copy is a producer input.
+Its observed-input mode retains metadata discovery: a facts journal does not
+qualify the reference receiver's unjournaled Raw mutations as push-driven custody.
 An identical normalized heartbeat preserves the copy and creates no new work.
 The reference viewer holds its discovery mutex before the facts lock; producers
 do not take that discovery mutex. A failed publication leaves durable dirty work
