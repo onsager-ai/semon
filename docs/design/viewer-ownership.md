@@ -250,8 +250,10 @@ rows, including child sessions, harness marks, recorded duration and delegation.
 Recent/Project/Machine/Harness grouping uses only loaded Catalog metadata and
 performs no source or transcript reads. Child counts follow exact loaded parent
 keys with cycle protection; they do not claim complete workspace counts. Metadata
-filters use the existing shared Filter/Select sheet. The source-qualified Machine
-field names the selected source rather than advertising an unavailable global
+filters use the existing shared Filter/Select sheet. Following the latest user
+review, the neutral Machine facet displays `All machines`; it applies no machine
+subset within the selected source. Source selection and qualified search/count
+tooltips retain the actual source boundary; this label admits no workspace-wide
 union. The reader retains filter requests, cursor generations, row focus and
 scroll; `catalogBrowser` owns only the bounded filter choices and shared sheet
 lifetime. Native completeness/retry notices remain explicit. The list retains a

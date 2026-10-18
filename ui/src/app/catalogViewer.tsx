@@ -1965,7 +1965,6 @@ export function createCatalogViewer(
       { harness, repo, model, q: query },
       items,
       capabilities.source_key,
-      selectedSourceLabel,
       filterDescription,
     );
     const groupKey = (item: CatalogSession) =>
