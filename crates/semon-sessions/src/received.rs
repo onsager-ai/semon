@@ -288,7 +288,16 @@ impl ReceivedMachines {
         if read_facts(&copy).is_ok_and(|previous| previous == facts) {
             return;
         }
-        if let Err(error) = crate::write_facts(&copy, &facts) {
+        // This reader-owned copy is a producer input, unlike the receiver's
+        // incoming facts. follow() holds its discovery mutex; producers never
+        // acquire that mutex. Serialize publication under the same facts fence
+        // as hosted receivers, and retain dirty work if publication fails.
+        let publish = || -> io::Result<()> {
+            let intent = crate::SessionFactsWrite::begin(&self.options(name, seen), &facts)?;
+            crate::write_facts(&copy, &facts)?;
+            intent.complete()
+        };
+        if let Err(error) = publish() {
             eprintln!("semon: received machine {name}: can't keep its facts: {error}");
         }
     }
