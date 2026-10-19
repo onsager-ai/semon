@@ -142,15 +142,27 @@ pub(crate) struct CodexUsageEvent {
 /// Native thread counters can include a fork's inherited context.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CodexNativeUsage {
+    #[serde(default)]
     seen: BTreeSet<String>,
     tokens: Tokens,
+    #[serde(default)]
     by_model: BTreeMap<String, ModelTokens>,
+    #[serde(default)]
     events: Vec<CodexUsageEvent>,
+    #[serde(skip)]
+    cost: Option<crate::pricing::CostBuild>,
 }
 
 impl CodexNativeUsage {
     pub(crate) fn tokens(&self) -> Tokens {
         self.tokens.clone()
+    }
+
+    pub(crate) fn compact(&self) -> Self {
+        Self {
+            tokens: self.tokens.clone(),
+            ..Self::default()
+        }
     }
 
     pub(crate) fn observe(
@@ -159,13 +171,42 @@ impl CodexNativeUsage {
         model: String,
         time: Option<i64>,
     ) {
-        let Some(usage) = payload.get("usage") else {
+        let Some((key, tokens, counts)) = Self::decode(payload) else {
             return;
         };
+        let native = slot.get_or_insert_with(Default::default);
+        if !native.seen.insert(key) {
+            return;
+        }
+        native.tokens.input += tokens.input;
+        native.tokens.cached_input += tokens.cached_input;
+        native.tokens.output += tokens.output;
+        native.tokens.total += tokens.total;
+        native.tokens.reasoning_output += tokens.reasoning_output;
+        native
+            .by_model
+            .entry(model.clone())
+            .or_default()
+            .add(&counts);
+        let event = CodexUsageEvent {
+            model,
+            tokens: counts,
+            timestamp: time,
+        };
+        if let Some(cost) = &mut native.cost {
+            cost.codex(&event);
+        } else {
+            native.events.push(event);
+        }
+    }
+
+    /// Shared validation for indexing and receipt-checked representation migration.
+    pub(crate) fn decode(payload: &Value) -> Option<(String, Tokens, ModelTokens)> {
+        let usage = payload.get("usage")?;
         let identity =
             ["thread_id", "session_id", "turn_id", "response_id"].map(|key| field(payload, key));
         if identity.iter().any(|id| id.is_none_or(str::is_empty)) {
-            return;
+            return None;
         }
         let [
             Some(input),
@@ -184,35 +225,27 @@ impl CodexNativeUsage {
         ]
         .map(|key| usage.get(key).and_then(Value::as_u64))
         else {
-            return;
+            return None;
         };
-        let native = slot.get_or_insert_with(Default::default);
         // Serialize the exact tuple, avoiding delimiter collisions or timing joins.
         let key = serde_json::to_string(&identity).expect("string tuple serializes");
-        if !native.seen.insert(key) {
-            return;
-        }
         let counts = ModelTokens {
             input: input.saturating_sub(cache_read),
             output,
             cache_read,
             cache_write,
         };
-        native.tokens.input += input;
-        native.tokens.cached_input += cache_read;
-        native.tokens.output += output;
-        native.tokens.total += total;
-        native.tokens.reasoning_output += reasoning;
-        native
-            .by_model
-            .entry(model.clone())
-            .or_default()
-            .add(&counts);
-        native.events.push(CodexUsageEvent {
-            model,
-            tokens: counts,
-            timestamp: time,
-        });
+        Some((
+            key,
+            Tokens {
+                input,
+                cached_input: cache_read,
+                output,
+                total,
+                reasoning_output: reasoning,
+            },
+            counts,
+        ))
     }
 }
 
@@ -287,6 +320,8 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    /// Only this parse batch; durable facts and identities stay in the Event Index.
+    pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
     pub(crate) tree_summary: Option<crate::native_tree::Summary>,
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker_index: Option<crate::native_marker::Index>,
@@ -726,6 +761,26 @@ impl FileIndex {
             .map_or(&self.codex_usage_events, |usage| &usage.events)
     }
 
+    #[cfg(test)]
+    pub(crate) fn native_usage_history_sizes(&self) -> Option<(usize, usize)> {
+        self.codex_native_usage
+            .as_ref()
+            .map(|native| (native.seen.len(), native.events.len()))
+    }
+
+    pub(crate) fn codex_cost(&self) -> crate::pricing::CostBuild {
+        if let Some(native) = &self.codex_native_usage
+            && let Some(cost) = &native.cost
+        {
+            return cost.clone();
+        }
+        let mut cost = crate::pricing::CostBuild::default();
+        for event in self.codex_usage_events() {
+            cost.codex(event);
+        }
+        cost
+    }
+
     pub(crate) fn tokens(&self, harness: &str) -> Tokens {
         if harness == "copilot" {
             return self
@@ -830,6 +885,7 @@ thread_local! {
     pub(crate) static AFTER_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static CATALOG_DERIVED_SOURCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static CATALOG_PUBLISHED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static INDEX_WRITTEN_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -1092,6 +1148,36 @@ pub(crate) trait IndexStore: Send {
 
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
+
+    fn native_usage_seen(
+        &self,
+        _path: &str,
+        _ledger: &Ledger,
+        _identity: &str,
+    ) -> Result<store::native_usage::Seen, StoreError> {
+        Ok(store::native_usage::Seen::default())
+    }
+
+    fn advance_native_usage_migration(
+        &mut self,
+        _options: &crate::Options,
+    ) -> io::Result<(bool, Option<String>)> {
+        Ok((false, None))
+    }
+    fn native_usage_migration_pending(&self) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn queue_tree_repair(
+        &mut self,
+        _path: &str,
+        _ledger: &Ledger,
+        _harness: &str,
+    ) -> io::Result<()> {
+        Err(io::Error::other(
+            "native tree repair requires a durable store",
+        ))
+    }
 
     /// A committed tree summary and its evidence, without event/signal rows.
     fn load_tree(
@@ -2072,6 +2158,26 @@ impl EventCache {
         self.files.keys().map(String::as_str)
     }
 
+    pub(crate) fn advance_native_usage_migration(
+        &mut self,
+        options: &crate::Options,
+    ) -> io::Result<bool> {
+        let Some(store) = self.store.as_mut() else {
+            return Ok(false);
+        };
+        let (pending, changed) = store.advance_native_usage_migration(options)?;
+        if let Some(path) = changed {
+            self.files.remove(&path);
+        }
+        Ok(pending)
+    }
+
+    pub(crate) fn native_usage_migration_pending(&self) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|store| store.native_usage_migration_pending().unwrap_or(true))
+    }
+
     pub(crate) fn indexed_stat(&self, path: &Path) -> Option<Stat> {
         self.files
             .get(path.to_string_lossy().as_ref())
@@ -2310,6 +2416,29 @@ impl EventCache {
         }
     }
 
+    fn require_usage_store(&self, index: &FileIndex) -> io::Result<()> {
+        // Either consumer can accept usage first: Tree also accepts it before
+        // the first model. Their compact checkpoints keep historical identities
+        // only in SQLite, so neither can become an in-memory append base.
+        let tree_checkpoint = index.native_usage_observations.is_some()
+            && index
+                .tree_summary
+                .as_ref()
+                .is_some_and(|tree| tree.stored.is_some());
+        if self.store.is_none()
+            && (tree_checkpoint
+                || index
+                    .codex_native_usage
+                    .as_ref()
+                    .is_some_and(|native| native.cost.is_some()))
+        {
+            return Err(io::Error::other(
+                "normalized native usage store unavailable",
+            ));
+        }
+        Ok(())
+    }
+
     /// Parsing happens before the write reservation. Cold complete new files
     /// share one bounded commit; no offset or dirty revision can escape alone.
     pub(crate) fn flush_cold_writes(&mut self) -> io::Result<()> {
@@ -2419,6 +2548,9 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
+        cache.require_usage_store(index)?;
+    }
     let started = cache.scan_measurements.start();
     let _source_lock = cache
         .lock_cache
@@ -2511,6 +2643,7 @@ pub(crate) fn scan_file(
             if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
                 match cache.base(&key, ledger) {
                     Base::Found(index) => {
+                        cache.require_usage_store(&index)?;
                         trusted_append = evidence
                             && index
                                 .source_chunks
@@ -2594,6 +2727,9 @@ pub(crate) fn scan_file(
         let clone_started = Instant::now();
         let shared = Arc::strong_count(&index) > 1;
         let writable = Arc::make_mut(&mut index);
+        if !append && harness == "codex" {
+            writable.native_usage_observations = Some(Vec::new());
+        }
         if shared {
             cache.index_clone += clone_started.elapsed();
         }
@@ -2629,7 +2765,26 @@ pub(crate) fn scan_file(
         if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
-        if harness != "copilot" && writable.tree_summary.is_none() {
+        let deferred_tree =
+            harness != "copilot" && writable.tree_summary.is_none() && from > 1024 * 1024;
+        if deferred_tree {
+            // Small compatibility repairs have a fixed byte ceiling. Large
+            // retained sources resume through the verified projection worker;
+            // never rebuild a historical Summary in the foreground reader.
+            if let (Some(store), Some(ledger)) = (cache.store.as_mut(), recorded.as_ref()) {
+                store.queue_tree_repair(&key, ledger, harness)?;
+            }
+            if recorded.as_ref().is_some_and(|ledger| ledger.stat == stat) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "native tree projection repair pending",
+                ));
+            }
+            // Advancing the Index receipt for a real append lets the worker
+            // resume its verified prefix. Tree stays explicitly unavailable
+            // until that worker commits a complete replacement projection.
+        }
+        if harness != "copilot" && writable.tree_summary.is_none() && !deferred_tree {
             let started = cache.scan_measurements.start();
             let (summary, observed) =
                 crate::native_tree::Summary::repair(&mut file, from, harness)?;
@@ -2668,8 +2823,22 @@ pub(crate) fn scan_file(
             handoffs.begin_append();
         }
         let parse_started = cache.scan_timing.then(Instant::now);
-        let (offset, parsed, bounded) =
-            parse(&mut file, from, harness, writable, cache.scan_byte_budget)?;
+        let (offset, parsed, bounded) = parse(
+            &mut file,
+            from,
+            harness,
+            writable,
+            cache.scan_byte_budget,
+            append
+                .then(|| {
+                    cache
+                        .store
+                        .as_deref()
+                        .zip(recorded.as_ref())
+                        .map(|(store, ledger)| (store, key.as_str(), ledger))
+                })
+                .flatten(),
+        )?;
         if let Some(started) = parse_started {
             cache.parse_duration += started.elapsed();
         }
@@ -2850,6 +3019,17 @@ pub(crate) fn scan_file(
                 .ok_or_else(|| io::Error::other("bounded source requires a durable store"))?;
             super::events::store::checkpoint_source_scan(stem, &key, &ledger, &stat)?;
         }
+        if cache.store.is_some() && !cache.unpersisted.contains(&key) {
+            store::native_usage::checkpoint(Arc::make_mut(&mut index));
+            if let Some(store) = cache.store.as_ref()
+                && let Some((stored, metadata)) = store
+                    .load_tree(&key, &ledger.stat)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+                && stored == ledger
+            {
+                Arc::make_mut(&mut index).tree_summary = Some(metadata.summary);
+            }
+        }
         cache.files.insert(
             key,
             CachedFile {
@@ -2870,6 +3050,7 @@ fn parse(
     harness: &str,
     index: &mut FileIndex,
     budget: Option<u64>,
+    stored: Option<(&dyn IndexStore, &str, &Ledger)>,
 ) -> io::Result<(u64, [u8; 32], bool)> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
@@ -2910,8 +3091,47 @@ fn parse(
             SOURCE_HASHED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
         }
         let record = serde_json::from_slice::<Value>(&line);
+        // Only a touched message needs its old report for the Tree delta.
+        if harness == "claude"
+            && let Some(summary) = &mut index.tree_summary
+            && summary.usage_total.is_some()
+            && let Some(message) = record.as_ref().ok().and_then(|r| r.get("message"))
+            && message.get("usage").is_some()
+            && let Some(id) = field(message, "id")
+            && !summary.usage_by_id.contains_key(id)
+            && let Some(old) = index.usage_by_id.get(id)
+        {
+            summary
+                .usage_by_id
+                .insert(id.to_owned(), old.tokens.clone());
+        }
+        let observation = if harness == "codex" {
+            record.as_ref().ok().and_then(|record| {
+                store::native_usage::Observation::capture(
+                    record,
+                    &line,
+                    line_offset,
+                    index.last_model.as_deref(),
+                )
+            })
+        } else {
+            None
+        };
+        let known = if let (Some(observation), Some((store, path, ledger))) = (&observation, stored)
+        {
+            store
+                .native_usage_seen(path, ledger, observation.identity())
+                .map_err(|error| io::Error::other(error.to_string()))?
+        } else {
+            store::native_usage::Seen::default()
+        };
+        if let (Some(observation), Some(observations)) =
+            (observation, &mut index.native_usage_observations)
+        {
+            observations.push(observation);
+        }
         if let Some(summary) = &mut index.tree_summary {
-            summary.observe(record.as_ref().ok(), harness);
+            summary.observe_counted(record.as_ref().ok(), harness, !known.tree);
         }
         match record {
             Ok(record) if record.is_object() => {
@@ -2925,8 +3145,10 @@ fn parse(
                     copilot(index, &record, line_offset);
                 } else if harness == "claude" {
                     claude(index, &record, line_offset);
-                } else {
+                } else if !known.model {
                     codex(index, &record, line_offset);
+                } else {
+                    activity(index, record_time(&record));
                 }
             }
             _ => gap(index, line_offset),
@@ -6198,8 +6420,8 @@ mod tests {
             .get(key.as_ref())
             .expect("the rollout is stored");
         assert_eq!(
-            format!("{:?}", entry.index.as_ref().unwrap()),
-            format!("{fresh_index:?}")
+            index_snapshot(entry.index.as_ref().unwrap()),
+            index_snapshot(&fresh_index)
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -6742,12 +6964,34 @@ mod tests {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}})
     }
 
+    // Compare all Index facts and observable Tree metadata across the in-memory
+    // and normalized representations. Full historical Tree maps are no longer
+    // the persistence contract; totals, models and active tool state still are.
+    fn index_snapshot(index: &FileIndex) -> String {
+        let mut snapshot = index.clone();
+        snapshot.tree_summary = index.tree_summary.as_ref().map(|summary| {
+            let mut compact = summary.compact(true);
+            compact.first = summary.first.clone();
+            compact.last = summary.last.clone();
+            compact.cwd = summary.cwd.clone();
+            compact.branch = summary.branch.clone();
+            compact.models = summary.models.clone();
+            compact.tools = summary
+                .open_tools()
+                .into_iter()
+                .map(|tool| (tool.id, tool.name))
+                .collect();
+            compact
+        });
+        format!("{snapshot:?}")
+    }
+
     /// What a cold, in-memory read of `path` indexes: the oracle every
     /// persisted index must equal.
     fn cold(path: &Path) -> String {
         let mut cache = EventCache::default();
         let index = scan_file(path, "claude", &mut cache, &mut false).unwrap();
-        format!("{index:?}")
+        index_snapshot(&index)
     }
 
     /// What the store beside `v1` holds for `path`, as a new process reads it.
@@ -6756,7 +7000,7 @@ mod tests {
         assert!(cache.store.is_some(), "the store opens");
         let key = path.to_string_lossy();
         let entry = cache.files.get(key.as_ref()).expect("the file is stored");
-        format!("{:?}", entry.index.as_ref().unwrap())
+        index_snapshot(entry.index.as_ref().unwrap())
     }
 
     /// The store's bytes and its WAL's, as text: a value stored in any row
@@ -6903,7 +7147,7 @@ mod tests {
         assert!(grown.dirty_rows.is_none());
         let mut restarted = EventCache::open(&cache_path);
         let loaded = scan_file(&path, "claude", &mut restarted, &mut dirty).unwrap();
-        assert_eq!(format!("{grown:?}"), format!("{loaded:?}"));
+        assert_eq!(index_snapshot(&grown), index_snapshot(&loaded));
         drop(cache);
         drop(restarted);
         fs::remove_dir_all(root).unwrap();
@@ -6918,7 +7162,7 @@ mod tests {
         let mut cache = EventCache::open_scoped(&cache_path).unwrap();
         let first = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         let weak = Arc::downgrade(&first);
-        let expected = format!("{first:?}");
+        let expected = index_snapshot(&first);
         let revision = cache.revision(&path);
         let source = cache.source(&path, "selected").unwrap();
         drop(first);
@@ -6934,7 +7178,7 @@ mod tests {
         let before = parsed();
         ledger_trace();
         let unchanged = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(format!("{unchanged:?}"), expected);
+        assert_eq!(index_snapshot(&unchanged), expected);
         assert_eq!(parsed(), before, "released history was reparsed");
         assert_eq!(ledger_trace(), ["unchanged"]);
         drop(unchanged);
@@ -6945,7 +7189,7 @@ mod tests {
         assert_eq!(ledger_trace(), ["append"]);
         assert_eq!(parsed() - before, 2, "append reread the old generation");
         assert!(appended.events[0].r.is_some());
-        assert_eq!(format!("{appended:?}"), stored(&cache_path, &path));
+        assert_eq!(index_snapshot(&appended), stored(&cache_path, &path));
         drop(appended);
         let key = path.to_string_lossy().into_owned();
         cache.unpersisted.insert(key.clone());
@@ -7184,7 +7428,7 @@ mod tests {
         touch(&log, 6);
         let index = scan(&mut cache);
         assert_eq!(ledger_trace(), ["replace"]);
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert_eq!(stored(&v1, &log), cold(&log));
 
         // Gone: its rows go with it.
@@ -7224,7 +7468,7 @@ mod tests {
             ledger_trace(),
             ["append", "append", "conflict", "unchanged"]
         );
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert_eq!(stored(&v1, &log), cold(&log));
         fs::remove_dir_all(root).unwrap();
     }
@@ -7275,6 +7519,59 @@ mod tests {
             assert_eq!(stored(&v1, log), cold(log));
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_usage_lost_store_rejects_compact_totals_until_reopened() {
+        for known_model in [false, true] {
+            let root = scratch("native-usage-store-loss");
+            let v1 = root.join("index.json");
+            let log = root.join("session.jsonl");
+            let usage = serde_json::json!({"type":"token_usage_record","payload":{
+                "thread_id":"native","session_id":"session","turn_id":"turn",
+                "response_id":"response","usage":{"input_tokens":7,"output_tokens":0,
+                "total_tokens":7,"cached_input_tokens":0,"cache_write_input_tokens":0,
+                "reasoning_output_tokens":0}}});
+            let mut records =
+                vec![serde_json::json!({"type":"session_meta","payload":{"id":"native"}})];
+            if known_model {
+                records.push(
+                    serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}),
+                );
+            }
+            records.push(usage.clone());
+            write_lines(&log, &records);
+            let mut cache = EventCache::open(&v1);
+            let index = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+            assert_eq!(index.tokens("codex").input, if known_model { 7 } else { 0 });
+            assert_eq!(
+                index.tree_summary.as_ref().unwrap().tokens("codex").input,
+                7
+            );
+            drop(index);
+            cache.lose_store(&"injected disconnect");
+            assert!(
+                scan_file(&log, "codex", &mut cache, &mut false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("usage store unavailable")
+            );
+            append_lines(&log, &[usage]);
+            assert!(
+                scan_file(&log, "codex", &mut cache, &mut false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("usage store unavailable")
+            );
+            let mut reopened = EventCache::open(&v1);
+            let index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+            assert_eq!(index.tokens("codex").input, if known_model { 7 } else { 0 });
+            assert_eq!(
+                index.tree_summary.as_ref().unwrap().tokens("codex").input,
+                7
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -7403,7 +7700,7 @@ mod tests {
             waited < Duration::from_millis(1800),
             "one wait, not two: {waited:?}"
         );
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert!(cache.store.is_some(), "a busy store stays in use");
         let key = |path: &Path| path.to_string_lossy().into_owned();
         assert!(cache.unpersisted.contains(&key(&log)));
@@ -7477,12 +7774,12 @@ mod tests {
         let mut cache = EventCache::open(&v1);
         assert!(cache.store.is_none(), "no store in a read-only directory");
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         append_lines(&log, &[claude_result("t1")]);
         ledger_trace();
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(ledger_trace(), ["append"], "in memory, it still resumes");
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert!(!EventCache::path(&v1).exists());
         restore();
         fs::remove_dir_all(root).unwrap();

@@ -206,25 +206,68 @@ const KINDS: [&str; 6] = [
     "web_search",
 ];
 
-#[derive(Default)]
-struct ModelCostBuild {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ModelCostBuild {
     tokens: CostTokens,
+    #[serde(deserialize_with = "cost_kinds")]
     usd_by_kind: BTreeMap<&'static str, f64>,
     usd: f64,
-    unpriced: bool,
+    pub(crate) unpriced: bool,
 }
 
-#[derive(Default)]
-struct CostBuild {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct CostBuild {
     usd: f64,
     has_unpriced: bool,
     split_unknown_messages: u64,
-    models: BTreeMap<String, ModelCostBuild>,
-    unpriced_models: BTreeSet<String>,
-    by_day: BTreeMap<String, f64>,
+    pub(crate) models: BTreeMap<String, ModelCostBuild>,
+    pub(crate) unpriced_models: BTreeSet<String>,
+    pub(crate) by_day: BTreeMap<String, f64>,
 }
 
 impl CostBuild {
+    pub(crate) fn codex(&mut self, event: &CodexUsageEvent) {
+        let billing = BillingUsage {
+            input: event.tokens.input,
+            output: event.tokens.output,
+            cache_read: event.tokens.cache_read,
+            prompt_size: event.tokens.input + event.tokens.cache_read,
+            timestamp: event.timestamp,
+            ..Default::default()
+        };
+        self.add(
+            &event.model,
+            &billing,
+            event.timestamp,
+            false,
+            price_for(&event.model),
+        );
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.usd += other.usd;
+        self.has_unpriced |= other.has_unpriced;
+        self.split_unknown_messages += other.split_unknown_messages;
+        self.unpriced_models
+            .extend(other.unpriced_models.iter().cloned());
+        for (model, cost) in &other.models {
+            let entry = self.models.entry(model.clone()).or_default();
+            entry.usd += cost.usd;
+            entry.unpriced |= cost.unpriced;
+            entry.tokens.input += cost.tokens.input;
+            entry.tokens.output += cost.tokens.output;
+            entry.tokens.cache_read += cost.tokens.cache_read;
+            entry.tokens.cache_write_5m += cost.tokens.cache_write_5m;
+            entry.tokens.cache_write_1h += cost.tokens.cache_write_1h;
+            for (kind, amount) in &cost.usd_by_kind {
+                *entry.usd_by_kind.entry(kind).or_default() += amount;
+            }
+        }
+        for (day, amount) in &other.by_day {
+            *self.by_day.entry(day.clone()).or_default() += amount;
+        }
+    }
+
     fn add(
         &mut self,
         model: &str,
@@ -337,7 +380,7 @@ impl CostBuild {
         }
     }
 
-    fn finish(self) -> Cost {
+    pub(crate) fn finish(self) -> Cost {
         let by_model = self
             .models
             .into_iter()
@@ -380,7 +423,7 @@ fn add_tokens(tokens: &mut CostTokens, kind: &str, amount: u64) {
     }
 }
 
-fn utc_day(timestamp_ms: i64) -> String {
+pub(crate) fn utc_day(timestamp_ms: i64) -> String {
     let days = timestamp_ms.div_euclid(86_400_000);
     // Howard Hinnant's civil_from_days, with Unix epoch day zero.
     let z = days + 719_468;

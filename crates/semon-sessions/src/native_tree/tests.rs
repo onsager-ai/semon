@@ -81,6 +81,641 @@ fn line(value: Value) -> String {
     format!("{value}\n")
 }
 
+fn explicit_usage(id: u64, input: u64) -> Value {
+    json!({"type":"token_usage_record","timestamp":"2026-10-01T00:00:00Z","payload":{
+        "thread_id":"native","session_id":"session","turn_id":format!("turn-{id}"),
+        "response_id":format!("response-{id}-{}","x".repeat(96)),
+        "usage":{"input_tokens":input,"output_tokens":0,"total_tokens":input,
+        "cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}})
+}
+
+#[test]
+fn native_usage_memory_only_reader_keeps_deduplication_until_a_durable_checkpoint() {
+    let home = Home::new();
+    let text = line(json!({"type":"session_meta","payload":{"id":"native"}}))
+        + &line(json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}))
+        + &line(explicit_usage(1, 7));
+    let path = home.write("codex/sessions/2026/10/01/rollout-native.jsonl", &text);
+    let mut cache = events::EventCache::default();
+    assert_eq!(
+        events::scan_file(&path, "codex", &mut cache, &mut false)
+            .unwrap()
+            .tokens("codex")
+            .input,
+        7
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(
+            (line(explicit_usage(1, 7))
+                + &line(explicit_usage(1, 99))
+                + &line(explicit_usage(2, 11)))
+                .as_bytes(),
+        )
+        .unwrap();
+    let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    assert_eq!(index.tokens("codex").input, 18);
+    assert_eq!(
+        index.tree_summary.as_ref().unwrap().tokens("codex").input,
+        18
+    );
+    assert!(!events::EventCache::path(&home.options.cache).exists());
+}
+
+#[test]
+fn native_usage_append_work_depends_on_touched_rows_and_pricing_dimensions() {
+    let mut writes = None;
+    for count in [8, 512, 8192] {
+        let home = Home::new();
+        let mut text = line(json!({"type":"session_meta","payload":{"id":"native"}}))
+            + &line(json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}));
+        for n in 0..count {
+            text += &line(explicit_usage(n, 7));
+        }
+        let path = home.write("codex/sessions/2026/10/01/rollout-native.jsonl", &text);
+        let baseline = {
+            let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+            json!(index.codex_cost().finish())
+        };
+        let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        db.execute_batch("CREATE TRIGGER facts_immutable BEFORE UPDATE ON native_usage_facts BEGIN SELECT RAISE(ABORT,'old fact rewritten'); END;").unwrap();
+        let restored =
+            events::store::native_usage::RESTORED_DIMENSION_ROWS.with(std::cell::Cell::get);
+        let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+        assert_eq!(
+            json!(index.codex_cost().finish()),
+            baseline,
+            "cost changed across serialization"
+        );
+        assert_eq!(
+            events::store::native_usage::RESTORED_DIMENSION_ROWS.with(std::cell::Cell::get)
+                - restored,
+            3
+        );
+        assert_eq!(index.native_usage_history_sizes(), Some((0, 0)));
+        drop(index);
+        let loads = events::FILE_READS.with(std::cell::Cell::get);
+        let mut evidence = Evidence::default();
+        let tree = read(
+            &home.options,
+            &path,
+            "codex",
+            "native",
+            &mut home.cache(),
+            &mut false,
+            &mut evidence,
+        )
+        .unwrap();
+        evidence.finish(&home.options).unwrap();
+        assert_eq!(tree.tokens("codex").input, count * 7);
+        assert_eq!(events::FILE_READS.with(std::cell::Cell::get), loads);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line(explicit_usage(count, 11)).as_bytes())
+            .unwrap();
+        let before = events::INDEX_WRITTEN_ROWS.with(std::cell::Cell::get);
+        let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+        let changed = events::INDEX_WRITTEN_ROWS.with(std::cell::Cell::get) - before;
+        assert_eq!(index.tokens("codex").input, count * 7 + 11);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_usage_facts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            count as i64 + 1
+        );
+        assert!(
+            changed < 128,
+            "append changed {changed} rows for {count} reports"
+        );
+        if let Some(previous) = writes {
+            assert!(changed <= previous + 4, "append writes grew with history");
+        }
+        writes = Some(changed);
+        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT native_offset FROM native_usage_identities WHERE source_id=?1 AND scope='model' AND identity=?2",rusqlite::params![1,"synthetic"],|r|r.get(3)).unwrap();
+        assert!(
+            plan.contains("PRIMARY KEY"),
+            "identity lookup scans history: {plan}"
+        );
+        eprintln!(
+            "usage-scaling history={count} native_restore_rows=3 native_restore_identities=0 native_restore_events=0 tree_index_loads=0 append_sql_changed_rows={changed} appended_facts=1 identity_plan={plan}"
+        );
+    }
+}
+
+#[test]
+fn native_usage_tree_dimensions_keep_root_small_and_restore_only_active_tools() {
+    for count in [8, 4096] {
+        let home = Home::new();
+        let mut text = String::new();
+        for n in 0..count {
+            text += &line(
+                json!({"type":"assistant","uuid":format!("uuid-{n}"),"message":{"id":format!("msg-{n}"),"model":"native","usage":{"input_tokens":1},"content":[{"type":"tool_use","id":format!("tool-{n}"),"name":"Read"}]}}),
+            );
+            if n >= 2 {
+                text += &line(
+                    json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":format!("tool-{n}"),"content":"synthetic"}]}}),
+                );
+            }
+        }
+        let path = home.write("claude/projects/repo/parent.jsonl", &text);
+        let nodes = collect(&home.options).unwrap();
+        assert_eq!(nodes[0].tokens.input, count);
+        assert_eq!(nodes[0].open_tools.len(), 2);
+        let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        let bytes: i64 = db
+            .query_row(
+                "SELECT octet_length(value) FROM meta WHERE key=?1",
+                [format!("native_tree_summary:{}", path.display())],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(bytes < 2048);
+        let parsed = events::PARSED.with(std::cell::Cell::get);
+        let reads = events::FILE_READS.with(std::cell::Cell::get);
+        let restarted = collect(&home.options).unwrap();
+        assert_eq!(restarted[0].tokens.input, count);
+        assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
+        assert_eq!(events::FILE_READS.with(std::cell::Cell::get), reads);
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(line(json!({"type":"assistant","message":{"id":"msg-0","usage":{"input_tokens":7},"content":[{"type":"tool_result","tool_use_id":"tool-0"},{"type":"tool_use","id":"tool-2","name":"Skill"}]}})).as_bytes()).unwrap();
+        let appended = collect(&home.options).unwrap();
+        assert_eq!(appended[0].tokens.input, count + 6);
+        assert_eq!(
+            appended[0].open_tools.len(),
+            1,
+            "a historical closed ID reopened"
+        );
+        assert_eq!(appended[0].open_tools[0].id, "tool-1");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_tree_tools", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            count as i64
+        );
+        eprintln!(
+            "tree-dimensions history={count} root_bytes={bytes} active_tools=2 cold_index_loads=0"
+        );
+    }
+}
+
+#[test]
+fn native_usage_facts_preserve_duplicate_conflict_unknown_model_and_incarnation_scope() {
+    let home = Home::new();
+    let unknown = explicit_usage(1, 7);
+    let mut text = line(json!({"type":"session_meta","payload":{"id":"native"}}));
+    text += &line(unknown.clone());
+    text += &line(json!({"type":"turn_context","payload":{"model":"unknown-model"}}));
+    text += &line(unknown);
+    text += &line(explicit_usage(1, 99));
+    text += &line(explicit_usage(2, 0));
+    let path = home.write("codex/sessions/2026/10/01/rollout-native.jsonl", &text);
+    {
+        let mut cache = home.cache();
+        let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(index.tokens("codex").input, 7);
+        assert_eq!(
+            index.tree_summary.as_ref().unwrap().tokens("codex").input,
+            7
+        );
+    }
+    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let source = || {
+        db.query_row(
+            "SELECT source_id FROM native_usage_current WHERE source_path=?1",
+            [path.to_str().unwrap()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let original = source();
+    let outcomes: Vec<(String,String)> = db.prepare("SELECT outcome,model_outcome FROM native_usage_facts WHERE source_id=?1 ORDER BY native_offset").unwrap().query_map([original],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    assert_eq!(
+        outcomes,
+        [
+            ("accepted".into(), "unavailable".into()),
+            ("conflict".into(), "accepted".into()),
+            ("conflict".into(), "conflict".into()),
+            ("accepted".into(), "accepted".into())
+        ]
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(line(explicit_usage(1, 7)).as_bytes())
+        .unwrap();
+    {
+        let mut cache = home.cache();
+        let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(index.tokens("codex").input, 7);
+        assert_eq!(
+            index.tree_summary.as_ref().unwrap().tokens("codex").input,
+            7
+        );
+    }
+    assert_eq!(source(), original, "append changed incarnation");
+    fs::write(
+        &path,
+        line(json!({"type":"session_meta","payload":{"id":"native","forked_from_id":"parent"}}))
+            + &line(json!({"type":"turn_context","payload":{"model":"unknown-model"}}))
+            + &line(explicit_usage(1, u64::MAX)),
+    )
+    .unwrap();
+    {
+        let mut cache = home.cache();
+        let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(index.tokens("codex").input, u64::MAX);
+    }
+    assert_ne!(
+        source(),
+        original,
+        "replacement retained the old incarnation"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM native_usage_facts WHERE source_id=?1",
+            [original],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        5,
+        "replacement lost original provenance"
+    );
+    let mut cache = home.cache();
+    assert_eq!(
+        events::scan_file(&path, "codex", &mut cache, &mut false)
+            .unwrap()
+            .tokens("codex")
+            .input,
+        u64::MAX
+    );
+}
+
+fn legacy_usage_fixture(count: u64) -> (Home, PathBuf) {
+    let home = Home::new();
+    let model = "gpt-6-sol";
+    let mut legacy = None;
+    let mut text = line(json!({"type":"session_meta","payload":{"id":"native"}}))
+        + &line(json!({"type":"turn_context","payload":{"model":model}}));
+    // Reverse IDs ensure sorted identity order cannot be zipped with events.
+    for n in (0..count).rev() {
+        let record = explicit_usage(n, 7);
+        events::CodexNativeUsage::observe(
+            &mut legacy,
+            &record["payload"],
+            model.into(),
+            events::parse_ms("2026-10-01T00:00:00Z"),
+        );
+        text += &line(record);
+    }
+    let path = home.write("codex/sessions/2026/10/01/rollout-native.jsonl", &text);
+    {
+        let mut cache = home.cache();
+        events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    }
+    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let legacy = serde_json::to_string(&legacy.unwrap()).unwrap();
+    assert!(legacy.len() > 1024 * 1024);
+    db.execute("UPDATE files SET codex_native_usage=?1", [&legacy])
+        .unwrap();
+    db.execute(
+        "DELETE FROM meta WHERE key LIKE 'native_tree_summary:%'",
+        [],
+    )
+    .unwrap();
+    db.execute_batch("DROP TRIGGER native_tree_copy_insert; DROP TRIGGER native_tree_copy_delete; DROP TABLE native_tree_copied_identities; DROP TABLE native_tree_usage_models; DROP TABLE native_tree_tools; DROP TABLE native_tree_models; DROP TABLE native_tree_labels; DROP TABLE native_tree_usage_work; DROP TABLE native_tree_codex_work; DROP TABLE native_tree_headers; DROP TABLE native_tree_generations; DROP TABLE native_usage_migrations; DROP TABLE native_usage_identities; DROP TABLE native_usage_facts; DROP TABLE native_usage_dimensions; DROP TABLE native_usage_current; DROP TABLE native_usage_sources; DELETE FROM meta WHERE key IN ('native_usage_discovery_done','native_usage_discovery_after'); PRAGMA user_version=28;").unwrap();
+    (home, path)
+}
+
+#[test]
+fn native_usage_migration_cancel_and_sql_failure_preserve_the_committed_checkpoint() {
+    let (home, path) = legacy_usage_fixture(8192);
+    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    assert!(
+        home.cache()
+            .advance_native_usage_migration(&home.options)
+            .unwrap()
+    );
+    let snapshot = || {
+        db.query_row("SELECT cursor,native_root,tree_root,(SELECT count(*) FROM native_usage_facts),(SELECT count(*) FROM native_usage_identities) FROM native_usage_migrations",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?))).unwrap()
+    };
+    let committed = snapshot();
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control = crate::SelectedReadControl::new(
+        std::time::Instant::now() + Duration::from_secs(60),
+        cancelled.clone(),
+    );
+    {
+        let _scope = crate::selected_read::Scope::enter(&control);
+        crate::selected_read::set_hook("native_usage_migration_commit", 0, move || {
+            cancelled.store(true, Ordering::Release)
+        });
+        assert_eq!(
+            home.cache()
+                .advance_native_usage_migration(&home.options)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+    assert_eq!(
+        snapshot(),
+        committed,
+        "cancelled batch published partial state"
+    );
+    db.execute_batch("CREATE TRIGGER fail_usage_slice BEFORE INSERT ON native_usage_facts BEGIN SELECT RAISE(ABORT,'synthetic transaction failure'); END;").unwrap();
+    assert!(
+        home.cache()
+            .advance_native_usage_migration(&home.options)
+            .is_err()
+    );
+    assert_eq!(
+        snapshot(),
+        committed,
+        "failed transaction advanced its cursor"
+    );
+    db.execute_batch("DROP TRIGGER fail_usage_slice;").unwrap();
+    let mut done = false;
+    for _ in 0..64 {
+        if !home
+            .cache()
+            .advance_native_usage_migration(&home.options)
+            .unwrap()
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM native_usage_facts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        8192
+    );
+    let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+    assert_eq!(index.tokens("codex").input, 8192 * 7);
+}
+
+#[test]
+fn native_usage_migration_restarts_after_append_rewrite_and_missing_source() {
+    for change in ["append", "rewrite", "missing"] {
+        let (home, path) = legacy_usage_fixture(8192);
+        let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+        for _ in 0..2 {
+            assert!(
+                home.cache()
+                    .advance_native_usage_migration(&home.options)
+                    .unwrap()
+            );
+        }
+        let before: (i64, i64) = db
+            .query_row(
+                "SELECT source_id,cursor FROM native_usage_migrations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(before.1 > 0);
+        match change {
+            "append" => {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(
+                        (line(explicit_usage(9000, 11)) + &line(explicit_usage(8191, 7)))
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                let index =
+                    events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+                assert_eq!(index.tokens("codex").input, 8192 * 7 + 11);
+            }
+            "rewrite" => {
+                fs::write(
+                    &path,
+                    line(json!({"type":"session_meta","payload":{"id":"native"}}))
+                        + &line(json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}))
+                        + &line(explicit_usage(9000, 19)),
+                )
+                .unwrap();
+                events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+            }
+            "missing" => fs::remove_file(&path).unwrap(),
+            _ => unreachable!(),
+        }
+        let revision: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut completed = false;
+        for _ in 0..96 {
+            if !home
+                .cache()
+                .advance_native_usage_migration(&home.options)
+                .unwrap()
+            {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "{change} did not yield or converge");
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            revision
+        );
+        if change == "missing" {
+            let state: String = db
+                .query_row("SELECT state FROM native_usage_migrations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(state, "blocked_source");
+            assert!(
+                !db.query_row(
+                    "SELECT usage_ready FROM native_usage_sources WHERE source_id=?1",
+                    [before.0],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+            );
+            let legacy_bytes: i64 = db
+                .query_row(
+                    "SELECT octet_length(codex_native_usage) FROM files",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                legacy_bytes > 1024 * 1024,
+                "missing source discarded compatibility evidence"
+            );
+            continue;
+        }
+        let index = events::scan_file(&path, "codex", &mut home.cache(), &mut false).unwrap();
+        let expected = if change == "append" {
+            8192 * 7 + 11
+        } else {
+            19
+        };
+        assert_eq!(index.tokens("codex").input, expected);
+        assert_eq!(
+            index.tree_summary.as_ref().unwrap().tokens("codex").input,
+            expected
+        );
+        let current: i64 = db
+            .query_row("SELECT source_id FROM native_usage_current", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(current == before.0, change == "append");
+    }
+}
+
+#[test]
+fn native_usage_claude_missing_projection_migrates_in_bounded_slices() {
+    let home = Home::new();
+    let mut text = String::new();
+    for n in 0..8192 {
+        text += &line(
+            json!({"type":"assistant","uuid":format!("u-{n}"),"message":{"id":format!("m-{n}"),"model":"claude-sonnet-4-5","usage":{"input_tokens":3},"content":[{"type":"tool_use","id":format!("t-{n}"),"name":"Read"}]}}),
+        );
+        text += &line(
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":format!("t-{n}")} ]}}),
+        );
+    }
+    text += &line(json!({"type":"assistant","message":{"id":"m-0","usage":{"input_tokens":9}}}));
+    let path = home.write("claude/projects/repo/parent.jsonl", &text);
+    collect(&home.options).unwrap();
+    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    db.execute("DELETE FROM meta WHERE key LIKE 'native_tree_summary:%' OR key IN ('native_usage_discovery_done','native_usage_discovery_after')",[]).unwrap();
+    let revision: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_source_revision'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let error = events::scan_file(&path, "claude", &mut home.cache(), &mut false).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    let mut steps = 0;
+    let mut previous = 0;
+    loop {
+        let pending = home
+            .cache()
+            .advance_native_usage_migration(&home.options)
+            .unwrap();
+        steps += 1;
+        let cursor: i64 = db
+            .query_row("SELECT cursor FROM native_usage_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(cursor - previous <= 1024 * 1024 + 32 * 1024 * 1024);
+        previous = cursor;
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            revision
+        );
+        if !pending {
+            break;
+        }
+        assert!(steps < 128);
+    }
+    assert!(steps > 16);
+    let nodes = collect(&home.options).unwrap();
+    assert_eq!(nodes[0].tokens.input, 8192 * 3 + 6);
+    assert!(nodes[0].open_tools.is_empty());
+    let root: i64 = db
+        .query_row(
+            "SELECT octet_length(value) FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{}", path.display())],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(root < 2048);
+    eprintln!(
+        "claude-projection history=8192 root_bytes={root} migration_steps={steps} max_records_per_slice=512"
+    );
+}
+
+#[test]
+fn native_usage_legacy_database_migration_resumes_without_repair_or_revision_reset() {
+    let (home, path) = legacy_usage_fixture(8192);
+    let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
+    let revision = || {
+        db.query_row(
+            "SELECT value FROM meta WHERE key='catalog_source_revision'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    };
+    let before = revision();
+    let event_rows: i64 = db
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    let mut previous = 0;
+    let mut steps = 0;
+    loop {
+        let mut cache = home.cache();
+        let pending = cache.advance_native_usage_migration(&home.options).unwrap();
+        steps += 1;
+        let facts: i64 = db
+            .query_row("SELECT count(*) FROM native_usage_facts", [], |r| r.get(0))
+            .unwrap();
+        assert!(facts - previous <= 512, "migration exceeded its row budget");
+        previous = facts;
+        assert_eq!(revision(), before);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            event_rows
+        );
+        if !pending {
+            break;
+        }
+        assert!(steps < 64, "migration failed to resume after reopening");
+    }
+    assert!(steps > 1);
+    assert_eq!(previous, 8192);
+    let mut cache = home.cache();
+    let index = events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    assert_eq!(index.tokens("codex").input, 8192 * 7);
+    assert_eq!(
+        index.tree_summary.as_ref().unwrap().tokens("codex").input,
+        8192 * 7
+    );
+    assert_eq!(revision(), before);
+    let encoded: String = db
+        .query_row("SELECT codex_native_usage FROM files", [], |r| r.get(0))
+        .unwrap();
+    assert!(encoded.len() < 2048);
+    assert!(!encoded.contains("seen") && !encoded.contains("events"));
+    assert!(!cache.advance_native_usage_migration(&home.options).unwrap());
+    eprintln!(
+        "usage-migration facts={previous} batches={steps} root_bytes={} max_batch_rows=512 revision={before}",
+        encoded.len()
+    );
+}
+
 #[test]
 fn warm_tree_does_not_decode_event_rows_or_fill_the_producer_cache_as_history_grows() {
     for count in [4, 4096] {
@@ -253,10 +888,27 @@ fn tree_restart_preserves_raw_activity_all_models_and_historical_tool_accounting
         .unwrap();
     let summary: Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(summary["summary"]["line_count"], 5);
-    assert_eq!(summary["summary"]["usage_models"]["same"], "z");
+    assert_eq!(summary["version"], 3);
+    assert_eq!(summary["summary"]["usage_models"], json!({}));
     assert_eq!(
-        summary["summary"]["usage_records"]["same"],
-        json!(["one", "two"])
+        connection
+            .query_row(
+                "SELECT model FROM native_tree_usage_models WHERE message_id='same'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "z"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM usage_identity WHERE message_id='same'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
     );
     assert!(!encoded.contains("SECRET") && !encoded.contains("marker"));
     assert_eq!(fs::read(&home.options.cache).unwrap(), legacy);
