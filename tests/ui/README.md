@@ -72,9 +72,14 @@ its completion witness is the native-publication success message in the CI log.
   do not approve different expanded output. The registry retains separate records
   for every reviewed size/theme/state and its original pinned references; raw
   findings and the strict 0.0001 maximum ratio remain unchanged. Exact bindings
-  use the reviewed [CI captures from run 39217434345](https://github.com/onsager-ai/semon/actions/runs/39217434345/artifacts/12170362330);
+  use the reviewed [CI captures from run 39219258365](https://github.com/onsager-ai/semon/actions/runs/39219258365/artifacts/12171068756);
   local captures support review but are not treated as portable byte-identical
-  approvals across font/rasterization environments.
+  approvals across font/rasterization environments. The latest captured runtime
+  passed Rust and all nonvisual browser CI. Its raw visual result retains 18
+  preservation and five main-frame stale byte bindings from the preceding run;
+  reinspection and the final registry assess those exact current artifacts with
+  zero pending/unreviewed findings. A fresh rerun can require fresh exact review;
+  this record does not claim an automatically green visual CI aggregate.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
