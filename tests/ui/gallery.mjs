@@ -15,7 +15,7 @@ if (args.length && (args.length !== 1 || args[0] !== '--update-baselines'))
   throw new Error('Usage: node tests/ui/gallery.mjs [--update-baselines]');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'semon-gallery-'));
 const output = path.join(temp, 'gallery.js');
-await buildConsumer(path.join(root, 'ui/tests/fixtures/design-gallery.tsx'), output);
+await buildConsumer(path.join(root, 'ui/tests/fixtures/design-gallery-entry.tsx'), output);
 const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'gallery-visual.json'), 'utf8'));
 const out = path.resolve(process.env.SEMON_UI_OUT ?? path.join(dir, 'out'), 'gallery');
 const visuals = createVisualContract({

@@ -21,6 +21,34 @@ TypeScript 6.0.3 includes the compiler AST API used by security-check.mjs. The
 Viewer UI required aggregate gates type-check/security/freshness before compiling
 its Rust fixture binaries and tests the served checked-in bytes.
 
+## Storybook workbench
+
+The optional Storybook workbench uses the pinned `storybook` and
+`@storybook/preact-vite` 10.6.0 packages with the existing Preact 10.29.8
+runtime. Story files live under `ui/stories/`, outside the production source
+tree, and import the canonical owners in `ui/src/lib` and `ui/src/app`. Vite
+deduplicates Preact so the workbench keeps the same single runtime as the viewer.
+The preview loads the canonical viewer, select and shell styles, font subsets,
+and harness mark from their source locations; it does not serve the crate source
+directory or use pen.dev credentials.
+
+```sh
+npm --prefix ui run storybook
+npm --prefix ui run storybook:typecheck
+npm --prefix ui run storybook:build
+npm --prefix tests/ui run storybook:contract
+npm --prefix tests/ui run storybook:capture
+```
+
+The static build lands in `tests/ui/storybook-static` for the CI contract and
+Playwright capture scripts. Captures use the existing browser/font setup at
+390, 820 and 1280 CSS pixels in both color schemes. They are candidate artifacts
+only. `tests/ui/storybook-reference-map.json` begins with no approved references;
+missing or unapproved captures remain pending failures. CI never writes or
+approves references. The Storybook contract crosswalk maps required visual
+states to real owner stories or the existing served/native product checks; it
+does not replace those checks or alter their comparators.
+
 `src/lib/index.ts` is the shared component/type entry; lib modules import no
 viewer state. `src/application.ts` exposes the typed application mount/destroy boundary.
 Shared chrome owns widget descendants, trigger/avatar, menu/backdrop, open state,

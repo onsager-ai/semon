@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "storyIndex": "storybook-static/index.json",
+  "referenceMap": "storybook-reference-map.json",
+  "pixelPolicy": {
+    "threshold": 0.1,
+    "maxRatio": 0.0001,
+    "dimensions": [390, 820, 1280],
+    "schemes": ["light", "dark"]
+  },
+  "servedChecks": {
+    "visual-pixels": "pixels.mjs",
+    "preservation": "preservation-contract.mjs",
+    "component-gallery": "gallery.mjs",
+    "functional-checks": "checks/run.mjs",
+    "served-catalog": "catalog-served.mjs",
+    "served-overview": "overview-served.mjs",
+    "native-shell": "../../ui/tests/native-shell-lifecycle.test.mjs",
+    "native-navigation": "../../ui/tests/native-navigation.test.mjs",
+    "native-selection": "../../ui/tests/catalog-selection.test.mjs"
+  },
+  "productionSurfaces": [
+    {
+      "id": "shared-shell-navigation-account",
+      "modules": ["../src/lib/shell", "../src/lib/account-chrome", "../src/lib/AccountMenu"],
+      "storyIds": ["semon-production-owners--component-gallery"],
+      "servedChecks": ["component-gallery", "functional-checks"]
+    },
+    {
+      "id": "home",
+      "modules": ["../src/lib/screens"],
+      "storyIds": ["semon-production-owners--home"],
+      "servedChecks": ["visual-pixels", "served-overview"]
+    },
+    {
+      "id": "sessions-catalog-filter-and-sources",
+      "modules": ["../src/lib/catalog", "../src/lib/facets", "../src/lib/select"],
+      "storyIds": [
+        "semon-production-owners--sessions-catalog",
+        "semon-production-owners--filtered-catalog",
+        "semon-production-owners--source-candidates",
+        "semon-production-owners--machine-filter",
+        "semon-production-owners--session-row"
+      ],
+      "servedChecks": ["visual-pixels", "served-catalog", "native-selection"]
+    },
+    {
+      "id": "machines",
+      "modules": ["../src/lib/screens"],
+      "storyIds": ["semon-production-owners--machines"],
+      "servedChecks": ["visual-pixels", "functional-checks"]
+    },
+    {
+      "id": "analytics",
+      "modules": ["../src/lib/analytics"],
+      "storyIds": ["semon-production-owners--analytics-states"],
+      "servedChecks": ["visual-pixels", "served-overview"]
+    },
+    {
+      "id": "trace",
+      "modules": ["../src/lib/trace"],
+      "storyIds": ["semon-production-owners--trace-empty"],
+      "servedChecks": ["visual-pixels", "functional-checks"]
+    },
+    {
+      "id": "native-transcript-reader",
+      "modules": ["../src/lib/transcript"],
+      "storyIds": [
+        "semon-production-owners--compact-reader",
+        "semon-production-owners--failure-inspection",
+        "semon-production-owners--transcript-empty"
+      ],
+      "servedChecks": ["visual-pixels", "functional-checks", "native-shell"]
+    },
+    {
+      "id": "session-menu",
+      "modules": ["../src/lib/session-menu"],
+      "storyIds": ["semon-production-owners--session-menu"],
+      "servedChecks": ["functional-checks"]
+    },
+    {
+      "id": "shared-panels-sheets-controls",
+      "modules": ["../src/lib/panel", "../src/lib/sheets", "../src/lib/tooltip"],
+      "storyIds": ["semon-production-owners--component-gallery"],
+      "servedChecks": ["component-gallery", "functional-checks"]
+    },
+    {
+      "id": "loading-empty-error-focus",
+      "modules": ["../src/lib/catalog", "../src/lib/screens"],
+      "storyIds": [
+        "semon-production-owners--catalog-loading",
+        "semon-production-owners--catalog-empty",
+        "semon-production-owners--catalog-failure",
+        "semon-production-owners--loading-empty-error",
+        "semon-production-owners--keyboard-focus"
+      ],
+      "servedChecks": ["visual-pixels", "preservation", "functional-checks"]
+    }
+  ],
+  "visualCoverage": {
+    "source": "visual-coverage.json",
+    "servedCheck": "visual-pixels",
+    "storyRules": [
+      { "pattern": "^analytics$", "storyIds": ["semon-production-owners--analytics-states"] },
+      { "pattern": "^home$", "storyIds": ["semon-production-owners--home"] },
+      { "pattern": "^machines?$|^machine-", "storyIds": ["semon-production-owners--machines"] },
+      { "pattern": "^session-", "storyIds": ["semon-production-owners--compact-reader", "semon-production-owners--failure-inspection"] },
+      { "pattern": "^sessions$", "storyIds": ["semon-production-owners--sessions-catalog"] },
+      { "pattern": "^trace-", "storyIds": ["semon-production-owners--trace-empty"] },
+      { "pattern": "^drawer$", "storyIds": ["semon-production-owners--component-gallery"] }
+    ]
+  },
+  "preservation": {
+    "source": "preservation-contract.mjs",
+    "servedCheck": "preservation"
+  },
+  "visualAcceptance": {
+    "source": "visual-acceptance.json",
+    "comparatorChecks": {
+      "pixels": "visual-pixels",
+      "preservation": "preservation"
+    }
+  },
+  "gallery": {
+    "source": "gallery-visual.json",
+    "storyIds": ["semon-production-owners--component-gallery"],
+    "servedCheck": "component-gallery"
+  },
+  "pen": {
+    "source": "../../docs/design/session-inspection/session-inspection.pen",
+    "roots": [
+      { "id": "Nt3eb", "storyIds": ["semon-production-owners--sessions-catalog"] },
+      { "id": "gZYIY", "storyIds": ["semon-production-owners--filtered-catalog"] },
+      { "id": "vGVHj", "storyIds": ["semon-production-owners--compact-reader"] },
+      { "id": "nGo6u", "storyIds": ["semon-production-owners--failure-inspection"] },
+      {
+        "id": "Oo357",
+        "storyIds": [
+          "semon-production-owners--catalog-loading",
+          "semon-production-owners--catalog-empty",
+          "semon-production-owners--catalog-failure",
+          "semon-production-owners--loading-empty-error",
+          "semon-production-owners--keyboard-focus"
+        ]
+      },
+      { "id": "gbtK3", "storyIds": ["semon-production-owners--sessions-catalog"] }
+    ],
+    "descendantStories": {
+      "workspaceSessions20261019": ["semon-production-owners--machine-filter"],
+      "uGNh2": ["semon-production-owners--compact-reader"],
+      "FPbSc": ["semon-production-owners--compact-reader"],
+      "DikBn": ["semon-production-owners--compact-reader"],
+      "GdtyG": ["semon-production-owners--compact-reader"],
+      "S8I0nF": ["semon-production-owners--compact-reader"]
+    },
+    "activeDescendantPolicy": "inherits-active-root-visual-contract",
+    "supersededDescendants": {
+      "S2P8p": "Design brief section 10 labels the historical linked-session surface superseded by compact disclosure.",
+      "WIlub": "Design brief section 10 labels the historical linked-session board superseded by compact disclosure."
+    },
+    "servedCheck": "visual-pixels"
+  },
+  "referencePolicy": "Candidate screenshots are artifacts only. Missing or unapproved references remain pending failures. CI never creates or approves a reference."
+}

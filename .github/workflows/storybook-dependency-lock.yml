@@ -12,6 +12,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Install locked product and preview tooling
+        run: |
+          npm --prefix ui ci --no-audit --no-fund
+          npm --prefix tests/ui ci --no-audit --no-fund
+      - name: Check preview types
+        run: npm --prefix ui run storybook:typecheck
+      - name: Build actual production stories
+        id: build
+        if: ${{ !cancelled() }}
+        run: npm --prefix ui run storybook:build
+      - name: Validate exhaustive contract coverage
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm --prefix tests/ui run storybook:contract
+      - name: Prepare authored formatting corrections for review
+        if: ${{ !cancelled() }}
+        run: |
+          npm --prefix ui run format
+          npm --prefix ui exec -- prettier --write 'ui/.storybook/*.{mjs,tsx,css}' 'ui/stories/*.{ts,tsx}' ui/tsconfig.storybook.json
+          git diff --binary > "$RUNNER_TEMP/storybook-format-review.patch"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: storybook-preview-feedback
+          path: |
+            tests/ui/storybook-static
+            tests/ui/out/storybook
+            ${{ runner.temp }}/storybook-format-review.patch
+          if-no-files-found: warn
   agents:
     runs-on: ubuntu-latest
     timeout-minutes: 5
