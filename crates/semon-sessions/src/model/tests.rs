@@ -10100,6 +10100,101 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
     assert_eq!(pending, 0);
 }
 
+#[test]
+fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
+    let mut home = acknowledged_semantic_family();
+    // Exceed the producer's 4 MiB scan budget with individually bounded native
+    // records. The one-line fixtures cannot exercise resumed Index writes.
+    let record = codex_user(ts(14, 0), &"Synthetic retained native text. ".repeat(3072));
+    home.codex("ack-root", json!({}), &vec![record; 64]);
+    let inputs = crate::inputs(&home.options).unwrap();
+    let paths = inputs
+        .iter()
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let large_path = inputs
+        .iter()
+        .find(|input| input.path.ends_with("rollout-ack-root.jsonl"))
+        .unwrap()
+        .full_path(&home.options);
+    let large_size = fs::metadata(&large_path).unwrap().len();
+    assert!(large_size > 4 * 1024 * 1024);
+    let facts = crate::Facts {
+        version: crate::FACTS_VERSION,
+        hostname: "synthetic-large-stage".into(),
+        codex_rollouts: Some(inputs.iter().map(|input| input.path.clone()).collect()),
+        ..Default::default()
+    };
+    home.options.facts = Some(home.root.join("facts.json"));
+    let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
+    crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
+    intent.complete().unwrap();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    for page in paths.chunks(64) {
+        assert_eq!(
+            cache.begin_semantic_stage(page, &runtime).unwrap(),
+            crate::events::Outcome::Written
+        );
+    }
+    drop(cache);
+    let mut phases = BTreeSet::new();
+    let mut partial_index = false;
+    let mut complete = false;
+    for step in 0..1024 {
+        let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let done = evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap_or_else(|error| panic!("large-source step={step} phases={phases:?}: {error}"));
+        evidence.retire();
+        drop(evidence);
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let phase: Option<String> = db
+            .query_row("SELECT phase FROM catalog_semantic_stage", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap();
+        if let Some(phase) = phase {
+            phases.insert(phase);
+        }
+        let resume: Option<i64> = db
+            .query_row(
+                "SELECT resume_at FROM files WHERE path=?1",
+                [large_path.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten();
+        partial_index |= resume.is_some_and(|offset| offset > 0 && (offset as u64) < large_size);
+        if done {
+            complete = true;
+            eprintln!(
+                "semantic-large-source-restart steps={} bytes={large_size} phases={phases:?}",
+                step + 1
+            );
+            break;
+        }
+    }
+    assert!(
+        partial_index,
+        "fixture never exercised a resumed Index write"
+    );
+    assert!(complete, "large native source did not recover: {phases:?}");
+    assert!(
+        phases.contains("indexing")
+            && phases.contains("identity")
+            && phases.contains("relations")
+            && phases.contains("publication")
+    );
+}
+
 fn acknowledged_semantic_family() -> Home {
     let home = Home::new();
     home.codex(
