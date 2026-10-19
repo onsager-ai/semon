@@ -5,6 +5,7 @@ import { HARNESS } from './registry';
 import { shortModel } from '../domain/format';
 
 export interface CatalogFilters {
+  machine?: string;
   harness: string;
   repo: string;
   model: string;
@@ -26,16 +27,14 @@ export function createCatalogBrowser(host: {
     select: (label, value, onChange) => createSelect({ label, value, options: [], onChange }),
     canOpen: host.canOpen,
     change(key, value) {
-      if (key === 'machine') return;
       filters = { ...filters, [key]: value };
     },
     cleared(key) {
-      if (key === 'machine') return;
       filters = { ...filters, [key]: '' };
       host.changed(filters);
     },
     clear() {
-      filters = { harness: '', repo: '', model: '', q: filters.q };
+      filters = { machine: '', harness: '', repo: '', model: '', q: filters.q };
     },
     opened(dialog) {
       before = JSON.stringify(filters);
@@ -55,6 +54,8 @@ export function createCatalogBrowser(host: {
       rows: readonly CatalogSession[],
       source: string,
       context: CatalogFilterDescription,
+      machines: readonly { source_key: string; label: string }[] = [],
+      workspace = false,
     ) {
       // Options are observations of the loaded source, never a workspace census.
       for (const key of [...options.keys()])
@@ -95,16 +96,28 @@ export function createCatalogBrowser(host: {
           ],
         };
       });
-      // The neutral facet does not narrow machines within the selected source.
-      // Source selection and its request/accessibility scope stay with the reader.
+      // Hosted machine choices come from the authorized source inventory; the
+      // standalone reader keeps its existing neutral facet.
       fields.splice(1, 0, {
         key: 'machine',
         label: 'Machine',
-        value: '',
-        display: 'All machines',
-        options: [{ value: '', label: 'All machines' }],
+        value: workspace ? (filters.machine ?? '') : '',
+        display:
+          workspace && filters.machine
+            ? (machines.find((m) => m.source_key === filters.machine)?.label ?? filters.machine)
+            : 'All machines',
+        options: [
+          { value: '', label: 'All machines' },
+          ...(workspace ? machines.map((m) => ({ value: m.source_key, label: m.label })) : []),
+        ],
       });
-      const filtered = !!(values.harness || values.repo || values.model || values.q);
+      const filtered = !!(
+        values.machine ||
+        values.harness ||
+        values.repo ||
+        values.model ||
+        values.q
+      );
       owner.update(fields, {
         tooltip: context.searchQualification,
         action: filtered ? { label: 'Clear filters', run: host.clearFilters } : undefined,

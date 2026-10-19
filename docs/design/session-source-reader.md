@@ -93,3 +93,33 @@ qualified by `facts::source_authority` tests. These measurements concern a
 metadata proof helper, not first parsed transcript content or a browser journey.
 Reproduce with `cargo test --locked -p semon-sessions
 exact_source_proof_work_stays_fixed -- --nocapture`.
+
+## Hosted workspace Catalog lists
+
+`session_catalog_union` merges the existing persisted Catalog pages supplied by
+an authorized host. It opens one source database at a time and retains at most
+two page buffers. It does not construct a Viewer core, load selected details,
+restore archived Raw, enumerate native trees or create a second index. Hosts
+still authorize source membership and workspace access before and after reads.
+
+A host may explicitly advertise `global_union: true`, `source_key: ""` and
+`order: "last_desc_key_asc_machine_asc"`. Union rows add
+`machine: { key, label }`; session keys remain source-local. Selected identity,
+transcript and control reads always require a concrete source. Existing focused
+Catalog contracts, filters and cursors remain unchanged.
+
+Workspace cursors bind the workspace, normalized metadata filters, source set
+and every Catalog generation. Ordering is descending recorded activity, then
+ascending session key and machine key. Source changes return `stale_cursor`,
+following focused Catalog resynchronization semantics under continuing writes.
+A bounded metadata search publishes only through the earliest scanned source
+frontier; later candidates are re-read from that global keyset on the next page.
+This preserves reachability even when a source exhausts its search scan budget
+before returning a full page or any matches.
+
+The merge admits at most 64 sources and 100 output rows per request. Each source
+retains its existing 512-candidate / 2 MiB search budget; the union search report
+states the aggregate maximum explicitly. A source read failure fails the union;
+it never becomes an empty source or a complete partial success. Capacity and
+source-unavailable responses remain distinct. The hosted adapter adds bounded
+request admission, a deadline and the existing Catalog publication coordinator.

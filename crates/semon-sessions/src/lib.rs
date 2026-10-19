@@ -40,7 +40,7 @@ pub use catalog::{
     CatalogFreshness, CatalogIdentityError, CatalogOwnerQualification, CatalogReadScope,
     CatalogSessionIdentity, CatalogSourceObservation, SessionSourceProof, SessionSourceRef,
     session_catalog_history_identity, session_catalog_identity, session_catalog_page,
-    session_source_proof, validate_session_catalog_query,
+    session_catalog_union, session_source_proof, validate_session_catalog_query,
 };
 pub use catalog_observer::{SessionCatalogObserver, invalidate_session_sources};
 pub use native_resolution::{
