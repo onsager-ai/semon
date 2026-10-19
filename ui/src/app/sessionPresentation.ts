@@ -8,6 +8,7 @@ import type {
   FooterView,
 } from '../lib';
 import { ago, clock, compactCount, dur, shortModel } from '../domain/format';
+import { catalogSessionKey } from '../state/catalog-wire';
 import type { SessionRow } from '../lib';
 import { resumeCommand } from '../domain/resume';
 import type { Cost, TokenKind } from '../domain/types';
@@ -224,7 +225,7 @@ export function catalogSessionRow(
     .filter(Boolean)
     .join(' · ');
   return {
-    id: session.key,
+    id: catalogSessionKey(session),
     name: session.name,
     kind: session.presentation_kind ?? session.kind,
     state,
@@ -237,6 +238,17 @@ export function catalogSessionRow(
     model: shortModel(session.model),
     modelTip: session.model,
     fields: [
+      ...(session.machine
+        ? [
+            {
+              className: 'row-machine',
+              text: session.machine.label,
+              tip: session.machine.label,
+              priority: 0,
+              icon: I.machine,
+            },
+          ]
+        : []),
       ...(session.start !== null
         ? [
             {
@@ -499,7 +511,7 @@ export function selectedSessionMenu(
             harnessName: HARNESS[row.harness] ?? row.harness,
           })),
           {
-            id: session.key,
+            id: catalogSessionKey(session),
             name: session.name,
             harness: session.harness,
             harnessName: HARNESS[session.harness] ?? session.harness,
