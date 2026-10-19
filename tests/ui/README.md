@@ -80,55 +80,39 @@ its completion witness is the native-publication success message in the CI log.
   reinspection and the final registry assess those exact current artifacts with
   zero pending/unreviewed findings. A fresh rerun can require fresh exact review;
   this record does not claim an automatically green visual CI aggregate.
-- The account-menu SPA follow-up re-inspects the [CI captures from run
-  39223065023](https://github.com/onsager-ai/semon/actions/runs/39223065023/artifacts/12172548963)
-  for PR #449 (source head `c71d5f9`, captured merge `e0670b9`). The changed runtime
-  fingerprint invalidates the preceding registry even where capture hashes match.
-  All 42 preservation and 69 main-frame findings retain their previously reviewed
-  states and causes. Actual candidate/reference/diff images were inspected for
-  phone tools, tablet Thinking, desktop expanded output, failed/returned children,
-  closed Atlas, long mobile full-page clipping, and the three changed desktop
-  main captures (parser, Principal, quill). Bounded evidence retains unchanged
-  shared styles and recorded content; the Atlas hidden-text distinction described
-  above remains limited to closed output. The current exact bindings record this
-  reinspection without changing references, thresholds, strict regions, coverage
-  or raw pixel results. CI must still validate the final registry and captures.
-- CI run `39239563956` retained the same runtime fingerprint, DOM/geometry
-  evidence and strict mismatch ratios, but 21 preservation and four main-frame
-  records changed PNG hashes. Individual-image inspection found only 1–2 channel
-  levels at a rounded sidebar edge and at most five levels on the sampled text
-  edges. Visual comparators now request Chromium's
-  [`--disable-skia-runtime-opts`](https://github.com/chromium/chromium/blob/main/content/public/common/content_switches.cc)
-  baseline CPU path on both independent applications, removing host CPU dispatch
-  as a source of byte variation. Other functional/performance browsers keep their
-  existing launch settings. The capture regression checks repeated independent
-  browser processes and rejects changed visible text. Exact screenshot/evidence
-  hashes, complete references, pixel tolerances and raw findings remain required;
-  captures from this path still need image review and a passing final CI run.
-- That run also caught a separate `desktop-light|session-a-scan` sidebar-order
-  mismatch. It is **not accepted** by the notice-removal review. The readers can
-  independently cross the existing Recent idle-reorder boundary during sequential
-  captures. Main desktop comparisons now hold a real pointer in inert sidebar
-  padding before navigation/capture and require matching visible row names and
-  selection. This uses the readers' existing hover behavior; it does not change
-  product timers, sort either DOM, hide rows or waive the pixel result. Other
-  browser suites continue testing the actual idle and interaction behavior.
-- The [baseline-raster captures from run 39241106362](https://github.com/onsager-ai/semon/actions/runs/39241106362/artifacts/12181229277)
-  requalify 30 stale bindings with exactly unchanged bounded text/geometry
-  evidence. Tablet Thinking, desktop harbor and long phone quill images/diffs
-  were re-inspected against their approved change families. The separate
-  sidebar-order mismatch is excluded; it must pass with the consistent pointer
-  precondition and matching visible rows. This review does not claim that a fresh
-  capture has passed until the final required CI result is green.
-- Run `39242800237` passed the matching-sidebar precondition and restored the
-  unaccepted survey frame to its reviewed state. The baseline CPU path alone
-  still left 20 preservation/five main PNG bindings stale despite identical
-  bounded DOM evidence. A sampled pair differed at just 17 rounded-edge pixels
-  by at most three channel levels. Visual launches therefore also use Chromium's
+- The account-menu SPA follow-up (PR #449) re-inspects the previously approved
+  notice-removal differences for the changed runtime. Initial [CI images from
+  run 39223065023](https://github.com/onsager-ai/semon/actions/runs/39223065023/artifacts/12172548963)
+  cover phone tools, tablet Thinking, desktop expanded output, failed/returned
+  children, closed Atlas, long mobile full-page clipping, and changed desktop
+  parser/Principal/quill captures. The Atlas hidden-text distinction above stays
+  limited to closed output. No new visible behavior is approved by these records.
+- Exact PNG bindings require repeatable rasterization as well as stable DOM.
+  Earlier reruns retained identical bounded text/geometry and strict mismatch
+  ratios but changed rounded-edge/text pixels by only a few channel levels.
+  Preservation/main comparators now use Chromium's baseline Skia CPU path,
   [deterministic rendering stages](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#rendering--gpu)
-  and full rasterization. Playwright retains normal frame scheduling; no external
-  BeginFrame driver is enabled. The independent-browser regression now includes
-  the clipped sticky sidebar geometry and repeated scroll/repaint cycles.
+  and full rasterization on both independent applications. Playwright keeps normal
+  frame scheduling. Functional/performance and two-machine/pushed-parity browsers
+  retain their existing launch settings. The capture regression checks independent
+  browser processes, clipped sticky geometry, repeated scroll/repaint equality,
+  and changed visible text.
+- Main desktop captures hold a real pointer in inert sidebar padding before
+  navigation/capture and require matching visible row names and selection. This
+  prevents the independent readers crossing their existing Recent idle-reorder
+  boundary at different times. The separately observed survey sidebar-order
+  mismatch is not accepted; its required state is restored and checked. Product
+  timers/order, DOM rows and pixel comparisons remain intact; other suites still
+  exercise actual idle, hover and focus behavior.
+- The [reviewed deterministic captures from run 39246032745](https://github.com/onsager-ai/semon/actions/runs/39246032745/artifacts/12182933579)
+  match [independent run 39244684719](https://github.com/onsager-ai/semon/actions/runs/39244684719/artifacts/12183397568)
+  byte-for-byte for all 68 preservation and 113 main full-frame candidate,
+  reference and diff PNGs, plus their bounded DOM evidence. All 162 strict-region
+  PNGs also match between runs. Actual tablet Thinking and closed desktop Atlas
+  images/diffs were re-inspected on this path. The registry refreshes 31 remaining
+  byte bindings with exactly unchanged bounded text/geometry evidence, retaining
+  all original reference pins, screenshot/evidence hash requirements, thresholds,
+  coverage and raw findings. Final required CI must validate the delivered tree.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
