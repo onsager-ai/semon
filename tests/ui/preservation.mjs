@@ -393,8 +393,10 @@ async function capture(candidate, reference, key) {
       });
       fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
       if (name === 'candidate')
-        fs.writeFileSync(path.join(out, key + '-candidate-presentation.json'),
-          JSON.stringify(await nativePresentationWitness(page, bytes), null, 2) + '\n');
+        fs.writeFileSync(
+          path.join(out, key + '-candidate-presentation.json'),
+          JSON.stringify(await nativePresentationWitness(page, bytes), null, 2) + '\n',
+        );
       evidenceBySide[name] = await snapshot(page);
       if (includeChromeDiagnostics)
         evidenceBySide[name].chromeDiagnostics = await snapshotChromeDiagnostics(page);

@@ -208,7 +208,8 @@ try {
         result.nativeStateDigest = sha256(JSON.stringify(native.preferences));
         await context.addInitScript((preferences) => {
           for (const [key, value] of Object.entries(preferences))
-            if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value);
+            if (value === null) localStorage.removeItem(key);
+            else localStorage.setItem(key, value);
         }, native.preferences);
       }
       await context.clock.install({ time: new Date(item.clock ?? '2026-10-19T12:00:00.000Z') });
@@ -261,7 +262,9 @@ try {
           `horizontal document overflow ${geometry.documentWidth}px > ${geometry.viewportWidth}px`,
         );
       if (item.capture?.scroll)
-        await applyCaptureScroll(page, item.capture.scroll, { input: item.capture.scroll !== 'region-top' });
+        await applyCaptureScroll(page, item.capture.scroll, {
+          input: item.capture.scroll !== 'region-top',
+        });
       if (item.capture?.viewportHeight === 'fit-transcript-and-dock-plus-80') {
         const native = nativeWitness(process.env.SEMON_STORYBOOK_NATIVE_ARTIFACT_ROOT, item).value;
         const target = page.locator(item.capture.selector);
@@ -292,7 +295,9 @@ try {
       // Fitted viewports can deliver a final resize observation. Apply and
       // verify the exact scroll identity after that geometry has settled.
       if (item.capture?.scroll)
-        result.actualScroll = await applyCaptureScroll(page, item.capture.scroll, { input: item.capture.scroll !== 'region-top' });
+        result.actualScroll = await applyCaptureScroll(page, item.capture.scroll, {
+          input: item.capture.scroll !== 'region-top',
+        });
       const file = path.join(
         output,
         storyId,
@@ -328,7 +333,9 @@ try {
         if (item.legacyKey) witness = await presentationWitness(page, item.capture?.selector);
         return bytes;
       };
-      const bytes = item.capture?.stablePaint ? await withCapturePaint(page, captureWithWitness) : await captureWithWitness();
+      const bytes = item.capture?.stablePaint
+        ? await withCapturePaint(page, captureWithWitness)
+        : await captureWithWitness();
       fs.writeFileSync(file, bytes);
       result.actualViewport = page.viewportSize();
       result.captureGeometry = item.capture?.selector

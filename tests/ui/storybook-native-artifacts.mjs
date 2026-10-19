@@ -10,17 +10,28 @@ export function nativeArtifactPaths(root, item) {
   const key = rest.join(':');
   let directory, stem;
   if (comparator === 'gallery') {
-    directory = path.join(root, 'viewer-ui-interaction/gallery'); stem = key;
+    directory = path.join(root, 'viewer-ui-interaction/gallery');
+    stem = key;
   } else if (comparator === 'preservation') {
-    directory = path.join(root, 'viewer-ui-visual/preservation'); stem = key + '-candidate';
+    directory = path.join(root, 'viewer-ui-visual/preservation');
+    stem = key + '-candidate';
   } else if (comparator === 'pixels') {
     const prefix = scope === 'main' ? 'viewer-ui-visual' : 'viewer-ui-transport/' + scope;
     directory = path.join(root, prefix, 'pixels');
     stem = key.replace(/[^a-zA-Z0-9_-]+/g, '_') + '-candidate';
   } else throw Error('Unknown native artifact family ' + comparator);
-  return { image: path.join(directory, stem + '.png'), witness: path.join(directory, stem + '-presentation.json'),
-    report: comparator === 'gallery' ? path.join(directory, 'visual-report.json') : path.join(directory, 'report.json'),
-    comparator, scope, kind, key };
+  return {
+    image: path.join(directory, stem + '.png'),
+    witness: path.join(directory, stem + '-presentation.json'),
+    report:
+      comparator === 'gallery'
+        ? path.join(directory, 'visual-report.json')
+        : path.join(directory, 'report.json'),
+    comparator,
+    scope,
+    kind,
+    key,
+  };
 }
 
 export function nativeWitness(root, item) {
@@ -28,7 +39,15 @@ export function nativeWitness(root, item) {
   const paths = nativeArtifactPaths(root, item);
   const record = JSON.parse(fs.readFileSync(paths.witness, 'utf8'));
   assert.deepEqual(Object.keys(record).sort(), ['imageSha256', 'presentation', 'sourceRevision']);
-  assert.equal(record.sourceRevision, process.env.GITHUB_SHA, 'Native presentation witness is from another revision');
-  assert.equal(record.imageSha256, createHash('sha256').update(fs.readFileSync(paths.image)).digest('hex'), 'Native witness/image binding changed');
+  assert.equal(
+    record.sourceRevision,
+    process.env.GITHUB_SHA,
+    'Native presentation witness is from another revision',
+  );
+  assert.equal(
+    record.imageSha256,
+    createHash('sha256').update(fs.readFileSync(paths.image)).digest('hex'),
+    'Native witness/image binding changed',
+  );
   return { paths, value: record.presentation };
 }
