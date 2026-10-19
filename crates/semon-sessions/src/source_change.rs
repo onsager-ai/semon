@@ -222,29 +222,50 @@ pub struct SessionFactsWrite {
     options: Options,
     before: crate::Facts,
     wanted: crate::Facts,
+    push_driven: bool,
     _lock: SourceLock,
 }
 impl SessionFactsWrite {
     pub fn begin(options: &Options, wanted: &crate::Facts) -> io::Result<Self> {
+        Self::begin_with_source_journal(options, wanted, true)
+    }
+    // The reference receiver journals facts, but its Raw transport does not
+    // journal every mutation. Keep ordinary metadata discovery for that reader.
+    pub(crate) fn begin_observed(options: &Options, wanted: &crate::Facts) -> io::Result<Self> {
+        Self::begin_with_source_journal(options, wanted, false)
+    }
+    fn begin_with_source_journal(
+        options: &Options,
+        wanted: &crate::Facts,
+        push_driven: bool,
+    ) -> io::Result<Self> {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::run(options, "facts_write_wait");
         let source_lock = SourceLock::acquire(options, "facts", true)?;
         let before = options
             .facts
             .as_ref()
             .and_then(|path| crate::read_facts(path).ok())
             .unwrap_or_default();
-        crate::events::store::enqueue_facts(options, &before, wanted)?;
+        crate::events::store::enqueue_facts(options, &before, wanted, push_driven)?;
         crate::events::store::preserve_legacy_runtime(options, &before, wanted)?;
         Ok(Self {
             options: options.clone(),
             before,
             wanted: wanted.clone(),
+            push_driven,
             _lock: source_lock,
         })
     }
     pub fn complete(self) -> io::Result<()> {
         // Re-enqueue after publication; claimed revisions can never ACK a newer
         // facts update, including recovery from a lost acknowledgment.
-        crate::events::store::enqueue_facts(&self.options, &self.before, &self.wanted)
+        crate::events::store::enqueue_facts(
+            &self.options,
+            &self.before,
+            &self.wanted,
+            self.push_driven,
+        )
     }
 }
 
