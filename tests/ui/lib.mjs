@@ -722,7 +722,7 @@ export async function served(browser, opts = {}) {
       });
     page.on('request', (request) => {
       const apiPath = selectedApiPath(request.url(), origin);
-      if (page.requests) page.requests.push(request.url());
+      if (opts.captureRequests) page.requests.push(request.url());
       if (apiPath) {
         const homePost =
           page.captureHomePostTagEnabled &&
