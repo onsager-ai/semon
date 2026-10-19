@@ -3720,7 +3720,6 @@ export function createCatalogViewer(
     root.replaceChildren();
     shell.closeDrawer(true);
     drawSources();
-    void overview.refresh();
     if (!sourceItems.length) await loadSources(false);
   }
   async function switchSource(key: string, push = true) {
@@ -3925,6 +3924,7 @@ export function createCatalogViewer(
         if ((parts[1] === 's' || parts[1] === 'trace') && parts[3])
           void locateBookmark(decodeURIComponent(parts[3]));
       });
+      void overview.refresh();
       return;
     }
     if (!capabilities.source_key || (machine && machine !== capabilities.source_key)) {
