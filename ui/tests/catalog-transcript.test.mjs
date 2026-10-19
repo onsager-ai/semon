@@ -391,3 +391,41 @@ test('initially incomplete native bodies can recover under the same qualified pr
     assert.equal(guarded.entries()[0].entry.text, '');
   }
 });
+
+test('failed native message, thought, tool and action reads recover without crossing source fences', () => {
+  for (const state of ['incomplete', 'unavailable'])
+    for (const entry of [
+      { k: 'u', text: 'Native user message' },
+      { k: 'a', text: 'Native assistant message' },
+      { k: 'think', text: 'Native thought' },
+      { k: 'tool', name: 'exec_command', arg: 'synthetic command', out: 'Native result', ok: true },
+      { k: 'h', id: 'native-action', text: 'Native action prompt' },
+    ]) {
+      const store = new CatalogTranscriptStore();
+      store.select({ source_key: 'source', catalog_key: 'session' });
+      const complete = page();
+      complete.entries[0] = { ...complete.entries[0], ...entry };
+      complete.entries[0].field = {
+        name: entry.k === 'tool' ? 'out' : 'text',
+        chunks: 1,
+        complete: true,
+      };
+      const missing = structuredClone(complete);
+      delete missing.entries[0].field;
+      missing.entries[0][entry.k === 'tool' ? 'out' : 'text'] = '';
+      missing.entries[0].freshness = { state };
+      store.accept(store.request(0, 2), missing);
+      assert.deepEqual(store.incompleteRange(), { first: 0, end: 2 });
+      assert.equal(store.accept(store.request(0, 2), complete), true);
+      assert.equal(store.incompleteRange(), null);
+      const recovered = store.entries()[0];
+      assert.equal(
+        recovered.entry.k === 'tool'
+          ? recovered.entry.out
+          : recovered.entry.k === 'h'
+            ? recovered.native_action_text
+            : recovered.entry.text,
+        entry.k === 'tool' ? entry.out : entry.text,
+      );
+    }
+});
