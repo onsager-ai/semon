@@ -1061,6 +1061,10 @@ pub(crate) trait IndexStore: Send {
         let _ = (batch, prepared);
         Err(StoreError::Data("semantic staging unavailable".into()))
     }
+    /// Constant, content-free reason from the last semantic write attempt.
+    fn semantic_rejection(&self) -> Option<&'static str> {
+        None
+    }
     fn publish_semantic_catalog(
         &mut self,
         batch: &crate::model::relation_stage::Batch,
@@ -1641,6 +1645,12 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .record_semantic_batch(batch, prepared)
             .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn semantic_rejection(&self) -> Option<&'static str> {
+        self.store
+            .as_deref()
+            .and_then(|store| store.semantic_rejection())
     }
 
     pub(crate) fn publish_semantic_catalog(

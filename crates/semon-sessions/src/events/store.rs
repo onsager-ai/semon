@@ -412,6 +412,7 @@ struct SqliteStore {
     connection: Connection,
     path: PathBuf,
     selected_runs: Option<std::collections::BTreeSet<String>>,
+    semantic_rejection: Option<&'static str>,
     #[cfg(test)]
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
@@ -2240,6 +2241,9 @@ impl IndexStore for SqliteStore {
     ) -> Result<Outcome, StoreError> {
         self.semantic_record(batch, prepared)
     }
+    fn semantic_rejection(&self) -> Option<&'static str> {
+        self.semantic_rejection
+    }
     fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
         self.semantic_finish(epoch)
     }
@@ -2255,9 +2259,13 @@ impl IndexStore for SqliteStore {
         batch: &crate::model::relation_stage::Batch,
         prepared: &crate::model::PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        if batch.phase != crate::model::relation_stage::Phase::Publication
-            || batch.base_generation != prepared.base_generation
-        {
+        self.semantic_rejection = None;
+        if batch.phase != crate::model::relation_stage::Phase::Publication {
+            self.semantic_rejection = Some("publication_phase");
+            return Ok((Outcome::Conflict, None));
+        }
+        if batch.base_generation != prepared.base_generation {
+            self.semantic_rejection = Some("prepared_generation");
             return Ok((Outcome::Conflict, None));
         }
         self.publish_catalog_with_generation(
@@ -3109,6 +3117,7 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.semantic_rejection = None;
         let rows = publication.rows;
         #[cfg(test)]
         {
@@ -3173,19 +3182,25 @@ impl SqliteStore {
                 .optional()
                 .map_err(failure)?;
             if previous.as_deref() != expected_generation {
+                self.semantic_rejection = Some("publication_generation");
                 return Ok(Outcome::Conflict);
             }
             if preserve_complete
                 && !closed_catalog(&transaction, publication, claims.unwrap_or_default())
                     .map_err(failure)?
             {
+                self.semantic_rejection = Some("closed_scope");
                 return Ok(Outcome::Conflict);
             }
             if let Some(batch) = semantic {
-                if !semantic_stage::valid_batch(&transaction, batch).map_err(failure)? {
+                if let Some(reason) =
+                    semantic_stage::batch_rejection(&transaction, batch).map_err(failure)?
+                {
+                    self.semantic_rejection = Some(reason);
                     return Ok(Outcome::Conflict);
                 }
             } else if semantic_stage::active(&transaction).map_err(failure)? {
+                self.semantic_rejection = Some("stage_owned");
                 return Ok(Outcome::Conflict);
             }
             // Do not let a slow builder overwrite a newer complete catalog.
@@ -3201,6 +3216,7 @@ impl SqliteStore {
                 i64::try_from(sources.len()).unwrap_or(-1)
             };
             if committed != i64::try_from(sources.len()).unwrap_or(-1) {
+                self.semantic_rejection = Some("source_membership");
                 return Ok(Outcome::Conflict);
             }
             let mut affected = std::collections::BTreeSet::new();
@@ -3208,6 +3224,7 @@ impl SqliteStore {
                 let claimed: std::collections::BTreeSet<_> =
                     claims.iter().map(|(path, _)| path.as_str()).collect();
                 if sources.keys().any(|path| !claimed.contains(path.as_str())) {
+                    self.semantic_rejection = Some("unclaimed_source");
                     return Ok(Outcome::Conflict);
                 }
                 for path in &claimed {
@@ -3216,6 +3233,7 @@ impl SqliteStore {
                     {
                         let removed: bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1 AND reason='removed')",[*path],|row|row.get(0)).map_err(failure)?;
                         if !removed {
+                            self.semantic_rejection = Some("source_missing_without_removal");
                             return Ok(Outcome::Conflict);
                         }
                     }
@@ -3223,6 +3241,7 @@ impl SqliteStore {
                 for (path, revision) in claims {
                     let actual: Option<i64> = transaction.query_row("SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",[path],|row|row.get(0)).optional().map_err(failure)?;
                     if actual != *revision {
+                        self.semantic_rejection = Some("publication_claim");
                         return Ok(Outcome::Conflict);
                     }
                     let mut statement = transaction.prepare("SELECT session_key FROM session_catalog_sources WHERE lifecycle='current' AND source_path=?1 LIMIT 65").map_err(failure)?;
@@ -3245,6 +3264,7 @@ impl SqliteStore {
                     }
                 }
                 if affected.len() > 64 {
+                    self.semantic_rejection = Some("owner_budget");
                     return Ok(Outcome::Conflict);
                 }
                 for key in &affected {
@@ -3254,6 +3274,7 @@ impl SqliteStore {
                         .map_err(failure)?
                     {
                         if !claimed.contains(path.map_err(failure)?.as_str()) {
+                            self.semantic_rejection = Some("owner_scope");
                             return Ok(Outcome::Conflict);
                         }
                     }
@@ -3261,6 +3282,7 @@ impl SqliteStore {
             }
             for (path, source) in &sources {
                 let Some((_, ledger)) = ledger_row(&transaction, path).map_err(failure)? else {
+                    self.semantic_rejection = Some("source_ledger_missing");
                     return Ok(Outcome::Conflict);
                 };
                 if (
@@ -3278,6 +3300,7 @@ impl SqliteStore {
                     source.tail_sha256,
                     source.changed_ns,
                 ) {
+                    self.semantic_rejection = Some("source_identity");
                     return Ok(Outcome::Conflict);
                 }
             }
@@ -3890,6 +3913,7 @@ impl SqliteStore {
             connection,
             path: path.to_owned(),
             selected_runs: scoped.then(std::collections::BTreeSet::new),
+            semantic_rejection: None,
             #[cfg(test)]
             traversal_observation: None,
         };

@@ -821,12 +821,12 @@ fn withdrawal_authority(c: &Connection) -> rusqlite::Result<Option<Withdrawal>> 
     let text:Option<Option<String>>=c.query_row("SELECT CASE WHEN octet_length(withdrawal_authority)<=1048576 THEN withdrawal_authority END FROM catalog_semantic_stage WHERE withdrawal_authority IS NOT NULL",[],|r|r.get(0)).optional()?;
     text.map(|text| bounded(text, &mut 0)).transpose()
 }
-fn witnesses(c: &Connection) -> rusqlite::Result<bool> {
+fn witness_rejection(c: &Connection) -> rusqlite::Result<Option<&'static str>> {
     // Source inventories are deliberately outside the runtime fingerprint.
     // This constant-size authority fence covers withdrawals acknowledged on
     // earlier pages as well as the selected page, until pointer retirement.
     if withdrawal_authority(c)?.is_some_and(|w| !w.authority_current().unwrap_or(false)) {
-        return Ok(false);
+        return Ok(Some("withdrawal_authority"));
     }
     // Our own completed steps advance this fence. With no new observation the
     // previous qualification is unchanged, regardless of component width.
@@ -834,28 +834,70 @@ fn witnesses(c: &Connection) -> rusqlite::Result<bool> {
         r.get(0)
     })?;
     if observed == revision(c)? {
-        return Ok(true);
+        return Ok(None);
     }
-    let changed: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources s LEFT JOIN session_catalog_invalidations i USING(source_path) LEFT JOIN files f ON f.path=s.source_path WHERE s.index_done=1 AND (i.revision IS NOT s.claim OR f.dev IS NOT s.dev OR f.ino IS NOT s.ino OR f.size IS NOT s.size OR f.mtime_ns IS NOT s.mtime_ns OR f.ctime_ns IS NOT s.ctime_ns OR f.resume_at IS NOT s.resume_at OR f.head_sha256 IS NOT s.head_sha256 OR f.tail_sha256 IS NOT s.tail_sha256))",[],|r|r.get(0))?;
-    Ok(!changed)
+    let changed: Option<bool> = c.query_row("SELECT i.revision IS NOT s.claim FROM catalog_semantic_sources s LEFT JOIN session_catalog_invalidations i USING(source_path) LEFT JOIN files f ON f.path=s.source_path WHERE s.index_done=1 AND (i.revision IS NOT s.claim OR f.dev IS NOT s.dev OR f.ino IS NOT s.ino OR f.size IS NOT s.size OR f.mtime_ns IS NOT s.mtime_ns OR f.ctime_ns IS NOT s.ctime_ns OR f.resume_at IS NOT s.resume_at OR f.head_sha256 IS NOT s.head_sha256 OR f.tail_sha256 IS NOT s.tail_sha256) LIMIT 1",[],|r|r.get(0)).optional()?;
+    Ok(changed.map(|claim_changed| {
+        if claim_changed {
+            "witness_claim"
+        } else {
+            "witness_ledger"
+        }
+    }))
 }
-pub(super) fn valid_batch(c: &Connection, b: &Batch) -> rusqlite::Result<bool> {
-    let actual: Option<(i64, String, Option<String>, String)> = c
+fn witnesses(c: &Connection) -> rusqlite::Result<bool> {
+    Ok(witness_rejection(c)?.is_none())
+}
+pub(super) fn batch_rejection(c: &Connection, b: &Batch) -> rusqlite::Result<Option<&'static str>> {
+    struct Fence {
+        epoch: i64,
+        phase: String,
+        generation: Option<String>,
+        runtime: String,
+        revision: i64,
+        resetting: bool,
+    }
+    let actual = c
         .query_row(
-            "SELECT epoch,phase,generation,runtime FROM catalog_semantic_stage WHERE resetting=0 AND revision=?1",
-            [b.source_revision],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            "SELECT epoch,phase,generation,runtime,revision,resetting FROM catalog_semantic_stage",
+            [],
+            |r| {
+                Ok(Fence {
+                    epoch: r.get(0)?,
+                    phase: r.get(1)?,
+                    generation: r.get(2)?,
+                    runtime: r.get(3)?,
+                    revision: r.get(4)?,
+                    resetting: r.get(5)?,
+                })
+            },
         )
         .optional()?;
-    Ok(actual
-        == Some((
-            b.epoch,
-            phase(b.phase).into(),
-            b.base_generation.clone(),
-            b.runtime.clone(),
-        ))
-        && generation(c)? == b.base_generation
-        && witnesses(c)?)
+    let Some(actual) = actual else {
+        return Ok(Some("stage_missing"));
+    };
+    if actual.resetting {
+        return Ok(Some("stage_resetting"));
+    }
+    if actual.epoch != b.epoch {
+        return Ok(Some("stage_epoch"));
+    }
+    if actual.phase != phase(b.phase) {
+        return Ok(Some("stage_phase"));
+    }
+    if actual.revision != b.source_revision {
+        return Ok(Some("stage_revision"));
+    }
+    if actual.generation != b.base_generation {
+        return Ok(Some("stage_generation"));
+    }
+    if actual.runtime != b.runtime {
+        return Ok(Some("stage_runtime"));
+    }
+    if generation(c)? != b.base_generation {
+        return Ok(Some("catalog_generation"));
+    }
+    witness_rejection(c)
 }
 fn bounded<T: DeserializeOwned>(text: Option<String>, used: &mut usize) -> rusqlite::Result<T> {
     let text = text.ok_or(rusqlite::Error::InvalidQuery)?;
@@ -1635,6 +1677,7 @@ impl SqliteStore {
         b: &Batch,
         prepared: &crate::model::PreparedSources,
     ) -> Result<Outcome, StoreError> {
+        self.semantic_rejection = None;
         if b.phase == Phase::Publication
             || b.paths.len() > if b.phase == Phase::Relations { 32 } else { 64 }
             || prepared.claims.len() > 64
@@ -1650,18 +1693,27 @@ impl SqliteStore {
         if !current(&tx).map_err(failure)? {
             return Ok(Outcome::Stale);
         }
-        if !valid_batch(&tx, b).map_err(failure)? || prepared.base_generation != b.base_generation {
+        if let Some(reason) = batch_rejection(&tx, b).map_err(failure)? {
+            self.semantic_rejection = Some(reason);
+            return Ok(Outcome::Conflict);
+        }
+        if prepared.base_generation != b.base_generation {
+            self.semantic_rejection = Some("prepared_generation");
             return Ok(Outcome::Conflict);
         }
         for (path, expected) in &prepared.claims {
             if claim(&tx, path).map_err(failure)? != *expected {
+                self.semantic_rejection = Some("prepared_claim");
                 return Ok(Outcome::Conflict);
             }
         }
         for row in &prepared.rows {
-            if row.sources.len() > 64
-                || !selected_roles_current(&tx, &row.sources).map_err(failure)?
-            {
+            if row.sources.len() > 64 {
+                self.semantic_rejection = Some("row_source_budget");
+                return Ok(Outcome::Conflict);
+            }
+            if !selected_roles_current(&tx, &row.sources).map_err(failure)? {
+                self.semantic_rejection = Some("row_source_role");
                 return Ok(Outcome::Conflict);
             }
         }
@@ -1680,13 +1732,28 @@ impl SqliteStore {
             let mut bytes = 0usize;
             let mut negative_paths = BTreeSet::new();
             for negative in &prepared.withdrawals {
-                if !negative_paths.insert(&negative.path)
-                    || !b.paths.contains(&negative.path)
-                    || negative.runtime != b.runtime
-                    || tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_owner_sources WHERE source_path=?1)",[&negative.path],|r|r.get::<_,bool>(0)).map_err(failure)?
-                    || prepared.indexed_sources.iter().any(|(_, source)| source.path == Path::new(&negative.path))
-                    || !negative.current().unwrap_or(false)
+                if !negative_paths.insert(&negative.path) || !b.paths.contains(&negative.path) {
+                    self.semantic_rejection = Some("withdrawal_membership");
+                    return Ok(Outcome::Conflict);
+                }
+                if negative.runtime != b.runtime {
+                    self.semantic_rejection = Some("withdrawal_runtime");
+                    return Ok(Outcome::Conflict);
+                }
+                if tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_owner_sources WHERE source_path=?1)",[&negative.path],|r|r.get::<_,bool>(0)).map_err(failure)? {
+                    self.semantic_rejection = Some("withdrawal_owner");
+                    return Ok(Outcome::Conflict);
+                }
+                if prepared
+                    .indexed_sources
+                    .iter()
+                    .any(|(_, source)| source.path == Path::new(&negative.path))
                 {
+                    self.semantic_rejection = Some("withdrawal_indexed");
+                    return Ok(Outcome::Conflict);
+                }
+                if !negative.current().unwrap_or(false) {
+                    self.semantic_rejection = Some("withdrawal_proof");
                     return Ok(Outcome::Conflict);
                 }
                 if let Some(previous) = &authority {
@@ -1694,6 +1761,7 @@ impl SqliteStore {
                         || previous.facts_identity != negative.facts_identity
                         || previous.runtime != negative.runtime
                     {
+                        self.semantic_rejection = Some("withdrawal_authority");
                         return Ok(Outcome::Conflict);
                     }
                 } else {
@@ -1728,6 +1796,7 @@ impl SqliteStore {
             tx.execute("UPDATE catalog_semantic_stage SET key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1",[]).map_err(failure)?;
             for (harness, source) in &prepared.indexed_sources {
                 if !selected_roles_current(&tx, std::slice::from_ref(source)).map_err(failure)? {
+                    self.semantic_rejection = Some("indexed_source_role");
                     return Ok(Outcome::Conflict);
                 }
                 let encoded = json(source).map_err(failure)?;
@@ -1942,6 +2011,7 @@ impl SqliteStore {
                 )
                 .map_err(failure)?;
             if b.paths.as_slice() != [cursor.path.clone()] || actual != cursor.after {
+                self.semantic_rejection = Some("relation_cursor");
                 return Ok(Outcome::Conflict);
             }
         }
@@ -1996,13 +2066,15 @@ impl SqliteStore {
             [revision(&tx).map_err(failure)?],
         )
         .map_err(failure)?;
-        if !witnesses(&tx).map_err(failure)? {
+        if let Some(reason) = witness_rejection(&tx).map_err(failure)? {
+            self.semantic_rejection = Some(reason);
             return Ok(Outcome::Conflict);
         }
         tx.commit().map_err(failure)?;
         Ok(Outcome::Written)
     }
     pub(super) fn semantic_finish(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
+        self.semantic_rejection = None;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2012,21 +2084,34 @@ impl SqliteStore {
         }
         let actual:Option<(i64,Option<String>,String)>=tx.query_row("SELECT epoch,generation,runtime FROM catalog_semantic_stage WHERE phase='publication' AND resetting=0 AND keys_done=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(failure)?;
         let Some((actual, expected, runtime)) = actual else {
+            self.semantic_rejection = Some("completion_phase");
             return Ok(Outcome::Conflict);
         };
         let unfinished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE index_done=0 OR events_done=0 OR identity_done=0 OR relation_done=0 OR publication_done=0) OR EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE published=0 OR parent_resolved=0 OR root_key IS NULL OR cost_done=0) OR EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE done=0)",[],|r|r.get(0)).map_err(failure)?;
-        if actual != epoch
-            || unfinished
-            || generation(&tx).map_err(failure)? != expected
-            || !witnesses(&tx).map_err(failure)?
-        {
+        if actual != epoch {
+            self.semantic_rejection = Some("stage_epoch");
+            return Ok(Outcome::Conflict);
+        }
+        if unfinished {
+            self.semantic_rejection = Some("completion_backlog");
+            return Ok(Outcome::Conflict);
+        }
+        if generation(&tx).map_err(failure)? != expected {
+            self.semantic_rejection = Some("catalog_generation");
+            return Ok(Outcome::Conflict);
+        }
+        if let Some(reason) = witness_rejection(&tx).map_err(failure)? {
+            self.semantic_rejection = Some(reason);
             return Ok(Outcome::Conflict);
         }
         let sources=tx.prepare("SELECT source_path,claim,ledger FROM catalog_semantic_sources WHERE ack_done=0 ORDER BY source_path LIMIT 64").map_err(failure)?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
         for (path, observed, recorded) in sources {
-            if claim(&tx, &path).map_err(failure)? != observed
-                || ledger(&tx, &path).map_err(failure)? != recorded
-            {
+            if claim(&tx, &path).map_err(failure)? != observed {
+                self.semantic_rejection = Some("completion_claim");
+                return Ok(Outcome::Conflict);
+            }
+            if ledger(&tx, &path).map_err(failure)? != recorded {
+                self.semantic_rejection = Some("completion_ledger");
                 return Ok(Outcome::Conflict);
             }
             let captured: Option<Ledger> = recorded
@@ -2085,7 +2170,8 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .map_err(failure)?;
-        if !witnesses(&tx).map_err(failure)? {
+        if let Some(reason) = witness_rejection(&tx).map_err(failure)? {
+            self.semantic_rejection = Some(reason);
             return Ok(Outcome::Conflict);
         }
         if !pending {
@@ -2397,6 +2483,178 @@ mod tests {
         // captures. ACK below uses the actual source/ledger/physical fences.
         store.connection.execute("UPDATE catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1) WHERE source_path=?1",params![path,claim(&store.connection,&path).unwrap(),ledger(&store.connection,&path).unwrap()]).unwrap();
         (root, store, path)
+    }
+
+    fn diagnostic_batch(store: &SqliteStore, path: &str) -> Batch {
+        store
+            .connection
+            .query_row(
+                "SELECT epoch,revision,generation,runtime FROM catalog_semantic_stage",
+                [],
+                |r| {
+                    Ok(Batch {
+                        epoch: r.get(0)?,
+                        source_revision: r.get(1)?,
+                        base_generation: r.get(2)?,
+                        runtime: r.get(3)?,
+                        phase: Phase::Indexing,
+                        paths: vec![path.to_owned()],
+                        context: Context::default(),
+                        relation_cursor: None,
+                    })
+                },
+            )
+            .unwrap()
+    }
+
+    fn empty_preparation(b: &Batch) -> crate::model::PreparedSources {
+        crate::model::PreparedSources {
+            base_generation: b.base_generation.clone(),
+            claims: Vec::new(),
+            rows: Vec::new(),
+            transcripts: Vec::new(),
+            pids: BTreeSet::new(),
+            lineage_dependencies: Vec::new(),
+            message_dependencies: None,
+            relationships: Context::default(),
+            indexed_sources: Vec::new(),
+            indexed_native_parents: Vec::new(),
+            withdrawals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn semantic_rejection_distinguishes_stale_batches_without_mutating_the_stage() {
+        for reason in [
+            "stage_epoch",
+            "stage_phase",
+            "stage_revision",
+            "stage_generation",
+            "stage_runtime",
+        ] {
+            let (root, mut store, path) = header_repair_store(reason);
+            let original = diagnostic_batch(&store, &path);
+            assert_eq!(batch_rejection(&store.connection, &original).unwrap(), None);
+            let mut stale = original.clone();
+            match reason {
+                "stage_epoch" => stale.epoch += 1,
+                "stage_phase" => stale.phase = Phase::Identity,
+                "stage_revision" => stale.source_revision += 1,
+                "stage_generation" => {
+                    stale.base_generation = Some("synthetic-other-generation".into())
+                }
+                "stage_runtime" => stale.runtime = "synthetic-other-runtime".into(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store
+                    .semantic_record(&stale, &empty_preparation(&stale))
+                    .unwrap(),
+                Outcome::Conflict
+            );
+            assert_eq!(store.semantic_rejection(), Some(reason));
+            assert_eq!(batch_rejection(&store.connection, &original).unwrap(), None);
+            assert_eq!(
+                diagnostic_batch(&store, &path).source_revision,
+                original.source_revision
+            );
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn semantic_rejection_distinguishes_claims_ledgers_catalog_generation_and_sqlite_busy() {
+        for reason in [
+            "prepared_claim",
+            "witness_claim",
+            "witness_ledger",
+            "catalog_generation",
+        ] {
+            let (root, mut store, path) = header_repair_store(reason);
+            let b = diagnostic_batch(&store, &path);
+            let mut prepared = empty_preparation(&b);
+            match reason {
+                "prepared_claim" => prepared.claims.push((path.clone(), Some(i64::MAX))),
+                "witness_claim" => {
+                    let tx = store.connection.unchecked_transaction().unwrap();
+                    invalidate_catalog_source(&tx, &path, "changed").unwrap();
+                    tx.commit().unwrap();
+                }
+                "witness_ledger" => {
+                    store
+                        .connection
+                        .execute("UPDATE files SET size=size+1 WHERE path=?1", [&path])
+                        .unwrap();
+                    store.connection.execute("UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='catalog_source_revision'", []).unwrap();
+                }
+                "catalog_generation" => {
+                    store.connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_generation','synthetic-other-generation')", []).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store.semantic_record(&b, &prepared).unwrap(),
+                Outcome::Conflict
+            );
+            assert_eq!(store.semantic_rejection(), Some(reason));
+            // A real write-lock conflict remains StoreError::Busy; it must not
+            // be reported as the preceding semantic rejection after retry.
+            store.connection.busy_timeout(Duration::ZERO).unwrap();
+            let blocker = Connection::open(&store.path).unwrap();
+            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+            assert!(matches!(
+                store.semantic_record(&b, &prepared),
+                Err(StoreError::Busy(_))
+            ));
+            assert_eq!(store.semantic_rejection(), None);
+            blocker.execute_batch("ROLLBACK").unwrap();
+            drop(blocker);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn semantic_rejection_keeps_withdrawal_authority_fenced_across_a_facts_rewrite() {
+        let (root, mut store, path) = header_repair_store("withdrawal-authority-diagnostic");
+        let b = diagnostic_batch(&store, &path);
+        let facts_path = root.join("facts.json");
+        let mut facts = crate::Facts {
+            version: crate::FACTS_VERSION,
+            codex_rollouts: Some(BTreeSet::new()),
+            ..Default::default()
+        };
+        crate::write_facts(&facts_path, &facts).unwrap();
+        let authority = Withdrawal {
+            path: path.clone(),
+            relative: "sessions/rollout-synthetic.jsonl".into(),
+            stat: Stat::of(Path::new(&path)).unwrap(),
+            facts_path: facts_path.clone(),
+            facts_identity: crate::facts::source_authority::Identity::of(
+                &fs::symlink_metadata(&facts_path).unwrap(),
+            )
+            .unwrap(),
+            runtime: b.runtime.clone(),
+        };
+        assert!(authority.authority_current().unwrap());
+        store
+            .connection
+            .execute(
+                "UPDATE catalog_semantic_stage SET withdrawal_authority=?1",
+                [json(&authority).unwrap()],
+            )
+            .unwrap();
+        facts.hostname = "synthetic-new-hostname".into();
+        crate::write_facts(&facts_path, &facts).unwrap();
+        assert_eq!(
+            store.semantic_record(&b, &empty_preparation(&b)).unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(store.semantic_rejection(), Some("withdrawal_authority"));
+        assert!(claim(&store.connection, &path).unwrap().is_some());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn acknowledge_repair_source(store: &SqliteStore, path: &str) {
