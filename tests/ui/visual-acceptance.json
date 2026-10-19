@@ -24,9 +24,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -52,9 +52,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -80,9 +80,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -108,9 +108,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -136,9 +136,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -151,22 +151,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "f8e87b3ac0a61ead3548543a83a31916e6e6a93c4266a66eebc744f1fea6f950",
+          "image": "a91bbf2269ca11fd81927fbbc68856c45f3caea9d2a9f6faa4b843ec2c06865b",
           "evidence": "fb3788b0242c41ca8a9cd0483eef6b035f077e6a66078841f562c4ccb6236008"
         },
         "reference": {
-          "image": "9473cf9266975b8f1f433d7e5ac1b0c22bafd2ac74978cccdb4063f11a2e8fcb",
+          "image": "e2a271d547aec7039d2b215981942e2add747b76ab9ff47403076dd2a7bc2862",
           "evidence": "f0a013cfda32f69ef5d238c35ea24635c8bbdd5a665a3ffbf79aa25c599b9f92"
         },
         "diff": {
-          "image": "4d30044d8dada9a906ee7e030b94527b25bed6e0f52f33b7e0cf64d7afaccff0",
+          "image": "df9db6fda0bb5fe43f427d3b3b7d695bc6a444fe80416692ec6066e3e4756bbc",
           "evidence": "573397f2bf0ef75a2ee7b54a5394d86c4ebd82a99e87a0850f32de60948f7b1f"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -192,9 +192,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -220,9 +220,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -248,9 +248,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -276,9 +276,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -304,9 +304,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -332,9 +332,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -347,22 +347,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "5adde994fe116fb1507958afd1b9826617aed4d61ff3fb0ae9c1b1ffa2b8498d",
+          "image": "ac6d385f09a1fa5e1a84e114bc96b4e9814161351e1b0190254f2f86a6bb5d3f",
           "evidence": "fb3788b0242c41ca8a9cd0483eef6b035f077e6a66078841f562c4ccb6236008"
         },
         "reference": {
-          "image": "56ced3ced06cba71c7736df9c1a1e5596b79fa0d07ba13a4b3608cba02656c10",
+          "image": "b06b0f4b79f16e0ebf333fee78f02f051e593ddbe18018b6a9319e7db6569b1f",
           "evidence": "f0a013cfda32f69ef5d238c35ea24635c8bbdd5a665a3ffbf79aa25c599b9f92"
         },
         "diff": {
-          "image": "15616b63a08690de70474ed3551eb06da1b8f187bedb16743d80caa5f1c23db9",
+          "image": "4ba55d6ee90c066d9af91e13b4675a7726fbe39c952c4e2d6faa73ecc7e30e52",
           "evidence": "a66f320653045852317e3b3054296f6562d179de72b2cd7189b0488293e931c0"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -388,9 +388,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -403,7 +403,7 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "0f994c5c86a4ec9407ecde8a0dd1543529634887d8ea01c6db2f1f2c1cdad803",
+          "image": "c3bbb2916d4c652061b28bc2faf64d01f38dd0964df331c4a8baa7ff7da53b3c",
           "evidence": "21f2196773a0fb5f3d687a536c27a3f6e1e38727c4345517a3c0f77c7a568f93"
         },
         "reference": {
@@ -416,9 +416,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -431,11 +431,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "4e95060c558f2f39a51737d086859a1d9dfd7c203ea6943f5c00035f991d941a",
+          "image": "1790aff1734f48ca88cf2db749523b6f1a14a3d35226a280db2798888c972f8e",
           "evidence": "d4bcfe004a0d9715316777de6616197b781a05352ec31713a6470ede14c236d6"
         },
         "reference": {
-          "image": "d677f8c874eb3bfe7a76d06eff11d3f69e46bb73a784c9dee22cea3962602f55",
+          "image": "5e0a3c51502a906ce12f67089b550f209c589bef2df650aec5910e3fdcd63199",
           "evidence": "a60f15466ec95fa005e9d1f0ee6b5a87d1223f9480f6432f355a1c80fb81093c"
         },
         "diff": {
@@ -444,9 +444,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -463,7 +463,7 @@
           "evidence": "4f234f07fa74093f8bc0bce472c6193a0aeb5b4a2899b8b422ad10953f09781c"
         },
         "reference": {
-          "image": "93b79492c90f0b33b37369b2148578c5fef09fc9d5215a5ac4e42387776fd6d7",
+          "image": "9cf5fc1be9d445512670b59c4c8b40bbade7c83db9ddf4e49bebc01ffebbc41d",
           "evidence": "bf44ce52059a92fd39a6cbeccfba238fed9ac56aaa382288438ffe2adda74cd7"
         },
         "diff": {
@@ -472,9 +472,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -487,22 +487,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "8ba330b29615b7617b57849e659a260baf816ba350fb877a1c0a9592d1ba53f9",
+          "image": "df587e1514f5cb6bbbe68083b6eccda3c63d8ab148b913bde9d1ec905c576cb2",
           "evidence": "785f163cf2f71c5c63d4784070b167f07adcaa856a899825faa3b152fe59310e"
         },
         "reference": {
-          "image": "4dc47944da88419c275779370c18d4bf9b9e4322152193141be37e477e0c3ce2",
+          "image": "ba4943fff15dbf99795aef0cc97f98db674346d3f139a88e81c49ff66025f83a",
           "evidence": "04756c3dab8e001ff09b528a33b420648d034640baba8cc287f10ef6494f44a3"
         },
         "diff": {
-          "image": "b1f87dcd94afd698a80f3d10d56539127ec683484e202e82d6a6e7c714c0d8d2",
+          "image": "5508de67c227fd0297f594d5f27c90d3d36b524ad3da497018f3f70769fc273e",
           "evidence": "2cdbedd9559471b95ab7c667469ccfa3d9474225b86e2db9b689244004c1da0b"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -519,7 +519,7 @@
           "evidence": "f342d2af1f91a14f61dc12c95260b44f322d6df9e719fb6816462248d27181ec"
         },
         "reference": {
-          "image": "b77490d9c4c9aa2758971a72559a366263b767ca6aaef64bfb9c62f834fbe37a",
+          "image": "ac1ec28cc53b641af9147e1d6701d0f7152340de6b858b5c15cf01fd192d67a0",
           "evidence": "6a58c8073f666f9a4915863e5564ed2a67beb6ddf3c9a52dbee890809e2e02db"
         },
         "diff": {
@@ -528,9 +528,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -543,22 +543,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "ac2b5fd8fbc0e0615acc67a7a2beb23702eab4096bb0ac5e4bc234ca250132f2",
+          "image": "f5ff6acc41eac7045dc03668637db9b910e29c5d6cc80c4ffa28fd8c8048ff91",
           "evidence": "2b961a0b5e3c42eb3e300a9a02eb73a5c609670aa6031b9dc8bb8fded0201d8c"
         },
         "reference": {
-          "image": "46e9ce49e61603bab44ca1a613113dbc10d9d5529c47a54fd0143b6219547ee4",
+          "image": "202b5343af6cfa9496f3300d91644065472bdc7652811ee08b217f7f60adcad5",
           "evidence": "03c9cbcb7788242da5683bd3c5e7880599f93bfeb8ad871a29bccd27c266a4c9"
         },
         "diff": {
-          "image": "a241999bd1770330e51692558cd2a1862a4586b567547393d2c943f02b72c6c5",
+          "image": "b8b1820d0271d20918b0c418e96814f6c8ee6b4cb74ace11e849152e11dc066e",
           "evidence": "bbacf585ff104a4319582292cd4f5680835b213dff9a990adad751d1bf96b834"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -584,9 +584,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -599,7 +599,7 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "a9d1e64aa4b453f6d0a175c83bb76a7b1342684a02a45240e972371d4acdd86b",
+          "image": "65a8ed3a2ff2f4d549b219b72df70a1b55b94580ce430030b36c13d159560711",
           "evidence": "68cc979037cf1db57096c6140453cd27171e0bee8a7303670512bf572fc05978"
         },
         "reference": {
@@ -612,9 +612,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -627,11 +627,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "5f4664d834878ca9ee3caa044fcd2d1e47feec0228ada3adeedc733020ae5afe",
+          "image": "3e180914c6345a4d4a3d79b9f0f9ccda38162f0d7dab359f9536e8ae71454b94",
           "evidence": "d4bcfe004a0d9715316777de6616197b781a05352ec31713a6470ede14c236d6"
         },
         "reference": {
-          "image": "53374da1b511480761ed4d6bb595f383e67e0763654763dfa0d4072d28e2c4ed",
+          "image": "2f037356944cbeacf2bbb0d7ac8493dbe5f60b4a03b47c8c027bf2152315066c",
           "evidence": "a60f15466ec95fa005e9d1f0ee6b5a87d1223f9480f6432f355a1c80fb81093c"
         },
         "diff": {
@@ -640,9 +640,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -655,11 +655,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "1bf616bbd6c5dc0ecdb806456d7921584086e55c25483f52860ca7707e383350",
+          "image": "864d1dc1188b0c821e2122d3a70ce8f8af00b2a785e2cb1ebad3a3a938d6e93b",
           "evidence": "e4b630ec9595c200aea9053243376f6cb736f7adaed2e22935a77249067e0889"
         },
         "reference": {
-          "image": "944bd2bcdc1aee576c49759bc401ce3b323eb3dbcc93852c8e9ff5fffd28e05b",
+          "image": "1d1a31ddcd14eaf0c449d690808bfad51db4132d188fb3d0aca7f44bf6c485b0",
           "evidence": "8d2d6a0e045259b4454cb465fba7491df04b2763876c04a816664a6e47b01a4a"
         },
         "diff": {
@@ -668,9 +668,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -683,11 +683,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "ce5c649b4de25bccbe60019269a444859a63016d958adf1cb8e24ca90c1bc358",
+          "image": "f97771294c10b0580396b01ad9344cdd6b9059742abfa2e502560bd4f98f478a",
           "evidence": "b31ff007381fef324ebde871392aa27b967eb7e09975557991e79819d1041a56"
         },
         "reference": {
-          "image": "87a74a3099e3d29ac79f1447c38de789dba0c4ded0089d9b52c5b6dd743d730b",
+          "image": "e9316abe12575ec6ffd926a0d5d0af97fda5f83738cf5edca367167ae45a8627",
           "evidence": "e33ac269a752a7a86b3985d6bf02924858466963e26095d0e33d784b1a11cde0"
         },
         "diff": {
@@ -696,9 +696,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -724,9 +724,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -739,22 +739,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "b9173a7d6eb9fef293822daaedee793ffbb8eaa45b0dc8463d24fcd941c176f6",
+          "image": "5fcc351f3abebc2c33d38c0a044207fddf7a0192863870db8a23b2f89c7622e6",
           "evidence": "2b961a0b5e3c42eb3e300a9a02eb73a5c609670aa6031b9dc8bb8fded0201d8c"
         },
         "reference": {
-          "image": "899e883bc9e461885f6f257d8d912c270cc73312ed89a6debdc8a9e1c75c3ba1",
+          "image": "599ca37e6afd49ab0bf894d2eeeeb5ea0b1d0a508b14975ff796f3441bec2807",
           "evidence": "03c9cbcb7788242da5683bd3c5e7880599f93bfeb8ad871a29bccd27c266a4c9"
         },
         "diff": {
-          "image": "3a5a6bc16225cca60d04d85aadf32bc72965107cd311977b384841aec89b9a8a",
+          "image": "41e0dccaec0c31e46b12f809d653f8c0812d0a81035061513fb0bb5a2642b968",
           "evidence": "94bdb6e7bad24d1d0065dce2784ee883d0bebe82e8a9085766decdf51ead3559"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -780,9 +780,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -795,22 +795,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "c28e7461f44b28e8b32f054499a65e7849466cd9baa7a90c9e98ee2dc32aeee7",
+          "image": "17da29a8ca39bee54e1612b34002f4cad7027726e99650755c85b1314554638f",
           "evidence": "295c32e59cfd535197339855ca88659b32f3fd01e934f3287316c6200d65b038"
         },
         "reference": {
-          "image": "9298cd25f37a5727f96e4496ffa03acd1bfa9ba53a41996a89bc9ee547a5153c",
+          "image": "7f5525c091c5a1afe08b37d531335e8f045a86b6c320b3be9c4549ace8c3521c",
           "evidence": "6a0c1ea46f0e87dea644cad4118d298aa9b409d7d864954dea7721df4b47a82a"
         },
         "diff": {
-          "image": "41805da8c243f1bcae0d257f1e8ff80df238beaae8c959e6990c05f9be01b62a",
+          "image": "ef46bf296cfae577121b92728aa933fc6033c5544ebaa937287b7415a8c7b238",
           "evidence": "d90eb44b4df520889285baacb34d0067a06fa44b14c4873e08d9ff9db885b8dc"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -823,11 +823,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "995bac9f1c424f936f6a7f0007df64a1668e874fea372ac90a2c5cef45157105",
+          "image": "36b92fd876b0867634ace5cf99da8da9c1e44bdf5022584f29abe4ad31305d35",
           "evidence": "feac1368dd9d15e19e3dd04dc5f673c4d20bbefdae4152bf31c210605c50fc51"
         },
         "reference": {
-          "image": "a7245e4daa628e405501ee51a5fe94a0f8dee0b548a01c72ebebc04b38e49ff2",
+          "image": "c17a487ecac690b806e05136ff867df42ad94bee9bb79a4a40a824a1874efd4e",
           "evidence": "fd69bdd5354c51cf7690166c4fe1eaa123e99f3b2cd1598b38255f0b42686dd4"
         },
         "diff": {
@@ -836,9 +836,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -851,11 +851,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "a9d0dbfb00f7a28416c8173947aa12cec46e572dce3effabd547eb1d9c82b84b",
+          "image": "e27745ff20f4f0f2b27aec2c0aa0d6c24ddc9ae6f0abe9048c755a86e41bf799",
           "evidence": "b794f4d4cd6320b84badc2e487e7ce1ca830848fb76301086eecce32ef826a24"
         },
         "reference": {
-          "image": "1937b020c00a933e03d4fa29e166be8870a65523973c12cd268dc5f5ffef91b9",
+          "image": "df24392414601205debaec1610c77613a2db2f6f4cb7e4cb82d1f458b9279278",
           "evidence": "6a9e43e585b381fe045dbdf959e9e386bc3e8a3dbf634f6487c0b566df604acb"
         },
         "diff": {
@@ -864,9 +864,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -883,7 +883,7 @@
           "evidence": "a13195dafe4c9a4f98efbdd470cf875b2ef1a601aa81b6b0442e588817eae6b4"
         },
         "reference": {
-          "image": "2800a97fa0b1fb5e634447c7a20a074c7a4e6168da723f778af95bb75c28d46b",
+          "image": "f361a65aa5b65fe15d283158f5d1ab0f0531ad48cbfd28e5691ea21486a46a28",
           "evidence": "d528d3189ac5cc5bd2ca022a7520434dee4f128505b992d8f0329d67a2603bc8"
         },
         "diff": {
@@ -892,9 +892,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -920,9 +920,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -935,22 +935,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "719dd0b1e023e6636c3c18087b64910293226ff98deb9bf4040e03c9c726acce",
+          "image": "5dd9d186aa015dc77b5eabbe9c6e7be3d7bd3bbd34ee62c97f34d80c4d072c89",
           "evidence": "86038609bfd72512ef01d5ee17bec666ebd23ed1b8ffe1e8dd6aef4c29892d75"
         },
         "reference": {
-          "image": "7ac41909e92de13a8962c2ea393729321fbf38149c52584491f7f0342d012b81",
+          "image": "032f4e443aa3463dc97e17990e27c86343c3a4d7d7bfecfad4faa22f192b0ae9",
           "evidence": "d945426aad1d4604af2e4bfd305e4ee7736fa174f5a91b90a704ab36ca4a8719"
         },
         "diff": {
-          "image": "89e5c9ddaf0dcff16e46b1fcccef2580b39a2c0bc7e3d658322e01ee219906f6",
+          "image": "e16aa7ba2c620612fb40ebb624f50dd392196b73725356b11377af94b3219b43",
           "evidence": "c05425f440269bca156927b1d230b3fb543ad372893f9af30f449d8cbd7a6ddf"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -976,9 +976,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -991,22 +991,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3f30d78a992545f901ab591fea191abd4a77dcd1a39bd001cefcc3f9a538d039",
+          "image": "4e419c8c4ff92810653537ce54c4b8ba6dd19462f177625ad8d371da5f39d9e2",
           "evidence": "295c32e59cfd535197339855ca88659b32f3fd01e934f3287316c6200d65b038"
         },
         "reference": {
-          "image": "bb3312b04a0a1671ca4aa7511dd1185566105e8a2fb285cb5be10a293a2a325f",
+          "image": "f13033aa2191d9df7f0e5c06ceb598f24d5fa402feb2affc9a1b826aa20d9685",
           "evidence": "6a0c1ea46f0e87dea644cad4118d298aa9b409d7d864954dea7721df4b47a82a"
         },
         "diff": {
-          "image": "39c7c416411164a19b0b25ef1b1259907f0127ec6b4db3d8a0b9cf7fc40e3e8d",
+          "image": "80f84a6259cedbb20a4a616730fdcde13de876028558202933d2b5d241ae6cf3",
           "evidence": "21c361bce3c5dacce7fc3bb2587a0c5427a11edb69f53ab2bdf9516dd72ec386"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1019,11 +1019,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "d799fabd8e9795c861d0a6d0712954d2ed3cde5aac915ebb66a4ca564678f353",
+          "image": "bb81dabb6634da00a021050faed1f1dfd816b9b35c2c640d34fa530cce74ee84",
           "evidence": "feac1368dd9d15e19e3dd04dc5f673c4d20bbefdae4152bf31c210605c50fc51"
         },
         "reference": {
-          "image": "06d9c92709f8804ab977b149bf2f8ad67a3bdf8d445bbee06da9c9c15a3a5b6e",
+          "image": "5ea24e6721555ab2f47ccc2d67bb7f7fe0ddccbc44f3b36c7c9c1f6565975a56",
           "evidence": "fd69bdd5354c51cf7690166c4fe1eaa123e99f3b2cd1598b38255f0b42686dd4"
         },
         "diff": {
@@ -1032,9 +1032,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1047,11 +1047,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "25eeab18b36cd57175604d3ae1319943d3b90218ebc33e5b3d389ca577fdb0fe",
+          "image": "fa457385c884556f38b19429fd49abfd0cc8d4b0888dc4c9148a249a3eff7eea",
           "evidence": "b794f4d4cd6320b84badc2e487e7ce1ca830848fb76301086eecce32ef826a24"
         },
         "reference": {
-          "image": "db854ec79c6b57109ed5f2e0d95812a937160ffe1ec013cf9f4a0e408907ff77",
+          "image": "aab6792375a72a5a91584df648a93dd20eb0becdce4618a22fdedbe6c831a792",
           "evidence": "6a9e43e585b381fe045dbdf959e9e386bc3e8a3dbf634f6487c0b566df604acb"
         },
         "diff": {
@@ -1060,9 +1060,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1079,7 +1079,7 @@
           "evidence": "a13195dafe4c9a4f98efbdd470cf875b2ef1a601aa81b6b0442e588817eae6b4"
         },
         "reference": {
-          "image": "61df7735519b72dec08a068c8e3fc4c0a4af367bbe2998d9a9150264df8ae766",
+          "image": "68f2ac33f4a69a68c13ba6e2e62e02a044580c9f0097efc8540c80895b6f7cd4",
           "evidence": "d528d3189ac5cc5bd2ca022a7520434dee4f128505b992d8f0329d67a2603bc8"
         },
         "diff": {
@@ -1088,9 +1088,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1116,9 +1116,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1131,22 +1131,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "dcf74832cf27304fd0940695b1ad1bbd2f4d813429fad30032a1e60eaea09a6f",
+          "image": "90a953c204b3bf1bff0f2486615c0307a26051caf3b58763265444c6873f0065",
           "evidence": "86038609bfd72512ef01d5ee17bec666ebd23ed1b8ffe1e8dd6aef4c29892d75"
         },
         "reference": {
-          "image": "76da97e02aa358fdb6f5aa096de6db49c84cea835269de11cced41eef8bfe868",
+          "image": "82d5bf86c5eb3e004bb726e878a7cb7184433c7d3be368b78fa00d3b52371778",
           "evidence": "d945426aad1d4604af2e4bfd305e4ee7736fa174f5a91b90a704ab36ca4a8719"
         },
         "diff": {
-          "image": "206e7bff89da3f79bfc660f14c98ded5d4367332b689bd6b7942d78365fcfb5a",
+          "image": "43ed36e0db0670f38bc4a25747707ebbacf21c5b25f5cb0d309b003c7f9e4614",
           "evidence": "159f583ca1728b15d4f2c27d638a675093e2de56dd422a1bf1ac813a40a25b10"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1172,9 +1172,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1200,9 +1200,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1215,22 +1215,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3710a89cbeafa852bce28618e39502082fea0cb99b7dea90e58df050634e5c37",
+          "image": "ad99c8c21d5219f3475ec7bca7a3609d38670c6a4ccc7cf87e4e41c1059a490c",
           "evidence": "562dbbd87c22d443330b236f6230639cdb863d007db756d2f580e942cfa68a5d"
         },
         "reference": {
-          "image": "62879f4f2361d09c2d220a63e83d5f2e3b68a4501f9f28f27af1a267253ee256",
+          "image": "58f1e2f4e11cefac8c7c56e6bf460fdf5aab95fe20ccb9c0dd8a44fa805940b9",
           "evidence": "1af3fae8333e820d1559ca2ac605dcf2413417c7fc8a0c9e7a8a8355aab883e3"
         },
         "diff": {
-          "image": "f186cfe16ce9a95fdcf2d86b509846c91ee783e44d3b5fdf121054fde9fed564",
+          "image": "78de595b4c88922f1e55267f65afc9beee5bf86325f1cd955eb102132bdf9660",
           "evidence": "15b9a3f37b478bcff81643be8f0307727feebdb3afb3bd14daa319933f5e719d"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1243,22 +1243,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3b46fc9dee7dab7ced125d7711c972aee815bd5f3f295988a41df2235172b4b5",
+          "image": "e69dcb9a4a90dd73f51e5e302d76c9031327c6481171076f16759c662873b2ca",
           "evidence": "74bddac8261d6c337796a950317307616ed76dc0378d8917cac0ad87c3501524"
         },
         "reference": {
-          "image": "281e3c8ca93066d3da386e1fdedf2d36ce9b20f3dc1180348a890d8b5feed8d2",
+          "image": "056b12f4ca4b97d885ee397156c5e1eae89e140a0d397afd2eaa328fee6a2d1f",
           "evidence": "eb6242a7098e44bb0463a44690f8b2bd90051ea781120c6eab8992b6ce2099ad"
         },
         "diff": {
-          "image": "1fd32da935739ffb4216c7c987a49e46bf540fa2edc3fdc9e478e3a44be0fb97",
+          "image": "32667d06f090715eb4747dde690a8675b2edbd36c1d1d7ce5ccd9e55b4198e6e",
           "evidence": "17af04d78d3d8bdc60383962509c7526c872bbaddcf200d81f5300d608947d81"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1284,9 +1284,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1312,9 +1312,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1340,9 +1340,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1355,22 +1355,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "36bcc9cf7733d6c4326753d949bc48558a3d245d97a9b3d572cdcaa4803fe03c",
+          "image": "481b14961ddeb33d106053fe2afd5b4f46d9f6ae12d0fe744dc1e29be656d316",
           "evidence": "5e3151747723e11431486e99f780a8b7857514da6a3c008116e1db42e793272a"
         },
         "reference": {
-          "image": "9a27c79e5004b3f716a87e51c819737d9e4cfc4a623d806e39ed02bb92631e5d",
+          "image": "b2312e3fdca19ca64808cae85f9ca63e12c6ef3369f985840b2957d35701ec5a",
           "evidence": "16c86eb89e2b61ad0b50c5211a4bd571ec2838ba26bcae2030a8678dd4397150"
         },
         "diff": {
-          "image": "c5405104eca45acbd63ae0e8da1d5af1a1b6e72fa0c902540c6b2174d313d12e",
+          "image": "e04b49c488d0769eedcd71f381ee81cf9f647a563f2384d463bc0e998952da26",
           "evidence": "710b5b433d293f16fd18bc3221545a1ac67665d5e9de2f1cdb2454553cb80e84"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1396,9 +1396,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1424,9 +1424,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained. This closed Atlas tool group has a hidden textContent-only no-result wording change; its visible pixels differ only at the removed notice. This does not approve an expanded tool-output wording change."
     },
     {
@@ -1452,9 +1452,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1467,22 +1467,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "f8e87b3ac0a61ead3548543a83a31916e6e6a93c4266a66eebc744f1fea6f950",
+          "image": "a91bbf2269ca11fd81927fbbc68856c45f3caea9d2a9f6faa4b843ec2c06865b",
           "evidence": "5a98b8b99df64499f753d610af1ff219952154e27909c4a273afdc49ea85c798"
         },
         "reference": {
-          "image": "9473cf9266975b8f1f433d7e5ac1b0c22bafd2ac74978cccdb4063f11a2e8fcb",
+          "image": "e2a271d547aec7039d2b215981942e2add747b76ab9ff47403076dd2a7bc2862",
           "evidence": "71cff938211841a1a9686382dfe04d8039448206eab2a9adc1f6f3df39a4871a"
         },
         "diff": {
-          "image": "4d30044d8dada9a906ee7e030b94527b25bed6e0f52f33b7e0cf64d7afaccff0",
+          "image": "df9db6fda0bb5fe43f427d3b3b7d695bc6a444fe80416692ec6066e3e4756bbc",
           "evidence": "7e09c0ce585e26bbb2257656e985c12afe74a66aa4e1e045d34a64f8de76d021"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1495,22 +1495,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "41c3ee67258b680f7cf4005cdad25c45a676a694b492f3c370d4c9245a1b2f0f",
+          "image": "691ebd35cfa6a108f1f548a3933d7a0d6d588230a56840aead5c3c0f4ce38330",
           "evidence": "b5e896283e9af4d85d8dbb88d67972fab51818bc8c37785c4e4e692c9203e685"
         },
         "reference": {
-          "image": "7f1194697dfb562682b943278dde44021f5ce77d17635cdf93c6824a3c54d390",
+          "image": "2de8249fa5bc2e7126391068055b0f2498c3223a6a03b42839a25c983e16ecbf",
           "evidence": "63d211d35fe97fa5dd051d2c014eb95b2a57573e0cf3e561464fde4d31843b30"
         },
         "diff": {
-          "image": "37b2c853c26d20ff6191fd26d2a88aadf2ab0c9f91fdf17c3d503e482b617806",
+          "image": "272dbeab98e8743550013ef537148a9746816e0a511a94c537a2d6750dfdab8d",
           "evidence": "52b51afb4cabca97fac8ac4a5b57a1d0bead2cc7f0a004732013dd10e1e009ed"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1536,9 +1536,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1564,9 +1564,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1579,22 +1579,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "837bd7faba6f923e6acf1fe9906d39b1c0e99cab6ea438b67c3a8c7f3fe3517d",
+          "image": "4fb38c4e0d1a1991ab418b1f951bcee04828516388473acd1b5baba299961c88",
           "evidence": "19d51c6719582467cc93479885738145d74c5130f6eb0513be7c1ed6a01fec84"
         },
         "reference": {
-          "image": "9e49d2cdf1fa8b6b7d19df6e393ec6b0a6ca53f8f9513a7553222ba6858b0322",
+          "image": "ff2ff2eea5a50947a8c140e5a0c3a910862d4b1b7a1b8b26b144546813323379",
           "evidence": "dcea71e6f92ef0775c389702055a6798353014f80e82b29f2639958dbc26511c"
         },
         "diff": {
-          "image": "d86888f2c6daf5525f5b80b7be38b9cf0b1d21c3fbe0000a0e8187d8b471b388",
+          "image": "72e10e5232db4ed6738d5e2b76fcb48e3c7368ea1edaaa3a762b1c904bd1472b",
           "evidence": "c3cb1e0ee09f9d6be5be85f449521a29efe0785285dc93c501e2fd8bfca88b88"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1620,9 +1620,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1648,9 +1648,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1676,9 +1676,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1704,9 +1704,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1719,22 +1719,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3c5bd898c07735a4407d13c76655b7f23fad9e54bb64f95464bef37bc15c2e5f",
+          "image": "7f2b1719f81175f7804ab27ad2c753788448c887712ffc046c3d068ed1d477a6",
           "evidence": "eec60fcbebe519214173ea9f7d29b2057196d8a78045dc63f8b3c3bb5fd06463"
         },
         "reference": {
-          "image": "3158e349c26e8c533bf62de797d9881a2f97ab54b1a8d8368dabbcf5ab30ac9f",
+          "image": "1370867c7cb6c8009225b154334241aea98f2a52938a4c18d345a50e396fa5fe",
           "evidence": "64ce881dcf461ccc70ff6f2e91d9e4e54266c0da83419878b6287e4ac4fa1910"
         },
         "diff": {
-          "image": "6a9e43359be1a2ebba3a887f01e33182b602a3c52b4b21392fa772f4a2ca5d6a",
+          "image": "2ec5a5327744076adde5beadf8877827add17ae3251982c22d156100bf7c992a",
           "evidence": "5164b4a73aee684e82d45f56878abd1802ba6dcea7e7c5f33e194291aa635f3a"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1760,9 +1760,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1788,9 +1788,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1816,9 +1816,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1844,9 +1844,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:36+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1859,22 +1859,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "1483da4fcee0631eb1cdc8bac33fa1ab049c142418d72d149123b706537bf55b",
+          "image": "7a9aeb978c50491a60d41e8e7fb3342b752fde5cdf3bf696961a6ef836954023",
           "evidence": "616b69f50ab67be22f0fa5eb244c1c14cea11b50c05daf25f908d80acdc95c37"
         },
         "reference": {
-          "image": "445ee19bdb80562a1416dd855d88c1ef35f37748b77a30f1fd0ec136405c606b",
+          "image": "b7c14e38dd90ebd1e6b0af43e272202c89962ce2ee97f93ada16580394263e27",
           "evidence": "43f052aa25b958b4bb1e8afc567104ee9dd61f86d766f25f8039d8a57d26041b"
         },
         "diff": {
-          "image": "25cce7e83cb9f7b568658b26d6cf2567293647214a5c59850bff122b1e81ec6a",
+          "image": "6e59ba07536686b0cba43b43c4fbd32df7d0c6bf67bff9c8fe21678737f7e10a",
           "evidence": "aea33c3ea49115a81d1da09ec5fbc80099ac089d6734b07c5bd5619ec011f007"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1887,22 +1887,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "fd5283ccf45cdf03141ea55dc323e733e78c7eef49c362b1e22141dffcb98af4",
+          "image": "eb445f2d8ce8276a3579498bb8691d6f28feb2df2e6c37abfcdbe942c32c5976",
           "evidence": "23356edde0301137f7f5970bdb3ade69984f37538d2abf1ac503168957b99b4d"
         },
         "reference": {
-          "image": "04e2e18f2d4ae2716ed1eac05b0b8c0c9374dc4af29611019158db2eeef56c38",
+          "image": "aae49e309f1afdd5b6c0688d74ba9c95ad9c8eba5ca5c002e2c83af4d4952680",
           "evidence": "39ab9d2a8b3403b590c36b79ea5917d536cb3724ba70ff611807b559c720cccb"
         },
         "diff": {
-          "image": "2318771ce47dc15c39af964d92b1149a3d1c8b213c0a286f8b427cdb6c061f95",
+          "image": "32902e59961a12a6ed6658abf7759d5ea3400074ac9573b49214358a19a0a1d4",
           "evidence": "d5f701745b22dc89d15ad438475bdfc40d8cf8180479e6cfcce7bbc7b2bcee05"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1928,9 +1928,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1956,9 +1956,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1984,9 +1984,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -1999,22 +1999,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "d3bc20742d30dfc5d3031d35afa9bf5082bfe6baa19f93b62bc6129af314cfb9",
+          "image": "e91977fdc1e90063f1eed0c8770878d3543d374a0cd1b8df785ac15c16c55365",
           "evidence": "73d0773d8d7c77667fcbe4cb3e0165cdb2476da6fedc1da621ca750cbab808fe"
         },
         "reference": {
-          "image": "c7ec3a89e55dde757ada129241699e78dbd8994374f2a01c3b3923d4432cc825",
+          "image": "77042f630d5de0697001afb51905981f992ad485c2a7569fb6ecf03f5b9227a3",
           "evidence": "4e52c871540957a9156d642b1fb3318a8517f989be3090dafbcaffd8f11264c5"
         },
         "diff": {
-          "image": "15f3dca7e91cdd51bb2f0ac1c0b9631b04806db89288a47a312a2bb0916c12fe",
+          "image": "d61974692129cb7c6f75034220de6aa6e818adc4f1fe7c5d6e1da7eb23832b22",
           "evidence": "7ab54d34413b6607134d335ec42303fab49dc58be1b8f74cb3ecadecb4ce8950"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2040,9 +2040,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2068,9 +2068,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained. This closed Atlas tool group has a hidden textContent-only no-result wording change; its visible pixels differ only at the removed notice. This does not approve an expanded tool-output wording change."
     },
     {
@@ -2096,9 +2096,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2111,22 +2111,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "5adde994fe116fb1507958afd1b9826617aed4d61ff3fb0ae9c1b1ffa2b8498d",
+          "image": "ac6d385f09a1fa5e1a84e114bc96b4e9814161351e1b0190254f2f86a6bb5d3f",
           "evidence": "50d238adaee5e4f25db5d2ec005041d95edf798998c69807a67855f576b2a6ae"
         },
         "reference": {
-          "image": "56ced3ced06cba71c7736df9c1a1e5596b79fa0d07ba13a4b3608cba02656c10",
+          "image": "b06b0f4b79f16e0ebf333fee78f02f051e593ddbe18018b6a9319e7db6569b1f",
           "evidence": "bfaedf9ab752c0898599106f526268f7815564592522dab1db2628981607e6ef"
         },
         "diff": {
-          "image": "15616b63a08690de70474ed3551eb06da1b8f187bedb16743d80caa5f1c23db9",
+          "image": "4ba55d6ee90c066d9af91e13b4675a7726fbe39c952c4e2d6faa73ecc7e30e52",
           "evidence": "d20fbcb35a84961f359457ddc540ab9a63e9ea9533bd4f88f92c4a2a9eab09ef"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2139,22 +2139,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "b06a4c82eefcecf711dac3269b46a28e712c07e5b71be5f75faf7930f6721d66",
+          "image": "583da102ae1a63e15182a5ed32cef3173f9a28db0146c043ce1dfb9f6236d5ff",
           "evidence": "dbe9d19772d5e876c475a59358ba29df0ed6c6927a4796a57c3fafe58640125b"
         },
         "reference": {
-          "image": "0ed49af4fd57286ff79eb440b3d68148abdb3224e9881f8c1dcc7d35da730aee",
+          "image": "d18827b2ea98b35d35ec382e337c0c0141274dc800e060807abd1d4bf896db3e",
           "evidence": "1c7901015d0b47d225efbf8e6f6e01a099243ebd2793fca3d0b48a753e89b4d0"
         },
         "diff": {
-          "image": "600af697e2065472c7c9037c31648e71462dc04e653ec9a0b2cccc12da9a008a",
+          "image": "261abd5f437c1ca3ca508e7d38c86016878f5e581768c5b4c27f242303a331b3",
           "evidence": "7d55c685f92b822ea025480d6a04e581daed5911cad5f4120d4156ddcb3bad13"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2180,9 +2180,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2208,9 +2208,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2223,22 +2223,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "20fea5ce513b454f643b755781599940775bb0aca17d4830298de81e74e1af06",
+          "image": "b208909bc827fd89556efbd796ed781f383b3fd2d11bd92e5528caa675c13275",
           "evidence": "7ad93fd05f687f9fd6a2ac86486b71a489221ef97c3184de6eaa512aaf270b4e"
         },
         "reference": {
-          "image": "8b2c7fe16c3d3d68dab999de222f3be2a13926ba4932e6b998e798628b7bbbc7",
+          "image": "468f1d16f5f2b0d1eba547be0f066b6e99c5972af7b0046ec94c5883ea23544d",
           "evidence": "d8bfc715189bef5c56e340284f89e86c3c3bc2c2810b9de17fc1a44d02c7b469"
         },
         "diff": {
-          "image": "dc0aa762ac0c02f3ac4cd147946aefad0c9f159f22c9b248cd42fde997ca3e47",
+          "image": "b4c7a5c1fc7bf7559bc2a1e3d1e1687ef662676a4ac130715abe2bc8bc71a086",
           "evidence": "1894b0f794782deb6dcd0b8b15c452c7c373e31690c506035f7c8c6124df5ed0"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2264,9 +2264,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2292,9 +2292,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2320,9 +2320,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2348,9 +2348,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2363,22 +2363,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "020c9bd1eebfd3ef712d5161751d7ea90fe04ad155f6fcf60fef35f60ddc5da5",
+          "image": "61b44d91a73d58a56c07c7353f04398adfcf966f1a68ce8810d90a803232e835",
           "evidence": "9f7d916487d0f4f0fef3a8346e0e8fe6a5c0ed2b0bf252e982de73e0ef65deb7"
         },
         "reference": {
-          "image": "b55538bc1558e6bfaa8a77cb2d67f4cd5008af13954d44a0eee0138d3c7c1aba",
+          "image": "f103b590cd47b21745b8a3f8e1cd82493ed55b66a86a58f36904f04cab9dc88f",
           "evidence": "1fad3919913a1a8ad86f2c8636de97eb531ad111f43465a6af7d5d2fda4d9d51"
         },
         "diff": {
-          "image": "220924f9fc6671b3aa40de4925b4cbde3ebf2c0c597ce32ea7a624d76a4a7dc7",
+          "image": "a84a868196e9b5b8427fdd57f286130065b5ee91f4d06ab303011d4c62765e52",
           "evidence": "d70c3e3d0cad917b8f5392e90dc89d42b60cd24e88cb180c230970f127c3ac9a"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2404,9 +2404,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2432,9 +2432,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2460,9 +2460,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2488,9 +2488,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2503,22 +2503,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3925a96cc10e6085ed76842424b5bf156523ed43e929627a15274aed47d21aa2",
+          "image": "6a8a307da4429150fc6fdc56ee6f4cf873cd7a34f2d15fe35118c924faf02986",
           "evidence": "a0ad21ba22ab4a7b5728d962ec740d72e17f7bf728f605e69f3ebbe79b23e1aa"
         },
         "reference": {
-          "image": "0b8f11dbb2b2f463f573f09b52fc3a417631ff2bd1e826be6c9c27f1bb72acb5",
+          "image": "ca67ae345adcd2aa7551e3d1bd97221795954dcb8ed9d8562a5d985769bfdf7e",
           "evidence": "faab3f3489228d5f6b8938c34b47951e9c29ea0bae2e38e0e622368558573e47"
         },
         "diff": {
-          "image": "88e182e32e67c2e9ba31be173f21cb2abf429517cf36de5cecfc09adc137c218",
+          "image": "fa669e9202f40c52dc8a46c8a285b1c1016e8a4b926ac8b1d568e644e6f2b2f3",
           "evidence": "5af37ed81899b9b0fbd1a6b1c9c3898ff51305570ac63b7f5e67f59421875b9e"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2531,22 +2531,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "c6f15f80707776557526c24e47c8abb49b0d07de6de37ffbd286d98334a6e767",
+          "image": "5ceba704c0b04fd373611869d6ab0dd07aa0a73b7802dc56880ee30f50f832c1",
           "evidence": "5a978498d8b2498a34538975da26796827550972e34843c43e6fd6f6783df351"
         },
         "reference": {
-          "image": "d6300b00e53946b2245644c00822a6816c93975ba2ff88effc8cd1fb63eb9315",
+          "image": "d98dc386da514d7e895e50c4864e67b22263549d9710e3d485e097643af9b674",
           "evidence": "1b94879fef7ab72f2168a31d3e4e81199d49c43c2ee133af09d36408276c2347"
         },
         "diff": {
-          "image": "7fd0b9e701653d4ff8885f94f5797c956de8d1c1f324aec9e8ab5cca3ee1ec89",
+          "image": "05b338c6662a4a3c20eb0afb1e7f8f96c72fd6348734098ea69da209e1adb47c",
           "evidence": "b420c5b6b2e9e084753c67bc317285f2723a6fd9e4dc9fe2335279fbbe301967"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2572,9 +2572,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2600,9 +2600,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2615,22 +2615,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "1b63802829dbcc4653dc6e3e34367e78c1a350d630a3636f4ae16b8dad6866a5",
-          "evidence": "dcdcdad9c56abda22d488e82973b8e493772a9d032ef9ddea361513782943902"
+          "image": "6c91262dc5281562d41ba374c1bd7caa0d7681d291e43ab969b77172518bf2ba",
+          "evidence": "8dbb4882852b6e312d79910a5a1a8c8de80e9136eb73771f560d89dcb2a6ffc0"
         },
         "reference": {
-          "image": "42118660f0d58d6afa24b7dd29fdf4c55e2f067d2e8f0d2e8f4a1af5cd9cb3de",
-          "evidence": "287cdbf75cd2df98744f04c2fac1f77fa01bf7a13ac7c059d56424d65ce9665e"
+          "image": "23e13fa4c42d921399a4e39b357ef08d6139b3185280cf204a4d6dca9dc8a420",
+          "evidence": "431091914d275014387fba6b5b921887e4c8e751840ab60b11832278b6361799"
         },
         "diff": {
-          "image": "78fd0cb1b87c36f94ed463ddf4de53be36b3297a432ef12109d53cf35e4449df",
+          "image": "4967dcd779f4bc2fe4bf1d8ba1d2021166c85d85028191f7b7d637010d892b71",
           "evidence": "acc1e358c055cc8109178a6d391aaf2f73f9e70e6d51d3f49e89f4df2c489811"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2643,22 +2643,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "8fa390bedbb50cc65ec22af9ceeea86af94c52570fb691c773a44176e5593944",
+          "image": "6063e6025c96697163b57aa83273c4f8d3129a08835736b5196281bd6a07d853",
           "evidence": "175c1050b0b45a910210810dd59cbb27172923cc46323751776eb055407e6ed6"
         },
         "reference": {
-          "image": "db52d9d2f5f8cfca36885949a51aaab1213c2a7064ad3ac84265271dcbbe9c6e",
+          "image": "6c0ded1a2f4f8d5fcea50fc985a94f92359297bf4fdeb9e40ccb20d09cb0276f",
           "evidence": "288b49636a024df3d4b46fe3f369e00612a745884a5c5dcb68f59dae723ba2f4"
         },
         "diff": {
-          "image": "ac79789b0dd9ea960a405994dec749589f18b4fa9885c7df8458bde86d513879",
+          "image": "9042651b15730859fc3fbc144c485de9411e6fc623ebaf765f1918c72eec4965",
           "evidence": "7381db2bb1ac9d04e968d2187bdfd869392e28cdc81299c3ea87fbdbd3489702"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2684,9 +2684,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2712,9 +2712,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained. This closed Atlas tool group has a hidden textContent-only no-result wording change; its visible pixels differ only at the removed notice. This does not approve an expanded tool-output wording change."
     },
     {
@@ -2740,9 +2740,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2755,22 +2755,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "4be7a93123af2357dd9442ff187934cb0f2e23c65cc26c98d8e1be53dc06676f",
+          "image": "5ba06e5226ff01473cc964095cd5e03c4e8a4b7c1a3bd8b2ae1fd83013e0d171",
           "evidence": "868020fc762dda354ccd21db433240c6f1023712d33ac103d499c69f4eb0c26d"
         },
         "reference": {
-          "image": "1de4e48dec8cd20f90f23f3ab88965f2806ade5285c2e501a3169eb8b220dd22",
+          "image": "fe453fdff90573008aae211bd12fd7287305d1a9c4ab146ca0b8bcc65e245944",
           "evidence": "3302bb5726e6088aa543a40131dd99839fcaa4127056eda6ce53e7275f05b585"
         },
         "diff": {
-          "image": "8e9f2f1923c67138caa2a4e4b204cf599e041edf17b915ebe17905ae62fe6bc5",
+          "image": "b20ed214bc20c4e2cb4883be59abe6c7ed06b30b6327ee8ff0577d1e8a36563a",
           "evidence": "c19b2a462affb0675acc4eccb99d04121ec45973beb72513c0d4ec33d131e760"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2783,22 +2783,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "067fbfc581dcb5924810f35a564fa14822ba5f189779e985b88ddb2fedf71508",
+          "image": "bcba7cad9cd5172e037970b38cd1cb9e4bf2cc5af5c177e87fcf9853122daf02",
           "evidence": "d96b3c64041bd7b43cf367f3b18cf833f8df58430ae96aed47fccbb60b32bc9f"
         },
         "reference": {
-          "image": "a6c303f60bff582174594b2218ee715801933d4198e21860a3f22b9ae2c33f73",
+          "image": "d4ebec98bf226a7e00c0c622bb6b0cef9b3839db1cc58c6f391e45d35ce7ab13",
           "evidence": "309b4d89dff7059ef30ce1aacc5e37724726eed7ca2c027c14ee63efce05184f"
         },
         "diff": {
-          "image": "348b7bdb12e63e28f5ffcb9adae040056df8d25a4c2d3c521ba785ac2dfd7b62",
+          "image": "b0fe9a8cc8418cea99c5dc5470b9015617186188b8a03c869f9a1b3a03548600",
           "evidence": "c651ce6ef8c6874a65036f987dc0f90fe54dacd9088b95b80c735e5687c9d988"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2824,9 +2824,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2852,9 +2852,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2867,22 +2867,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "ef1ecd67550f811ac5c8bdf73ae71029d1ebe94dd19cdfc3f693cb2cd2ef0303",
+          "image": "480aea3abe76d77220bbdeb599657f23887f0b8f9930899b83d5b82fc844924b",
           "evidence": "a9e2ce724eb7bf8734a24cd8249c4572f3139ab7ce2dd23268e9441fe5bf01ff"
         },
         "reference": {
-          "image": "7a4b75d080a4c8ca228ace141b6ee3bdcd543ae78b0c65d2256de5a4b3c61e83",
+          "image": "b84c4b0e09db4ccbe422ec4fab930df6777d331795ae1ff33ac9399d40347eda",
           "evidence": "1ec8c56495707345f595ee457ea9ebe0ee9043769543846349ebf8b6db982b2a"
         },
         "diff": {
-          "image": "79a405f95ed00193e45e66b852b94be927521a2814d0bfb4ae9302dabc0d04e0",
+          "image": "5b56e74ca8e4b1c0e676026dfaf8257fc69c220e6da34b594263fbf8e9dc611a",
           "evidence": "4c95057836367a8033a50f24447a222489b5458e4e32187c77918742e7ce0224"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2895,22 +2895,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "55e62856051d3d633231848805f43672a2665314d2e2684591ecadce319c970b",
+          "image": "85093a4f2ef607bc5be8de094400bacb6c5c68b2e29932886099666341430365",
           "evidence": "67be54125b7cc6a0eb7c855619685cb886b0a59cbdc3179e6e4c5c14d5c35c6a"
         },
         "reference": {
-          "image": "032f68290a5741b0f9ba712fca170f469dab31fa4934cb1a815a15c86b19c8db",
+          "image": "10f394df6d8bc2dd6aa726e616191b8a7c28272457bf1044aa42c4bb05805f5e",
           "evidence": "fb1846bd27a4aaea001b261cb401e69ba2f03ebcad74775e6f6a96f5e7de2130"
         },
         "diff": {
-          "image": "5d9484c8e91b46f685e7da36ac637cb1fcb39b8df2200cbc08faa534f0dbabb6",
+          "image": "2cf9ecdb5e15de03f3d1b114146b719864be4d8b45d387836b951df0d2edf793",
           "evidence": "6d042ad7c79382a229e2c00b6ee097d4c5941e18861ee2f7da26c3c86a38e0a4"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2936,9 +2936,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2964,9 +2964,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -2979,7 +2979,7 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "f3aa5c28a588c41f50a6ac9541e49805f740c8fa3a16888ebc9f492e5da6d6df",
+          "image": "f039223417bad9c9a0124822810ca428ce4235884a64e9241320ef2a452425fd",
           "evidence": "aae701da05237472139c7bcd51585aa8e62e0dfdfd988a6dbe485000e6af855e"
         },
         "reference": {
@@ -2987,14 +2987,14 @@
           "evidence": "1fe76a1fc9f9eaaec48d6a1499c141a0d96d2361bb08b309f9ea1c29b4cced8b"
         },
         "diff": {
-          "image": "063e75c8235d4ec2172a38569d45f29b1061cd3168b5516e478b13eb73770e44",
+          "image": "f5ee348443d09bbe600c636692912ab99a6f3f2717e38a59b2cfc26cb1b494e3",
           "evidence": "12bcc95a0bddf5667c924129a90a2bf16af5cda18fbf2e7158106bfd33bbdc4b"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -3007,22 +3007,22 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "4b5692ca1f1c2713d0653ddc903df7f954f5cd142f83ff8021132c413f2dd380",
+          "image": "ba2ef0f030efe4f7da7e31a3f37dd0fc151d14a11965305f099b78925e5aa08c",
           "evidence": "77a8f58615e85e575eabe998f85e19b906d8d8c77307f0d52c573a0673153c95"
         },
         "reference": {
-          "image": "8367234c7a9411fb2c3a1e0374bfb7c1afb18a0a6d5e5d8a149e695bdc1a4153",
+          "image": "0e9e2291667086ed9afeb807db14d93b7b3bd49142d487e6b3e84b558f8e0520",
           "evidence": "7f6d304fe6b84067e08620ae3cba640eb9bff8f41eab86c1732748e2de33e3c6"
         },
         "diff": {
-          "image": "f3d08e00dc6d66b83c7cc0a6657519a33efd2540ab9d89941eed52e51118b421",
+          "image": "c6c4f40cde83e829d0ae0832726e097dfa6ee85b9d79eb31bc7b500cc19a3b95",
           "evidence": "c4536b25e0ea3b5a6d65db9782067493120d2147183e4095dcd07fc4ee074abf"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -3048,9 +3048,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -3063,7 +3063,7 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "2406a0c4bd9188582b0028497be37e9ca1eb889d3d4484b4e4685d62f6e00f20",
+          "image": "4dfc5c38ac9ff5e94eb4295b053bd0714a8e27d223555903687ae99e981b728e",
           "evidence": "27fda294450f3bab7950203a50ed758d8ece09016f0f58293153b35707f3fcf2"
         },
         "reference": {
@@ -3076,9 +3076,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     },
     {
@@ -3104,9 +3104,9 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "dd33d4ba53f6b51843c515f0b08e5788f897854f",
+      "reviewedCandidate": "53ba06f3f912b82adda59f24eeec0fa2a72e3349",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (image/evidence audit)",
-      "reviewedAt": "2026-10-19T07:38:46+00:00",
+      "reviewedAt": "2026-10-19T07:53:37+00:00",
       "rationale": "Owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. Actual images and bounded evidence reviewed by cause; no other visible change. See tests/ui/README.md (2026-10-19 review). Exact artifacts only; raw findings and thresholds retained."
     }
   ]

@@ -71,8 +71,11 @@ its completion witness is the native-publication success message in the CI log.
   visible screenshot difference is only the removed notice. Their exact bindings
   do not approve different expanded output. The registry retains separate records
   for every reviewed size/theme/state and its original pinned references; raw
-  findings and the strict 0.0001 maximum ratio remain unchanged.
-- Full-frame PNGs and their bounded DOM/paint evidence share one animation
+  findings and the strict 0.0001 maximum ratio remain unchanged. Exact bindings
+  use the reviewed [CI captures from run 39217434345](https://github.com/onsager-ai/semon/actions/runs/39217434345/artifacts/12170362330);
+  local captures support review but are not treated as portable byte-identical
+  approvals across font/rasterization environments.
+- Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
   screenshot-only suppression resumed effects before diagnostics and made exact
@@ -81,7 +84,8 @@ its completion witness is the native-publication success message in the CI log.
   removed. A bounded consecutive-PNG equality check also rejects unstable mobile
   full-page compositor tiles after scrolling fixed/clipped content. It does not
   select a favorable comparison: unchanged consecutive paints are required before
-  any reference comparison. `capture-paint.test.mjs` checks the timing-dependent negative control,
+  any reference comparison. Two-machine and pushed parity retain their existing
+  capture path. `capture-paint.test.mjs` checks the timing-dependent negative control,
   repeated PNG/evidence equality, visible-content changes and failure cleanup.
 - Captures require bounded API/DOM quiescence and the requested rendered title,
   session heading or exact Trace root turn. Reference menu cleanup uses its real

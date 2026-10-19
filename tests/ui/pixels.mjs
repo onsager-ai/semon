@@ -709,11 +709,10 @@ async function prepareFrame(page, phone, includePaintDiagnostics = false) {
   const beforeScreenshot = includePaintDiagnostics
     ? await snapshotPhoneHarborPaint(page)
     : undefined;
-  const bytes = await captureStableFrame(page, {
-    fullPage: phone,
-    animations: 'allow',
-    caret: 'hide',
-  });
+  const bytes =
+    scope === 'main'
+      ? await captureStableFrame(page, { fullPage: phone, animations: 'allow', caret: 'hide' })
+      : await page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
   return { bytes, beforeScreenshot };
 }
 
@@ -736,7 +735,7 @@ async function captureFrame(candidate, reference, key, phone) {
     ['reference', reference],
   ]) {
     try {
-      await withCapturePaint(page, async () => {
+      const capture = async () => {
         const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
           bytes = prepared.bytes;
         save(key, name, bytes);
@@ -751,7 +750,9 @@ async function captureFrame(candidate, reference, key, phone) {
           evidence: saveJson(key, name, evidenceBySide[name]),
         };
         images.push(PNG.sync.read(bytes));
-      });
+      };
+      if (scope === 'main') await withCapturePaint(page, capture);
+      else await capture();
     } catch (error) {
       report.errors.push(`${key} ${name} screenshot: ${error.message}`);
     }
