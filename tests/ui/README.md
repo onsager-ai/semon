@@ -120,6 +120,15 @@ its completion witness is the native-publication success message in the CI log.
   sidebar-order mismatch is excluded; it must pass with the consistent pointer
   precondition and matching visible rows. This review does not claim that a fresh
   capture has passed until the final required CI result is green.
+- Run `39242800237` passed the matching-sidebar precondition and restored the
+  unaccepted survey frame to its reviewed state. The baseline CPU path alone
+  still left 20 preservation/five main PNG bindings stale despite identical
+  bounded DOM evidence. A sampled pair differed at just 17 rounded-edge pixels
+  by at most three channel levels. Visual launches therefore also use Chromium's
+  [deterministic rendering stages](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#rendering--gpu)
+  and full rasterization. Playwright retains normal frame scheduling; no external
+  BeginFrame driver is enabled. The independent-browser regression now includes
+  the clipped sticky sidebar geometry and repeated scroll/repaint cycles.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
