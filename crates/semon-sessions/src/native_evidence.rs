@@ -516,7 +516,8 @@ impl NativeEvidence {
         paths: &[String],
         runtime: &str,
     ) -> io::Result<crate::events::Outcome> {
-        if self.options.facts.is_some() && crate::events::store::push_driven(&self.options)? {
+        // The store checks journal authority in the stage transaction.
+        if self.options.facts.is_some() {
             cache.begin_semantic_stage_with_journal(paths, runtime, true)
         } else {
             cache.begin_semantic_stage(paths, runtime)
