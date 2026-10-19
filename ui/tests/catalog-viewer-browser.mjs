@@ -456,8 +456,13 @@ for (const width of [390, 1280])
                 next_cursor: null,
               },
             });
-          if (url.pathname === '/api/session-capabilities')
+          if (url.pathname === '/api/session-capabilities') {
+            // Capability work may finish after the compact Home response. Keep
+            // this independently delayed so the paused clock cannot assume that
+            // receiving Home has already scheduled the next refresh timer.
+            if (workspaceMode !== 'ready') await new Promise((resolve) => setTimeout(resolve, 150));
             return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
+          }
           if (url.pathname === '/api/viewer/home') {
             const focused = url.searchParams.get('source');
             if (focused) return route.fulfill({ json: publication(focused) });
@@ -680,11 +685,22 @@ for (const width of [390, 1280])
 
         for (const mode of ['unavailable', 'partial', 'pending', 'ready']) {
           workspaceMode = mode;
-          const response = page.waitForResponse(
-            (value) => value.headers()['x-fixture-workspace-mode'] === mode,
-          );
-          await page.clock.runFor(8100);
+          let delivered = false;
+          const response = page
+            .waitForResponse((value) => value.headers()['x-fixture-workspace-mode'] === mode)
+            .then((receipt) => {
+              delivered = true;
+              return receipt;
+            });
           stage = 'workspace response after ' + mode;
+          // The refresh cadence is armed after asynchronous capability/name
+          // reads finish. Advance the paused clock while allowing those real
+          // network callbacks to settle; one 8.1s jump can strand its next timer.
+          // Keep the existing response deadline and every scope/content check.
+          for (let tick = 0; tick < 24 && !delivered; tick++) {
+            await page.clock.runFor(1000);
+            await Promise.race([response, new Promise((resolve) => setTimeout(resolve, 100))]);
+          }
           const receipt = await withDeadline(response, stage);
           assert.equal(receipt.status(), mode === 'unavailable' ? 503 : 200);
           // Error reads intentionally release their unread body; the exact HTTP
