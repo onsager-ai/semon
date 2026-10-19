@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "813208c75079c3b87154b8a8615e4a0fd35b32e5e5a2d39eae4c55212c67f254",
+  "manifest_sha256": "dddbf6ad42c296de26247dd4fe8c68f40c9a42dc6f1452ba7267b415f69adcb7",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -73,7 +73,7 @@
       "mode": "100644"
     },
     ".agents/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "3daced28386d6b113eb9819c20577d56e6ad4c6f27b8e6af8ce90145e3e5996a",
+      "sha256": "99f7aab66016c08f894010419c60ec6101cf793b14b90f4e8b8b0d6a37b7780e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -88,7 +88,7 @@
       "mode": "100644"
     },
     ".agents/skills/ui-design/references/storybook-visual-testing.md": {
-      "sha256": "ad6417134d68ebe30da3af059a7744cf62f978996cf613d5e39ad0a8b819b2be",
+      "sha256": "8f00612a64b1d08fd7c5c9f7ef95c5c5af92a1d4628d720985a1d3e86a3e8687",
       "owner": "shared",
       "mode": "100644"
     },
@@ -203,7 +203,7 @@
       "mode": "100644"
     },
     ".claude/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "3daced28386d6b113eb9819c20577d56e6ad4c6f27b8e6af8ce90145e3e5996a",
+      "sha256": "99f7aab66016c08f894010419c60ec6101cf793b14b90f4e8b8b0d6a37b7780e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -218,7 +218,7 @@
       "mode": "100644"
     },
     ".claude/skills/ui-design/references/storybook-visual-testing.md": {
-      "sha256": "ad6417134d68ebe30da3af059a7744cf62f978996cf613d5e39ad0a8b819b2be",
+      "sha256": "8f00612a64b1d08fd7c5c9f7ef95c5c5af92a1d4628d720985a1d3e86a3e8687",
       "owner": "shared",
       "mode": "100644"
     },
