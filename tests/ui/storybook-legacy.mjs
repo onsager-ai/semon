@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { legacyScrollPolicy } from './storybook-scroll.mjs';
 
 // Independent, authored successor inventory. This never imports the expected
 // coverage manifests: the CI validator compares those against these bindings.
@@ -53,13 +54,13 @@ export const routeStories = [
   ['session-sentinel', 'session-sentinel', 'Sentinel', ['topbar', 'transcript']],
   ['sessions', 'sessions', 'Sessions', ['topbar']],
   ['trace-a-review-a-h-review', 'trace-a-review-a-h-review', 'Review the parser diff', []],
-  ['trace-atlas-h12', 'trace-atlas-h12', 'atlas', []],
+  ['trace-atlas-h12', 'trace-atlas-h-12', 'atlas', []],
   ['trace-atlas-ingest-a-ask', 'trace-atlas-ingest-a-ask', 'atlas ingest', []],
-  ['trace-h-review-h3', 'trace-h-review-h3', 'Review offline-sync diff', []],
-  ['trace-harbor-h1', 'trace-harbor-h1', 'harbor', []],
-  ['trace-ledger-h16', 'trace-ledger-h16', 'ledger', []],
-  ['trace-principal-h8', 'trace-principal-h8', 'Principal', []],
-  ['trace-quill-h4', 'trace-quill-h4', 'quill', []],
+  ['trace-h-review-h3', 'trace-h-review-h-3', 'Review offline-sync diff', []],
+  ['trace-harbor-h1', 'trace-harbor-h-1', 'harbor', []],
+  ['trace-ledger-h16', 'trace-ledger-h-16', 'ledger', []],
+  ['trace-principal-h8', 'trace-principal-h-8', 'Principal', []],
+  ['trace-quill-h4', 'trace-quill-h-4', 'quill', []],
   ['trace-sentinel-sentinel_0', 'trace-sentinel-sentinel-0', 'Sentinel', []],
   ['machine-desktop', 'machine-desktop', 'desktop', ['machine-content', 'topbar']],
 ];
@@ -245,11 +246,12 @@ function capture(
     width,
     scheme,
     fixture: {
-      source: 'tests/ui/fixture-data/overhaul.json',
+      source: 'ui/stories/LegacyNative.records.json',
       scope,
       frame,
-      revision: 'bf9190ef2b80fcd56726f61dc480346b698039a2',
-      policyDependencies: ['tests/ui/fixture.mjs'],
+      revision: process.env.GITHUB_SHA ?? null,
+      policyDependencies: ['tests/ui/fixture.mjs', 'tests/ui/storybook-native-records.mjs'],
+      nativeState: 'exact-current-head-native-witness preferences',
     },
     args: { scope: scope === 'required' ? 'main' : scope },
     viewport: {
@@ -261,7 +263,7 @@ function capture(
     },
     capture: {
       selector: region?.selector ?? null,
-      top: region?.top ?? true,
+      scroll: legacyScrollPolicy(comparator, kind, frame, width),
       viewportHeight: region?.viewportHeight ?? 'fixed',
       fullPage: comparator === 'pixels' && kind === 'frame' && width === 390,
       animations:
@@ -388,7 +390,7 @@ export function legacyCapturePlan() {
           },
           capture: {
             selector: null,
-            top: true,
+            scroll: legacyScrollPolicy('gallery', 'frame', state, width),
             viewportHeight: 'fixed',
             fullPage: false,
             animations: 'disabled',

@@ -7,6 +7,7 @@ import { buildConsumer } from '../../ui/build.mjs';
 import { launch } from './lib.mjs';
 import { auditText } from './text-audit.mjs';
 import { createVisualContract } from './visual-contract.mjs';
+import { nativePresentationWitness } from './storybook-presentation-witness.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url)),
   root = path.resolve(dir, '../..');
@@ -99,6 +100,11 @@ try {
         }
         report.push({ width, scheme, state, text });
         await visuals.capture(page, `${state}-${width}-${scheme}`);
+        // Additional unapproved migration witness; the original comparator,
+        // screenshot options, thresholds and baseline ownership above stay intact.
+        fs.writeFileSync(path.join(out, `${state}-${width}-${scheme}-presentation.json`),
+          JSON.stringify(await nativePresentationWitness(page,
+            fs.readFileSync(path.join(out, `${state}-${width}-${scheme}.png`))), null, 2) + '\n');
       };
       await audit('primitives');
       // Keyboard opens and selects through the real shared Select controller.

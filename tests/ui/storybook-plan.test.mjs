@@ -11,6 +11,8 @@ import {
 import { assertionErrors, verifyAssertions } from './storybook-assertions.mjs';
 import { legacyCapturePlan, routeStoryIds, successorErrors } from './storybook-legacy.mjs';
 import { EXPECTED, expectedPixelCoverage } from './preservation-contract.mjs';
+import { nativeArtifactPaths } from './storybook-native-artifacts.mjs';
+import { witnessDifferences } from './storybook-presentation-witness.mjs';
 
 const read = (file) => JSON.parse(fs.readFileSync(new URL(file, import.meta.url), 'utf8'));
 const contract = read('./storybook-contract.json');
@@ -25,6 +27,37 @@ const stories = [
   ]),
 ];
 const plan = () => makeCapturePlan(structuredClone(contract), structuredClone(inventory), stories);
+
+test('legacy capture identities retain native tail, region and preservation reset policies', () => {
+  const cases = legacyCapturePlan();
+  const get = (key) => cases.find((item) => item.legacyKey === key);
+  assert.equal(get('pixels:main:frame:phone-light|session-harbor').capture.scroll, 'document-tail');
+  assert.equal(get('pixels:main:frame:desktop-light|session-harbor').capture.scroll, 'main-tail');
+  assert.equal(get('pixels:main:frame:phone-light|home').capture.scroll, 'top');
+  assert.equal(get('pixels:main:region:phone-light|session-harbor|transcript').capture.scroll, 'region-top');
+  assert.equal(get('preservation:required:frame:390-light-session-harbor').capture.scroll, 'preservation-reset');
+  const selected = get('pixels:main:frame:phone-light|session-harbor');
+  assert.notEqual(captureIdentityDigest(selected), captureIdentityDigest({ ...selected,
+    capture: { ...selected.capture, scroll: 'top' } }));
+});
+
+test('native artifact binding keeps all scopes and region keys separate', () => {
+  const item = (legacyKey) => ({ legacyKey });
+  assert.equal(nativeArtifactPaths('/native', item('pixels:two-machines:frame:phone-light|machine-desktop')).image,
+    '/native/viewer-ui-transport/two-machines/pixels/phone-light_machine-desktop-candidate.png');
+  assert.equal(nativeArtifactPaths('/native', item('pixels:pushed:region:phone-light|session-harbor|transcript')).witness,
+    '/native/viewer-ui-transport/pushed/pixels/phone-light_session-harbor_transcript-candidate-presentation.json');
+  assert.equal(nativeArtifactPaths('/native', item('preservation:required:frame:390-light-harbor-thinking-open')).image,
+    '/native/viewer-ui-visual/preservation/390-light-harbor-thinking-open-candidate.png');
+});
+
+test('native presentation comparison never normalizes source, text, order, disclosure or geometry', () => {
+  const native = { text: 'Sentinel', source: '["laptop","principal"]', open: true, box: [0, 44, 390, 60] };
+  assert.deepEqual(witnessDifferences(native, structuredClone(native)), []);
+  for (const changed of [{ text: 'Principal' }, { source: '["desktop","principal"]' }, { open: false }, { box: [0, 45, 390, 60] }, { extra: 'unknown' }])
+    assert.ok(witnessDifferences(native, { ...native, ...changed }).length > 0);
+  assert.ok(witnessDifferences([native, { text: 'next' }], [{ text: 'next' }, native]).length > 0);
+});
 
 function expectedLegacyKeys() {
   const keys = [];
