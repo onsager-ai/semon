@@ -66,14 +66,17 @@ or trailing destinations; `subscribeNavigation` reports changes without requirin
 a content model. Its unsubscribe belongs to the reader's document lifetime.
 Hosts validate unknown policy JSON with `parseShellNavigation` before rendering.
 The canonical reader keeps source selection in Sessions context and labels scoped
-Recent rows with their machine. Home and Analytics share that reader. A
-`nativePage` mounts the same chrome over server content and preserves native forms
-and server navigation. An authenticated workspace host sets
-`nativePage.workspaceChrome` to share the bounded workspace Recent publication and
-Home count. This reads compact metadata only, with no preview hydration, source
-selection or native observation/repair. Hosts without a workspace retain the
-empty Recent slot and issue no workspace reads. Compatibility markers
-are normalized away without selecting another reader.
+Recent rows with their machine. Home, Analytics and host administration pages
+share that reader's shell, routing and metadata lifecycle. `ViewerHost.pages`
+provides matching/title/navigation metadata and abortable authorized content,
+including the initial server page. The router inserts it in the existing content
+slot, mounts its enhancements, and destroys them on departure. Source capability
+responses and host responses are fenced against later destinations. Host reads
+share the bounded compact Recent publication without selected reads or repair.
+Account/workspace changes and redirects require a fresh authorized document;
+native POST forms retain server handling. A legacy static `nativePage` embedding
+port remains supported, but Hub does not use that mode. Compatibility markers
+are normalized away without selecting another application.
 
 `topbar(ShellBar)` commits host-owned `titleSlot` and `actions` nodes, or `mode`
 nodes for Find/error navigation. Supply `lead`, `session`, optional validated
@@ -94,14 +97,11 @@ listeners now exist only while there are mounted account roots. The independent
 consumer tests repeated mount/update/unmount/destroy in both device sizes/themes,
 stale triggers, slot preservation, native link semantics and listener removal.
 
-Native pages mount the same canonical reader with `ViewerHost.nativePage` and
-`mountNativeShell({ chrome: false })`. The shared frame owns chrome; the native
-page retains its content, forms and native links. Mount, capability cadence,
-visibility and history notifications never admit a selected reader. Opted-in
-workspace chrome uses the existing document-owned overview refresh cadence and
-teardown; it does not add a router, poller or native-content loader.
-Home, Analytics and selected-session links enter their reader documents
-through native browser navigation.
+Hub administration mounts the canonical application with `ViewerHost.pages`.
+`mountNativeShell({ chrome: false })` supplies only page-local form enhancements;
+its lifetime belongs to the content page, while chrome and routing stay mounted.
+Home, Analytics, Sessions and host links share ordinary same-document navigation.
+Server fallbacks, identity changes and form submissions retain browser navigation.
 Standalone navigation fragments may use pure `renderShellNavigation` under an
 explicit host owner, with no reader or poller. The former sidebar-only model
 application and its compatibility attributes are removed.

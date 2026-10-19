@@ -6,7 +6,23 @@ export interface ViewerContent {
   title?: string;
   destroy(): void;
 }
+/** Server-authorized content occupies the same router/content slot as the reader. */
+export interface ViewerPage extends ViewerContent {
+  title: string;
+  nav: string;
+  /** Enhancements mount after insertion and are released by destroy. */
+  mount?(): void;
+}
+export interface ViewerPages {
+  match(url: URL): { title: string; nav: string } | null;
+  initial?: ViewerPage;
+  /** null requires a fresh authorized document (for example after a workspace change). */
+  load(url: URL, signal: AbortSignal): Promise<ViewerPage | null>;
+}
 export interface ViewerHost {
+  pages?: ViewerPages;
+  /** false for authenticated hosts without a current workspace; no workspace chrome reads. */
+  workspaceMetadata?: boolean;
   machinesPath: string;
   /** Shared destination policy; no host data or routing owner lives in chrome. */
   navigation?: ShellNavigation;

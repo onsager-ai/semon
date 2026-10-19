@@ -3710,3 +3710,225 @@ for (const width of [390, 1280])
           await browser.close();
         }
       });
+
+for (const width of [390, 1280])
+  test(`host pages share the reader router and reject stale content at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    try {
+      await page.route('http://catalog.test/**', async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === '/api/session-capabilities')
+          return route.fulfill({ json: capabilities(true) });
+        if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
+        if (url.pathname === '/api/session-transcript')
+          return route.fulfill({ json: transcript('one', url.searchParams) });
+        if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 503, json: {} });
+        return fulfillCatalogStatic(route, url);
+      });
+      await page.goto('http://catalog.test/machines');
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.hostMounted = 0;
+        window.hostDestroyed = 0;
+        window.hostAborted = false;
+        const content = (name) => {
+          const element = document.createElement('section');
+          const heading = document.createElement('h1');
+          heading.textContent = name;
+          const form = document.createElement('form');
+          form.method = 'post';
+          form.action = '/machines/rename';
+          const input = document.createElement('input');
+          input.name = 'name';
+          input.value = 'Retained machine';
+          form.append(input);
+          element.append(heading, form);
+          return {
+            element,
+            title: name,
+            nav: 'machines',
+            mount() {
+              window.hostMounted++;
+            },
+            destroy() {
+              window.hostDestroyed++;
+              element.remove();
+            },
+          };
+        };
+        window.app = CatalogViewer.mountViewerApplication({
+          machinesPath: '/machines',
+          pages: {
+            match: (url) =>
+              ['/machines', '/account'].includes(url.pathname)
+                ? { title: url.pathname === '/machines' ? 'Machines' : 'Account', nav: 'machines' }
+                : null,
+            initial: content('Machines'),
+            load(url, signal) {
+              if (window.failHost) return Promise.reject({ status: 503 });
+              if (window.holdHost)
+                return new Promise((resolve) => {
+                  window.releaseHost = () => resolve(content('Stale account'));
+                  signal.addEventListener('abort', () => {
+                    window.hostAborted = true;
+                  });
+                });
+              return Promise.resolve(
+                content(url.pathname === '/machines' ? 'Machines' : 'Account'),
+              );
+            },
+          },
+        });
+        window.sharedApp = document.querySelector('.app');
+        window.sharedSidebar = document.querySelector('#sidebar');
+      });
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      assert.equal(await page.locator('form').getAttribute('method'), 'post');
+      const navigate = async (key) => {
+        if (
+          width === 390 &&
+          !(await page.locator('body').evaluate((node) => node.classList.contains('drawer-open')))
+        )
+          await page.locator('#lead-btn').click();
+        await page.locator(`#nav [data-go="${key}"]`).click();
+      };
+      await navigate('sessions');
+      await page.locator('#page [data-session-row="list"]').waitFor();
+      await page.locator('#page [data-session-row="list"]').click();
+      await page.locator('#page [data-entry-key]').first().waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('machine'), 'source');
+      await navigate('machines');
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      await page.waitForTimeout(50);
+      assert.equal(
+        new URL(page.url()).pathname,
+        '/machines',
+        'closing the drawer rolled back the route',
+      );
+      await page.goBack();
+      await page.locator('#page [data-entry-key]').first().waitFor();
+      await page.goForward();
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      await page.evaluate(() => {
+        window.holdHost = true;
+        const link = document.createElement('a');
+        link.href = '/account';
+        document.querySelector('#page').append(link);
+        link.click();
+      });
+      await page.waitForFunction(() => typeof window.releaseHost === 'function');
+      await navigate('sessions');
+      await page.locator('#page [data-session-row="list"]').waitFor();
+      await page.evaluate(() => window.releaseHost());
+      await page.waitForTimeout(50);
+      assert.equal(await page.getByText('Stale account', { exact: true }).count(), 0);
+      assert.deepEqual(
+        await page.evaluate(() => ({
+          sameApp: sharedApp === document.querySelector('.app'),
+          sameSidebar: sharedSidebar === document.querySelector('#sidebar'),
+          aborted: hostAborted,
+        })),
+        { sameApp: true, sameSidebar: true, aborted: true },
+      );
+      await page.evaluate(() => {
+        window.holdHost = false;
+        const fetch0 = window.fetch;
+        window.fetch = (url, options) =>
+          String(url).startsWith('/api/session-capabilities')
+            ? new Promise((resolve) => {
+                window.releaseCapability = () =>
+                  resolve(
+                    new Response(
+                      JSON.stringify({
+                        api: 1,
+                        read_contract: 'catalog-v1',
+                        source_key: 'other',
+                        selected_transcript: true,
+                        pagination: true,
+                        filters: [],
+                        order: 'last_desc_key_asc',
+                        full_text_search: false,
+                      }),
+                      { headers: { 'Content-Type': 'application/json' } },
+                    ),
+                  );
+              })
+            : fetch0(url, options);
+        const link = document.createElement('a');
+        link.href = '/sessions?machine=other';
+        document.querySelector('#page').append(link);
+        link.click();
+      });
+      await page.waitForFunction(() => typeof window.releaseCapability === 'function');
+      await navigate('machines');
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      const mountedBefore = await page.evaluate(() => hostMounted);
+      await page.evaluate(() => window.releaseCapability());
+      await page.waitForTimeout(50);
+      assert.equal(
+        await page.evaluate(() => hostMounted),
+        mountedBefore,
+        'stale capability reopened the host page',
+      );
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      await page.evaluate(() => {
+        window.failHost = true;
+        const link = document.createElement('a');
+        link.href = '/account';
+        document.querySelector('#page').append(link);
+        link.click();
+      });
+      await page.getByText('This page is temporarily unavailable.', { exact: false }).waitFor();
+      assert.equal(await page.locator('#topbar .t').textContent(), 'Account');
+      await page.evaluate(() => {
+        window.failHost = false;
+      });
+      await page.getByRole('button', { name: 'Retry', exact: true }).click();
+      await page.getByRole('heading', { name: 'Account', exact: true }).waitFor();
+      await page.evaluate(() => app.destroy());
+      assert.equal(
+        await page.evaluate(() => hostDestroyed),
+        (await page.evaluate(() => hostMounted)) + 1,
+        'unmounted stale delivery is disposed too',
+      );
+      await page.evaluate(() => {
+        window.workspaceReads = [];
+        window.fetch = async (url) => {
+          window.workspaceReads.push(String(url));
+          throw Error('workspaceless read');
+        };
+        const element = document.createElement('section');
+        element.textContent = 'No workspace';
+        window.app = CatalogViewer.mountViewerApplication({
+          machinesPath: '/machines',
+          workspaceMetadata: false,
+          pages: {
+            match: () => ({ title: 'Account', nav: 'account' }),
+            initial: {
+              element,
+              title: 'Account',
+              nav: 'account',
+              destroy() {
+                element.remove();
+              },
+            },
+            load: async () => null,
+          },
+        });
+      });
+      await page.getByText('No workspace', { exact: true }).waitFor();
+      await page.waitForTimeout(25);
+      assert.deepEqual(
+        await page.evaluate(() => workspaceReads),
+        [],
+        'workspaceless host read workspace metadata',
+      );
+      await page.evaluate(() => app.destroy());
+      assert.deepEqual(errors, []);
+    } finally {
+      await browser.close();
+    }
+  });

@@ -12,7 +12,7 @@ import { reachableResultIds } from '../domain/trace';
 import type { ControlView } from '../lib/control';
 import type { ViewerApplication } from './viewer';
 import { object, text } from '../domain/validate';
-import type { ViewerHost } from '../viewer-host';
+import type { ViewerHost, ViewerPage } from '../viewer-host';
 import { parseCatalogCapabilities, type CatalogCapabilities } from '../state/catalog-capabilities';
 import {
   catalogSessionKey,
@@ -201,6 +201,13 @@ export function createCatalogViewer(
     });
   const previousScrollRestoration = history.scrollRestoration;
   if (!viewerHost?.nativePage) history.scrollRestoration = 'manual';
+  let hostPage: ViewerPage | null = null;
+  let hostRoute: { title: string; nav: string } | null = null;
+  const hostScroll = new Map<string, { main: number; window: number }>();
+  let hostRequest: AbortController | null = null;
+  let hostEpoch = 0;
+  let initialHostPage = viewerHost?.pages?.initial;
+  const initialHostUrl = location.href;
   let nameRefreshOffset = 0;
   let listRetry: number | undefined,
     listRetryDelay = 1000;
@@ -363,6 +370,10 @@ export function createCatalogViewer(
     },
     navigate(destination) {
       if (viewerHost?.nativePage) return false;
+      if (viewerHost?.pages?.match(new URL(destination.href, location.href))) {
+        navigateApplication(destination.href);
+        return true;
+      }
       if (destination.key === 'home' || destination.key === 'analytics') {
         goOverview(destination.key);
         return true;
@@ -752,6 +763,7 @@ export function createCatalogViewer(
     root,
     homeIntro: viewerHost?.initialHome?.element,
     nativeContent: !!viewerHost?.nativePage,
+    enabled: viewerHost?.workspaceMetadata !== false,
     api,
     panelOpened,
     panelClosed,
@@ -827,6 +839,20 @@ export function createCatalogViewer(
     fromLocation();
   }
   function leaveScreen() {
+    if (navigation.route.v === 'host') {
+      hostScroll.delete(navigation.route.id);
+      hostScroll.set(navigation.route.id, {
+        main: document.querySelector<HTMLElement>('#main')!.scrollTop,
+        window: window.scrollY,
+      });
+      if (hostScroll.size > 24) hostScroll.delete(hostScroll.keys().next().value!);
+    }
+    ++hostEpoch;
+    hostRequest?.abort();
+    hostRequest = null;
+    hostPage?.destroy();
+    hostPage = null;
+    hostRoute = null;
     sessionPanel?.destroy();
     ++causalEpoch;
     causal = null;
@@ -853,6 +879,117 @@ export function createCatalogViewer(
     render(null, root);
     root.replaceChildren();
   }
+  function navigateApplication(href: string) {
+    const { sheet: _sheet, drawer: _drawer, ...state } = history.state ?? {};
+    history.replaceState(state, '');
+    shell.account.close({ navigating: true });
+    shell.closeDrawer(true);
+    history.pushState(null, '', href);
+    fromLocation();
+  }
+  async function showHostPage(url: URL) {
+    const pages = viewerHost?.pages;
+    const route = pages?.match(url);
+    if (!pages || !route) return;
+    leaveScreen();
+    hostRoute = route;
+    // A source capability response cannot turn a later administrative route
+    // back into a reader. The same generation also fences names/source lists.
+    ++sourcesEpoch;
+    sourcesUpdating = false;
+    const epoch = hostEpoch;
+    const controller = scope.request();
+    const deadline = scope.timeout(() => controller.abort(), 15000);
+    hostRequest = controller;
+    navigation.route = { v: 'host', id: url.pathname + url.search };
+    shell.closeDrawer(true);
+    render(
+      <p class="catalog-note" role="status">
+        Loading…
+      </p>,
+      root,
+    );
+    root.setAttribute('aria-busy', 'true');
+    chrome();
+    void overview.refresh();
+    try {
+      const initial = initialHostPage;
+      initialHostPage = undefined;
+      const next =
+        initial && url.href === initialHostUrl
+          ? initial
+          : (initial?.destroy(), await pages.load(url, controller.signal));
+      if (disposed || epoch !== hostEpoch || controller.signal.aborted) {
+        next?.destroy();
+        return;
+      }
+      if (!next) {
+        location.assign(url.href);
+        return;
+      }
+      hostPage = next;
+      render(null, root);
+      root.replaceChildren(next.element);
+      next.mount?.();
+      chrome();
+      const scroll = hostScroll.get(url.pathname + url.search);
+      document.querySelector<HTMLElement>('#main')!.scrollTop = scroll?.main ?? 0;
+      window.scrollTo(0, scroll?.window ?? 0);
+    } catch (error) {
+      if (!disposed && epoch === hostEpoch)
+        render(
+          <p class="catalog-note" role="status">
+            {error && typeof error === 'object' && 'status' in error && error.status === 403
+              ? 'You do not have permission to open this page.'
+              : 'This page is temporarily unavailable.'}{' '}
+            <button class="link" type="button" onClick={() => void showHostPage(url)}>
+              Retry
+            </button>
+          </p>,
+          root,
+        );
+    } finally {
+      scope.clearTimeout(deadline);
+      scope.releaseRequest(controller);
+      if (!disposed && epoch === hostEpoch) {
+        root.removeAttribute('aria-busy');
+        hostRequest = null;
+      }
+    }
+  }
+  // Native forms keep their server method/authorization. Only ordinary same-origin
+  // application links enter the sole router; downloads and modified clicks stay native.
+  scope.listen(document, 'click', (event) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey ||
+      !(event.target instanceof Element)
+    )
+      return;
+    const link = event.target.closest<HTMLAnchorElement>('a[href]');
+    if (!link || link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
+    const url = new URL(link.href, location.href);
+    if (
+      url.origin !== location.origin ||
+      (url.pathname === location.pathname && url.search === location.search && url.hash)
+    )
+      return;
+    if (
+      !viewerHost?.pages ||
+      !(
+        viewerHost.pages.match(url) ||
+        ['/', '/sessions', '/analytics', '/timeline'].includes(url.pathname) ||
+        /^\/(s|trace)\//.test(url.pathname)
+      )
+    )
+      return;
+    event.preventDefault();
+    navigateApplication(url.pathname + url.search + url.hash);
+  });
   function goOverview(route: 'home' | 'analytics' | 'machines', push = true) {
     leaveScreen();
     navigation.route = { v: route };
@@ -1144,27 +1281,30 @@ export function createCatalogViewer(
     const route = navigation.route.v;
     title.classList.toggle('catalog-title', route !== 'machine' && route !== 'trace');
     const name =
-      viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
-        ? viewerHost.nativePage.title
-        : route === 'home'
-          ? ((viewerHost?.initialHome?.element.parentElement === root
-              ? viewerHost.initialHome.title
-              : undefined) ?? 'Home')
-          : route === 'analytics'
-            ? 'Analytics'
-            : route === 'machine'
-              ? (overview.machine()?.label ?? 'Machine')
-              : route === 'machines'
-                ? 'Machines'
-                : route === 'trace'
-                  ? 'Trace'
-                  : sourcesOpen
-                    ? 'Choose a machine'
-                    : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
+      route === 'host'
+        ? (hostPage?.title ?? hostRoute?.title ?? '')
+        : viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
+          ? viewerHost.nativePage.title
+          : route === 'home'
+            ? ((viewerHost?.initialHome?.element.parentElement === root
+                ? viewerHost.initialHome.title
+                : undefined) ?? 'Home')
+            : route === 'analytics'
+              ? 'Analytics'
+              : route === 'machine'
+                ? (overview.machine()?.label ?? 'Machine')
+                : route === 'machines'
+                  ? 'Machines'
+                  : route === 'trace'
+                    ? 'Trace'
+                    : sourcesOpen
+                      ? 'Choose a machine'
+                      : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
     const recentHeading = document.querySelector('.side-h'),
       recentTree = shell.slots.recent.querySelector<HTMLElement>('#lanes'),
       machineRecent =
-        !viewerHost?.nativePage && !['home', 'analytics', 'machines', 'machine'].includes(route),
+        !viewerHost?.nativePage &&
+        !['home', 'analytics', 'machines', 'machine', 'host'].includes(route),
       recentScope = overview.recentScope(machineRecent);
     if (recentHeading) {
       recentHeading.textContent = 'Recent';
@@ -1188,13 +1328,15 @@ export function createCatalogViewer(
             (item) => item.key !== 'new-session',
           ),
         },
-        viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
-          ? viewerHost.nativePage.nav
-          : route === 'machine'
-            ? 'machines'
-            : route === 'session' || route === 'trace'
-              ? 'sessions'
-              : route,
+        route === 'host'
+          ? (hostPage?.nav ?? hostRoute?.nav ?? '')
+          : viewerHost?.nativePage && !['home', 'analytics', 'sessions', 'session'].includes(route)
+            ? viewerHost.nativePage.nav
+            : route === 'machine'
+              ? 'machines'
+              : route === 'session' || route === 'trace'
+                ? 'sessions'
+                : route,
         {
           home: viewerHost?.navigation?.paths?.home ?? '/',
           analytics: viewerHost?.navigation?.paths?.analytics ?? '/analytics',
@@ -1454,7 +1596,10 @@ export function createCatalogViewer(
     }
     if (active || route === 'machine')
       scope.frame(() => measureViewerBar(document.querySelector<HTMLElement>('#topbar')!));
-    if (viewerHost?.nativePage || ['home', 'analytics', 'machines', 'machine'].includes(route))
+    if (
+      viewerHost?.nativePage ||
+      ['home', 'analytics', 'machines', 'machine', 'host'].includes(route)
+    )
       recent.update(overview.recentSnapshot(undefined, [], undefined, rail));
     else
       recent.update(
@@ -3725,6 +3870,7 @@ export function createCatalogViewer(
         return;
       }
       if (
+        navigation.route.v === 'host' ||
         navigation.route.v === 'home' ||
         navigation.route.v === 'analytics' ||
         navigation.route.v === 'machines' ||
@@ -4030,6 +4176,11 @@ export function createCatalogViewer(
     }
   }
   function fromLocation() {
+    const url = new URL(location.href);
+    if (viewerHost?.pages?.match(url)) {
+      void showHostPage(url);
+      return;
+    }
     if (viewerHost?.nativePage) {
       navigation.route = { v: 'machines' };
       chrome();
@@ -4353,6 +4504,10 @@ export function createCatalogViewer(
       readerResize.disconnect();
       sessionPanel?.destroy();
       sessionBar.destroy();
+      ++hostEpoch;
+      hostRequest?.abort();
+      hostPage?.destroy();
+      initialHostPage?.destroy();
       viewerHost?.initialMachines?.destroy();
       viewerHost?.initialHome?.destroy();
       selection.destroy();
