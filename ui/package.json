@@ -25,6 +25,7 @@
     "preact": "10.29.8"
   },
   "devDependencies": {
+    "@types/node": "22.19.0",
     "@storybook/preact-vite": "10.6.0",
     "esbuild": "0.28.2",
     "postcss": "8.5.28",

@@ -2,7 +2,7 @@
   "extends": "./tsconfig.lib.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": []
+    "types": ["node"]
   },
   "include": [
     ".storybook/preview.tsx",

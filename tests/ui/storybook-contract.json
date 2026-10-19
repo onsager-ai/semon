@@ -5,36 +5,63 @@
   "pixelPolicy": {
     "threshold": 0.1,
     "maxRatio": 0.0001,
-    "dimensions": [390, 820, 1280],
-    "schemes": ["light", "dark"]
+    "dimensions": [
+      390,
+      820,
+      1280
+    ],
+    "schemes": [
+      "light",
+      "dark"
+    ]
   },
   "servedChecks": {
     "visual-pixels": "pixels.mjs",
     "preservation": "preservation-contract.mjs",
     "component-gallery": "gallery.mjs",
     "functional-checks": "checks/run.mjs",
-    "served-catalog": "catalog-served.mjs",
-    "served-overview": "overview-served.mjs",
-    "native-shell": "../../ui/tests/native-shell-lifecycle.test.mjs",
+    "served-catalog": "../../ui/tests/catalog-served.mjs",
+    "served-overview": "../../ui/tests/overview-served.mjs",
+    "native-shell": "../../ui/tests/native-shell-lifecycle.mjs",
     "native-navigation": "../../ui/tests/native-navigation.test.mjs",
     "native-selection": "../../ui/tests/catalog-selection.test.mjs"
   },
   "productionSurfaces": [
     {
       "id": "shared-shell-navigation-account",
-      "modules": ["../src/lib/shell", "../src/lib/account-chrome", "../src/lib/AccountMenu"],
-      "storyIds": ["semon-production-owners--component-gallery"],
-      "servedChecks": ["component-gallery", "functional-checks"]
+      "modules": [
+        "../src/lib/shell",
+        "../src/lib/account-chrome",
+        "../src/lib/AccountMenu"
+      ],
+      "storyIds": [
+        "semon-production-owners--component-gallery"
+      ],
+      "servedChecks": [
+        "component-gallery",
+        "functional-checks"
+      ]
     },
     {
       "id": "home",
-      "modules": ["../src/lib/screens"],
-      "storyIds": ["semon-production-owners--home"],
-      "servedChecks": ["visual-pixels", "served-overview"]
+      "modules": [
+        "../src/lib/screens"
+      ],
+      "storyIds": [
+        "semon-production-owners--home"
+      ],
+      "servedChecks": [
+        "visual-pixels",
+        "served-overview"
+      ]
     },
     {
       "id": "sessions-catalog-filter-and-sources",
-      "modules": ["../src/lib/catalog", "../src/lib/facets", "../src/lib/select"],
+      "modules": [
+        "../src/lib/catalog",
+        "../src/lib/facets",
+        "../src/lib/select"
+      ],
       "storyIds": [
         "semon-production-owners--sessions-catalog",
         "semon-production-owners--filtered-catalog",
@@ -42,51 +69,104 @@
         "semon-production-owners--machine-filter",
         "semon-production-owners--session-row"
       ],
-      "servedChecks": ["visual-pixels", "served-catalog", "native-selection"]
+      "servedChecks": [
+        "visual-pixels",
+        "served-catalog",
+        "native-selection"
+      ]
     },
     {
       "id": "machines",
-      "modules": ["../src/lib/screens"],
-      "storyIds": ["semon-production-owners--machines"],
-      "servedChecks": ["visual-pixels", "functional-checks"]
+      "modules": [
+        "../src/lib/screens"
+      ],
+      "storyIds": [
+        "semon-production-owners--machines"
+      ],
+      "servedChecks": [
+        "visual-pixels",
+        "functional-checks"
+      ]
     },
     {
       "id": "analytics",
-      "modules": ["../src/lib/analytics"],
-      "storyIds": ["semon-production-owners--analytics-states"],
-      "servedChecks": ["visual-pixels", "served-overview"]
+      "modules": [
+        "../src/lib/analytics"
+      ],
+      "storyIds": [
+        "semon-production-owners--analytics-states",
+        "semon-production-owners--analytics-loaded"
+      ],
+      "servedChecks": [
+        "visual-pixels",
+        "served-overview"
+      ]
     },
     {
       "id": "trace",
-      "modules": ["../src/lib/trace"],
-      "storyIds": ["semon-production-owners--trace-empty"],
-      "servedChecks": ["visual-pixels", "functional-checks"]
+      "modules": [
+        "../src/lib/trace"
+      ],
+      "storyIds": [
+        "semon-production-owners--trace-empty",
+        "semon-production-owners--trace-flow"
+      ],
+      "servedChecks": [
+        "visual-pixels",
+        "functional-checks"
+      ]
     },
     {
       "id": "native-transcript-reader",
-      "modules": ["../src/lib/transcript"],
+      "modules": [
+        "../src/lib/transcript"
+      ],
       "storyIds": [
         "semon-production-owners--compact-reader",
         "semon-production-owners--failure-inspection",
-        "semon-production-owners--transcript-empty"
+        "semon-production-owners--transcript-empty",
+        "semon-production-owners--long-transcript"
       ],
-      "servedChecks": ["visual-pixels", "functional-checks", "native-shell"]
+      "servedChecks": [
+        "visual-pixels",
+        "functional-checks",
+        "native-shell"
+      ]
     },
     {
       "id": "session-menu",
-      "modules": ["../src/lib/session-menu"],
-      "storyIds": ["semon-production-owners--session-menu"],
-      "servedChecks": ["functional-checks"]
+      "modules": [
+        "../src/lib/session-menu"
+      ],
+      "storyIds": [
+        "semon-production-owners--session-menu"
+      ],
+      "servedChecks": [
+        "functional-checks"
+      ]
     },
     {
       "id": "shared-panels-sheets-controls",
-      "modules": ["../src/lib/panel", "../src/lib/sheets", "../src/lib/tooltip"],
-      "storyIds": ["semon-production-owners--component-gallery"],
-      "servedChecks": ["component-gallery", "functional-checks"]
+      "modules": [
+        "../src/lib/panel",
+        "../src/lib/sheets",
+        "../src/lib/tooltip"
+      ],
+      "storyIds": [
+        "semon-production-owners--component-gallery",
+        "semon-production-owners--tooltip"
+      ],
+      "servedChecks": [
+        "component-gallery",
+        "functional-checks"
+      ]
     },
     {
       "id": "loading-empty-error-focus",
-      "modules": ["../src/lib/catalog", "../src/lib/screens"],
+      "modules": [
+        "../src/lib/catalog",
+        "../src/lib/screens"
+      ],
       "storyIds": [
         "semon-production-owners--catalog-loading",
         "semon-production-owners--catalog-empty",
@@ -94,20 +174,61 @@
         "semon-production-owners--loading-empty-error",
         "semon-production-owners--keyboard-focus"
       ],
-      "servedChecks": ["visual-pixels", "preservation", "functional-checks"]
+      "servedChecks": [
+        "visual-pixels",
+        "preservation",
+        "functional-checks"
+      ]
     }
   ],
   "visualCoverage": {
     "source": "visual-coverage.json",
     "servedCheck": "visual-pixels",
     "storyRules": [
-      { "pattern": "^analytics$", "storyIds": ["semon-production-owners--analytics-states"] },
-      { "pattern": "^home$", "storyIds": ["semon-production-owners--home"] },
-      { "pattern": "^machines?$|^machine-", "storyIds": ["semon-production-owners--machines"] },
-      { "pattern": "^session-", "storyIds": ["semon-production-owners--compact-reader", "semon-production-owners--failure-inspection"] },
-      { "pattern": "^sessions$", "storyIds": ["semon-production-owners--sessions-catalog"] },
-      { "pattern": "^trace-", "storyIds": ["semon-production-owners--trace-empty"] },
-      { "pattern": "^drawer$", "storyIds": ["semon-production-owners--component-gallery"] }
+      {
+        "pattern": "^analytics$",
+        "storyIds": [
+          "semon-production-owners--analytics-loaded"
+        ]
+      },
+      {
+        "pattern": "^home$",
+        "storyIds": [
+          "semon-production-owners--home"
+        ]
+      },
+      {
+        "pattern": "^machines?$|^machine-",
+        "storyIds": [
+          "semon-production-owners--machines"
+        ]
+      },
+      {
+        "pattern": "^session-",
+        "storyIds": [
+          "semon-production-owners--compact-reader",
+          "semon-production-owners--failure-inspection",
+          "semon-production-owners--long-transcript"
+        ]
+      },
+      {
+        "pattern": "^sessions$",
+        "storyIds": [
+          "semon-production-owners--sessions-catalog"
+        ]
+      },
+      {
+        "pattern": "^trace-",
+        "storyIds": [
+          "semon-production-owners--trace-flow"
+        ]
+      },
+      {
+        "pattern": "^drawer$",
+        "storyIds": [
+          "semon-production-owners--component-gallery"
+        ]
+      }
     ]
   },
   "preservation": {
@@ -123,42 +244,289 @@
   },
   "gallery": {
     "source": "gallery-visual.json",
-    "storyIds": ["semon-production-owners--component-gallery"],
+    "storyIds": [
+      "semon-production-owners--component-gallery"
+    ],
     "servedCheck": "component-gallery"
   },
   "pen": {
     "source": "../../docs/design/session-inspection/session-inspection.pen",
     "roots": [
-      { "id": "Nt3eb", "storyIds": ["semon-production-owners--sessions-catalog"] },
-      { "id": "gZYIY", "storyIds": ["semon-production-owners--filtered-catalog"] },
-      { "id": "vGVHj", "storyIds": ["semon-production-owners--compact-reader"] },
-      { "id": "nGo6u", "storyIds": ["semon-production-owners--failure-inspection"] },
+      {
+        "id": "Nt3eb",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--sessions-catalog"
+        ]
+      },
+      {
+        "id": "BYbh8",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--filtered-catalog"
+        ]
+      },
+      {
+        "id": "raaGL",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--session-row"
+        ]
+      },
+      {
+        "id": "gZYIY",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--filtered-catalog"
+        ]
+      },
+      {
+        "id": "nGo6u",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--failure-inspection",
+          "semon-production-owners--long-transcript"
+        ]
+      },
       {
         "id": "Oo357",
+        "disposition": "active",
         "storyIds": [
           "semon-production-owners--catalog-loading",
           "semon-production-owners--catalog-empty",
           "semon-production-owners--catalog-failure",
           "semon-production-owners--loading-empty-error",
-          "semon-production-owners--keyboard-focus"
+          "semon-production-owners--keyboard-focus",
+          "semon-production-owners--source-candidates"
         ]
       },
-      { "id": "gbtK3", "storyIds": ["semon-production-owners--sessions-catalog"] }
+      {
+        "id": "gbtK3",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--sessions-catalog"
+        ]
+      },
+      {
+        "id": "vGVHj",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--compact-reader",
+          "semon-production-owners--long-transcript"
+        ]
+      },
+      {
+        "id": "S2P8p",
+        "disposition": "superseded",
+        "storyIds": [],
+        "reason": "Design brief section 10 supersedes this historical linked-session composition with compact session disclosure."
+      },
+      {
+        "id": "WIlub",
+        "disposition": "superseded",
+        "storyIds": [],
+        "reason": "Design brief section 10 supersedes this historical linked-session composition with compact session disclosure."
+      },
+      {
+        "id": "uGNh2",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--compact-reader"
+        ]
+      },
+      {
+        "id": "pkKQT",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--compact-reader"
+        ]
+      },
+      {
+        "id": "workspaceSessions20261019",
+        "disposition": "active",
+        "storyIds": [
+          "semon-production-owners--machine-filter"
+        ]
+      }
+    ],
+    "activeDescendantGroups": [
+      {
+        "root": "Nt3eb",
+        "ids": [
+          "P4cT3K",
+          "XxrIN",
+          "u2bYht",
+          "GZCvb",
+          "K22Z2",
+          "siYza",
+          "Sughc",
+          "K0C2W",
+          "ARFew",
+          "hFSHE",
+          "t6oQxQ",
+          "BR60V",
+          "SHMo4",
+          "BcZql",
+          "eoiQs",
+          "D4FY6",
+          "cMHEB",
+          "EGONE",
+          "I0NY3"
+        ]
+      },
+      {
+        "root": "BYbh8",
+        "ids": [
+          "rzFC3"
+        ]
+      },
+      {
+        "root": "raaGL",
+        "ids": []
+      },
+      {
+        "root": "gZYIY",
+        "ids": [
+          "FIwqa",
+          "ypFy7",
+          "vFIlg",
+          "XUBQx",
+          "gXHrB",
+          "TRQHl"
+        ]
+      },
+      {
+        "root": "nGo6u",
+        "ids": [
+          "FiLXX",
+          "dcx52",
+          "Jb6nO",
+          "t5d78r",
+          "ikalf",
+          "be8BK",
+          "tg2IX",
+          "vzVL5",
+          "zWtI1",
+          "PzYKs",
+          "o0s4e",
+          "oLroE",
+          "M7Zjq",
+          "kD4Pe",
+          "V6i5L"
+        ]
+      },
+      {
+        "root": "Oo357",
+        "ids": [
+          "qO2OE",
+          "OxmTy",
+          "KEdPz",
+          "C3JzD2"
+        ]
+      },
+      {
+        "root": "gbtK3",
+        "ids": [
+          "wCnIL",
+          "XwmtP",
+          "ztAky",
+          "g8aOkf",
+          "Xo51R",
+          "s4RT1R",
+          "trEGm",
+          "jsUvU",
+          "v0xoD",
+          "WrISy",
+          "e3gpV",
+          "W0tEEh",
+          "uj2tA",
+          "l1X7z",
+          "NFwCK",
+          "B9gQL",
+          "CQZfM",
+          "wWSJr",
+          "KMzk2"
+        ]
+      },
+      {
+        "root": "vGVHj",
+        "ids": [
+          "hnbrS",
+          "UOPSN",
+          "x3zFKU",
+          "O7h1ft",
+          "oZ1Jj",
+          "eWa49",
+          "nj0hK",
+          "YvyEJ",
+          "DQHeF",
+          "sXwhD",
+          "K5eEtt",
+          "j1fnH",
+          "Wd35g"
+        ]
+      },
+      {
+        "root": "uGNh2",
+        "ids": [
+          "AWPNE",
+          "IDwPX",
+          "xH7RQ",
+          "G9XjGN",
+          "DikBn"
+        ]
+      },
+      {
+        "root": "pkKQT",
+        "ids": [
+          "KcVGn",
+          "GdtyG",
+          "S8I0nF"
+        ]
+      },
+      {
+        "root": "workspaceSessions20261019",
+        "ids": []
+      }
     ],
     "descendantStories": {
-      "workspaceSessions20261019": ["semon-production-owners--machine-filter"],
-      "uGNh2": ["semon-production-owners--compact-reader"],
-      "FPbSc": ["semon-production-owners--compact-reader"],
-      "DikBn": ["semon-production-owners--compact-reader"],
-      "GdtyG": ["semon-production-owners--compact-reader"],
-      "S8I0nF": ["semon-production-owners--compact-reader"]
+      "workspaceSessions20261019": [
+        "semon-production-owners--machine-filter"
+      ],
+      "uGNh2": [
+        "semon-production-owners--compact-reader"
+      ],
+      "FPbSc": [
+        "semon-production-owners--compact-reader"
+      ],
+      "DikBn": [
+        "semon-production-owners--compact-reader"
+      ],
+      "GdtyG": [
+        "semon-production-owners--compact-reader"
+      ],
+      "S8I0nF": [
+        "semon-production-owners--compact-reader"
+      ]
     },
-    "activeDescendantPolicy": "inherits-active-root-visual-contract",
-    "supersededDescendants": {
-      "S2P8p": "Design brief section 10 labels the historical linked-session surface superseded by compact disclosure.",
-      "WIlub": "Design brief section 10 labels the historical linked-session board superseded by compact disclosure."
-    },
-    "servedCheck": "visual-pixels"
+    "servedCheck": "visual-pixels",
+    "supersededDescendantGroups": [
+      {
+        "root": "S2P8p",
+        "ids": [
+          "pG6Ly",
+          "Q3hEK"
+        ]
+      },
+      {
+        "root": "WIlub",
+        "ids": [
+          "Cqf0q",
+          "uNKUJ",
+          "qkmvq"
+        ]
+      }
+    ]
   },
   "referencePolicy": "Candidate screenshots are artifacts only. Missing or unapproved references remain pending failures. CI never creates or approves a reference."
 }
