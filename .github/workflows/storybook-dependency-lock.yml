@@ -1,0 +1,29 @@
+name: Prepare Storybook dependency lock
+
+on:
+  push:
+    branches: [feat/428-full-storybook-migration-20261019]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storybook-dependency-lock-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Resolve the declared preview dependencies on CI
+        run: npm --prefix ui install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: storybook-dependency-lock
+          path: ui/package-lock.json
+          if-no-files-found: error
