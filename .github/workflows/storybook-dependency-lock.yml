@@ -30,25 +30,47 @@ jobs:
   preview:
     if: ${{ !contains(github.event.head_commit.message, '[storybook-lock]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            tests/ui/package-lock.json
       - name: Install locked product and preview tooling
         run: |
           npm --prefix ui ci --no-audit --no-fund
           npm --prefix tests/ui ci --no-audit --no-fund
+      - name: Test the finite static preview server
+        id: server-tests
+        run: node --test tests/ui/storybook-server.test.mjs
+      - name: Install pinned Playwright Chromium
+        id: browser
+        if: ${{ !cancelled() && steps.server-tests.outcome == 'success' }}
+        working-directory: tests/ui
+        run: npx playwright install --with-deps chromium
       - name: Check preview types
+        id: typecheck
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
         run: npm --prefix ui run storybook:typecheck
       - name: Build actual production stories
         id: build
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.typecheck.outcome == 'success' }}
         run: npm --prefix ui run storybook:build
       - name: Validate exhaustive contract coverage
+        id: contract
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm --prefix tests/ui run storybook:contract
+      - name: Capture production stories and interaction states
+        id: capture
+        if: ${{ !cancelled() && steps.contract.outcome == 'success' }}
+        continue-on-error: true
+        run: npm --prefix tests/ui run storybook:capture
       - name: Prepare authored formatting corrections for review
         if: ${{ !cancelled() }}
         run: |
@@ -64,6 +86,32 @@ jobs:
             tests/ui/out/storybook
             ${{ runner.temp }}/storybook-format-review.patch
           if-no-files-found: warn
+      - name: Report render failures separately from pending approvals
+        if: ${{ always() && steps.capture.outcome != 'skipped' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const file = 'tests/ui/out/storybook/candidates/capture-report.json';
+          if (!fs.existsSync(file)) {
+            console.error('Storybook render failure: capture produced no report.');
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (report.failures.length) {
+            console.error(`Storybook render/comparison failures: ${report.failures.length}`);
+            for (const failure of report.failures) console.error(`- ${failure}`);
+          }
+          if (report.pending.length) {
+            console.error(`Storybook references pending separate review: ${report.pending.length}`);
+            for (const key of report.pending) console.error(`- ${key}`);
+          }
+          if (report.failures.length || report.pending.length) process.exit(1);
+          if ('${{ steps.capture.outcome }}' !== 'success') {
+            console.error('Storybook capture step failed despite an empty report.');
+            process.exit(1);
+          }
+          console.log(`All ${report.results.length} Storybook captures matched reviewed references.`);
+          NODE
   agents:
     runs-on: ubuntu-latest
     timeout-minutes: 5
