@@ -13,9 +13,9 @@ export interface CatalogCapabilities {
   large_native_records: boolean;
   pagination: true;
   filters: string[];
-  order: 'last_desc_key_asc';
+  order: 'last_desc_key_asc' | 'last_desc_key_asc_machine_asc';
   full_text_search: false;
-  global_union: false;
+  global_union: boolean;
 }
 /** Unknown contracts must not be normalized into either complete graph or bounded authority. */
 export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
@@ -26,11 +26,13 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
   if (
     row.api !== 1 ||
     row.read_contract !== 'catalog-v1' ||
-    !sourceKey ||
+    (!sourceKey && row.global_union !== true) ||
+    (row.global_union === true && sourceKey !== '') ||
     row.pagination !== true ||
-    row.order !== 'last_desc_key_asc' ||
+    row.order !==
+      (row.global_union === true ? 'last_desc_key_asc_machine_asc' : 'last_desc_key_asc') ||
     row.full_text_search !== false ||
-    row.global_union !== false ||
+    typeof row.global_union !== 'boolean' ||
     metadataSearch !== filters.includes('q') ||
     filters.some(
       (filter) =>
@@ -54,8 +56,8 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
     large_native_records: boolean(row.large_native_records),
     pagination: true,
     filters,
-    order: 'last_desc_key_asc',
+    order: row.global_union === true ? 'last_desc_key_asc_machine_asc' : 'last_desc_key_asc',
     full_text_search: false,
-    global_union: false,
+    global_union: boolean(row.global_union),
   };
 }
