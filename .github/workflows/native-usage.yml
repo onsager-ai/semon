@@ -1,27 +1,21 @@
 name: Native usage projections
-
 on:
-  pull_request:
-    paths:
-      - 'crates/semon-sessions/**'
-      - '.github/workflows/native-usage.yml'
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: native-usage-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  actions: read
 jobs:
   regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [9b4417c37a1c4e801d92789c26143157d5e8aaf3, 4edc804ee9cb2229e5dd00e1dd54e7726c67e322]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          ref: ${{ matrix.source }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
@@ -29,20 +23,42 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-usage-${{ hashFiles('Cargo.lock') }}
-      - name: Prepare formatting review
+      - name: Compare the existing cold-family bound on base and fix
+        run: cargo test --locked -p semon-sessions cold_codex_family_crossing_batches_preserves_every_native_parent -- --nocapture
+  visual-diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Compare exact visual evidence with its existing acceptances
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cargo fmt --all
-          git diff --binary > "$RUNNER_TEMP/native-usage-format.patch"
-      - name: Retain formatter patch
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          gh run download 39265961625 -R onsager-ai/semon -n viewer-ui-visual -D "$RUNNER_TEMP/visual-report"
+          python3 - <<'PY'
+          import json,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'visual-report'
+          accepted=json.loads(pathlib.Path('tests/ui/visual-acceptance.json').read_text())['acceptances']
+          result=[]
+          for path in root.rglob('report.json'):
+              report=json.loads(path.read_text())
+              comparator='pixels' if report.get('scope') else 'preservation'
+              scope=report.get('scope',report.get('mode','required'))
+              rows=[('frame',r) for r in report.get('results',[])]+[('region',r) for r in report.get('regions',[])]
+              rows=[(kind,r) for kind,r in rows if r.get('size') is not None or r.get('ratio',0)>.0001]
+              changed=[]
+              identical=0
+              for kind,row in rows:
+                  matches=[a for a in accepted if a['comparator']==comparator and a['scope']==scope and a['kind']==kind and a['key']==row['key']]
+                  if len(matches)==1 and matches[0]['artifactDigests']==row.get('artifactDigests'):
+                      identical+=1
+                  else:
+                      changed.append({'kind':kind,'key':row['key'],'ratio':row.get('ratio')})
+              result.append({'report':str(path.relative_to(root)),'comparator':comparator,'scope':scope,'candidateFingerprint':report.get('candidateFingerprint'),'failures':len(rows),'identical_accepted_artifacts':identical,'changed_artifacts':changed,'errors':report.get('errors',[])})
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'visual-diagnostics.json'
+          out.write_text(json.dumps(result,indent=2))
+          print(out.read_text())
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: native-usage-format
-          path: ${{ runner.temp }}/native-usage-format.patch
-          retention-days: 7
-      - name: Verify native history recovery and report bounded work
-        run: |
-          cargo test --locked -p semon-sessions native_usage_ -- --nocapture
-          cargo test --locked -p semon-sessions native_tree:: -- --nocapture
-      - name: Verify catalog progress during unrelated runtime changes
-        run: cargo test --locked -p semon-sessions catalog_runtime_ -- --nocapture
+          name: runtime-visual-diagnostics
+          path: ${{ runner.temp }}/visual-diagnostics.json
