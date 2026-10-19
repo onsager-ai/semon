@@ -50,7 +50,7 @@ const native = mountNativeShell({ chrome: false });
 const viewer = mountViewerApplication({
   machinesPath: '/machines',
   catalogSources: true,
-  nativePage: { title: 'Devices', nav: 'machines' },
+  nativePage: { title: 'Devices', nav: 'machines', workspaceChrome: true },
   account: validatedServerAccount,
 });
 // Before replacing the document-owned frame:
@@ -61,6 +61,9 @@ native.destroy();
 Mount once after the frame exists. The Viewer owns chrome, navigation, bounded
 Recent metadata and its refresh lifetime; native enhancements own confirmation,
 copy and readiness controls. Links and submissions retain server behavior.
+Set `workspaceChrome` only when the authenticated host has a current workspace.
+It enables compact published Recent/count metadata, without selecting a source,
+hydrating previews or preparing native history. Omit it for workspaceless pages.
 Load the single consumer bundle instead of also loading `/viewer.js` and
 `/shell.js`. Without JavaScript, fallback links and forms remain usable.
 Sidebar fragments without an application frame can use the pure shared

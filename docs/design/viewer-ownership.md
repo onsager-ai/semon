@@ -26,8 +26,13 @@ abort superseded overview/causal work. Destroying the application invalidates
 callbacks before destroying stores, controls, native content and screen roots.
 Navigation's observable route is shared with scoped status observers; it has no
 native-page loader or independent destination request lifecycle.
-Native host documents retain their empty Recent slot and never select a reader
-source or fetch workspace publications for chrome. Their native links enter
+Native host documents never select a reader source. An authenticated workspace
+host opts into `nativePage.workspaceChrome` to consume the same compact workspace
+Recent publication and Home count as reader pages. The sidebar-only overview path
+never hydrates previews, observes pending native sessions or replaces host content;
+the existing EffectScope, refresh cadence and publication validation own these
+reads. Hosts without a workspace retain their empty Recent slot and issue no
+workspace requests. Their native links enter
 Home, Analytics and selected-session reader documents through browser navigation;
 mount, ordinary cadence, visibility and same-document history notifications keep
 the native content and its forms under the host's owner.

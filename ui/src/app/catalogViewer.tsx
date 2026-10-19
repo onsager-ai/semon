@@ -3585,7 +3585,10 @@ export function createCatalogViewer(
     const observedSource = capabilities.source_key,
       observedEpoch = sourcesEpoch;
     try {
-      if (viewerHost?.nativePage) return;
+      if (viewerHost?.nativePage) {
+        if (viewerHost.nativePage.workspaceChrome) await overview.refresh();
+        return;
+      }
       if (
         navigation.route.v === 'home' ||
         navigation.route.v === 'analytics' ||
@@ -3881,6 +3884,7 @@ export function createCatalogViewer(
     if (viewerHost?.nativePage) {
       navigation.route = { v: 'machines' };
       chrome();
+      if (viewerHost.nativePage.workspaceChrome) void overview.refresh();
       return;
     }
     const queryParams = new URLSearchParams(location.search);
