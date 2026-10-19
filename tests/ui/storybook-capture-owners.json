@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "method": "CI lexical census of authored JavaScript/TypeScript. It reports direct screenshot calls, mask/masks option declarations, and imports of shared capture helpers. This is a bounded lexical inventory, not semantic evaluation of dynamic options or runtime capture behavior.",
+  "records": [
+    {"owner":"tests/ui/pixels.mjs","status":"active","disposition":"retained native comparator; exact Storybook successors are tracked in storybook-gates.json","successor":"storybook-legacy.mjs exact frames/regions","evidence":"storybook-gates.json inspected captureFrame/regionShot options: no mask option; fullPage/clip/selector policies remain distinct.","maskOptions":[]},
+    {"owner":"tests/ui/preservation.mjs","status":"active","disposition":"retained native comparator; exact Storybook successors are tracked in storybook-gates.json","successor":"storybook-legacy.mjs exact preservation states","evidence":"storybook-gates.json inspected captureStableFrame call: fullPage:false, animations:allow, caret:hide; no mask option.","maskOptions":[]},
+    {"owner":"tests/ui/gallery.mjs","status":"active","disposition":"retained native comparator; exact Storybook successors are tracked in storybook-gates.json","successor":"storybook-legacy.mjs five gallery states","evidence":"storybook-gates.json inspected visuals.capture(page,key) call supplies no extra options; visual-contract forwards options unchanged.","maskOptions":[]},
+    {"owner":"tests/ui/compact-gallery.mjs","status":"active","disposition":"retained compact geometry policy","successor":null,"evidence":"storybook-gates.json bounded source inspection found no mask option in this capture runner.","maskOptions":[]},
+    {"owner":"ui/tests/catalog-served.mjs","status":"active","disposition":"retained native served-page checks","successor":null,"evidence":"storybook-gates.json bounded source inspection found no mask option in this inspected runner.","maskOptions":[]},
+    {"owner":"ui/tests/overview-served.mjs","status":"active","disposition":"retained native served-page checks","successor":null,"evidence":"storybook-gates.json bounded source inspection found no mask option in this inspected runner.","maskOptions":[]},
+    {"owner":"tests/ui/storybook-capture.mjs","status":"active","disposition":"candidate-only; exact references remain pending","successor":null,"evidence":"storybook-gates.json inspected frame/locator/clip screenshot options and stable-paint owner: no mask option; every exact legacy capture identity declares masks:[] and fails if changed.","maskOptions":[]},
+    {"owner":"tests/ui/native-controls.mjs","status":"active","disposition":"retained compact control accessibility and native screenshot evidence","successor":null,"evidence":"Inspected page.screenshot call at the native-controls runner; it supplies only a path and no mask option. This is a static call-site observation.","maskOptions":[]}
+  ]
+}

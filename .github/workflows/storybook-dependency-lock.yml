@@ -118,3 +118,12 @@ jobs:
           name: agent-config-review
           path: ${{ runner.temp }}/agent-config-review.patch
           if-no-files-found: error
+      - name: Census Storybook capture and mask owners
+        working-directory: consumer
+        run: node tests/ui/storybook-census.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: storybook-capture-census
+          path: consumer/tests/ui/out/storybook/census
+          if-no-files-found: warn
