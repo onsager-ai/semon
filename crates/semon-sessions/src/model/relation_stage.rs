@@ -98,6 +98,9 @@ pub(crate) enum Selector {
     ClaudeCall {
         id: String,
     },
+    ClaudeReceipt {
+        id: String,
+    },
     CodexSibling {
         parent: String,
         task: String,

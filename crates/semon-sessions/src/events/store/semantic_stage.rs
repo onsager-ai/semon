@@ -6,9 +6,9 @@ use crate::model::relation_stage::{
 };
 use std::collections::BTreeSet;
 
-// Older in-flight stages have not registered unpublished runtime dependencies.
-// Rebuild them once before allowing journal-qualified runtime rebasing.
-const RECIPE: &str = "recorded-origin-turn-journaled-runtime-v2";
+// Earlier stages may contain parent turns derived from partial receipt sets.
+// Rebuild their witnesses using complete physical sender receipt boundaries.
+const RECIPE: &str = "recorded-origin-turn-complete-receipts-v3";
 fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -2262,6 +2262,21 @@ impl SqliteStore {
                 ..Selection::default()
             });
         }
+        if let Selector::ClaudeReceipt { id } = s {
+            let text: Option<Option<String>> = self.connection.query_row(
+                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",
+                [id], |r| r.get(0),
+            ).optional().map_err(failure)?;
+            let Some(text) = text else {
+                return Ok(Selection::default());
+            };
+            let native = decode_event(&self.connection, text, &mut 0).map_err(failure)?;
+            return Ok(Selection {
+                count: 1,
+                location: Some(native.at),
+                ..Selection::default()
+            });
+        }
         if let Selector::ClaudeCall { id } = s {
             let keys=self.connection.prepare("SELECT source_path,event_key FROM catalog_semantic_events WHERE kind='call' AND tool_id=?1 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2").map_err(failure)?.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
             if keys.len() != 1 {
@@ -2333,7 +2348,8 @@ impl SqliteStore {
         let (sql, first, target, endpoint) = match s {
             Selector::NativeKey { .. }
             | Selector::ClaudeName { .. }
-            | Selector::ClaudeCall { .. } => {
+            | Selector::ClaudeCall { .. }
+            | Selector::ClaudeReceipt { .. } => {
                 unreachable!("Claude selectors returned above")
             }
             Selector::CodexSibling { parent, task } => (
@@ -2733,7 +2749,7 @@ mod tests {
         store
             .connection
             .execute(
-                "UPDATE meta SET value='recorded-origin-turn-v1' WHERE key='catalog_semantic_recipe'",
+                "UPDATE meta SET value='recorded-origin-turn-journaled-runtime-v2' WHERE key='catalog_semantic_recipe'",
                 [],
             )
             .unwrap();

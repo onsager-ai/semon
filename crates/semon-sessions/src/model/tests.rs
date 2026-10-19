@@ -4046,6 +4046,104 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
 }
 
 #[test]
+fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
+    let home = Home::new();
+    let mut alpha = vec![human("alpha", ts(6, 0), "Coordinate a conversation")];
+    // Offset the two native message pages so the same send is observed with
+    // different incident subsets. Its preceding receipt still owns its turn.
+    let mut beta = vec![peer("beta", ts(6, 1), "prelude", "Outside", 101, "Start")];
+    for n in 0..80 {
+        let minute = 7 + n / 10;
+        let second = (n % 10) * 4;
+        let forward = format!("forward-{n:03}");
+        let backward = format!("backward-{n:03}");
+        let send = format!("send-{n:03}");
+        let reply = format!("reply-{n:03}");
+        alpha.push(assistant(
+            "alpha",
+            ts(minute, second),
+            vec![tool(
+                &send,
+                "SendMessage",
+                json!({"to":"beta","message":"Forward"}),
+            )],
+        ));
+        alpha.push(result(
+            "alpha",
+            ts(minute, second),
+            &send,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":forward}),
+        ));
+        beta.push(peer(
+            "beta",
+            ts(minute, second + 1),
+            &forward,
+            "Alpha",
+            102,
+            "Forward",
+        ));
+        beta.push(assistant(
+            "beta",
+            ts(minute, second + 2),
+            vec![tool(
+                &reply,
+                "SendMessage",
+                json!({"to":"alpha","message":"Backward"}),
+            )],
+        ));
+        beta.push(result(
+            "beta",
+            ts(minute, second + 2),
+            &reply,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":backward}),
+        ));
+        alpha.push(peer(
+            "alpha",
+            ts(minute, second + 3),
+            &backward,
+            "Beta",
+            103,
+            "Backward",
+        ));
+    }
+    home.top("alpha", &alpha);
+    home.top("beta", &beta);
+    for n in 0..70 {
+        let id = format!("independent-{n:03}");
+        home.top(&id, &[human(&id, ts(6, 0), "Independent history")]);
+    }
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for turn in &oracle.turns {
+        for edge in &turn.sent {
+            let handoff = oracle.handoffs.iter().find(|h| h.id == *edge).unwrap();
+            for owner in [Some(turn.sid.as_str()), handoff.to.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                let actual: String = db
+                    .query_row(
+                        "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                        rusqlite::params![owner, edge],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let actual: Value = serde_json::from_str(&actual).unwrap();
+                assert_eq!(
+                    actual["source_turn"],
+                    json!(turn.id),
+                    "{owner}: {edge} recorded sender turn"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
     let home = Home::new();
     home.top(
