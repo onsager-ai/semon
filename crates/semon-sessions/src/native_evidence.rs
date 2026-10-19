@@ -458,9 +458,11 @@ impl NativeEvidence {
                                 .into_owned()
                         })
                         .collect::<Vec<_>>();
-                    if self
-                        .begin_catalog_stage(cache, &paths, &query_runtime_generation(&self.options)?)?
-                        != crate::events::Outcome::Written
+                    if self.begin_catalog_stage(
+                        cache,
+                        &paths,
+                        &query_runtime_generation(&self.options)?,
+                    )? != crate::events::Outcome::Written
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -1123,9 +1125,11 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            if self
-                .begin_catalog_stage(cache, &staged_paths, &query_runtime_generation(&self.options)?)?
-                != crate::events::Outcome::Written
+            if self.begin_catalog_stage(
+                cache,
+                &staged_paths,
+                &query_runtime_generation(&self.options)?,
+            )? != crate::events::Outcome::Written
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -1214,7 +1218,8 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
-                if self.begin_catalog_stage(cache,
+                if self.begin_catalog_stage(
+                    cache,
                     &staged_paths,
                     &query_runtime_generation(&self.options)?,
                 )? != crate::events::Outcome::Written

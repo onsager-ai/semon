@@ -1535,8 +1535,16 @@ mod tests {
         for path in &paths {
             crate::events::scan_file(path, "claude", &mut cache, &mut false).unwrap();
         }
-        let paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        cache.begin_semantic_stage(&paths, &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap()).unwrap();
+        let paths = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        cache
+            .begin_semantic_stage(
+                &paths,
+                &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+            )
+            .unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
         let mut work = crate::viewer::lock(&evidence.work);
         work.events = Some(cache);
@@ -1546,14 +1554,19 @@ mod tests {
         let mut complete = false;
         for turn in 0..256 {
             if turn % 2 == 0 {
-                facts.codex_locks.insert("unrelated-running-thread".into(), 42);
+                facts
+                    .codex_locks
+                    .insert("unrelated-running-thread".into(), 42);
             } else {
                 facts.codex_locks.remove("unrelated-running-thread");
             }
             let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
-            if evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap() {
+            if evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+            {
                 complete = true;
                 break;
             }
@@ -1561,7 +1574,10 @@ mod tests {
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let history: i64 = db.query_row("SELECT count(*) FROM session_catalog WHERE lifecycle='current' AND harness='claude'", [], |r| r.get(0)).unwrap();
         let new_session: i64 = db.query_row("SELECT count(*) FROM session_catalog WHERE lifecycle='current' AND session_key='new-during-history'", [], |r| r.get(0)).unwrap();
-        assert!(complete && history == 40 && new_session == 1, "unrelated runtime churn starved publication: complete={complete} history={history} new_session={new_session}");
+        assert!(
+            complete && history == 40 && new_session == 1,
+            "unrelated runtime churn starved publication: complete={complete} history={history} new_session={new_session}"
+        );
         drop(work);
         evidence.retire();
     }
@@ -1579,19 +1595,32 @@ mod tests {
             intent.complete().unwrap();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
             let mut work = crate::viewer::lock(&evidence.work);
-            evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
+            evidence
+                .prepare_events(&mut work, crate::model::now_ms())
+                .unwrap();
             let cache = work.events.as_mut().unwrap();
             crate::events::scan_file(&path, "codex", cache, &mut false).unwrap();
-            cache.begin_semantic_stage(&[path.to_string_lossy().into_owned()], &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap()).unwrap();
+            cache
+                .begin_semantic_stage(
+                    &[path.to_string_lossy().into_owned()],
+                    &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+                )
+                .unwrap();
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let mut staged = false;
             for _ in 0..64 {
-                evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap();
+                evidence
+                    .refresh_catalog(&mut work, crate::model::now_ms())
+                    .unwrap();
                 staged = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE identity_done=1 AND publication_done=0)", [], |r| r.get(0)).unwrap();
-                if staged { break; }
+                if staged {
+                    break;
+                }
             }
             assert!(staged, "fixture did not reach an unpublished identity");
-            let epoch: i64 = db.query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0)).unwrap();
+            let epoch: i64 = db
+                .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+                .unwrap();
             if global {
                 facts.hostname = "changed-machine".into();
             } else {
@@ -1602,13 +1631,23 @@ mod tests {
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             let dirty: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources s JOIN session_catalog_invalidations i USING(source_path) WHERE i.revision IS NOT s.claim)", [], |r| r.get(0)).unwrap();
-            assert!(dirty, "runtime change did not journal the unpublished owner: global={global}");
-            evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap();
-            let next: i64 = db.query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0)).unwrap();
+            assert!(
+                dirty,
+                "runtime change did not journal the unpublished owner: global={global}"
+            );
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+            let next: i64 = db
+                .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+                .unwrap();
             assert!(next > epoch, "affected staged identity was reused");
             let mut complete = false;
             for _ in 0..128 {
-                if evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap() {
+                if evidence
+                    .refresh_catalog(&mut work, crate::model::now_ms())
+                    .unwrap()
+                {
                     complete = true;
                     break;
                 }
@@ -1618,7 +1657,10 @@ mod tests {
             evidence.retire();
             let (status, page) = fixture.body("sid=affected&limit=1");
             assert_eq!(status, 200, "{page}");
-            assert_eq!(page["items"][0]["facts_observation"]["state"], "cached", "{page}");
+            assert_eq!(
+                page["items"][0]["facts_observation"]["state"], "cached",
+                "{page}"
+            );
         }
     }
 
@@ -1628,19 +1670,37 @@ mod tests {
         let path = fixture.source("unobserved-runtime");
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
         let mut work = crate::viewer::lock(&evidence.work);
-        evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
+        evidence
+            .prepare_events(&mut work, crate::model::now_ms())
+            .unwrap();
         let cache = work.events.as_mut().unwrap();
         crate::events::scan_file(&path, "claude", cache, &mut false).unwrap();
-        cache.begin_semantic_stage(&[path.to_string_lossy().into_owned()], &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap()).unwrap();
-        evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap();
+        cache
+            .begin_semantic_stage(
+                &[path.to_string_lossy().into_owned()],
+                &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+            )
+            .unwrap();
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let epoch: i64 = db.query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0)).unwrap();
+        let epoch: i64 = db
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+            .unwrap();
         let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
         facts.codex_locks.insert("unobserved-thread".into(), 42);
         crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
-        evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap();
-        let next: i64 = db.query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0)).unwrap();
-        assert!(next > epoch, "an unjournaled runtime change bypassed its epoch fence");
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        let next: i64 = db
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            next > epoch,
+            "an unjournaled runtime change bypassed its epoch fence"
+        );
         drop(work);
         evidence.retire();
     }
