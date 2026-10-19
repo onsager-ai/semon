@@ -17,6 +17,24 @@ function emptyObservedBody(item: CatalogTranscriptEntry): boolean {
       ? !item.native_action_text
       : (entry.k === 'u' || entry.k === 'a' || entry.k === 'think') && !entry.text;
 }
+function missingObservedBody(item: CatalogTranscriptEntry): boolean {
+  return (
+    (item.freshness?.state === 'incomplete' || item.freshness?.state === 'unavailable') &&
+    emptyObservedBody(item)
+  );
+}
+function bodyMetadata(item: CatalogTranscriptEntry): string {
+  const { freshness, field, clipped, native_action_text, entry, ...identity } = item;
+  if (entry.k === 'tool') {
+    const { out, ...recorded } = entry;
+    return JSON.stringify({ ...identity, entry: recorded });
+  }
+  if (entry.k === 'u' || entry.k === 'a' || entry.k === 'think') {
+    const { text, ...recorded } = entry;
+    return JSON.stringify({ ...identity, entry: recorded });
+  }
+  return JSON.stringify({ ...identity, entry });
+}
 export interface CatalogRangeRequest extends CatalogSelectionScope {
   readonly epoch: number;
   readonly after: number | null;
@@ -151,8 +169,7 @@ export class CatalogTranscriptStore {
       // Failed source verification must remain visible without erasing useful retained content.
       if (
         old &&
-        item.freshness?.state === 'incomplete' &&
-        emptyObservedBody(item) &&
+        missingObservedBody(item) &&
         old.entry_id === item.entry_id &&
         old.entry.k === item.entry.k &&
         JSON.stringify(old.provenance) === JSON.stringify(item.provenance)
@@ -164,7 +181,9 @@ export class CatalogTranscriptStore {
       const old = existing.get(item.slot);
       if (
         (ids.has(item.entry_id) && ids.get(item.entry_id) !== item.slot) ||
-        (old && content(old) !== content(item))
+        (old &&
+          content(old) !== content(item) &&
+          !(missingObservedBody(old) && bodyMetadata(old) === bodyMetadata(item)))
       )
         throw new Error('Catalog transcript entry changed within a projection');
     }
@@ -215,6 +234,15 @@ export class CatalogTranscriptStore {
   }
   selectedPage(): CatalogTranscriptPage | null {
     return this.pages.at(-1) ?? null;
+  }
+  incompleteRange(): CatalogLoadedRange | null {
+    const page = this.pages.find((page) =>
+      page.entries.some(
+        (entry) =>
+          entry.freshness?.state === 'incomplete' || entry.freshness?.state === 'unavailable',
+      ),
+    );
+    return page ? { first: page.range.first, end: page.range.end } : null;
   }
   context(): CatalogTranscriptPage['relationship_context'] {
     const handoffs = new Map<

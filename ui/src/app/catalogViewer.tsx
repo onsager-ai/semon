@@ -99,6 +99,8 @@ interface SelectedView {
   loading: boolean;
   observing?: boolean;
   note: string;
+  transientNote?: boolean;
+  observationFailure?: { text: string; retryable: boolean };
   anchorNote?: string;
   ticket?: CatalogSelectionRequest;
   identityLoading: boolean;
@@ -124,7 +126,7 @@ interface SelectedView {
   jumpGeneration: string | null;
   newCount: number;
   lastTotal: number | null;
-  queuedAfter?: number | null;
+  queuedAfter?: { after: number | null; preservePosition: boolean };
   contextLoading?: boolean;
   contextText?: Map<
     string,
@@ -2346,6 +2348,7 @@ export function createCatalogViewer(
       observationNote = [
         view.anchorNote,
         view.note,
+        view.observationFailure?.text,
         view.meta?.source_refs.some(
           (reference) => reference.state === 'unavailable' || reference.state === 'incomplete',
         )
@@ -2508,6 +2511,14 @@ export function createCatalogViewer(
             (view.store.context().state === 'incomplete'
               ? ' · related session context is incomplete'
               : ''),
+        observationSummary:
+          !view.anchorNote &&
+          (!view.note || view.transientNote) &&
+          (!view.observationFailure || view.observationFailure.retryable)
+            ? view.note || view.observationFailure
+              ? 'Updates delayed'
+              : 'History details'
+            : undefined,
         started:
           view.store.loadedRanges()[0]?.first === 0 && view.meta?.start != null
             ? {
@@ -2891,9 +2902,14 @@ export function createCatalogViewer(
     const retainedEntries = new Set(view.store.entries().map((item) => item.entry_id));
     for (const key of view.fields.keys()) if (!retainedEntries.has(key)) view.fields.delete(key);
   }
-  async function loadSelected(view: SelectedView, after: number | null = null) {
+  async function loadSelected(
+    view: SelectedView,
+    after: number | null = null,
+    preservePosition = false,
+  ) {
     if (view.loading && !disposed && capabilities.selected_transcript) {
-      if (view.queuedAfter === undefined || after !== null) view.queuedAfter = after;
+      if (view.queuedAfter === undefined || after !== null)
+        view.queuedAfter = { after, preservePosition };
       return;
     }
     if (
@@ -2904,7 +2920,7 @@ export function createCatalogViewer(
       drawSelected(view);
       return;
     }
-    if (after !== null) {
+    if (after !== null && !preservePosition) {
       view.following = false;
       view.jumpVisible = true;
     }
@@ -2920,6 +2936,7 @@ export function createCatalogViewer(
     view.loading = true;
     view.root.setAttribute('aria-busy', 'true');
     view.note = '';
+    view.transientNote = false;
     drawSelected(view);
     try {
       const value = await api('/api/session-transcript?' + p);
@@ -2953,11 +2970,14 @@ export function createCatalogViewer(
         }
       }
       view.note = readError(error);
-      if (
+      view.transientNote =
         retryable(error) ||
-        (error && typeof error === 'object' && 'status' in error && error.status === 409)
-      ) {
-        view.retry = scope.timeout(() => void loadSelected(view, after), view.retryDelay);
+        !!(error && typeof error === 'object' && 'status' in error && error.status === 409);
+      if (view.transientNote) {
+        view.retry = scope.timeout(
+          () => void loadSelected(view, after, preservePosition),
+          view.retryDelay,
+        );
         view.retryDelay = Math.min(8000, view.retryDelay * 2);
       }
     } finally {
@@ -2966,7 +2986,8 @@ export function createCatalogViewer(
       drawSelected(view);
       const queued = view.queuedAfter;
       view.queuedAfter = undefined;
-      if (!disposed && active === view && queued !== undefined) void loadSelected(view, queued);
+      if (!disposed && active === view && queued !== undefined)
+        void loadSelected(view, queued.after, queued.preservePosition);
       else if (
         !disposed &&
         active === view &&
@@ -2990,25 +3011,35 @@ export function createCatalogViewer(
         current = view.store.selectedPage();
       if (!metadata || metadata.key !== view.key || next.machine !== source)
         throw Error('Selected observation changed');
+      const recovered = !!view.observationFailure;
+      view.observationFailure = undefined;
       const labelChanged = view.sourceLabel !== next.machine_info.label;
       view.sourceLabel = next.machine_info.label;
-      if (
+      const projectionChanged =
         metadata.transcript &&
         (metadata.transcript.generation !== current?.projection.generation ||
           metadata.transcript.total !== current?.projection.total ||
-          metadata.transcript.errorsGeneration !== current?.projection.errorsGeneration)
-      )
-        await loadSelected(view);
-      else if (labelChanged || JSON.stringify(metadata) !== JSON.stringify(view.meta)) {
+          metadata.transcript.errorsGeneration !== current?.projection.errorsGeneration);
+      if (projectionChanged) await loadSelected(view);
+      else if (
+        labelChanged ||
+        JSON.stringify(metadata) !== JSON.stringify(view.meta) ||
+        recovered
+      ) {
         view.meta = metadata;
         view.renderedRevision = -1;
         drawSelected(view);
         chrome();
       }
+      // A successful source observation need not publish a new projection.
+      // Retry only failed native ranges, using the existing cadence and fences.
+      const incomplete = view.store.incompleteRange();
+      if (!projectionChanged && incomplete && !view.loading)
+        await loadSelected(view, incomplete.first, true);
       void loadIdentity(view);
     } catch (error) {
       if (!disposed && active === view) {
-        view.note = readError(error);
+        view.observationFailure = { text: readError(error), retryable: retryable(error) };
         drawSelected(view);
       }
     } finally {
