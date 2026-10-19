@@ -403,23 +403,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "6980a932b5139012315ab68d19e7aab18045fbbf30a017841744a0792e37e796",
+          "image": "f653bbde2be30186f9e0628f9eb1051dd2604e0fc26a0959ceff76bccfdb7de2",
           "evidence": "21f2196773a0fb5f3d687a536c27a3f6e1e38727c4345517a3c0f77c7a568f93"
         },
         "reference": {
-          "image": "e6e1784e58797070258639e23b60c1217e13333a698246a283ddca49861c9317",
+          "image": "c21853ef8ddde5897d9ffb82f289ad3be21c55a57afa25900a0dd3f85a2c24fa",
           "evidence": "e3a9d81173f921922422ff29265a5b778da4a6f7158cde5ce78fbfa061f1981b"
         },
         "diff": {
-          "image": "1d46c447c7c61a649b3ff4162ed451072a89506e8d8f86b8030e0a7a1dce9908",
+          "image": "efdb86e911b760053246a7914b3ec3b938fe3b30830931574b4529b63789c733",
           "evidence": "0ac24e44abb29108e216535840b35c44ce2c87f02ec8a19761da814b71c81915"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -431,23 +431,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "c70c1a2d1d4b3db5e4b6fb58af287a024aca744294f3f52e32393fb35b0ac1a7",
+          "image": "21285d9165bcc733e822954050ae74d86da96fbe3be01a1fa3024886b5bb18c1",
           "evidence": "d4bcfe004a0d9715316777de6616197b781a05352ec31713a6470ede14c236d6"
         },
         "reference": {
-          "image": "e6cb4310ef39e5da3b3239eaa5ef91ad667e81e7025aaa2cee86adaabf9ea781",
+          "image": "d677f8c874eb3bfe7a76d06eff11d3f69e46bb73a784c9dee22cea3962602f55",
           "evidence": "a60f15466ec95fa005e9d1f0ee6b5a87d1223f9480f6432f355a1c80fb81093c"
         },
         "diff": {
-          "image": "7d7c21e4adae29bb8bd83eb100226780e47f18b8a33f1f0d68a1a786378c62ae",
+          "image": "d7216e892d32f06d1ddb1506a79d982ffa0cd8ef53b14f9fc6cac87675603f32",
           "evidence": "acba36a997dcab49418488e0a166a81532f9cf9fbd7bb169041d9ff6a4343c71"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -459,11 +459,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "c7ccbc96a18c57279e17d1c574fa8e6a712041068e6f23de4808dc78afe152d8",
+          "image": "5321f15dd5f5e058be906482f76333f9a8d0fc06bf5b3667f8f698a7e91775ba",
           "evidence": "4f234f07fa74093f8bc0bce472c6193a0aeb5b4a2899b8b422ad10953f09781c"
         },
         "reference": {
-          "image": "9cf5fc1be9d445512670b59c4c8b40bbade7c83db9ddf4e49bebc01ffebbc41d",
+          "image": "93b79492c90f0b33b37369b2148578c5fef09fc9d5215a5ac4e42387776fd6d7",
           "evidence": "bf44ce52059a92fd39a6cbeccfba238fed9ac56aaa382288438ffe2adda74cd7"
         },
         "diff": {
@@ -472,10 +472,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -487,23 +487,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "d727f91fbde962af37d5d33766f0cc24a34878bb1e21edf2504bcf4f78011ed1",
+          "image": "8ba330b29615b7617b57849e659a260baf816ba350fb877a1c0a9592d1ba53f9",
           "evidence": "785f163cf2f71c5c63d4784070b167f07adcaa856a899825faa3b152fe59310e"
         },
         "reference": {
-          "image": "746fae9ccfd20055d131086731ee60f54f5e1de3bab663fc601e19092bf13b5e",
+          "image": "4dc47944da88419c275779370c18d4bf9b9e4322152193141be37e477e0c3ce2",
           "evidence": "04756c3dab8e001ff09b528a33b420648d034640baba8cc287f10ef6494f44a3"
         },
         "diff": {
-          "image": "5508de67c227fd0297f594d5f27c90d3d36b524ad3da497018f3f70769fc273e",
+          "image": "b1f87dcd94afd698a80f3d10d56539127ec683484e202e82d6a6e7c714c0d8d2",
           "evidence": "2cdbedd9559471b95ab7c667469ccfa3d9474225b86e2db9b689244004c1da0b"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -519,7 +519,7 @@
           "evidence": "f342d2af1f91a14f61dc12c95260b44f322d6df9e719fb6816462248d27181ec"
         },
         "reference": {
-          "image": "ac1ec28cc53b641af9147e1d6701d0f7152340de6b858b5c15cf01fd192d67a0",
+          "image": "b77490d9c4c9aa2758971a72559a366263b767ca6aaef64bfb9c62f834fbe37a",
           "evidence": "6a58c8073f666f9a4915863e5564ed2a67beb6ddf3c9a52dbee890809e2e02db"
         },
         "diff": {
@@ -528,10 +528,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -543,23 +543,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3e7768ac27f8a00e8e7c7c696114107213bf2a9d6f36b7deb1c405d353716601",
+          "image": "80ac493c69ed9b58feec684b6ecb8d16acaa14e6756ab79617d8ee5dc836761a",
           "evidence": "2b961a0b5e3c42eb3e300a9a02eb73a5c609670aa6031b9dc8bb8fded0201d8c"
         },
         "reference": {
-          "image": "25d7712b5844acc174c6f5ee4bc57f5a096ea8aa5142d98101ab8fe17cbca11b",
+          "image": "a4395eb05858d8a1026264948d3ea7c26d9c47c939089808e419e09ad31744e6",
           "evidence": "03c9cbcb7788242da5683bd3c5e7880599f93bfeb8ad871a29bccd27c266a4c9"
         },
         "diff": {
-          "image": "b8b1820d0271d20918b0c418e96814f6c8ee6b4cb74ace11e849152e11dc066e",
+          "image": "28f57b8a786cc53e38945c8b7c94344efa2b354a69589314c6d948f1e2cfc30d",
           "evidence": "bbacf585ff104a4319582292cd4f5680835b213dff9a990adad751d1bf96b834"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -599,11 +599,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "65a8ed3a2ff2f4d549b219b72df70a1b55b94580ce430030b36c13d159560711",
+          "image": "af6b3b8a5b7d457eeefa15c504e9ec10e24af617512ce9c53348200821dc2636",
           "evidence": "68cc979037cf1db57096c6140453cd27171e0bee8a7303670512bf572fc05978"
         },
         "reference": {
-          "image": "692ee31641dd22edcd3167ec4a5d4bb8cb03b5fde49ea39cacffc3b2be68b2f9",
+          "image": "799f1c4bd10174f8f1d4f2aa5cb7e2b27e9d37446912f87e1c290781fdd73d54",
           "evidence": "68c51a3499a61eb632d6a43193f1367e776d190284ce13bfe89333acda3b4c9f"
         },
         "diff": {
@@ -612,10 +612,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -627,11 +627,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "3e180914c6345a4d4a3d79b9f0f9ccda38162f0d7dab359f9536e8ae71454b94",
+          "image": "354fb0fce3df7cee226dc82af2fcb856aa5a2075912271c073fa5978516699a7",
           "evidence": "d4bcfe004a0d9715316777de6616197b781a05352ec31713a6470ede14c236d6"
         },
         "reference": {
-          "image": "2f037356944cbeacf2bbb0d7ac8493dbe5f60b4a03b47c8c027bf2152315066c",
+          "image": "53374da1b511480761ed4d6bb595f383e67e0763654763dfa0d4072d28e2c4ed",
           "evidence": "a60f15466ec95fa005e9d1f0ee6b5a87d1223f9480f6432f355a1c80fb81093c"
         },
         "diff": {
@@ -640,10 +640,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -655,11 +655,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "864d1dc1188b0c821e2122d3a70ce8f8af00b2a785e2cb1ebad3a3a938d6e93b",
+          "image": "1bf616bbd6c5dc0ecdb806456d7921584086e55c25483f52860ca7707e383350",
           "evidence": "e4b630ec9595c200aea9053243376f6cb736f7adaed2e22935a77249067e0889"
         },
         "reference": {
-          "image": "1d1a31ddcd14eaf0c449d690808bfad51db4132d188fb3d0aca7f44bf6c485b0",
+          "image": "944bd2bcdc1aee576c49759bc401ce3b323eb3dbcc93852c8e9ff5fffd28e05b",
           "evidence": "8d2d6a0e045259b4454cb465fba7491df04b2763876c04a816664a6e47b01a4a"
         },
         "diff": {
@@ -668,10 +668,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -683,11 +683,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "aeadbfbec87a24e40110931841f96de1089af255acec1e492cbbf311469f3be5",
+          "image": "ce5c649b4de25bccbe60019269a444859a63016d958adf1cb8e24ca90c1bc358",
           "evidence": "b31ff007381fef324ebde871392aa27b967eb7e09975557991e79819d1041a56"
         },
         "reference": {
-          "image": "e9316abe12575ec6ffd926a0d5d0af97fda5f83738cf5edca367167ae45a8627",
+          "image": "87a74a3099e3d29ac79f1447c38de789dba0c4ded0089d9b52c5b6dd743d730b",
           "evidence": "e33ac269a752a7a86b3985d6bf02924858466963e26095d0e33d784b1a11cde0"
         },
         "diff": {
@@ -696,10 +696,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -715,7 +715,7 @@
           "evidence": "f342d2af1f91a14f61dc12c95260b44f322d6df9e719fb6816462248d27181ec"
         },
         "reference": {
-          "image": "68656a2ce69ddb190c0accaa51b7aa1501b19947911613b02ac1b961cf6bf29c",
+          "image": "b9c7196333260d427c570807e60a627daa126af5059994a89b4f6dcc7d4d4185",
           "evidence": "6a58c8073f666f9a4915863e5564ed2a67beb6ddf3c9a52dbee890809e2e02db"
         },
         "diff": {
@@ -724,10 +724,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -739,23 +739,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "9a3f9cc176c8ba6f7ddbf18ac33292136c2314702093770ad97cc464a11e619f",
+          "image": "6f4c920e001fb1f9fd429d215b8690460848886b0a8a09829b8b4c523c02c459",
           "evidence": "2b961a0b5e3c42eb3e300a9a02eb73a5c609670aa6031b9dc8bb8fded0201d8c"
         },
         "reference": {
-          "image": "b305ad4e92c8455da7294dd4528d4c6760fd48e1d1110d25a51525b19e5c63b6",
+          "image": "af3db3e70313bb01d30d7553ba99b5fc16df75a107f297dafed8cf72caa6f4e5",
           "evidence": "03c9cbcb7788242da5683bd3c5e7880599f93bfeb8ad871a29bccd27c266a4c9"
         },
         "diff": {
-          "image": "1d803a7f1b62480bd4cdcc9ee957814559e78b1ab0323929577bdcac85c48051",
+          "image": "ef13a688789f1f012c8f64385142e2c0a66369fd876f56b77676c9d979e8266a",
           "evidence": "94bdb6e7bad24d1d0065dce2784ee883d0bebe82e8a9085766decdf51ead3559"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -795,11 +795,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "1305e7188b0143219dcdf7b4925bb0374d3fc4eb0bdf6555e3035fd98a0068a3",
+          "image": "4b725e31e13991b79d777eede59c7067ad6507908482c5fba7c627bfd10d8a86",
           "evidence": "295c32e59cfd535197339855ca88659b32f3fd01e934f3287316c6200d65b038"
         },
         "reference": {
-          "image": "6b9b78f208fbae804d360d207c71c61a7bc0ce7922b00e3550da3d9a5e01fa5f",
+          "image": "9298cd25f37a5727f96e4496ffa03acd1bfa9ba53a41996a89bc9ee547a5153c",
           "evidence": "6a0c1ea46f0e87dea644cad4118d298aa9b409d7d864954dea7721df4b47a82a"
         },
         "diff": {
@@ -808,10 +808,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -823,23 +823,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "9afd53190fa90d3e4ae4d112e527f66a8f721ddf86e66f1230a9fd53a7dd8d17",
+          "image": "141ee122cfbf30789cd255398ca58f765e5d0acc43cba2a459c5c530c02603e1",
           "evidence": "feac1368dd9d15e19e3dd04dc5f673c4d20bbefdae4152bf31c210605c50fc51"
         },
         "reference": {
-          "image": "4375a9fb671d9d9dac6ddce83d36e82e793b63c7065bbe30b3e80c26324d6112",
+          "image": "f9159e35f1317a0862d8d9b890467ac9d1c1516e0cbe7601ea4e20c3b51c6638",
           "evidence": "fd69bdd5354c51cf7690166c4fe1eaa123e99f3b2cd1598b38255f0b42686dd4"
         },
         "diff": {
-          "image": "5745e47c3e26877276d34c04021e9a6ab10033f570a9f8432b6d269897af5b19",
+          "image": "c348edc1b0c32dd25b4e105160d72640ebb931255e0bac81f519b0ed2c054649",
           "evidence": "d8e5d5c53d43f84bced37f90df0aeecf0540a9390ade9475409b2e731f6cf4bf"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -851,23 +851,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "67ada8255942461e481b6103c9d872fb3708cce59c669479b5f03a3df82b35f5",
+          "image": "8a62acbbd83c8a294105e4e04f87253b72449b3e2a0531b6a0fc1c0827923695",
           "evidence": "b794f4d4cd6320b84badc2e487e7ce1ca830848fb76301086eecce32ef826a24"
         },
         "reference": {
-          "image": "3c5390ee8efe72a12d3de2cd92b871818f29b257a9781f13e103c1fc73f5ddd8",
+          "image": "1937b020c00a933e03d4fa29e166be8870a65523973c12cd268dc5f5ffef91b9",
           "evidence": "6a9e43e585b381fe045dbdf959e9e386bc3e8a3dbf634f6487c0b566df604acb"
         },
         "diff": {
-          "image": "5c8a96886f3528e73f9f6407e82ba3f21e81e3a72ea708174fb208047a4e6f57",
+          "image": "78081cb2d668410e32d5b7075a22f102349b4ee134b100f44ff907c32da7c475",
           "evidence": "667a9deef88796b9d5ad326773e4751188b48e58d64cb6e76eda946d9f38e334"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -879,11 +879,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "13b6e0a4ed2195e1532a5f9aa66ffce90f950c401135d21a00b225558dfe54d1",
+          "image": "469e1e671b430417fd7bd210c417b2f87d83c347a95b93bfa98087c8daa042ab",
           "evidence": "a13195dafe4c9a4f98efbdd470cf875b2ef1a601aa81b6b0442e588817eae6b4"
         },
         "reference": {
-          "image": "b4d4b7721f857e24fe271b6c7a7bf97f614406db04d560f63d5785a6ebc872f5",
+          "image": "2800a97fa0b1fb5e634447c7a20a074c7a4e6168da723f778af95bb75c28d46b",
           "evidence": "d528d3189ac5cc5bd2ca022a7520434dee4f128505b992d8f0329d67a2603bc8"
         },
         "diff": {
@@ -892,10 +892,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -935,7 +935,7 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "5432160ed3a3376351b4eb64ad3b566131420f8a90f1705d54590a1d83b29f48",
+          "image": "259fc49f4011591195f6e65e7608f7e0aa97f2ec11ca91b2137e1483e318e5d5",
           "evidence": "86038609bfd72512ef01d5ee17bec666ebd23ed1b8ffe1e8dd6aef4c29892d75"
         },
         "reference": {
@@ -948,10 +948,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -991,23 +991,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "4e5eb6a38dcfcf0e5fcd8b9e525c692c6cd5f5258156f7cf51c9a80ff2989a69",
+          "image": "804f14b8e9010ea91bca395c6a5198e349f5a33eb379fe9ab7611ed3a0f7fc44",
           "evidence": "295c32e59cfd535197339855ca88659b32f3fd01e934f3287316c6200d65b038"
         },
         "reference": {
-          "image": "f13033aa2191d9df7f0e5c06ceb598f24d5fa402feb2affc9a1b826aa20d9685",
+          "image": "bb3312b04a0a1671ca4aa7511dd1185566105e8a2fb285cb5be10a293a2a325f",
           "evidence": "6a0c1ea46f0e87dea644cad4118d298aa9b409d7d864954dea7721df4b47a82a"
         },
         "diff": {
-          "image": "39c7c416411164a19b0b25ef1b1259907f0127ec6b4db3d8a0b9cf7fc40e3e8d",
+          "image": "4fe53c88d80069ee68ce89d97d73b8cff843d5237d211f145e0ddc27471c2357",
           "evidence": "21c361bce3c5dacce7fc3bb2587a0c5427a11edb69f53ab2bdf9516dd72ec386"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -1019,11 +1019,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "bb81dabb6634da00a021050faed1f1dfd816b9b35c2c640d34fa530cce74ee84",
+          "image": "a5cefe9975002ebcaeae6e78a3b294dbc106a7a00ebe683446b3bfc864084b7b",
           "evidence": "feac1368dd9d15e19e3dd04dc5f673c4d20bbefdae4152bf31c210605c50fc51"
         },
         "reference": {
-          "image": "5ea24e6721555ab2f47ccc2d67bb7f7fe0ddccbc44f3b36c7c9c1f6565975a56",
+          "image": "06d9c92709f8804ab977b149bf2f8ad67a3bdf8d445bbee06da9c9c15a3a5b6e",
           "evidence": "fd69bdd5354c51cf7690166c4fe1eaa123e99f3b2cd1598b38255f0b42686dd4"
         },
         "diff": {
@@ -1032,10 +1032,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -1047,11 +1047,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "fa457385c884556f38b19429fd49abfd0cc8d4b0888dc4c9148a249a3eff7eea",
+          "image": "cfd1f4c4f93a4fc05d5d4b5eb5978fb9f235c5de34efcf62f8dc76dabc004743",
           "evidence": "b794f4d4cd6320b84badc2e487e7ce1ca830848fb76301086eecce32ef826a24"
         },
         "reference": {
-          "image": "aab6792375a72a5a91584df648a93dd20eb0becdce4618a22fdedbe6c831a792",
+          "image": "37bf710e36b3cd817f837b8e2ed2922b65d6d47ba28fb06f95ca24dc4c406ad5",
           "evidence": "6a9e43e585b381fe045dbdf959e9e386bc3e8a3dbf634f6487c0b566df604acb"
         },
         "diff": {
@@ -1060,10 +1060,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -1075,11 +1075,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "6f80795e19d7cda1e5a5ec20498d425d30d4f0fe549886222bc3f77d25a18cf6",
+          "image": "6656cb9e399b44746e2c95c22acdab050e586f8c363eb2ab2cc27638bcc3b9d7",
           "evidence": "a13195dafe4c9a4f98efbdd470cf875b2ef1a601aa81b6b0442e588817eae6b4"
         },
         "reference": {
-          "image": "968165f90e15b77c9af9f942fa79b522a090cc3e5a6b9db6297d0d8541f7eaf5",
+          "image": "61df7735519b72dec08a068c8e3fc4c0a4af367bbe2998d9a9150264df8ae766",
           "evidence": "d528d3189ac5cc5bd2ca022a7520434dee4f128505b992d8f0329d67a2603bc8"
         },
         "diff": {
@@ -1088,10 +1088,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -1131,23 +1131,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "ae81f26709fb08fe943ff8f879241a802d777ee23ef9af5609232d9fcaf47ce5",
+          "image": "90a953c204b3bf1bff0f2486615c0307a26051caf3b58763265444c6873f0065",
           "evidence": "86038609bfd72512ef01d5ee17bec666ebd23ed1b8ffe1e8dd6aef4c29892d75"
         },
         "reference": {
-          "image": "82d5bf86c5eb3e004bb726e878a7cb7184433c7d3be368b78fa00d3b52371778",
+          "image": "6d3a8a846725ef3f0c50058c4e4487189a23cff261736cf65777bfba4537ee56",
           "evidence": "d945426aad1d4604af2e4bfd305e4ee7736fa174f5a91b90a704ab36ca4a8719"
         },
         "diff": {
-          "image": "6e592999f6475a3f00517dd95e2f65044b6d2899c84d6af161d1907bd32ca0b0",
+          "image": "43ed36e0db0670f38bc4a25747707ebbacf21c5b25f5cb0d309b003c7f9e4614",
           "evidence": "159f583ca1728b15d4f2c27d638a675093e2de56dd422a1bf1ac813a40a25b10"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "preservation",
@@ -1775,23 +1775,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "0f1f136728ee9b226bd272a604a15607fec08dd4446d2c7b6b8ca481c4f71f1f",
+          "image": "847b4586b42110588e7fdb371688a57fd1d299f50bce6ef40d6039909a097a35",
           "evidence": "b784bddd4521b7617369693dad957cfe8a745d387bed27a638aadc9e51d7ae45"
         },
         "reference": {
-          "image": "896845eb915dd5a526b2548dff88d4a23874995a7376cfb920bebc693ded1a07",
+          "image": "17cbf19c868cf63f6ea6eb1b2494637e6199239102a919025e78c2804fd3a242",
           "evidence": "ffd104d1302ee6b6b407a908bd9d1da597dcaba0fdcb518dacc853a615a5f8c2"
         },
         "diff": {
-          "image": "6052a988cdd2ff911b09572e4fe0ec1ead916322586754bf3e3b8e008ea8679a",
+          "image": "4451ac6544cd99bd7db26a8aad57fa040dda7ed1b3557de7193fe63b8525c992",
           "evidence": "f5c6e83e2183adbff8bf5ea74c8965f41739948bc3c3e780ec96178c22f0cedc"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -2419,23 +2419,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "f5f3a887263e823092b7560ef8cdc5d7d95f792e367848784daf9a5487f1075d",
+          "image": "87cceff0394ca2926a53f11cc959166622f63a6f286c84738073dd1a38b480b9",
           "evidence": "2fc85836714c0313adbf2dce1eddd66419934902c4ad5616304c060723e28084"
         },
         "reference": {
-          "image": "3952b71529e176ddfc85a159b67eb7780302eac80ae410b507ec0b0d68486730",
+          "image": "314f3302a41ddf43fd334c0de5beb5c2d2a660fded0b884cd0fef62beef706ca",
           "evidence": "7070e9cd547b09d4ffe5e7c11dc4676c5691643e77915a04949aa40875124982"
         },
         "diff": {
-          "image": "02f69a1fd253e07a14f598592d7e2555234ee18b71fdb2cbbdd646f30d910905",
+          "image": "e0152f19c84825ccd273ab8ecccc3942524bdecacdf221a733587ae92951234a",
           "evidence": "776782cc78acf64ede1743f2d7a7e69798751558e8eddce5726aa164bbc99bac"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -2535,7 +2535,7 @@
           "evidence": "5a978498d8b2498a34538975da26796827550972e34843c43e6fd6f6783df351"
         },
         "reference": {
-          "image": "d98dc386da514d7e895e50c4864e67b22263549d9710e3d485e097643af9b674",
+          "image": "f2445863eecb2f3460a3fb9f076eb0e933ab4458fe742a387e08f401eabbd9c2",
           "evidence": "1b94879fef7ab72f2168a31d3e4e81199d49c43c2ee133af09d36408276c2347"
         },
         "diff": {
@@ -2544,10 +2544,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -2755,23 +2755,23 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "d449ca3da4428738cc0bfe35559156fb5d80daa05263f28fcd5817599f4abd81",
+          "image": "5ab6d7331cf85cf43abcf66e50084ee5be082932408f416ec66f0675863980a0",
           "evidence": "868020fc762dda354ccd21db433240c6f1023712d33ac103d499c69f4eb0c26d"
         },
         "reference": {
-          "image": "fe453fdff90573008aae211bd12fd7287305d1a9c4ab146ca0b8bcc65e245944",
+          "image": "a0935666e146a8835397cfb50e24376d70a1ba79af0cda5f709b0d17d1b5c314",
           "evidence": "3302bb5726e6088aa543a40131dd99839fcaa4127056eda6ce53e7275f05b585"
         },
         "diff": {
-          "image": "6cd2bc4f589bfa865dff793cd9b4b76d620b07edf37f89204996de0b0b69fcc6",
+          "image": "b20ed214bc20c4e2cb4883be59abe6c7ed06b30b6327ee8ff0577d1e8a36563a",
           "evidence": "c19b2a462affb0675acc4eccb99d04121ec45973beb72513c0d4ec33d131e760"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -2787,7 +2787,7 @@
           "evidence": "d96b3c64041bd7b43cf367f3b18cf833f8df58430ae96aed47fccbb60b32bc9f"
         },
         "reference": {
-          "image": "d4ebec98bf226a7e00c0c622bb6b0cef9b3839db1cc58c6f391e45d35ce7ab13",
+          "image": "147e607d7d389deae9727e35a107cde8b56cf511becf825c22b384a424422f6b",
           "evidence": "309b4d89dff7059ef30ce1aacc5e37724726eed7ca2c027c14ee63efce05184f"
         },
         "diff": {
@@ -2796,10 +2796,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -2839,7 +2839,7 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "7c2bf7dea2c0b4c3a059f90a13abcc1e6364663213d3ab7aa1bb9f2fa77a3229",
+          "image": "1cfcf2e533f05f2164039a260f6eee569f667886542dedad9fd59722098b6e9c",
           "evidence": "7d9f873642b4ec075bc590909d62e21b6f7878cc4d606154fe3c396dcc6f4298"
         },
         "reference": {
@@ -2847,15 +2847,15 @@
           "evidence": "c052b784e33f8e168523e9cdb7ac8bfa850fd25129dedc2787bb94254da4aeb3"
         },
         "diff": {
-          "image": "f520c1baaf347b5d2e7a388d9c90d8b3042a80c3cc68e49efa088e00e482b463",
+          "image": "891930f0f6d372c41af51c6e636020d5723e7a1c65731420951bccc8931a4234",
           "evidence": "3617fd525882026c45eaa77fa117c56481230d1c95e98e9b009baef20e6319e3"
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -2899,7 +2899,7 @@
           "evidence": "67be54125b7cc6a0eb7c855619685cb886b0a59cbdc3179e6e4c5c14d5c35c6a"
         },
         "reference": {
-          "image": "10f394df6d8bc2dd6aa726e616191b8a7c28272457bf1044aa42c4bb05805f5e",
+          "image": "032f68290a5741b0f9ba712fca170f469dab31fa4934cb1a815a15c86b19c8db",
           "evidence": "fb1846bd27a4aaea001b261cb401e69ba2f03ebcad74775e6f6a96f5e7de2130"
         },
         "diff": {
@@ -2908,10 +2908,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
@@ -3063,11 +3063,11 @@
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
         "candidate": {
-          "image": "55551e5f42c32a634e0ade6fb5b9d130c612f1be3e629ae15dea16f83c7a6519",
+          "image": "2406a0c4bd9188582b0028497be37e9ca1eb889d3d4484b4e4685d62f6e00f20",
           "evidence": "27fda294450f3bab7950203a50ed758d8ece09016f0f58293153b35707f3fcf2"
         },
         "reference": {
-          "image": "34ed52a7e87898e05f3ae8a8f6bd64a8ee78311f7d01bd1ab664d068cea3138d",
+          "image": "e9a24d4ad299a9b967c68a12d065e96805ac62dd3df607eb514b0440cb016471",
           "evidence": "22e86c77410c0a2e2f07d8a9ddf5d1d5b1e648e9ae909e50fb09458ebc7042b1"
         },
         "diff": {
@@ -3076,10 +3076,10 @@
         }
       },
       "decision": "accepted",
-      "reviewedCandidate": "e0670b9e89ac3d70779eb60a314376c8143f57c1",
+      "reviewedCandidate": "ccbb7ec47a4e3a374bf19cdebe2e3d2f45f4060f",
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
-      "reviewedAt": "2026-10-19T10:43:56+00:00",
-      "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained."
+      "reviewedAt": "2026-10-19T11:11:01+00:00",
+      "rationale": "Owner-approved passive notice removal and resulting dock/full-page scroll geometry, re-inspected from baseline-raster CI run 39241106362 by the previously reviewed change families. Actual tablet Thinking, desktop harbor and long phone quill candidate/reference/diff images inspected; bounded text/geometry evidence exactly matches the preceding review. The separate session-a-scan sidebar-order mismatch is excluded. Exact artifacts only; references, raw findings and thresholds retained. See tests/ui/README.md."
     },
     {
       "comparator": "pixels",
