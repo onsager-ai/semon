@@ -22,8 +22,10 @@
 
 pub(crate) mod chunk_proofs;
 mod launch_calls;
+pub(crate) mod native_usage;
 mod relocation;
 mod semantic_stage;
+pub(crate) mod tree_state;
 
 use std::{
     collections::BTreeMap,
@@ -57,7 +59,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-const SCHEMA_VERSION: i64 = 28;
+pub(crate) const SCHEMA_VERSION: i64 = 30;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -328,7 +330,21 @@ DELETE FROM signals;
 DELETE FROM usage_identity;
 DELETE FROM usage;
 DELETE FROM codex_usage;
+DELETE FROM native_tree_headers;
+DELETE FROM native_tree_generations;
+DELETE FROM native_tree_usage_work;
+DELETE FROM native_tree_codex_work;
+DELETE FROM native_tree_models;
+DELETE FROM native_tree_labels;
+DELETE FROM native_tree_tools;
+DELETE FROM native_tree_usage_models;
+DELETE FROM native_tree_copied_identities;
+DELETE FROM native_usage_current;
+DELETE FROM native_usage_migrations;
+DELETE FROM meta WHERE key IN ('native_usage_discovery_done','native_usage_discovery_after','native_usage_migration_clock','native_tree_copy_clock');
 DELETE FROM files;
+INSERT INTO meta(key,value) VALUES('native_tree_legacy_max_file','0') ON CONFLICT(key) DO UPDATE SET value='0';
+INSERT INTO meta(key,value) VALUES('native_usage_discovery_done','1') ON CONFLICT(key) DO UPDATE SET value='1';
 DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
 DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
 DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
@@ -337,6 +353,7 @@ DELETE FROM meta WHERE key GLOB 'native_proof_tree:*';
 DELETE FROM meta WHERE key GLOB 'native_proof_repair:*';
 DELETE FROM meta WHERE key GLOB 'native_parent_marker:*';
 DELETE FROM meta WHERE key GLOB 'native_tree_summary:*';
+DELETE FROM meta WHERE key GLOB 'native_tree_failure:*';
 DELETE FROM meta WHERE key GLOB 'native_launch_calls:*';
 ";
 
@@ -2613,6 +2630,74 @@ impl IndexStore for SqliteStore {
         self.read_one(path).map_err(failure)
     }
 
+    fn native_usage_seen(
+        &self,
+        path: &str,
+        ledger: &Ledger,
+        identity: &str,
+    ) -> Result<native_usage::Seen, StoreError> {
+        native_usage::seen(&self.connection, path, ledger, identity).map_err(failure)
+    }
+
+    fn advance_native_usage_migration(
+        &mut self,
+        options: &crate::Options,
+    ) -> io::Result<(bool, Option<String>)> {
+        let (pending, changed) = native_usage::advance(self, options)?;
+        let copies = tree_state::advance_copies(&mut self.connection).map_err(io::Error::other)?;
+        let cleanup = tree_state::cleanup_work(&mut self.connection).map_err(io::Error::other)?;
+        Ok((pending || copies || cleanup, changed))
+    }
+
+    fn native_usage_migration_pending(&self) -> Result<bool, StoreError> {
+        let usage = native_usage::migration_pending(&self.connection).map_err(failure)?;
+        let copies = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_tree_headers WHERE copies_ready=0)",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(failure)?;
+        Ok(usage || copies || tree_state::work_pending(&self.connection).map_err(failure)?)
+    }
+
+    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, harness: &str) -> io::Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        if !current(&tx).map_err(io::Error::other)?
+            || ledger_row(&tx, path)
+                .map_err(io::Error::other)?
+                .map(|(_, l)| l)
+                .as_ref()
+                != Some(ledger)
+        {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let failed: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [format!("native_tree_failure:{path}")],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        if failed.as_deref() == Some(&header_ledger(ledger))
+            && Stat::of(Path::new(path)).ok().as_ref() == Some(&ledger.stat)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native tree compact metadata exceeds budget",
+            ));
+        }
+        let usage_needed = harness == "codex"
+            && !native_usage::normalized(&tx, path, ledger).map_err(io::Error::other)?;
+        tx.execute("INSERT INTO native_usage_migrations(source_path,receipt,usage_needed) VALUES(?1,?2,?3) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_usage_migrations.state='done' THEN 'ready' ELSE native_usage_migrations.state END",params![path,header_ledger(ledger),usage_needed]).map_err(io::Error::other)?;
+        tx.commit().map_err(io::Error::other)
+    }
+
     fn load_tree(
         &self,
         path: &str,
@@ -3998,12 +4083,12 @@ impl SqliteStore {
         #[cfg(test)]
         hook(&AFTER_TREE_LEDGER);
         let mut statement = transaction.prepare(NATIVE_METADATA_VALUE)?;
-        let Some(summary) = read_tree_summary(&mut statement, path, &ledger)? else {
+        let Some(summary) = read_tree_summary(&transaction, &mut statement, path, &ledger)? else {
             return Ok(None);
         };
-        let Some(chunks) = chunk_proofs::read(&transaction, path, &ledger)? else {
+        if !chunk_proofs::header_ready(&transaction, path, &ledger)? {
             return Ok(None);
-        };
+        }
         let Some(marker) = read_parent_marker(&mut statement, path, &ledger)? else {
             return Ok(None);
         };
@@ -4014,7 +4099,7 @@ impl SqliteStore {
             ledger,
             crate::native_tree::Metadata {
                 summary,
-                chunks,
+                chunks: None,
                 marker,
                 calls: std::sync::Arc::new(calls),
             },
@@ -4125,6 +4210,7 @@ impl SqliteStore {
                 "usage_identity",
                 "usage",
                 "codex_usage",
+                "native_tree_copied_identities",
             ] {
                 transaction.execute(
                     &format!(
@@ -4134,6 +4220,10 @@ impl SqliteStore {
                     [path],
                 )?;
             }
+            transaction.execute(
+                "DELETE FROM native_tree_headers WHERE source_path=?1",
+                [path],
+            )?;
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
@@ -4400,6 +4490,15 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             )?;
         }
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(native_usage::SCHEMA)?;
+        if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_usage_sources') WHERE name='usage_ready')",[],|r|r.get::<_,bool>(0))? {
+            transaction.execute_batch("ALTER TABLE native_usage_sources ADD COLUMN usage_ready INTEGER NOT NULL DEFAULT 1")?;
+        }
+        transaction.execute_batch(tree_state::SCHEMA)?;
+        // New usage identities are maintained by the installed copy triggers.
+        // Only files already present at the additive upgrade need bootstrap.
+        transaction.execute("INSERT INTO meta(key,value) SELECT 'native_tree_legacy_max_file',CAST(COALESCE(MAX(file_id),0) AS TEXT) FROM files WHERE true ON CONFLICT(key) DO NOTHING",[])?;
+        transaction.execute("INSERT INTO meta(key,value) SELECT 'native_usage_discovery_done','1' WHERE NOT EXISTS(SELECT 1 FROM files) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[])?;
         transaction.execute_batch(semantic_stage::SCHEMA)?;
         transaction.execute_batch(crate::overview::SCHEMA)?;
         transaction.execute_batch(crate::causal_trace::SCHEMA)?;
@@ -4882,6 +4981,7 @@ fn tree_summary_key(path: &str) -> String {
 }
 
 fn read_tree_summary(
+    connection: &Connection,
     statement: &mut Statement<'_>,
     path: &str,
     ledger: &Ledger,
@@ -4892,13 +4992,23 @@ fn read_tree_summary(
             row.get(0)
         })
         .optional()?;
-    Ok(encoded.flatten().and_then(|text| {
-        let record: TreeSummaryRecord = serde_json::from_str(&text).ok()?;
-        (record.version == 1
-            && record.parser_version == CACHE_VERSION
-            && record.ledger == header_ledger(ledger))
-        .then_some(record.summary)
-    }))
+    let Some(text) = encoded.flatten() else {
+        return Ok(None);
+    };
+    let Some(record) = serde_json::from_str::<TreeSummaryRecord>(&text).ok() else {
+        return Ok(None);
+    };
+    if !(1..=3).contains(&record.version)
+        || record.parser_version != CACHE_VERSION
+        || record.ledger != header_ledger(ledger)
+    {
+        return Ok(None);
+    }
+    let mut summary = record.summary;
+    if record.version == 3 && !tree_state::restore(connection, path, ledger, &mut summary)? {
+        return Ok(None);
+    }
+    Ok(Some(summary))
 }
 
 fn write_tree_summary(
@@ -4906,24 +5016,39 @@ fn write_tree_summary(
     path: &str,
     ledger: &Ledger,
     summary: Option<&crate::native_tree::Summary>,
+    normalized_usage: bool,
 ) -> rusqlite::Result<()> {
     let encoded = summary
         .map(|summary| {
+            tree_state::write(transaction, path, ledger, summary)?;
             json(&TreeSummaryRecord {
-                version: 1,
+                version: 3,
                 parser_version: CACHE_VERSION,
                 ledger: header_ledger(ledger),
-                summary: summary.clone(),
+                summary: summary.compact(normalized_usage),
             })
         })
         .transpose()?;
-    if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
+    if let Some(encoded) = encoded {
+        if encoded.len() > NATIVE_METADATA_MAX {
+            // A pathological scalar is explicitly unavailable for this
+            // receipt. Retain old compatibility data; never delete and retry
+            // the same oversized representation on every unchanged read.
+            transaction.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("native_tree_failure:{path}"),header_ledger(ledger)])?;
+            if normalized_usage {
+                transaction.execute("UPDATE native_usage_migrations SET state='blocked_metadata' WHERE source_path=?1",[path])?;
+            } else {
+                // An oversized compatibility accumulator is precisely the
+                // migration's input, not a reason to block that worker.
+                transaction.execute("INSERT INTO native_usage_migrations(source_path,receipt,usage_needed) VALUES(?1,?2,1) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_usage_migrations.state='done' THEN 'ready' ELSE native_usage_migrations.state END",params![path,header_ledger(ledger)])?;
+            }
+            return Ok(());
+        }
         transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![tree_summary_key(path), encoded])?;
-    } else {
-        // Never truncate native model labels, tool state or usage accounting.
-        transaction
-            .prepare_cached("DELETE FROM meta WHERE key=?1")?
-            .execute([tree_summary_key(path)])?;
+        transaction.execute(
+            "DELETE FROM meta WHERE key=?1",
+            [format!("native_tree_failure:{path}")],
+        )?;
     }
     Ok(())
 }
@@ -5325,9 +5450,16 @@ fn read_file(
 
     let index = FileIndex {
         dirty_rows: None,
+        native_usage_observations: native_usage::normalized(readers.connection, &path, &ledger)?
+            .then(Vec::new),
         source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
         marker_index: read_parent_marker(&mut readers.parent_marker, &path, &ledger)?,
-        tree_summary: read_tree_summary(&mut readers.tree_summary, &path, &ledger)?,
+        tree_summary: read_tree_summary(
+            readers.connection,
+            &mut readers.tree_summary,
+            &path,
+            &ledger,
+        )?,
         handoff_index: launch_calls::read(readers.connection, &path, &ledger)?,
         codex_header: read_codex_header(&mut readers.codex_header, &path, &ledger)?,
         claude_sidecar: if crate::native_sidecar::agent_path(Path::new(&path)) {
@@ -5360,10 +5492,12 @@ fn read_file(
             .get::<_, Option<String>>(27)?
             .map(|text| from_json(27, &text))
             .transpose()?,
-        codex_native_usage: row
-            .get::<_, Option<String>>(26)?
-            .map(|text| from_json(26, &text))
-            .transpose()?,
+        codex_native_usage: native_usage::restore(
+            readers.connection,
+            &path,
+            &ledger,
+            row.get(26)?,
+        )?,
         rate_limits: row
             .get::<_, Option<String>>(25)?
             .map(|text| from_json(25, &text))
@@ -5509,12 +5643,17 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
         "usage_identity",
         "usage",
         "codex_usage",
+        "native_tree_copied_identities",
     ] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE file_id = ?1"),
             [file_id],
         )?;
     }
+    transaction.execute(
+        "DELETE FROM native_tree_headers WHERE file_id=?1",
+        [file_id],
+    )?;
     Ok(())
 }
 
@@ -5568,12 +5707,27 @@ fn write_index_changes_measured(
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
     let started = measurements.start();
+    // The source ledger fences raw bytes; the sidecar is an independent
+    // interpretation dependency. Re-encoding derived proofs changes neither.
+    let semantic_change = expected != Some(ledger)
+        || (crate::native_sidecar::agent_path(Path::new(path)) && {
+            let mut statement = transaction.prepare(NATIVE_METADATA_VALUE)?;
+            read_claude_sidecar(&mut statement, path, ledger)?.as_ref()
+                != index.claude_sidecar.as_ref()
+        });
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
+    native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
     let started = measurements.start();
     let full = super::DirtyRows {
-        usage: index.usage_by_id.keys().cloned().collect(),
+        usage: if changes.is_none() {
+            index.usage_by_id.keys().cloned().collect()
+        } else {
+            Default::default()
+        },
         ..super::DirtyRows::default()
     };
     measurements.record("dirty_rows", started, 1);
@@ -5585,6 +5739,7 @@ fn write_index_changes_measured(
         index,
         measurements,
     )?;
+    native_usage::write(transaction, path, ledger, index)?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
     for id in index
@@ -5625,14 +5780,25 @@ fn write_index_changes_measured(
     transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
     measurements.record("archive_metadata", started, 1);
     let started = measurements.start();
-    invalidate_catalog_source(transaction, path, "changed")?;
-    measurements.record("invalidation", started, 1);
+    if semantic_change {
+        invalidate_catalog_source(transaction, path, "changed")?;
+        measurements.record("invalidation", started, 1);
+    } else {
+        measurements.record("representation_repair", started, 1);
+    }
     let started = measurements.start();
     transaction.execute(
         "DELETE FROM session_source_mutations WHERE source_path=?1",
         [path],
     )?;
     measurements.record("mutation_retirement", started, 1);
+    #[cfg(test)]
+    {
+        let written_after: i64 =
+            transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
+        super::INDEX_WRITTEN_ROWS
+            .with(|n| n.set(n.get() + (written_after - written_before) as u64));
+    }
     Ok(())
 }
 
@@ -5648,6 +5814,7 @@ fn write_file(
 ) -> rusqlite::Result<()> {
     let FileIndex {
         dirty_rows: _,
+        native_usage_observations: _,
         tree_summary,
         source_chunks,
         marker_index,
@@ -5675,7 +5842,7 @@ fn write_file(
         codex_tokens,
         codex_tokens_by_model,
         codex_usage_events,
-        codex_native_usage,
+        codex_native_usage: _,
         copilot,
         rate_limits,
     } = index;
@@ -5695,9 +5862,6 @@ fn write_file(
     let started = measurements.start();
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
     measurements.record("proof_header", started, 1);
-    let started = measurements.start();
-    write_tree_summary(transaction, path, ledger, tree_summary.as_ref())?;
-    measurements.record("proof_tree", started, 1);
     let started = measurements.start();
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     measurements.record("proof_sidecar", started, 1);
@@ -5764,7 +5928,7 @@ fn write_file(
             json(codex_tokens)?,
             json(codex_tokens_by_model)?,
             rate_limits,
-            codex_native_usage.as_ref().map(json).transpose()?,
+            native_usage::encoded(index)?,
             copilot.as_ref().map(json).transpose()?,
             changed_ns.map(i128::to_be_bytes),
         ];
@@ -5775,6 +5939,15 @@ fn write_file(
         file_id
     };
 
+    let started = measurements.start();
+    write_tree_summary(
+        transaction,
+        path,
+        ledger,
+        tree_summary.as_ref(),
+        index.native_usage_observations.is_some(),
+    )?;
+    measurements.record("proof_tree", started, 1);
     let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_EVENT)?;
     let mut cut = transaction
@@ -8566,6 +8739,7 @@ mod tests {
     fn full() -> FileIndex {
         FileIndex {
             dirty_rows: None,
+            native_usage_observations: None,
             source_chunks: None,
             marker_index: Some(crate::native_marker::Index::default()),
             tree_summary: None,
