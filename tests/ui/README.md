@@ -5,7 +5,7 @@ builds the test-clock binary and account fixture once, transfers those binaries
 to isolated runners, and runs twelve suites in parallel. Each runner owns its
 servers, fixture directories, and report artifact (`viewer-ui-<suite>`). Failures
 in one suite do not cancel the others; a skipped or failed suite fails the aggregate.
-New commits cancel superseded runs on the same PR or branch.
+New PR commits cancel superseded runs of that PR. Main and manual events have separate concurrency groups and do not cancel running validation. Browser infrastructure regressions run once in the required foundation job before binary builds and browser fan-out.
 
 Functional groups live in `suite-plan.mjs`. `checks/run.mjs` verifies that every
 registered check belongs to exactly one group before running anything. Adding a
