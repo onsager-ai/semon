@@ -3552,7 +3552,7 @@ for (const width of [390, 1280])
             });
           });
           await page.locator('#page [data-id="one"]').click();
-          await page.locator('#page [data-entry-key="one:5"]').waitFor();
+          await page.locator('#page [data-entry-key="one:5"]').waitFor({ state: 'attached' });
           if (failure === 'observation')
             await page
               .getByText('Source observation is unavailable. Retrying…', { exact: true })
