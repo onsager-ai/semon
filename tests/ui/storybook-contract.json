@@ -2,6 +2,9 @@
   "version": 2,
   "stateBindings": "storybook-state-bindings.json",
   "ownedStoryPrefix": "semon-production-owners--",
+  "ownedStoryPrefixes": ["semon-production-owners--", "semon-legacy-routes--", "semon-legacy-gallery--"],
+  "legacySuccessors": "storybook-legacy.mjs",
+  "gateInventory": "storybook-gates.json",
   "storyIndex": "storybook-static/index.json",
   "referenceMap": "storybook-reference-map.json",
   "pixelPolicy": {
@@ -19,7 +22,7 @@
   },
   "servedChecks": {
     "visual-pixels": "pixels.mjs",
-    "preservation": "preservation-contract.mjs",
+    "preservation": "preservation.mjs",
     "component-gallery": "gallery.mjs",
     "functional-checks": "checks/run.mjs",
     "served-catalog": "../../ui/tests/catalog-served.mjs",

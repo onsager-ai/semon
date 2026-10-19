@@ -97,23 +97,23 @@
       ]
     },
     "catalog-shell": {
-      "served": {"comparator": "preservation", "scope": "required", "kind": "frame", "keys": ["1280-light-sessions", "1280-dark-sessions"]},
-      "referenceDisposition": "preserve-exact-served-comparator",
+      "legacyKeys": ["preservation:required:frame:1280-light-sessions", "preservation:required:frame:1280-dark-sessions"],
+      "referenceDisposition": "pending-storybook-review",
       "expectedState": "Sessions route with production navigation, source-scoped Recent tree and toolbar visible. Historical Sources navigation is now owned by Sessions source context (ui/README.md)."
     },
     "reader-shell": {
-      "served": {"comparator": "preservation", "scope": "required", "kind": "frame", "keys": ["1280-light-session-harbor", "1280-dark-session-harbor"]},
-      "referenceDisposition": "preserve-exact-served-comparator",
+      "legacyKeys": ["preservation:required:frame:1280-light-session-harbor", "preservation:required:frame:1280-dark-session-harbor"],
+      "referenceDisposition": "pending-storybook-review",
       "expectedState": "Selected harbor transcript with production navigation, populated nested Recent tree and selected-session toolbar visible."
     },
     "phone-toolbar": {
-      "served": {"comparator": "preservation", "scope": "required", "kind": "frame", "keys": ["390-light-sessions", "390-dark-sessions"]},
-      "referenceDisposition": "preserve-exact-served-comparator",
+      "legacyKeys": ["preservation:required:frame:390-light-sessions", "preservation:required:frame:390-dark-sessions"],
+      "referenceDisposition": "pending-storybook-review",
       "expectedState": "Phone Sessions toolbar with compact menu trigger; sidebar stays hidden until drawer interaction."
     }
   },
   "bindings": [
-    {"frames": ["Nt3eb", "gbtK3"], "targets": ["catalog-shell", "catalog", "filters"], "visibleOwnership": "Whole catalog compositions split explicitly between served shell and production catalog content; component captures do not claim sidebar pixels."},
+    {"frames": ["Nt3eb", "gbtK3"], "targets": ["catalog-shell", "catalog", "filters"], "visibleOwnership": "Whole catalog compositions bind actual shell route Storybook captures and separate production catalog/filter captures; component captures do not claim sidebar pixels."},
     {"frames": ["P4cT3K", "wCnIL"], "targets": ["catalog-shell", "recent"], "visibleOwnership": "#sidebar shell and populated expanded Recent are separate explicit owners; the Recent story asserts every named descendant visible."},
     {"frames": ["XxrIN", "XwmtP"], "targets": ["catalog-shell"], "visibleOwnership": "#sidebar Sessions navigation link."},
     {"frames": ["GZCvb", "g8aOkf"], "targets": ["catalog-shell"], "visibleOwnership": "#sidebar Machines navigation link."},
@@ -134,7 +134,7 @@
     {"frames": ["I0NY3", "KMzk2"], "targets": ["catalog"], "visibleOwnership": ".session-list contiguous production session rows."},
     {"frames": ["BYbh8", "rzFC5"], "targets": ["filters"], "visibleOwnership": "Production Search session details input surface, using canonical colors and focus geometry."},
     {"frames": ["raaGL"], "targets": ["row"], "visibleOwnership": "Production session row identity, harness, state and metadata."},
-    {"frames": ["gZYIY"], "targets": ["phone-toolbar", "filters", "scope", "catalog"], "visibleOwnership": "Phone composition explicitly separates served compact toolbar from responsive form, disclosure and row captures."},
+    {"frames": ["gZYIY"], "targets": ["phone-toolbar", "filters", "scope", "catalog"], "visibleOwnership": "Phone composition binds the actual compact shell route Storybook capture plus responsive form, disclosure and row captures."},
     {"frames": ["FIwqa"], "targets": ["phone-toolbar"], "visibleOwnership": "#topbar owns the compact phone toolbar."},
     {"frames": ["ypFy7"], "targets": ["filters", "scope", "catalog"], "visibleOwnership": "Phone content comprises the visible catalog form, disclosure and rows."},
     {"frames": ["vFIlg"], "targets": ["filters"], "visibleOwnership": "Narrow metadata search/harness/repository filter form."},

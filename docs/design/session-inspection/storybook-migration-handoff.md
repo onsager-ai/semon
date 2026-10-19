@@ -1,5 +1,82 @@
 # Storybook migration corrections, 2026-10-19
 
+## Full-scope source checkpoint after 3e8bec06
+
+The independent full-scope review supersedes the earlier served-only coverage
+interpretation below. `LegacyRoutes.stories.tsx` now provides every named legacy
+session and trace, Home/Sessions/Analytics, the machine inventory and separate
+laptop/desktop details through a test-owned production-owner shell composition.
+`LegacyRoutes.data.ts` adapts the retained sample and relationship records through
+the production transcript/trace/session presentation helpers. The separate gallery
+story mounts the original gallery with its original fixture arrangement CSS.
+No production source/API/style was edited. Route cleanup releases the screen,
+Recent, topbar, facets, modal and shell owners.
+
+`tests/ui/storybook-legacy.mjs` is the independent exact successor inventory:
+explicit named routes, per-scope membership, per-route region ownership, cumulative
+preservation interactions and all five gallery states. Its matrix expansion emits
+one distinct capture per exact original key, with no representative session,
+regex alias, ancestor inheritance or implicit shared reference. The contract
+compares those keys to the authoritative legacy manifests and the executable plan;
+missing, unknown, duplicate, orphan and changed identity bindings fail closed.
+The three previously served-only shell/toolbar targets now resolve to actual
+Storybook successors. Existing native comparators remain separate required gates.
+
+Capture records now include fixture/scope/state, viewport height/DPR, selector,
+top-scroll, paint and pixel policy. Preservation reuses stable capture paint with
+`fullPage:false/animations:allow/caret:hide`; pixels keep frame/region geometry
+distinct; gallery retains 0.1/0.001 while strict captures retain 0.1/0.0001.
+Thinking/tools/output, open Filter with focused Close and zero scroll, and phone
+drawer/account controls are executable states. Capture reports include actual
+viewport/region geometry. A fitted candidate transcript viewport has not been
+proven equal to the native pair's shared fitted geometry; pending approval and
+matched native/reference/candidate image inspection remain necessary.
+
+All overlay gallery successors replay the original keyboard selection of Oldest
+first before opening Account/Sheet/Panel; opening the same overlay over the default
+selection would change the original image. The exact inventory has three bounded
+CI context workers, with a fresh context/clock per case and fail-closed setup/
+cleanup failures. It does not skip cases to fit the CI allowance. Analytics uses
+the retained activity, wait and token-price facts rather than placeholder totals;
+its native projection equivalence still requires the CI comparison evidence.
+
+`storybook-gates.json` records the authoritative workflow matrix, foundation,
+build, functional members, independent/native suites, visual/transport/order/live/
+performance owners, conditional diagnostics, per-inspected-runner no-mask evidence,
+paint policy and inactive historical artifacts. Preservation now points to the
+executable `preservation.mjs` and separately retains its constants dependency.
+The validator checks actual workflow/group ownership rather than file existence
+alone. New regression cases cover the full exact-key set, all 68 preservation
+states, malformed/missing/duplicate/orphan successors, scope/geometry/story changes,
+disclosures, Filter focus/scroll and original gallery policy.
+
+CI checkpoint ownership: this implementer owns `ui/stories/Legacy*`, preview
+composition/root sizing, and `tests/ui/storybook-{legacy,gates,plan,contract,
+capture,assertions,references}` plus schema/bindings/docs. Hub Sol exclusively owns
+`ui/.storybook/main.mjs` and `tests/ui/storybook-server*.mjs`; their concurrent edits
+are not this implementer's changes. The adapter owner needs canonical production
+`/harness/claude-code.svg`, `/harness/codex-black.svg`, `/harness/codex.svg` and the
+explicit `tests/ui/gallery.css` import available. The fixture JSON allowlist change
+is already visible from that owner. No broad directory exposure is requested.
+
+Use the CI-only commands below for the first full route render checkpoint.
+No local parsing, audit, test, build, browser or image processing was performed;
+thermal readings remain stale at 07:30:38 UTC. Authored TypeScript and runtime
+behavior are source-reviewed only until CI returns. Fixture projection and
+native/Storybook image equivalence remain unverified, including exact analytics
+facts, paged native content and shared transcript-region geometry. These are
+remaining evidence/repair work, not accepted coverage or authorized baseline
+promotion. Approvals remain empty. The bootstrap remains active; the prepared
+final workflow patch stays unactivated until functional captures pass. Its
+commands already discover the new route files and exact plan; activation must
+also apply `/tmp/semon-storybook-final-gate-owner-20261019.patch` to reconcile the
+inventory's temporary workflow owner before removal. This additional patch is
+prepared only; it has not been applied. Root advanced HEAD to `f3e5a8ae` during
+this source work; all edits here remain uncommitted for root's checkpoint.
+
+This source checkpoint does not complete visual acceptance. Root owns commit,
+push and CI feedback; no commit/push/merge/deploy/approval was performed here.
+
 This is implementation and CI preparation, not visual acceptance. No new reference
 has been approved, copied into baselines or promoted. No production UI source,
 native comparator, threshold, mask or pending ratchet changes are included.

@@ -5,16 +5,93 @@ import { createHash } from 'node:crypto';
 import { makeCapturePlan } from './storybook-plan.mjs';
 import { referenceErrors, referenceComparisonErrors, captureIdentityDigest } from './storybook-references.mjs';
 import { assertionErrors, verifyAssertions } from './storybook-assertions.mjs';
+import { legacyCapturePlan, routeStoryIds, successorErrors } from './storybook-legacy.mjs';
+import { EXPECTED, expectedPixelCoverage } from './preservation-contract.mjs';
 
 const read = (file) => JSON.parse(fs.readFileSync(new URL(file, import.meta.url), 'utf8'));
 const contract = read('./storybook-contract.json');
 const inventory = read('./storybook-state-bindings.json');
 const stories = [...new Set([
+  ...routeStoryIds, 'semon-legacy-gallery--gallery',
   ...contract.productionSurfaces.flatMap((item) => item.storyIds),
   ...Object.values(inventory.targets).flatMap((item) => item.storyId ? [item.storyId] : []),
   ...contract.interactionCaptures.map((item) => item.storyId),
 ])];
 const plan = () => makeCapturePlan(structuredClone(contract), structuredClone(inventory), stories);
+
+function expectedLegacyKeys() {
+  const keys = [];
+  for (const scope of ['main', 'two-machines', 'pushed']) {
+    const coverage = expectedPixelCoverage(scope);
+    for (const kind of ['frame', 'region']) for (const key of coverage[kind === 'frame' ? 'frames' : 'regions']) keys.push(`pixels:${scope}:${kind}:${key}`);
+  }
+  keys.push(...EXPECTED.map((key) => 'preservation:required:frame:' + key));
+  const gallery = read('./gallery-visual.json');
+  for (const state of gallery.states) for (const width of gallery.widths) for (const scheme of gallery.schemes) keys.push(`gallery:required:frame:${state}-${width}-${scheme}`);
+  return keys;
+}
+
+test('every exact legacy key has one discoverable executable successor, with no aliases', () => {
+  const cases = plan(), expected = expectedLegacyKeys();
+  assert.deepEqual(successorErrors(expected, cases), []);
+  assert.equal(cases.filter((row) => row.legacyKey).length, expected.length);
+  assert.equal(cases.filter((row) => row.legacyKey?.startsWith('preservation:')).length, 68);
+  for (const item of cases.filter((row) => row.legacyKey)) {
+    assert.ok(stories.includes(item.storyId));
+    assert.equal(item.capture.masks.length, 0);
+    assert.equal(item.pixelPolicy.maxRatio, item.legacyKey.startsWith('gallery:') ? 0.001 : 0.0001);
+    assert.equal(item.viewport.deviceScaleFactor, item.width === 390 ? 2 : 1);
+    if (item.legacyKey.startsWith('preservation:')) {
+      assert.equal(item.capture.fullPage, false);
+      assert.equal(item.capture.animations, 'allow');
+      assert.equal(item.capture.caret, 'hide');
+      assert.equal(item.capture.stablePaint, true);
+    }
+  }
+});
+
+test('exact successor audit rejects missing, unknown, duplicate and incomplete bindings', () => {
+  const expected = expectedLegacyKeys(), cases = legacyCapturePlan();
+  assert.match(successorErrors(expected, cases.slice(1)).join('\n'), /Missing Storybook successor/);
+  assert.match(successorErrors(expected, [...cases, cases[0]]).join('\n'), /Duplicate legacy successor/);
+  assert.match(successorErrors(expected, [...cases, { ...cases[0], key: 'orphan', legacyKey: 'pixels:main:frame:unknown' }]).join('\n'), /Unknown legacy successor/);
+  assert.match(successorErrors(expected, [{ ...cases[0], fixture: null }, ...cases.slice(1)]).join('\n'), /Incomplete exact successor identity/);
+  for (const change of [{ storyId: 'semon-production-owners--home' }, { viewport: { ...cases[0].viewport, height: 900 } }, { capture: { ...cases[0].capture, selector: '#topbar' } }, { fixture: { ...cases[0].fixture, scope: 'pushed' } }])
+    assert.match(successorErrors(expected, [{ ...cases[0], ...change }, ...cases.slice(1)]).join('\n'), /Changed explicit legacy successor binding/);
+  assert.throws(() => makeCapturePlan(contract, inventory, stories.filter((id) => id !== 'semon-legacy-routes--machine-desktop')), /unknown legacy story/);
+});
+
+test('legacy disclosure, filter focus/scroll and compact account states use real scoped controls', () => {
+  const cases = legacyCapturePlan();
+  const output = cases.find((row) => row.legacyKey === 'preservation:required:frame:820-dark-harbor-tool-output-open');
+  assert.deepEqual(output.actions.map((action) => action.selector), ['.think-disclosure >> nth=0', '.tsum >> nth=0', '.tgroup .steps .step > button >> nth=0']);
+  const filter = cases.find((row) => row.legacyKey === 'preservation:required:frame:390-light-sessions-filter-open');
+  assert.deepEqual(filter.actions.map((action) => action.kind), ['click', 'focus', 'scroll-top']);
+  for (const scheme of ['light', 'dark']) {
+    const account = cases.find((row) => row.legacyKey === `gallery:required:frame:account-390-${scheme}`);
+    assert.deepEqual(account.actions.slice(-2).map((action) => action.selector), ['#lead-btn', '#account-drawer .account-trigger']);
+    assert.deepEqual(account.actions.slice(0, 4).map((action) => action.key ?? action.kind), ['focus', 'ArrowDown', 'ArrowDown', 'Enter']);
+    assert.ok(account.assertions.some((assertion) => assertion.text === 'Oldest first'));
+  }
+  assert.deepEqual(assertionErrors({ kind: 'visible', selector: '.filters-sheet .vb', scrollTop: 0 }), []);
+  assert.ok(assertionErrors({ kind: 'visible', selector: '.filters-sheet .vb', scrollTop: -1 }).length);
+});
+
+test('gallery provenance permits only its original case policy and retains strict native policy', () => {
+  const gallery = legacyCapturePlan().find((row) => row.legacyKey.startsWith('gallery:'));
+  // A draft may never become valid simply because its policy matches gallery.
+  const map = { $schema: './storybook-reference-map.schema.json', version: 2, pending: 'review required', approved: { [gallery.key]: { decision: 'draft', threshold: 0.1, maxRatio: 0.001 } } };
+  assert.ok(referenceErrors(map, [gallery]).length);
+  const digest = (value) => createHash('sha256').update(value).digest('hex');
+  const bytes = Buffer.from('synthetic reviewed gallery bytes');
+  const record = { decision: 'accepted', path: 'baselines/storybook/reviewed-gallery.png', sha256: digest(bytes), storyId: gallery.storyId, width: gallery.width, scheme: gallery.scheme,
+    threshold: 0.1, maxRatio: 0.001, sourceDigest: digest('historical gallery source'), captureDigest: captureIdentityDigest(gallery), reviewedRevision: 'a'.repeat(40),
+    reviewedBy: 'Synthetic reviewer', reviewedAt: '2026-10-19T07:00:00.000Z', rationale: 'Exact original gallery policy', provenance: { source: 'original gallery owner', state: gallery.expectedState, geometry: 'original gallery frame' } };
+  assert.deepEqual(referenceComparisonErrors(record, gallery, bytes, { sourceDigest: digest('edited candidate'), sourceRevision: 'b'.repeat(40) }), []);
+  assert.ok(referenceErrors({ ...map, approved: { [gallery.key]: { ...record, maxRatio: 0.0001 } } }, [gallery]).length);
+  const strict = legacyCapturePlan().find((row) => row.legacyKey.startsWith('preservation:'));
+  assert.ok(referenceErrors({ ...map, approved: { [strict.key]: { ...record, storyId: strict.storyId, width: strict.width, scheme: strict.scheme, captureDigest: captureIdentityDigest(strict) } } }, [strict]).length);
+});
 
 test('full matrix includes distinct collapsed tools, compact sizes and executable disclosures', () => {
   const cases = plan();

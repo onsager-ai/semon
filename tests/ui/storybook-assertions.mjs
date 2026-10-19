@@ -28,6 +28,7 @@ export function assertionErrors(assertion) {
   }
   if (assertion.expectedWidths && Object.entries(assertion.expectedWidths).some(([width, value]) =>
     ![334, 390, 696, 820, 1280].includes(Number(width)) || !Number.isFinite(value) || value <= 0)) errors.push('Invalid expected component width');
+  if (assertion.scrollTop !== undefined && (!Number.isFinite(assertion.scrollTop) || assertion.scrollTop < 0 || count !== 1)) errors.push('Invalid expected scroll position');
   return errors;
 }
 
@@ -63,6 +64,8 @@ export async function verifyAssertions(page, assertions, { timeoutMs = 10000, po
       }
       if (assertion.kind === 'focused' && !(await target.evaluate((node) => node === document.activeElement)))
         throw new Error(`expected focused element ${assertion.selector}`);
+      if (assertion.scrollTop !== undefined && Math.abs(await target.evaluate((node) => node.scrollTop) - assertion.scrollTop) > 0.5)
+        throw new Error(`expected ${assertion.selector} scrollTop ${assertion.scrollTop}`);
       const expectedWidth = assertion.expectedWidths?.[page.viewportSize().width];
       if (expectedWidth !== undefined) {
         const box = await target.boundingBox();
