@@ -15,7 +15,12 @@ export interface ViewerHost {
   /** Host-owned links use native navigation; shared chrome validates paths. */
   nativeNavigation?: readonly ShellDestination[];
   /** A native administrative page uses shared chrome and native links without a reader/model. */
-  nativePage?: { title: string; nav: string };
+  nativePage?: {
+    title: string;
+    nav: string;
+    /** An authenticated workspace can publish compact Recent/count metadata without selecting a reader. */
+    workspaceChrome?: boolean;
+  };
   /** Advertise source inventory so an unselected reader can choose without a failing probe. */
   catalogSources?: boolean;
   account?: unknown;
