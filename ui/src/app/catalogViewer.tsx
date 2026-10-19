@@ -561,8 +561,14 @@ export function createCatalogViewer(
   jumpActions.append(jumpSlot);
   const recent = createRecentRenderer(shell.slots.recent.querySelector<HTMLElement>('#lanes')!, {
     open(key) {
+      const item = items.find(
+        (row) => JSON.stringify([row.machine?.key ?? capabilities.source_key, row.key]) === key,
+      );
+      if (item?.machine) {
+        openCatalogSession(item);
+        return;
+      }
       if (overview.openRecent(key)) return;
-      const item = items.find((row) => JSON.stringify([capabilities.source_key, row.key]) === key);
       if (item) void goSession(item.key, item);
       else {
         const identity: unknown = JSON.parse(key);
@@ -1955,6 +1961,24 @@ export function createCatalogViewer(
         });
     }
   }
+  function openCatalogSession(item: Pick<CatalogSession, 'key' | 'harness' | 'machine'>) {
+    if (item.machine) {
+      saveSource();
+      const p = browsingParams();
+      p.set('machine', item.machine.key);
+      p.set('all_machines', '1');
+      history.pushState(
+        { v: 'session', id: item.key },
+        '',
+        '/s/' + encodeURIComponent(item.harness) + '/' + encodeURIComponent(item.key) + '?' + p,
+      );
+      fromLocation();
+    } else
+      void goSession(
+        item.key,
+        items.find((row) => row.key === item.key),
+      );
+  }
   function drawList() {
     if (disposed || navigation.route.v !== 'sessions' || active || sourcesOpen) return;
     chrome();
@@ -2108,29 +2132,7 @@ export function createCatalogViewer(
           groupBy = value;
           drawList();
         },
-        session(item) {
-          if (item.machine) {
-            saveSource();
-            const p = browsingParams();
-            p.set('machine', item.machine.key);
-            p.set('all_machines', '1');
-            history.pushState(
-              { v: 'session', id: item.key },
-              '',
-              '/s/' +
-                encodeURIComponent(item.harness) +
-                '/' +
-                encodeURIComponent(item.key) +
-                '?' +
-                p,
-            );
-            fromLocation();
-          } else
-            void goSession(
-              item.key,
-              items.find((row) => row.key === item.key),
-            );
-        },
+        session: openCatalogSession,
         children(key, expanded) {
           if (expanded) listExpanded.add(cacheKey(key));
           else listExpanded.delete(cacheKey(key));
