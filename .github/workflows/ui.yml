@@ -61,6 +61,20 @@ jobs:
           npm --prefix tests/ui ci --no-audit --no-fund
           node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs
 
+      - name: Prepare UI assets for thermal-restricted review
+        if: failure()
+        run: |
+          npm --prefix ui run format
+          npm --prefix ui run build
+          git diff --binary -- ui crates/semon-sessions/src > "$RUNNER_TEMP/ui-generated-review.patch"
+      - name: Retain generated changes without bypassing freshness
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ui-generated-review
+          path: ${{ runner.temp }}/ui-generated-review.patch
+          if-no-files-found: error
+
   build:
     name: viewer test binaries
     needs: foundation
