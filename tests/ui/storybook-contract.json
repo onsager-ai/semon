@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "ownedStoryPrefix": "semon-production-owners--",
   "storyIndex": "storybook-static/index.json",
   "referenceMap": "storybook-reference-map.json",
   "pixelPolicy": {
@@ -35,7 +36,8 @@
         "../src/lib/AccountMenu"
       ],
       "storyIds": [
-        "semon-production-owners--component-gallery"
+        "semon-production-owners--component-gallery",
+        "semon-production-owners--gallery-lifecycle"
       ],
       "servedChecks": [
         "component-gallery",
@@ -377,7 +379,7 @@
       {
         "root": "BYbh8",
         "ids": [
-          "rzFC3"
+          "rzFC5"
         ]
       },
       {
@@ -435,7 +437,7 @@
           "s4RT1R",
           "trEGm",
           "jsUvU",
-          "v0xoD",
+          "v0xoB",
           "WrISy",
           "e3gpV",
           "W0tEEh",
@@ -473,7 +475,8 @@
           "IDwPX",
           "xH7RQ",
           "G9XjGN",
-          "DikBn"
+          "DikBn",
+          "FPbSc"
         ]
       },
       {
@@ -507,6 +510,15 @@
       ],
       "S8I0nF": [
         "semon-production-owners--compact-reader"
+      ],
+      "kD4Pe": [
+        "semon-production-owners--failure-inspection"
+      ],
+      "V6i5L": [
+        "semon-production-owners--failure-inspection"
+      ],
+      "C3JzD2": [
+        "semon-production-owners--filtered-catalog"
       ]
     },
     "servedCheck": "visual-pixels",
@@ -528,5 +540,281 @@
       }
     ]
   },
-  "referencePolicy": "Candidate screenshots are artifacts only. Missing or unapproved references remain pending failures. CI never creates or approves a reference."
+  "referencePolicy": "Candidate screenshots are artifacts only. Missing or unapproved references remain pending failures. CI never creates or approves a reference.",
+  "interactionCaptures": [
+    {
+      "id": "related-session-expanded",
+      "storyId": "semon-production-owners--compact-reader",
+      "widths": [
+        334,
+        696
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "action": {
+        "kind": "click",
+        "selector": "button[aria-label=\"Expand Check the phone layout details\"]"
+      },
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": ".cc-details",
+          "text": "The name, status and disclosure remain visible."
+        }
+      ],
+      "frames": [
+        "DikBn",
+        "FPbSc",
+        "GdtyG",
+        "S8I0nF"
+      ]
+    },
+    {
+      "id": "failed-tool-output-expanded",
+      "storyId": "semon-production-owners--failure-inspection",
+      "widths": [
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "action": {
+        "kind": "click",
+        "selector": "[data-e=\"failed-tool\"] button"
+      },
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "[data-e=\"failed-tool\"] .out",
+          "text": "Expected the recorded child result and trace action to remain visible."
+        }
+      ],
+      "frames": [
+        "kD4Pe",
+        "V6i5L"
+      ]
+    },
+    {
+      "id": "source-scope-expanded",
+      "storyId": "semon-production-owners--filtered-catalog",
+      "widths": [
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "action": {
+        "kind": "click",
+        "selector": "details.catalog-scope > summary"
+      },
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "details.catalog-scope > p",
+          "text": "Search includes names, IDs and repositories"
+        }
+      ],
+      "frames": [
+        "C3JzD2"
+      ]
+    },
+    {
+      "id": "tooltip-visible",
+      "storyId": "semon-production-owners--tooltip",
+      "widths": [
+        390,
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "action": {
+        "kind": "hover",
+        "selector": "button[data-tip]"
+      },
+      "waitMs": 650,
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "[role=\"tooltip\"]",
+          "text": "A recorded source may be incomplete while history loads."
+        }
+      ],
+      "frames": []
+    },
+    {
+      "id": "machine-filter-open",
+      "storyId": "semon-production-owners--machine-filter",
+      "widths": [
+        390,
+        820,
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "[role=\"option\"][data-value=\"laptop\"]",
+          "text": "Marvin\u2019s laptop"
+        }
+      ],
+      "actions": [
+        {
+          "kind": "click",
+          "selector": "button[aria-label=\"Filter\"]"
+        },
+        {
+          "kind": "click",
+          "selector": "button[role=\"combobox\"]"
+        }
+      ],
+      "frames": [
+        "workspaceSessions20261019"
+      ]
+    },
+    {
+      "id": "gallery-overlay-lifecycle",
+      "storyId": "semon-production-owners--gallery-lifecycle",
+      "widths": [
+        390,
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "actions": [
+        {
+          "kind": "click",
+          "selector": "#sheet-trigger",
+          "assertionsAfter": [
+            {
+              "kind": "visible",
+              "selector": "dialog[open]",
+              "text": "Example sheet"
+            }
+          ]
+        },
+        {
+          "kind": "click",
+          "selector": "button[aria-label=\"Unmount gallery\"]",
+          "assertionsAfter": [
+            {
+              "kind": "absent",
+              "selector": "dialog[open]"
+            },
+            {
+              "kind": "absent",
+              "selector": "#sheet-trigger"
+            }
+          ]
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "button[aria-label=\"Mount gallery\"]"
+        }
+      ],
+      "postCaptureActions": [
+        {
+          "kind": "click",
+          "selector": "button[aria-label=\"Mount gallery\"]"
+        }
+      ],
+      "postCaptureAssertions": [
+        {
+          "kind": "visible",
+          "selector": "#sheet-trigger"
+        }
+      ],
+      "frames": []
+    },
+    {
+      "storyId": "semon-production-owners--component-gallery",
+      "widths": [
+        390,
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "frames": [],
+      "id": "gallery-sheet-open",
+      "actions": [
+        {
+          "kind": "click",
+          "selector": "#sheet-trigger"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "dialog[open][aria-label=\"Example sheet\"]",
+          "text": "No items match"
+        }
+      ]
+    },
+    {
+      "storyId": "semon-production-owners--component-gallery",
+      "widths": [
+        390,
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "frames": [],
+      "id": "gallery-panel-open",
+      "actions": [
+        {
+          "kind": "click",
+          "selector": "#panel-trigger"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "dialog[open][aria-label=\"Example panel\"]",
+          "text": "Details lead with what matters."
+        }
+      ]
+    },
+    {
+      "storyId": "semon-production-owners--component-gallery",
+      "widths": [
+        390,
+        1280
+      ],
+      "schemes": [
+        "light",
+        "dark"
+      ],
+      "frames": [],
+      "id": "gallery-account-menu-open",
+      "actions": [
+        {
+          "kind": "click",
+          "selector": "button[aria-label=\"Ada Example account menu\"]"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "visible",
+          "selector": "[role=\"menu\"]",
+          "text": "Sign out"
+        }
+      ]
+    }
+  ]
 }

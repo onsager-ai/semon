@@ -41,7 +41,7 @@ if (!fs.existsSync(storyIndexPath)) {
 const storyIndex = readJson(storyIndexPath);
 const availableStories = new Set(
   Object.entries(storyIndex.entries ?? {})
-    .filter(([, entry]) => entry.type === 'story')
+    .filter(([id, entry]) => entry.type === 'story' && id.startsWith(contract.ownedStoryPrefix))
     .map(([id]) => id),
 );
 
@@ -68,6 +68,52 @@ for (const surface of contract.productionSurfaces) {
     if (!directlyImported && !barrelImported) {
       errors.push(`production surface ${surface.id}: owner ${module} is not imported by a story`);
     }
+  }
+}
+
+const interactionIds = new Set();
+for (const interaction of contract.interactionCaptures ?? []) {
+  if (!interaction.id || interactionIds.has(interaction.id)) {
+    errors.push(`interaction capture has a missing or duplicate state ID: ${interaction.id ?? '(empty)'}`);
+  }
+  interactionIds.add(interaction.id);
+  addStories([interaction.storyId], `interaction state ${interaction.id}`);
+  addCheck('visual-pixels', `interaction state ${interaction.id}`);
+  if (!Array.isArray(interaction.widths) || interaction.widths.length === 0) {
+    errors.push(`interaction state ${interaction.id}: at least one explicit viewport width is required`);
+  }
+  if (!Array.isArray(interaction.schemes) || interaction.schemes.length === 0) {
+    errors.push(`interaction state ${interaction.id}: at least one explicit color scheme is required`);
+  }
+  if (!Array.isArray(interaction.actions) || interaction.actions.length === 0) {
+    errors.push(`interaction state ${interaction.id}: an executable action sequence is required`);
+  }
+  if (!Array.isArray(interaction.assertions) || interaction.assertions.length === 0) {
+    errors.push(`interaction state ${interaction.id}: at least one visible-state assertion is required`);
+  }
+  for (const assertion of [
+    ...(interaction.assertions ?? []),
+    ...(interaction.actions ?? []).flatMap((action) => action.assertionsAfter ?? []),
+    ...(interaction.postCaptureAssertions ?? []),
+  ]) {
+    if (!['visible', 'absent'].includes(assertion.kind)) {
+      errors.push(`interaction state ${interaction.id}: unsupported assertion kind ${assertion.kind}`);
+    }
+  }
+  for (const width of interaction.widths ?? []) {
+    if (!Number.isInteger(width) || width < 300 || width > 2560) {
+      errors.push(`interaction state ${interaction.id}: invalid viewport width ${width}`);
+    }
+  }
+  for (const scheme of interaction.schemes ?? []) {
+    if (!contract.pixelPolicy.schemes.includes(scheme)) {
+      errors.push(`interaction state ${interaction.id}: unknown color scheme ${scheme}`);
+    }
+  }
+  for (const frameId of interaction.frames ?? []) {
+    if (contract.pen.roots.some((root) => root.id === frameId && root.disposition === 'active')) continue;
+    if ((contract.pen.descendantStories?.[frameId] ?? []).includes(interaction.storyId)) continue;
+    errors.push(`interaction state ${interaction.id}: frame ${frameId} is not explicitly mapped to ${interaction.storyId}`);
   }
 }
 

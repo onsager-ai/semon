@@ -32,23 +32,27 @@ its completion witness is the native-publication success message in the CI log.
 
 `storybook-contract.json` derives the required migration set from the current
 visual acceptance records, 39-frame visual coverage manifest, component-gallery
-states, and the six active session-inspection pen frames (`Nt3eb`, `gZYIY`,
-`vGVHj`, `nGo6u`, `Oo357`, `gbtK3`). The compact related-session descendants
-inherit their active parent-frame contract unless the current design brief
-explicitly supersedes that historical canvas surface. The optional hosted
-Sessions Machine-filter descendant is mapped to the production facet/select
-owners. Each historical route frame remains tied to the existing served
-application visual check, while the Storybook stories import Semon's production
-owners for Home, Sessions/Catalog, Sources candidates, Machines, Analytics,
-Trace, transcript states, menus, filters, sheets and shared controls.
+states, and every top-level session-inspection pen frame. The contract lists all
+active roots and descendant frame IDs explicitly, and records the two historical
+linked-session roots superseded by the compact disclosure design. The optional
+hosted Sessions Machine-filter state maps to the production facet/select owners.
+Compact reader captures exercise the expanded related-session details at 334px
+and 696px; failure inspection captures expanded recorded tool output; catalog
+scope, tooltip, and Machine-filter captures assert their open states. Stories
+import Semon's production owners for Home, Sessions/Catalog, Sources candidates,
+Machines, Analytics, Trace, transcript states, menus, filters, sheets and shared
+controls. Existing served and native checks continue to exercise the actual
+application routes.
 
 After `npm --prefix ui run storybook:build`,
 `npm --prefix tests/ui run storybook:contract` derives each required frame and
 exact acceptance record, verifies the story IDs against Storybook's built index,
 and rejects unknown, missing or orphaned mappings. `npm --prefix
 tests/ui run storybook:capture` captures each story at 390, 820 and 1280 CSS
-pixels in light and dark schemes, then writes candidate images and a report to
-the usual UI output directory. The reference map is deliberately empty while
+pixels in light and dark schemes, then runs the required interaction captures
+at their declared widths. The report pins the browser version, source and
+fixture digests, fonts and lockfile, locale, timezone and clock. Captures write
+candidate images and a report to the usual UI output directory. The reference map is deliberately empty while
 these Storybook captures await separate review. A missing or unapproved
 reference is a pending failure; capture cannot write or approve a baseline.
 Existing pixel thresholds, ratchets, masks, dimensions, required captures and

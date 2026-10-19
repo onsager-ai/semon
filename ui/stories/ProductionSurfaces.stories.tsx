@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { render } from 'preact';
 import type { Meta, StoryObj } from '@storybook/preact-vite';
 import markUrl from '../../crates/semon-sessions/src/mark.svg?url';
@@ -188,6 +188,27 @@ export const ComponentGallery: Story = {
       <Mounted mount={mountDesignGallery} />
     </div>
   ),
+};
+
+export const GalleryLifecycle: Story = {
+  render: () => {
+    function LifecycleOwner() {
+      const [mounted, setMounted] = useState(true);
+      return (
+        <main class="page storybook-component-frame">
+          <button
+            type="button"
+            aria-label={mounted ? 'Unmount gallery' : 'Mount gallery'}
+            onClick={() => setMounted((value) => !value)}
+          >
+            {mounted ? 'Unmount gallery' : 'Mount gallery'}
+          </button>
+          {mounted && <Mounted mount={mountDesignGallery} />}
+        </main>
+      );
+    }
+    return <LifecycleOwner />;
+  },
 };
 
 export const Tooltip: Story = {
