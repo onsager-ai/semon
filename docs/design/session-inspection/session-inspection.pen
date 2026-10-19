@@ -3819,6 +3819,48 @@
           ]
         }
       ]
+    },
+    {
+      "type": "frame",
+      "id": "workspaceSessions20261019",
+      "x": 0,
+      "y": 10000,
+      "name": "Hosted Sessions · optional Machine",
+      "width": 760,
+      "height": 180,
+      "fill": "$ground",
+      "layout": "vertical",
+      "gap": 16,
+      "padding": 24,
+      "children": [
+        {
+          "type": "text",
+          "id": "workspaceSessionsTitle",
+          "content": "Sessions · All machines",
+          "fill": "$ink",
+          "fontFamily": "$sans",
+          "fontSize": 16,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "workspaceSessionsIntent",
+          "content": "Filter → Machine: All machines / a specific machine. Flat rows retain their machine label.",
+          "fill": "$ink-2",
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "workspaceSessionsRoute",
+          "content": "Row → exact machine + session → refresh → return to the workspace list with filters.",
+          "fill": "$ink-2",
+          "fontFamily": "$sans",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        }
+      ]
     }
   ],
   "themes": {
