@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
+import vm from 'node:vm';
 import { GROUPS, TAP_SESSIONS, selectChecks, selectSchemes, tapSessions } from './suite-plan.mjs';
 
 // Read the actual registry without importing browser modules or starting servers.
@@ -79,4 +80,67 @@ test('the workflow matrix and functional condition reach every declared group', 
       'transport',
     ].every((group) => matrix.includes(group)),
   );
+});
+
+// Evaluate the real workflow expressions for independent events and PR revisions.
+for (const file of ['rust', 'ui'])
+  test(`${file} supersedes only earlier revisions of the same PR`, () => {
+    const workflow = fs.readFileSync(
+      new URL(`../../.github/workflows/${file}.yml`, import.meta.url),
+      'utf8',
+    );
+    const group = workflow.match(/^  group: (.+)$/m)[1];
+    const cancel = workflow.match(/^  cancel-in-progress: \$\{\{ (.+) \}\}$/m)[1];
+    const policy = (event, number = undefined, ref = 'refs/heads/main') => {
+      const context = { github: { event_name: event, ref, event: { pull_request: { number } } } };
+      return {
+        group: group.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expr) =>
+          vm.runInNewContext(expr, context),
+        ),
+        cancel: vm.runInNewContext(cancel, context),
+      };
+    };
+    const pr = policy('pull_request', 42);
+    assert.equal(pr.cancel, true);
+    assert.equal(pr.group, policy('pull_request', 42).group);
+    assert.notEqual(pr.group, policy('pull_request', 43).group);
+    for (const event of ['push', 'workflow_dispatch']) {
+      assert.equal(policy(event).cancel, false);
+      assert.notEqual(pr.group, policy(event).group);
+    }
+    assert.notEqual(policy('push').group, policy('workflow_dispatch').group);
+  });
+
+test('infrastructure has one foundation owner and touch checks have one browser owner', () => {
+  const workflow = fs.readFileSync(
+    new URL('../../.github/workflows/ui.yml', import.meta.url),
+    'utf8',
+  );
+  const section = (job) => workflow.split(`  ${job}:\n`)[1].split(/^  [\w-]+:\n/m)[0];
+  const foundation = section('foundation'),
+    build = section('build'),
+    checks = section('checks');
+  assert.equal(workflow.split('name: Browser-check infrastructure regression tests').length - 1, 1);
+  for (const file of [
+    'capture-network',
+    'suite-plan',
+    'pixel-diff',
+    'visual-contract',
+    'preservation-contract',
+    'dom-evidence',
+  ])
+    assert.ok(foundation.includes(`tests/ui/${file}.test.mjs`), file);
+  for (const file of ['catalog-cache', 'catalog-wire'])
+    assert.ok(foundation.includes(`tests/ui/checks/${file}.test.mjs`), file);
+  assert.match(foundation, /npm --prefix tests\/ui ci --no-audit --no-fund/);
+  assert.match(build, /needs: foundation/);
+  assert.match(checks, /needs: build/);
+  assert.doesNotMatch(checks, /name: Browser-check infrastructure regression tests/);
+  assert.match(checks, /name: Install pinned UI consumer tooling/);
+  assert.doesNotMatch(foundation, /tap-hit\.test\.mjs/);
+  assert.match(
+    checks,
+    /name: Browser touch infrastructure regression tests\n        if: matrix\.suite == 'interaction'\n        run: node --test tests\/ui\/tap-hit\.test\.mjs/,
+  );
+  assert.equal(workflow.split('node --test tests/ui/tap-hit.test.mjs').length - 1, 1);
 });

@@ -55,8 +55,6 @@ jobs:
         if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache cargo registry and target
         if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
@@ -70,11 +68,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: Update and verify pricing goldens
+      # Native pricing has direct tests. Full Rust and Viewer validation is
+      # dispatched below on the committed candidate; legacy model snapshots omit cost.
+      - name: Verify native pricing contracts
         if: steps.compare.outputs.parse_failure == 'false' && steps.compare.outputs.changed == 'true'
         run: |
-          SEMON_UPDATE_GOLDEN=1 cargo test -p semon-sessions
-          cargo test -p semon-sessions
+          cargo test -p semon-sessions --lib --locked pricing::
 
       - name: Open or update the pricing issue on a parse failure
         if: steps.compare.outputs.parse_failure == 'true'
@@ -122,11 +121,6 @@ jobs:
           git switch -C chore/pricing-sync
           git add \
             crates/semon-sessions/src/pricing.json \
-            crates/semon-sessions/src/model/golden/answers.json \
-            crates/semon-sessions/src/model/golden/lineage.json \
-            crates/semon-sessions/src/model/golden/relays.json \
-            crates/semon-sessions/src/model/golden/spawns.json \
-            crates/semon-sessions/src/model/golden/turns.json \
             scripts/pricing/fixtures/anthropic.html \
             scripts/pricing/fixtures/openai.html
           git commit -F "$commit_message"

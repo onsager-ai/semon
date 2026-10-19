@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# A newer PR revision supersedes only that PR's earlier Rust run.
+concurrency:
+  group: rust-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: fmt, clippy, test
@@ -87,6 +92,7 @@ jobs:
       - name: Collection pause boundaries before broad regressions
         run: |
           python3 -m unittest discover -s tests/spikes -p test_collection_pause.py -v
+          python3 tests/ssh/test_controller_supervisor.py
           cargo test -p semon-sessions --lib --locked paused_find_ -- --nocapture
           cargo test -p semon-sessions --lib --locked collection_control_refuses_ -- --nocapture
           cargo test -p semon-cli --bin semon --locked paused_delivery_refuses_ -- --nocapture

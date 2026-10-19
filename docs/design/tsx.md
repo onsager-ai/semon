@@ -13,7 +13,7 @@ Integration and production acceptance are recorded in issue #224.
 
 ## Current decision — 2026-10-02
 
-Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.com/onsager-ai/semon/issues/224): “Okay. Go for preact then. Record that decision and start a new codex cloud session to implement”. This supersedes the custom `h()`/no-runtime decision below. The benchmark remains a historical comparison, including its sample runtime costs; those are not production-viewer measurements.
+Marvin selected **Preact + TypeScript/TSX + esbuild** in [#224](https://github.com/onsager-ai/semon/issues/224): “Okay. Go for preact then. Record that decision and start a new codex cloud session to implement”. This supersedes the custom `h()`/no-runtime decision below. The benchmark remains a historical comparison, including its sample runtime costs; those are not production-viewer measurements. Its one-off CI workflow is retired; rerun `bash docs/design/tsx-bench/bench.sh` explicitly when a new comparison is needed.
 
 The top-level `ui/` stays in Semon. Use native Preact; `preact/compat` needs a demonstrated dependency requirement. CSS, URLs, CSP, embedding prelude, `window.semonEmbed` and `semon:refresh` / `semon:polled` / `semon:ended` stay unchanged. Rust embeds checked-in production assets and requires no Node or build script.
 
@@ -217,7 +217,7 @@ This PR begins the migration; legacy rendering remains. Merge and deployment req
 The original September 29–30 record follows unchanged. References to the helper, standalone installer, local-machine restrictions, unmerged overhaul PRs and future file moves describe that earlier proposal, not the active cloud-session build instructions above. No AGENTS.md or CLAUDE.md exists in either refreshed checkout; the authorized cloud task includes local build/test work.
 
 
-Status: decided 2026-09-29 and 2026-09-30. The comparison below is kept as the record of why. The numbers come from `docs/design/tsx-bench/` and its workflow, `.github/workflows/tsx-bench.yml`.
+Status: decided 2026-09-29 and 2026-09-30. The comparison below is kept as the record of why. The numbers come from `docs/design/tsx-bench/` and the historical `tsx-bench.yml` workflow retained in Git history.
 
 ## Decision
 
