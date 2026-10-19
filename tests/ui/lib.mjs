@@ -23,9 +23,14 @@ export const ENV = {
 };
 fs.mkdirSync(ENV.out, { recursive: true });
 
-export const launch = () =>
+export const launch = ({ baselineRaster = false } = {}) =>
   chromium.launch({
-    args: ['--disable-gpu', '--font-render-hinting=none'],
+    args: [
+      '--disable-gpu',
+      '--font-render-hinting=none',
+      // Exact visual evidence must not select a different Skia CPU path per runner.
+      ...(baselineRaster ? ['--disable-skia-runtime-opts'] : []),
+    ],
     ...(process.platform === 'linux'
       ? {
           env: {
