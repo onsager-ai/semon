@@ -1526,6 +1526,47 @@ mod tests {
     }
 
     #[test]
+    fn catalog_runtime_churn_does_not_starve_unrelated_history_or_new_sessions() {
+        let fixture = Fixture::new();
+        let paths = (0..40)
+            .map(|n| fixture.source(&format!("history-{n:03}")))
+            .collect::<Vec<_>>();
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        for path in &paths {
+            crate::events::scan_file(path, "claude", &mut cache, &mut false).unwrap();
+        }
+        let paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        cache.begin_semantic_stage(&paths, &crate::native_evidence::query_runtime_generation(&fixture.options).unwrap()).unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        work.events = Some(cache);
+        let relative = fixture.codex_source("new-during-history", None, 1);
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
+        let mut complete = false;
+        for turn in 0..256 {
+            if turn % 2 == 0 {
+                facts.codex_locks.insert("unrelated-running-thread".into(), 42);
+            } else {
+                facts.codex_locks.remove("unrelated-running-thread");
+            }
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+            intent.complete().unwrap();
+            if evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap() {
+                complete = true;
+                break;
+            }
+        }
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let history: i64 = db.query_row("SELECT count(*) FROM session_catalog WHERE lifecycle='current' AND harness='claude'", [], |r| r.get(0)).unwrap();
+        let new_session: i64 = db.query_row("SELECT count(*) FROM session_catalog WHERE lifecycle='current' AND session_key='new-during-history'", [], |r| r.get(0)).unwrap();
+        assert!(complete && history == 40 && new_session == 1, "unrelated runtime churn starved publication: complete={complete} history={history} new_session={new_session}");
+        drop(work);
+        evidence.retire();
+    }
+
+    #[test]
     fn native_usage_history_restart_converges_without_repair_revision_churn() {
         use std::io::Write;
 
