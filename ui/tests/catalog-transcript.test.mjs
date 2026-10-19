@@ -358,3 +358,36 @@ test('runtime observation fences loaded ranges while preserving their source ide
   assert.equal(fresh.selectedPage().projection.errorsGeneration, 'c'.repeat(64));
   assert.equal(fresh.entries()[0].entry.text, 'New qualified runtime rendering');
 });
+
+test('initially incomplete native bodies can recover under the same qualified projection', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const missing = page();
+  missing.entries[0].text = '';
+  missing.entries[0].freshness = { state: 'incomplete' };
+  store.accept(store.request(0, 2), missing);
+  const version = store.revision;
+  const recovered = page();
+  recovered.entries[0].freshness = { state: 'cached' };
+  assert.equal(store.accept(store.request(0, 2), recovered), true);
+  assert.equal(store.entries()[0].entry.text, 'Original native text');
+  assert.ok(store.revision > version);
+
+  for (const change of [
+    (body) => body.entries[0].provenance.offset++,
+    (body) => body.entries[0].provenance.source.prefix_sha256.fill(9),
+    (body) => (body.entries[0].entry_id = 'different-event'),
+    (body) => (body.entries[0].observed_at = 100),
+    (body) => (body.entries[0].turn = 'different-turn'),
+    (body) => (body.projection.generation = 'c'.repeat(64)),
+    (body) => (body.projection.errors_generation = 'c'.repeat(64)),
+  ]) {
+    const guarded = new CatalogTranscriptStore();
+    guarded.select({ source_key: 'source', catalog_key: 'session' });
+    guarded.accept(guarded.request(0, 2), missing);
+    const changed = page();
+    change(changed);
+    assert.throws(() => guarded.accept(guarded.request(0, 2), changed));
+    assert.equal(guarded.entries()[0].entry.text, '');
+  }
+});
