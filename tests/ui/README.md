@@ -47,7 +47,7 @@ its completion witness is the native-publication success message in the CI log.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
-  pixel findings remain in the reports. `visual-acceptance.json` starts empty;
+  pixel findings remain in the reports. `visual-acceptance.json` records only exact reviewed states;
   a reviewed entry can accept only one exact comparator, scope, state, candidate
   runtime-binary fingerprint, reference pins, screenshot/diff hashes and bounded
   text/geometry evidence hashes. The reviewed candidate commit is recorded as
@@ -55,6 +55,34 @@ its completion witness is the native-publication success message in the CI log.
   registry does not create a self-referential commit hash or imply ancestry.
   Stale, unreviewed or incomplete records fail closed. No broad waiver, mask,
   auto-approval or threshold change can turn a mismatch green.
+- The 2026-10-19 unified Hub application review classifies the historical passive
+  reader notice/disclosure as an obsolete reference under design brief section 11.
+  The task owner explicitly accepted its removal after reviewing the 820px light
+  Thinking comparison. Actual-image inspection also covers phone collapsed/tools,
+  desktop expanded output, failed children and long-transcript clipping. The
+  smaller dock exposes existing transcript text and moves Jump to Bottom. In the
+  eight long mobile full-page frames it also shortens the document and therefore
+  moves the fixed header captured at the latest scroll position; shared
+  chrome, visible recorded text and controls retain their existing presentation.
+  The original CI evidence remains at [run 39213975213](https://github.com/onsager-ai/semon/actions/runs/39213975213/artifacts/12168508595):
+  42 preservation and 69 main-frame raw differences, no failed strict regions and
+  no coverage errors. The three closed Atlas tool-group frames also contain a
+  hidden `textContent` wording change (`no result` → `Result not recorded`); their
+  visible screenshot difference is only the removed notice. Their exact bindings
+  do not approve different expanded output. The registry retains separate records
+  for every reviewed size/theme/state and its original pinned references; raw
+  findings and the strict 0.0001 maximum ratio remain unchanged.
+- Full-frame PNGs and their bounded DOM/paint evidence share one animation
+  transaction. As with the existing screenshot suppression, finite effects finish;
+  infinite effects pause at time zero through both reads, then resume. The former
+  screenshot-only suppression resumed effects before diagnostics and made exact
+  hashes depend on wall-clock timing. Both independent applications use the same
+  transaction; no content, selectors, regions, styles or pixel tolerances are
+  removed. A bounded consecutive-PNG equality check also rejects unstable mobile
+  full-page compositor tiles after scrolling fixed/clipped content. It does not
+  select a favorable comparison: unchanged consecutive paints are required before
+  any reference comparison. `capture-paint.test.mjs` checks the timing-dependent negative control,
+  repeated PNG/evidence equality, visible-content changes and failure cleanup.
 - Captures require bounded API/DOM quiescence and the requested rendered title,
   session heading or exact Trace root turn. Reference menu cleanup uses its real
   Close button and waits for the overlay history entry to finish. The original

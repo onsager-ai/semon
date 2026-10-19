@@ -159,6 +159,15 @@ Capability recovery restores input; readable history never grants send authority
 Drafts belong to source and session identity and clear only after confirmed
 acceptance of that exact draft. Unknown delivery remains blocked from replay.
 
+During the collection pause, the passive reader omits the routine “Native session
+controls are unavailable” notice and its disabled-input disclosure. This current
+presentation supersedes that part of the historical complete-application reference;
+it preserves saved history, Jump to Bottom and actionable reading errors. Optional
+control components retain the draft and uncertain-delivery rules above. This does
+not enable control delivery. The owner confirmed the notice removal during the
+2026-10-19 unified Hub application review; exact screenshot acceptance remains
+governed by the existing visual comparator.
+
 The written staging requirements are the implementation contract when the owner
 authenticated Site cannot be opened. This section changes the conversation reader
 only; new-task composer variants retain their existing design contracts.
