@@ -122,14 +122,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: onsager-ai/dev-skills
-          ref: b5b75ec6c404f20ee7e7ee7f0d963b9c9749f9b8
+          ref: 7bc8f25f90994045df487517d9e43ff5ae078320
           path: canonical
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.x
       - name: Prepare generated projections against the reviewed prerequisite
         run: |
-          node canonical/agent-config/sync.mjs --repo consumer --source canonical --revision b5b75ec6c404f20ee7e7ee7f0d963b9c9749f9b8
+          node canonical/agent-config/sync.mjs --repo consumer --source canonical --revision 7bc8f25f90994045df487517d9e43ff5ae078320
           node consumer/.agents/sync.mjs --repo consumer --source canonical --check
           git -C consumer add --intent-to-add .agents .claude
           git -C consumer diff --binary > "$RUNNER_TEMP/agent-config-review.patch"
