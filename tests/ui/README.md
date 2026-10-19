@@ -28,6 +28,32 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
+### Storybook owner and coverage crosswalk
+
+`storybook-contract.json` derives the required migration set from the current
+visual acceptance records, 39-frame visual coverage manifest, component-gallery
+states, and the six active session-inspection pen frames (`Nt3eb`, `gZYIY`,
+`vGVHj`, `nGo6u`, `Oo357`, `gbtK3`). The compact related-session descendants
+inherit their active parent-frame contract unless the current design brief
+explicitly supersedes that historical canvas surface. The optional hosted
+Sessions Machine-filter descendant is mapped to the production facet/select
+owners. Each historical route frame remains tied to the existing served
+application visual check, while the Storybook stories import Semon's production
+owners for Home, Sessions/Catalog, Sources candidates, Machines, Analytics,
+Trace, transcript states, menus, filters, sheets and shared controls.
+
+After `npm --prefix ui run storybook:build`,
+`npm --prefix tests/ui run storybook:contract` derives each required frame and
+exact acceptance record, verifies the story IDs against Storybook's built index,
+and rejects unknown, missing or orphaned mappings. `npm --prefix
+tests/ui run storybook:capture` captures each story at 390, 820 and 1280 CSS
+pixels in light and dark schemes, then writes candidate images and a report to
+the usual UI output directory. The reference map is deliberately empty while
+these Storybook captures await separate review. A missing or unapproved
+reference is a pending failure; capture cannot write or approve a baseline.
+Existing pixel thresholds, ratchets, masks, dimensions, required captures and
+the served/native interaction suites stay under their current comparators.
+
 - Every functional assertion stays required, including live updates, session order,
   embedding, approval reviews, transcript paging, and error navigation.
 - The touch audit checks phone, landscape, and tablet viewports; top-level screens,

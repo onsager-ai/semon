@@ -7,7 +7,8 @@ import {
   type AccountMenuProps,
 } from '../../src/lib';
 
-const app = document.querySelector<HTMLElement>('.app')!;
+export function mountDesignGallery(app: HTMLElement) {
+const overlays = new Set<{ dialog: HTMLDialogElement; destroy(): void }>();
 const chrome = createShellChrome({
   account: {
     place() {},
@@ -163,9 +164,9 @@ const select = createSelect({
   ],
   value: 'new',
 });
-document.querySelector('#select-root')!.append(select.el);
+chrome.slots.content.querySelector('#select-root')!.append(select.el);
 function openSheet() {
-  const trigger = document.querySelector<HTMLButtonElement>('#sheet-trigger')!;
+  const trigger = chrome.slots.content.querySelector<HTMLButtonElement>('#sheet-trigger')!;
   const sheet = createNativeSheet(
     {
       className: 'kids-sheet',
@@ -177,21 +178,25 @@ function openSheet() {
     {
       opened() {},
       closed() {
+        overlays.delete(sheet);
         trigger.focus();
       },
     },
   );
   render(<p class="empty">No items match. Adjust your filters.</p>, sheet.body);
   sheet.cleanup(() => render(null, sheet.body));
+  overlays.add(sheet);
   sheet.show();
 }
 function openPanel() {
-  const trigger = document.querySelector<HTMLButtonElement>('#panel-trigger')!;
-  const panel = createPanelChrome(
+  const trigger = chrome.slots.content.querySelector<HTMLButtonElement>('#panel-trigger')!;
+  let panel: ReturnType<typeof createPanelChrome> | null = null;
+  panel = createPanelChrome(
     { title: 'Example panel', label: 'Example panel' },
     {
       opened() {},
       closed() {
+        if (panel) overlays.delete(panel);
         trigger.focus();
       },
     },
@@ -199,19 +204,22 @@ function openPanel() {
   const content = document.createElement('p');
   content.textContent = 'Details lead with what matters.';
   panel.body.append(content);
+  overlays.add(panel);
   panel.show();
 }
-document.addEventListener('keydown', (event) => {
+const onKeyDown = (event: KeyboardEvent) => {
   if (event.key === 'Escape') {
     if (chrome.account.open) chrome.account.escape();
-    else if (!document.querySelector('dialog[open]')) chrome.closeDrawer();
+    else if (![...overlays].some((overlay) => overlay.dialog.open)) chrome.closeDrawer();
   }
-});
-window.addEventListener(
-  'pagehide',
-  () => {
-    select.destroy();
-    chrome.destroy();
-  },
-  { once: true },
-);
+};
+document.addEventListener('keydown', onKeyDown);
+return () => {
+  document.removeEventListener('keydown', onKeyDown);
+  for (const overlay of [...overlays]) overlay.destroy();
+  overlays.clear();
+  select.destroy();
+  render(null, chrome.slots.content);
+  chrome.destroy();
+};
+}

@@ -10,7 +10,9 @@
     "fixture": "node fixture.mjs",
     "gaps": "node gaps.mjs",
     "pixels": "node pixels.mjs",
-    "checks": "node checks/run.mjs"
+    "checks": "node checks/run.mjs",
+    "storybook:contract": "node storybook-contract.mjs",
+    "storybook:capture": "node storybook-capture.mjs"
   },
   "dependencies": {
     "pixelmatch": "7.2.0",
