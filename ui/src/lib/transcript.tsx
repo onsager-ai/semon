@@ -187,37 +187,6 @@ interface SessionOwner {
   change(key: string): void;
 }
 const owners = new WeakMap<HTMLElement, SessionOwner>();
-/** Saved reading needs no control owner, discovery, draft or delivery action. */
-class PassiveReadingNotice extends Component<{ owner: SessionOwner }, { disclosed: boolean }> {
-  state = { disclosed: false };
-  render() {
-    const { disclosed } = this.state;
-    return (
-      <section class="local-control" aria-label="Saved session availability">
-        <button
-          type="button"
-          class="composer-unavailable"
-          aria-label="Native session controls are unavailable."
-          aria-expanded={disclosed}
-          onClick={(event) => {
-            if (!this.props.owner.disposed && event.currentTarget.isConnected)
-              this.setState({ disclosed: !disclosed });
-          }}
-        >
-          <span role="status" data-transcript-observation="">
-            Native session controls are unavailable.
-          </span>
-          <span aria-hidden="true">{disclosed ? '⌃' : '⌄'}</span>
-        </button>
-        {disclosed && (
-          <p role="status">
-            Saved session history remains readable. Session controls are unavailable here.
-          </p>
-        )}
-      </section>
-    );
-  }
-}
 /** The existing page tree owns this leaf; status never walks transcript blocks. */
 class SessionControls extends Component<{ owner: SessionOwner }> {
   componentDidMount() {
@@ -1148,16 +1117,13 @@ export function renderSessionScreen(
               if (node && state.jump && state.jump.parentNode !== node) node.append(state.jump);
             }}
           />
-          {view.observation === 'Cached history' &&
-            (view.control ? (
-              <div class="local-control">
-                <div class="composer-unavailable" role="status" data-transcript-observation="">
-                  <span>{view.observation}</span>
-                </div>
+          {view.observation === 'Cached history' && view.control && (
+            <div class="local-control">
+              <div class="composer-unavailable" role="status" data-transcript-observation="">
+                <span>{view.observation}</span>
               </div>
-            ) : (
-              <PassiveReadingNotice owner={state} />
-            ))}
+            </div>
+          )}
         </div>
         {view.footer && (
           <div class="session-foot">
