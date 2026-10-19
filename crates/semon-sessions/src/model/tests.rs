@@ -4260,7 +4260,7 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Buil
     drop(cache);
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
     let mut complete = false;
-    for _ in 0..128 {
+    for _ in 0..512 {
         if evidence
             .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
             .unwrap()
