@@ -4120,19 +4120,25 @@ fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     for turn in &oracle.turns {
         for edge in &turn.sent {
-            let actual: String = db
-                .query_row(
-                    "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
-                    rusqlite::params![turn.sid, edge],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let actual: Value = serde_json::from_str(&actual).unwrap();
-            assert_eq!(
-                actual["source_turn"],
-                json!(turn.id),
-                "{edge} recorded sender turn"
-            );
+            let handoff = oracle.handoffs.iter().find(|h| h.id == *edge).unwrap();
+            for owner in [Some(turn.sid.as_str()), handoff.to.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                let actual: String = db
+                    .query_row(
+                        "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                        rusqlite::params![owner, edge],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let actual: Value = serde_json::from_str(&actual).unwrap();
+                assert_eq!(
+                    actual["source_turn"],
+                    json!(turn.id),
+                    "{owner}: {edge} recorded sender turn"
+                );
+            }
         }
     }
 }
