@@ -111,7 +111,7 @@ for (const file of ['rust', 'ui'])
     assert.notEqual(policy('push').group, policy('workflow_dispatch').group);
   });
 
-test('browser infrastructure runs once before all binary and browser consumers', () => {
+test('infrastructure has one foundation owner and touch checks have one browser owner', () => {
   const workflow = fs.readFileSync(
     new URL('../../.github/workflows/ui.yml', import.meta.url),
     'utf8',
@@ -125,7 +125,6 @@ test('browser infrastructure runs once before all binary and browser consumers',
     'capture-network',
     'suite-plan',
     'pixel-diff',
-    'tap-hit',
     'visual-contract',
     'preservation-contract',
     'dom-evidence',
@@ -138,4 +137,10 @@ test('browser infrastructure runs once before all binary and browser consumers',
   assert.match(checks, /needs: build/);
   assert.doesNotMatch(checks, /name: Browser-check infrastructure regression tests/);
   assert.match(checks, /name: Install pinned UI consumer tooling/);
+  assert.doesNotMatch(foundation, /tap-hit\.test\.mjs/);
+  assert.match(
+    checks,
+    /name: Browser touch infrastructure regression tests\n        if: matrix\.suite == 'interaction'\n        run: node --test tests\/ui\/tap-hit\.test\.mjs/,
+  );
+  assert.equal(workflow.split('node --test tests/ui/tap-hit.test.mjs').length - 1, 1);
 });
