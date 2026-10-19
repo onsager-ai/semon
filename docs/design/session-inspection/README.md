@@ -177,11 +177,6 @@ The changed browser cases are in `ui/tests/catalog-viewer-browser.mjs` and
 Hub consumer validation and its reviewed-pin adoption boundary are recorded in
 the companion Hub delivery. CI remains the final exact-head merge gate.
 
-## Continuing alignment
+## Current workflow
 
-Future Codex UI work reads DESIGN.md and existing ownership contracts first,
-reuses semantic CSS roles/components, updates the native canvas when intent
-changes, validates representative states at matching viewports and records
-intentional deviations in the PR. Review pixel diffs before updating references.
-These are additions to the existing repository brief and pinned skill discovery,
-not a second instruction system or a new dependency package.
+The preceding delivery record and its canvas/screenshots remain historical evidence. Future UI work follows the current [source-first design workflow](../ai-design-workflow.md) and complete [Storybook coverage contract](../../../tests/ui/storybook-contract.json): implement production components, map every active state, exercise interactions and capture with Playwright, inspect actual images, then propose any justified reference change as an unapproved Git-reviewed candidate. Canvas edits are optional and do not establish visual acceptance.

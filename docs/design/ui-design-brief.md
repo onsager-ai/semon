@@ -4,6 +4,7 @@ This source-derived brief retains applicable visual foundations and approved
 reader/composer refinements. Current task scope and settled product decisions
 supersede obsolete capability invitations and copy. The shared design contract,
 canonical CSS and actual reviewed application references retain their ownership.
+The complete original canvas/baseline inventory and active-state coverage live in the [Storybook contract](../../tests/ui/storybook-contract.json). Current product contracts determine active intent; retained `.pen` files and exports are historical evidence and optional exploration inputs, not required acceptance tools.
 
 Snapshot provenance: initial viewer `274f0b9bb43f65982863a22c177413c04d805740`;
 section-specific source revisions remain below. These are historical provenance,
@@ -18,9 +19,7 @@ Preserve the compact actual viewer, shared semantic CSS roles, Instrument Sans
 and JetBrains Mono, existing controls, flat rows, reading width and responsive
 navigation. The source in `crates/semon-sessions/src/viewer.css` owns tokens;
 `docs/design/design-contract.md` owns type, contrast and touch constraints.
-Use real screenshots and the editable [session canvas](session-inspection/session-inspection.pen)
-for review. A canvas is a derived intent model, not a replacement pixel oracle.
-Keep native forms, keyboard/focus, scroll and lifecycle owners intact.
+Use deterministic Storybook/Playwright states mapped to production sources in the contract inventory; inspect actual matched reference, candidate and diff images. The [session canvas](session-inspection/session-inspection.pen) is retained historical intent and remains optional. Keep native forms, keyboard/focus, scroll and lifecycle owners intact.
 
 Routine source/cache/search architecture explanations are not required interface
 copy. Preserve correct source-scoped metadata filtering and meaningful exceptional
@@ -65,8 +64,7 @@ Image Gen originals and rejection provenance are in
 image is an exploration, not a pixel specification: generated text and state
 details can be inaccurate. The implementation deliberately keeps the original
 message bubble and navigation shapes rather than adopting those redraw changes.
-The native session canvas records the linked-session surface component; actual
-before/after images verify unchanged reader geometry at 390/1280px in both themes.
+The retained session canvas records the linked-session surface intent. The active Storybook contract and actual matched image review determine acceptance for these states at their required viewports/themes.
 Hub consumes these shared styles only after reviewed source adoption.
 
 ## 10. Annotation refinement: compact related sessions
@@ -99,9 +97,7 @@ The bounded catalog does not expose complete relationship context: do not
 fabricate subagent/handoff links there. This pattern applies where real resolved
 relationships already exist.
 
-The editable canvas remains `session-inspection/session-inspection.pen`.
-Its current compact disclosure board supersedes the explicitly historical
-linked-session board. Annotation screenshots/checks are in
+The historical canvas `session-inspection/session-inspection.pen` retains the compact disclosure exploration; it is not required to implement or accept this behavior. The active contract and Storybook coverage inventory supersede the explicitly historical linked-session board. Annotation screenshots/checks are in
 `session-inspection/annotation-refinement/`; previous Image Gen
 proposals are retained as historical exploration, not implementation references.
 
@@ -187,4 +183,4 @@ Preserve existing shared tokens and control geometry. Update only references of
 the superseded hosted picker/default Machine state; generic filter and reader
 baselines remain authoritative. Review desktop/mobile list, open Machine filter,
 loading, empty and unavailable states in both themes using actual served data.
-The session canvas's `Hosted Sessions · optional Machine` note records this change.
+The session canvas's `Hosted Sessions · optional Machine` note is retained history; the active product contract and Storybook inventory define current coverage.
