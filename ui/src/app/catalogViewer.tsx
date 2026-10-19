@@ -355,6 +355,11 @@ export function createCatalogViewer(
       },
       navigate(href) {
         if (!history.state?.sheet) return false;
+        const destination = applicationURL(href);
+        if (destination) {
+          navigateApplication(destination.pathname + destination.search + destination.hash);
+          return true;
+        }
         const { sheet, ...route } = history.state;
         history.replaceState(route, '');
         location.assign(href);
@@ -879,6 +884,16 @@ export function createCatalogViewer(
     render(null, root);
     root.replaceChildren();
   }
+  function applicationURL(href: string) {
+    const url = new URL(href, location.href);
+    return viewerHost?.pages &&
+      url.origin === location.origin &&
+      (viewerHost.pages.match(url) ||
+        ['/', '/sessions', '/analytics', '/timeline'].includes(url.pathname) ||
+        /^\/(s|trace)\//.test(url.pathname))
+      ? url
+      : null;
+  }
   function navigateApplication(href: string) {
     const { sheet: _sheet, drawer: _drawer, ...state } = history.state ?? {};
     history.replaceState(state, '');
@@ -978,15 +993,7 @@ export function createCatalogViewer(
       (url.pathname === location.pathname && url.search === location.search && url.hash)
     )
       return;
-    if (
-      !viewerHost?.pages ||
-      !(
-        viewerHost.pages.match(url) ||
-        ['/', '/sessions', '/analytics', '/timeline'].includes(url.pathname) ||
-        /^\/(s|trace)\//.test(url.pathname)
-      )
-    )
-      return;
+    if (!applicationURL(url.href)) return;
     event.preventDefault();
     navigateApplication(url.pathname + url.search + url.hash);
   });

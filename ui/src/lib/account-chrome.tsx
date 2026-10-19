@@ -87,10 +87,26 @@ export function createAccountChrome(host: AccountChromeHost): AccountChrome {
             role="menu"
             aria-label="Account"
             onClick={(event) => {
+              if (
+                !compact ||
+                event.defaultPrevented ||
+                event.button !== 0 ||
+                event.altKey ||
+                event.ctrlKey ||
+                event.metaKey ||
+                event.shiftKey
+              )
+                return;
               const target = event.target;
               const link =
                 target instanceof Element ? target.closest<HTMLAnchorElement>('a[href]') : null;
-              if (compact && link && host.navigate(link.href)) event.preventDefault();
+              if (
+                !link ||
+                link.hasAttribute('download') ||
+                (link.target && link.target !== '_self')
+              )
+                return;
+              if (host.navigate(link.href)) event.preventDefault();
             }}
             onSubmit={(event) => {
               if (compact && event.target instanceof HTMLFormElement && host.submit(event.target))
