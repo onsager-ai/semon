@@ -458,9 +458,11 @@ impl NativeEvidence {
                                 .into_owned()
                         })
                         .collect::<Vec<_>>();
-                    if cache
-                        .begin_semantic_stage(&paths, &query_runtime_generation(&self.options)?)?
-                        != crate::events::Outcome::Written
+                    if self.begin_catalog_stage(
+                        cache,
+                        &paths,
+                        &query_runtime_generation(&self.options)?,
+                    )? != crate::events::Outcome::Written
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -506,6 +508,20 @@ impl NativeEvidence {
                 .session_catalog_generation()
                 .ok_or_else(|| io::Error::other("backfill generation missing"))?,
         ))
+    }
+
+    fn begin_catalog_stage(
+        &self,
+        cache: &mut EventCache,
+        paths: &[String],
+        runtime: &str,
+    ) -> io::Result<crate::events::Outcome> {
+        // The store checks journal authority in the stage transaction.
+        if self.options.facts.is_some() {
+            cache.begin_semantic_stage_with_journal(paths, runtime, true)
+        } else {
+            cache.begin_semantic_stage(paths, runtime)
+        }
     }
 
     fn semantic_write_conflict(
@@ -558,7 +574,7 @@ impl NativeEvidence {
             return Ok(false);
         }
         let runtime = query_runtime_generation(&self.options)?;
-        match cache.begin_semantic_stage(&[], &runtime)? {
+        match self.begin_catalog_stage(cache, &[], &runtime)? {
             crate::events::Outcome::Conflict => return Ok(false),
             crate::events::Outcome::Written => {}
             _ => {
@@ -1110,9 +1126,11 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            if cache
-                .begin_semantic_stage(&staged_paths, &query_runtime_generation(&self.options)?)?
-                != crate::events::Outcome::Written
+            if self.begin_catalog_stage(
+                cache,
+                &staged_paths,
+                &query_runtime_generation(&self.options)?,
+            )? != crate::events::Outcome::Written
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -1201,7 +1219,8 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
-                if cache.begin_semantic_stage(
+                if self.begin_catalog_stage(
+                    cache,
                     &staged_paths,
                     &query_runtime_generation(&self.options)?,
                 )? != crate::events::Outcome::Written

@@ -44,3 +44,7 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions native_usage_ -- --nocapture
           cargo test --locked -p semon-sessions native_tree:: -- --nocapture
+      - name: Verify catalog progress during unrelated runtime changes
+        run: cargo test --locked -p semon-sessions catalog_runtime_ -- --nocapture
+      - name: Verify bounded cross-batch native lineage recovery
+        run: cargo test --locked -p semon-sessions cold_codex_family_crossing_batches_preserves_every_native_parent -- --nocapture
