@@ -1812,6 +1812,7 @@ struct Builder<'a> {
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
     staged_endpoints: BTreeMap<String, relation_stage::Endpoint>,
+    staged_origins: BTreeMap<String, relation_stage::RelationOrigin>,
     staged_epoch: Option<i64>,
     matching_refs: Option<BTreeSet<Ref>>,
 }
@@ -1893,6 +1894,7 @@ impl<'a> Builder<'a> {
             shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
             staged_endpoints: BTreeMap::new(),
+            staged_origins: BTreeMap::new(),
             staged_epoch: None,
             matching_refs: None,
         }
@@ -7638,7 +7640,7 @@ fn build_sources_inner(
         }
     }
     if let Some(relationships) = staged_relationships {
-        timed!("staged_relationships", relationships.install(&mut builder)?);
+        timed!("staged_relationships", relationships.replay(&mut builder)?);
     } else {
         timed!("claude_spawns", builder.claude_spawns()?);
         timed!("codex_spawns", builder.codex_spawns()?);
@@ -7854,7 +7856,7 @@ fn build_sources_inner(
                         tx.get(&row.key).map(Arc::as_ref),
                     )
                     .with_origin_turns(&holding_turns, &ambiguous_holding_turns)
-                    .with_staged_origin_turns(staged_relationships, |sender| {
+                    .with_staged_origin_turns(staged_relationships.map(|_| &builder.staged_origins), |sender| {
                         builder
                             .by_key
                             .get(sender)
