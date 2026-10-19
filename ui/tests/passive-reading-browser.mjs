@@ -11,7 +11,7 @@ const css = fs.readFileSync(
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export {renderSessionScreen} from './src/lib/transcript'; export {releaseScreen} from './src/lib/screens';",
+      "export {renderSessionScreen, updateSessionJump} from './src/lib/transcript'; export {releaseScreen} from './src/lib/screens';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -23,7 +23,7 @@ const { outputFiles } = await build({
 
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
-    test(`saved reading notice remains passive and preserves responsive spacing at ${width}px ${colorScheme}`, async () => {
+    test(`saved reading omits paused controls and preserves Jump and responsive spacing at ${width}px ${colorScheme}`, async () => {
       const browser = await chromium.launch();
       try {
         const page = await browser.newPage({
@@ -96,85 +96,54 @@ for (const width of [390, 1280])
             },
           );
           blocks.map = () => {
-            throw Error('Passive disclosure walked the saved transcript');
+            throw Error('Passive Jump walked the saved transcript');
           };
         });
-        const button = page.getByRole('button', {
-            name: 'Native session controls are unavailable.',
-            exact: true,
-          }),
-          explanation = page.getByText(
-            'Saved session history remains readable. Session controls are unavailable here.',
-            { exact: true },
-          ),
-          transcript = await page.locator('[data-entry-key="saved-entry"]').elementHandle();
-        try {
-          await button.waitFor();
-        } catch (error) {
-          const diagnostic = await page.evaluate(() => {
-            const reader = document.querySelector('#reader');
-            return {
-              html: reader?.outerHTML.slice(0, 8000),
-              unavailable: [...document.querySelectorAll('.composer-unavailable')]
-                .slice(0, 4)
-                .map((node) => {
-                  const bounds = node.getBoundingClientRect(),
-                    style = getComputedStyle(node);
-                  return {
-                    tag: node.tagName,
-                    text: node.textContent,
-                    role: node.getAttribute('role'),
-                    ariaLabel: node.getAttribute('aria-label'),
-                    hidden: node.hidden,
-                    display: style.display,
-                    visibility: style.visibility,
-                    bounds: {
-                      x: bounds.x,
-                      y: bounds.y,
-                      width: bounds.width,
-                      height: bounds.height,
-                    },
-                  };
-                }),
-            };
-          });
-          diagnostic.aria = (await page.locator('#reader').ariaSnapshot()).slice(0, 4000);
-          diagnostic.pageErrors = errors.slice(0, 8);
-          throw new Error('Passive reading fixture: ' + JSON.stringify(diagnostic), {
-            cause: error,
-          });
-        }
-        assert.equal(await button.getAttribute('aria-expanded'), 'false');
-        assert.equal(await explanation.count(), 0);
-        const geometry = await button.evaluate((node) => ({
-          button: node.getBoundingClientRect().height,
-          dock: node.closest('.session-dock').getBoundingClientRect().height,
-          pageGap: getComputedStyle(document.querySelector('#page')).rowGap,
-          readerGap: getComputedStyle(document.querySelector('#reader')).rowGap,
-        }));
-        assert.equal(geometry.pageGap, width === 390 ? '16px' : '24px');
-        assert.equal(geometry.readerGap, geometry.pageGap);
-        assert.equal(geometry.button, width === 390 ? 44 : 36);
-        assert.equal(geometry.dock, geometry.button + 8);
+        const transcript = await page.locator('[data-entry-key="saved-entry"]').elementHandle();
         const noActivePaths = async () => {
+          assert.equal(
+            await page
+              .locator('.composer-unavailable, [aria-label="Saved session availability"]')
+              .count(),
+            0,
+          );
+          assert.equal(
+            await page
+              .getByText('Native session controls are unavailable.', { exact: true })
+              .count(),
+            0,
+          );
           assert.equal(
             await page.locator('textarea, input, form, .session-composer-panel').count(),
             0,
           );
           for (const name of ['Open Composer', 'Send', 'Stop response', 'Reconnect', 'Allow once'])
             assert.equal(await page.getByRole('button', { name, exact: true }).count(), 0);
-          assert.deepEqual(await page.evaluate(() => actions), []);
           assert.deepEqual(
             requests.filter((pathname) => pathname.startsWith('/api/')),
             [],
           );
         };
         await noActivePaths();
-        await button.focus();
+        const geometry = await page.locator('#reader').evaluate((node) => ({
+          pageGap: getComputedStyle(document.querySelector('#page')).rowGap,
+          readerGap: getComputedStyle(node).rowGap,
+        }));
+        assert.equal(geometry.pageGap, width === 390 ? '16px' : '24px');
+        assert.equal(geometry.readerGap, geometry.pageGap);
+        await page.evaluate(() => {
+          const target = document.createElement('div');
+          target.className = 'jump-wrap';
+          ReadingNotice.updateSessionJump(reader, true, 1, false, target);
+        });
+        const jump = page.locator('#jump-bottom');
+        await jump.focus();
         await page.keyboard.press('Enter');
-        await explanation.waitFor();
-        assert.equal(await button.getAttribute('aria-expanded'), 'true');
-        assert.equal(await button.evaluate((node) => node === document.activeElement), true);
+        assert.deepEqual(await page.evaluate(() => actions), ['jump']);
+        if (width === 390) {
+          await jump.tap();
+          assert.deepEqual(await page.evaluate(() => actions), ['jump', 'jump']);
+        }
         assert.equal(
           await page.evaluate(
             (node) => node === document.querySelector('[data-entry-key="saved-entry"]'),
@@ -183,22 +152,13 @@ for (const width of [390, 1280])
           true,
         );
         await noActivePaths();
-        await page.keyboard.press('Space');
-        await explanation.waitFor({ state: 'detached' });
-        assert.equal(await button.getAttribute('aria-expanded'), 'false');
-        if (width === 390) {
-          await button.tap();
-          await explanation.waitFor();
-          await button.tap();
-          await explanation.waitFor({ state: 'detached' });
-        }
-        const retiredButton = await button.elementHandle();
-        assert.ok(retiredButton);
+        const retiredJump = await jump.elementHandle();
         await page.evaluate(() => ReadingNotice.releaseScreen(reader));
-        assert.equal(await button.count(), 0, 'releasing the screen unmounts its controls');
-        assert.equal(await retiredButton.evaluate((node) => node.isConnected), false);
-        await retiredButton.evaluate((node) => node.click());
-        assert.equal(await retiredButton.getAttribute('aria-expanded'), 'false');
+        assert.equal(await jump.count(), 0, 'releasing the screen unmounts Jump');
+        assert.equal(await retiredJump.evaluate((node) => node.isConnected), false);
+        const actionsAtRelease = await page.evaluate(() => actions.length);
+        await retiredJump.evaluate((node) => node.click());
+        assert.equal(await page.evaluate(() => actions.length), actionsAtRelease);
         await noActivePaths();
         assert.deepEqual(errors, []);
       } finally {
