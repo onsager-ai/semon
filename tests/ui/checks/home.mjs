@@ -288,6 +288,7 @@ export default async function homeCheck(browser) {
     await page.waitForFunction(
       () =>
         location.search.includes('harness=codex') &&
+        document.querySelectorAll('[data-session-row="list"]').length > 0 &&
         [...document.querySelectorAll('[data-session-row="list"]')].every((row) =>
           row.querySelector('.hicon[data-harness="codex"]'),
         ),
