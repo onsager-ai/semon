@@ -2916,6 +2916,7 @@ mod tests {
             connection,
             path,
             selected_runs: None,
+            semantic_rejection: None,
             traversal_observation: None,
         };
         NATIVE_OCCUPANCY_PROBES.with(|count| count.set(0));
