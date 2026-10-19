@@ -7856,12 +7856,15 @@ fn build_sources_inner(
                         tx.get(&row.key).map(Arc::as_ref),
                     )
                     .with_origin_turns(&holding_turns, &ambiguous_holding_turns)
-                    .with_staged_origin_turns(staged_relationships.map(|_| &builder.staged_origins), |sender| {
-                        builder
-                            .by_key
-                            .get(sender)
-                            .is_some_and(|at| !builder.sessions[*at].files.is_empty())
-                    })?
+                    .with_staged_origin_turns(
+                        staged_relationships.map(|_| &builder.staged_origins),
+                        |sender| {
+                            builder
+                                .by_key
+                                .get(sender)
+                                .is_some_and(|at| !builder.sessions[*at].files.is_empty())
+                        },
+                    )?
                     .with_family_cost(family_costs[&row.key.as_str()]),
                 );
                 measurements.record("projection_trace", started, 1);
