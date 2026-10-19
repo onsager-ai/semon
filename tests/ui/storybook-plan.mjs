@@ -1,8 +1,10 @@
 import { assertionErrors } from './storybook-assertions.mjs';
+import { legacyCapturePlan, routeStoryIds } from './storybook-legacy.mjs';
 
 // Contract validation and browser capture resolve exactly the same state keys.
 export function makeCapturePlan(contract, inventory, storyIds) {
   const errors = [], plan = new Map(), stories = new Set(storyIds);
+  const legacyStories = new Set([...routeStoryIds, 'semon-legacy-gallery--gallery']);
   const dimensions = new Set([334, 390, 696, 820, 1280]);
   function matrix(item, label) {
     if (!Array.isArray(item.widths) || !item.widths.length || new Set(item.widths).size !== item.widths.length)
@@ -50,8 +52,8 @@ export function makeCapturePlan(contract, inventory, storyIds) {
     if (!state.expectedState?.trim()) errors.push(`story ${storyId}: explicit expected state required`);
     assertions(state.assertions, `story ${storyId}`, true);
   }
-  for (const storyId of stories) if (!inventory.stories?.[storyId]) errors.push(`missing explicit story state ${storyId}`);
-  for (const storyId of stories) for (const width of defaults.widths) for (const scheme of defaults.schemes)
+  for (const storyId of stories) if (!inventory.stories?.[storyId] && !(contract.legacySuccessors && legacyStories.has(storyId))) errors.push(`missing explicit story state ${storyId}`);
+  for (const storyId of stories) if (!legacyStories.has(storyId)) for (const width of defaults.widths) for (const scheme of defaults.schemes)
     add({ storyId, width, scheme, actions: [], assertions: [...(inventory.stories?.[storyId]?.assertions ?? [])], postCaptureActions: [], postCaptureAssertions: [] });
   const interactions = new Set();
   for (const item of contract.interactionCaptures ?? []) {
@@ -83,6 +85,19 @@ export function makeCapturePlan(contract, inventory, storyIds) {
       if (!plan.has(key)) add({ storyId: target.storyId, width, scheme, actions: [], assertions: [...(inventory.stories?.[target.storyId]?.assertions ?? [])], postCaptureActions: [], postCaptureAssertions: [] });
       plan.get(key).assertions.push(...target.assertions);
     }
+  }
+  if (contract.legacySuccessors) for (const item of legacyCapturePlan()) {
+    if (!stories.has(item.storyId)) errors.push(`unknown legacy story ${item.storyId}`);
+    if (plan.has(item.key)) errors.push(`duplicate executable legacy capture ${item.key}`);
+    assertions(item.assertions, item.key, true);
+    // Legacy actions have a separate exact inventory; the only additional
+    // operation is setting a named owned scroll container to its recorded top.
+    for (const action of item.actions) {
+      if (action.kind === 'scroll-top') {
+        if (action.selector !== '.filters-sheet .vb') errors.push(`unsupported legacy scroll target ${action.selector}`);
+      } else actions([action], item.key, item.storyId);
+    }
+    plan.set(item.key, item);
   }
   if (errors.length) throw new Error(errors.join('\n'));
   return [...plan.values()];

@@ -9,6 +9,7 @@ import { createStorybookServer } from './storybook-server.mjs';
 import { makeCapturePlan } from './storybook-plan.mjs';
 import { verifyAssertions } from './storybook-assertions.mjs';
 import { referenceErrors, referenceComparisonErrors, captureIdentityDigest } from './storybook-references.mjs';
+import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(path.resolve(here, file), 'utf8'));
@@ -18,7 +19,7 @@ const referenceMap = readJson(contract.referenceMap);
 const storyDir = path.resolve(here, 'storybook-static');
 const storyIndex = readJson(contract.storyIndex);
 const storyIds = Object.entries(storyIndex.entries ?? {})
-  .filter(([id, entry]) => entry.type === 'story' && id.startsWith(contract.ownedStoryPrefix))
+  .filter(([id, entry]) => entry.type === 'story' && (contract.ownedStoryPrefixes ?? [contract.ownedStoryPrefix]).some((prefix) => id.startsWith(prefix)))
   .map(([id]) => id).sort();
 const plan = makeCapturePlan(contract, inventory, storyIds);
 const invalidReferences = referenceErrors(referenceMap, plan);
@@ -34,6 +35,9 @@ const provenanceFiles = [
   'tests/ui/storybook-plan.mjs', 'tests/ui/storybook-capture.mjs',
   'tests/ui/storybook-assertions.mjs',
   'tests/ui/storybook-references.mjs', 'tests/ui/storybook-reference-map.schema.json',
+  'tests/ui/storybook-legacy.mjs', 'tests/ui/storybook-gates.json',
+  'ui/stories/LegacyRoutes.stories.tsx', 'ui/stories/LegacyRoutes.data.ts', 'ui/stories/LegacyRoutes.analytics.ts',
+  'ui/stories/LegacyGallery.stories.tsx', 'tests/ui/fixture-data/overhaul.json', 'tests/ui/fixture.mjs', 'tests/ui/gallery.css', 'tests/ui/capture-paint.mjs',
   'ui/package-lock.json', 'tests/ui/package-lock.json',
   'crates/semon-sessions/src/viewer.css', 'crates/semon-sessions/src/select.css',
   'crates/semon-sessions/src/shell.css',
@@ -70,6 +74,7 @@ async function perform(page, actions) {
     else if (action.kind === 'press') await target.press(action.key);
     else if (action.kind === 'owner-unmount')
       await target.evaluate((owner) => owner.dispatchEvent(new Event('storybook:unmount')));
+    else if (action.kind === 'scroll-top') await target.evaluate((node) => { node.scrollTop = 0; });
     else throw new Error(`unknown action kind ${action.kind}`);
     if (action.waitMs) await page.waitForTimeout(action.waitMs);
     await verifyAssertions(page, action.assertionsAfter ?? []);
@@ -100,7 +105,7 @@ function compareReference(item, bytes, result) {
   result.ratio = diff.ratio;
   result.reference = 'accepted';
   if (diff.size || diff.ratio > approval.maxRatio) {
-    const diffPath = path.join(path.dirname(path.resolve(here, result.candidate)), `${item.width}-${item.scheme}${item.interactionId ? `-${item.interactionId}` : ''}-diff.png`);
+    const diffPath = path.resolve(here, result.candidate.replace(/\.png$/, '-diff.png'));
     fs.writeFileSync(diffPath, PNG.sync.write(diff.diff));
     result.diff = path.relative(here, diffPath);
     throw new Error(diff.size ? 'image dimensions changed' : `pixel mismatch ${(100 * diff.ratio).toFixed(3)}%`);
@@ -112,25 +117,26 @@ try {
   server = await createStorybookServer(storyDir);
   browser = await launch({ baselineRaster: true });
   browserVersion = browser.version();
-  for (const item of plan) {
+  const captureOne = async (item) => {
     const { storyId, width, scheme } = item;
+    const viewport = item.viewport ?? { width, height: width <= 390 ? 844 : 860, deviceScaleFactor: width <= 390 ? 2 : 1, isMobile: width <= 390, hasTouch: width < 1000 };
     const context = await browser.newContext({
-      viewport: { width, height: width <= 390 ? 844 : 860 },
-      deviceScaleFactor: width <= 390 ? 2 : 1,
-      isMobile: width <= 390, hasTouch: width < 1000,
-      colorScheme: scheme, reducedMotion: 'reduce', locale: 'en-US', timezoneId: 'UTC',
+      viewport: { width, height: viewport.height }, deviceScaleFactor: viewport.deviceScaleFactor,
+      isMobile: viewport.isMobile, hasTouch: viewport.hasTouch,
+      colorScheme: scheme, reducedMotion: item.reducedMotion ?? 'reduce', locale: 'en-US', timezoneId: 'UTC',
     });
-    await context.clock.install({ time: new Date('2026-10-19T12:00:00.000Z') });
-    const page = await context.newPage();
     const pageErrors = [];
     const result = { ...item, candidate: null, sourceDigest, captureDigest: captureIdentityDigest(item) };
     try {
+      await context.clock.install({ time: new Date(item.clock ?? '2026-10-19T12:00:00.000Z') });
+      const page = await context.newPage();
       await context.route('**/*', (route) =>
         new URL(route.request().url()).origin === server.origin ? route.continue() :
           (pageErrors.push(`blocked nonlocal request ${route.request().url()}`), route.abort()));
       page.on('response', (response) => { if (response.status() >= 400) pageErrors.push(`HTTP ${response.status()} ${response.url()}`); });
       page.on('pageerror', (error) => pageErrors.push(error.message));
-      await page.goto(`${server.origin}/iframe.html?id=${encodeURIComponent(storyId)}&viewMode=story&globals=theme%3A${scheme}`, { waitUntil: 'networkidle', timeout: 30000 });
+      const args = Object.entries(item.args ?? {}).map(([key, value]) => `${key}:${value}`).join(';');
+      await page.goto(`${server.origin}/iframe.html?id=${encodeURIComponent(storyId)}&viewMode=story&globals=theme%3A${scheme}${args ? '&args=' + encodeURIComponent(args) : ''}`, { waitUntil: 'networkidle', timeout: 30000 });
       await page.waitForSelector('#storybook-root > *', { timeout: 15000 });
       await perform(page, item.actions);
       await verifyAssertions(page, item.assertions);
@@ -150,9 +156,38 @@ try {
       if (!geometry.sans || !geometry.mono) throw new Error('required production font failed to load');
       if (geometry.documentWidth > geometry.viewportWidth + 1)
         throw new Error(`horizontal document overflow ${geometry.documentWidth}px > ${geometry.viewportWidth}px`);
-      const file = path.join(output, storyId, `${item.interactionId ? `state-${item.interactionId}-` : ''}${width}-${scheme}.png`);
+      if (item.capture?.top) await page.evaluate(() => { window.scrollTo(0, 0); const main = document.querySelector('#main'); if (main) main.scrollTop = 0; });
+      if (item.capture?.viewportHeight === 'fit-transcript-and-dock-plus-80') {
+        const target = page.locator(item.capture.selector);
+        const box = await target.boundingBox();
+        if (!box || await target.count() !== 1) throw new Error('Exact transcript region must have one measurable owner');
+        const dock = page.locator('.session-dock');
+        const dockHeight = await dock.count() ? (await dock.boundingBox())?.height ?? 0 : 0;
+        await page.setViewportSize({ width, height: Math.ceil(Math.max(viewport.height, box.y + box.height + dockHeight + 80)) });
+        const after = await target.boundingBox();
+        if (!after || Math.abs(box.width - after.width) > 0.5 || Math.abs(box.height - after.height) > 0.5) throw new Error('Transcript geometry changed while fitting capture viewport');
+      }
+      if (item.expectedState?.includes('sessions-filter-open')) await verifyAssertions(page, [{ kind: 'visible', selector: '.filters-sheet .vb', scrollTop: 0 }, { kind: 'focused', selector: '.filters-sheet[open] .vclose' }]);
+      const file = path.join(output, storyId, `${item.legacyKey ? sha256(item.key).slice(0, 20) + '-' : item.interactionId ? `state-${item.interactionId}-` : ''}${width}-${scheme}.png`);
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      const bytes = await page.screenshot({ path: file, fullPage: true, animations: 'disabled' });
+      const options = item.capture ? { fullPage: item.capture.fullPage, animations: item.capture.animations, ...(item.capture.caret ? { caret: item.capture.caret } : {}) } : { fullPage: true, animations: 'disabled' };
+      const shot = async () => {
+        if (item.capture?.selector) {
+          const target = page.locator(item.capture.selector);
+          if (await target.count() !== 1) throw new Error('Capture region requires exactly one owner');
+          if (item.capture.viewportHeight === 'fit-transcript-and-dock-plus-80') {
+            const clip = await target.boundingBox();
+            if (!clip) throw new Error('Missing transcript capture rectangle');
+            return page.screenshot({ clip, animations: options.animations, caret: options.caret });
+          }
+          return target.screenshot({ animations: options.animations, caret: options.caret });
+        }
+        return item.capture?.stablePaint ? captureStableFrame(page, options) : page.screenshot(options);
+      };
+      const bytes = item.capture?.stablePaint ? await withCapturePaint(page, shot) : await shot();
+      fs.writeFileSync(file, bytes);
+      result.actualViewport = page.viewportSize();
+      result.captureGeometry = item.capture?.selector ? await page.locator(item.capture.selector).boundingBox() : null;
       result.candidate = path.relative(here, file);
       result.sha256 = sha256(bytes);
       await perform(page, item.postCaptureActions);
@@ -171,7 +206,24 @@ try {
       results.push(result);
       await context.close();
     }
-  }
+  };
+  // The complete inventory contains hundreds of isolated pages. Three bounded
+  // CI workers keep the full plan within the existing job allowance; each case
+  // still owns a fresh browser context, clock, fixture, theme and output path.
+  let next = 0;
+  await Promise.all(Array.from({ length: 3 }, async () => {
+    while (next < plan.length) {
+      const item = plan[next++];
+      try { await captureOne(item); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${item.key}: context setup/cleanup failed: ${message}`);
+        const row = results.find((entry) => entry.key === item.key);
+        if (row) { row.rendered = false; row.error = message; }
+        else results.push({ ...item, rendered: false, candidate: null, error: message });
+      }
+    }
+  }));
 } finally {
   if (browser) await browser.close();
   if (server) await server.close();
@@ -187,6 +239,8 @@ const report = {
   captureDimensions: [...new Set(plan.map((item) => item.width))].sort((a, b) => a - b),
   colorSchemes: contract.pixelPolicy.schemes, interactionCaptureCount: contract.interactionCaptures.length,
   fixedClock: '2026-10-19T12:00:00.000Z', locale: 'en-US', timezone: 'UTC', browserVersion,
+  fixedClocks: [...new Set(plan.map((item) => item.clock ?? '2026-10-19T12:00:00.000Z'))],
+  contextWorkers: 3,
   sourceRevision: process.env.GITHUB_SHA ?? null, provenance, sourceDigest,
   storyCount: storyIds.length, expectedKeys: [...expectedKeys], results, pending, failures,
 };

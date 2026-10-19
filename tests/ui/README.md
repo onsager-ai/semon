@@ -45,8 +45,15 @@ Every exported story has an expected state and assertions. Populated Recent uses
 the production shell/Recent renderers and asserts all six named rows, including
 nested descendants, inside the capture's viewport and clipping ancestors. The
 collapsed-tool story asserts the actual closed production step. Catalog and reader
-components claim their own content; complete route chrome remains bound to exact
-served frames. Machine details keep their route-specific frame/region keys and
+components claim their own content; complete route chrome now binds actual
+Storybook shell compositions as well as retaining the native comparators.
+`ui/stories/LegacyRoutes.stories.tsx` exports a discoverable story for every
+named session/trace and both machine detail routes. Its test-only `RouteOwner`
+mounts the production shell, populated Recent, topbar/account/menu/facet owners
+and exact screen renderer. It releases those owners on unmount and never mounts
+the networked application. Retained synthetic content comes from
+`fixture-data/overhaul.json`, with `fixture.mjs` provenance; the second machine's
+two named tasks come from `fixture.mjs`'s `writeSecond`. Machine detail keys
 never resolve to the Machines inventory story. Compact component fixtures assert
 actual 334/696px widths, using test-owned parent sizing with production child CSS.
 Keyboard, touch, focus, tooltip, open account/drawer, sheet/panel, source scope,
@@ -57,13 +64,31 @@ while the modal is open, followed by cleanup and an operable remount.
 After `npm --prefix ui run storybook:build`,
 `npm --prefix tests/ui run storybook:contract` derives each required frame and
 exact acceptance record, verifies the story IDs against Storybook's built index,
-and rejects unknown, missing, duplicate or orphaned mappings. Contract validation
+and rejects unknown, missing, duplicate or orphaned mappings. The independently
+authored `storybook-legacy.mjs` route/scope/region/state matrices expand to one
+explicit legacy-key → Storybook-capture binding per original case in the report.
+Validation compares this entire set against `visual-coverage.json`, all 68
+preservation keys, gallery's five-state matrix and the executable capture plan.
+Every active pen target must resolve to Storybook captures; served-only targets
+are rejected. There are no representative-route or ancestor aliases.
+Contract validation
 and capture share `storybook-plan.mjs`; tests cover singular-action regressions,
 viewport-specific sequences, scoped teardown and invalid reference provenance.
 `npm --prefix
 tests/ui run storybook:capture` captures each story at 390, 820 and 1280 CSS
 pixels in light and dark schemes, then runs the required interaction captures
-at their declared widths. A failed assertion or omitted capture stays a failure.
+at their declared widths. Additional legacy captures preserve the original
+width/height/DPR, fixture scope, theme, frame/region selector, top-scroll and paint
+policy. Preservation uses `capture-paint.mjs`, `fullPage:false`,
+`animations:allow`, `caret:hide`; gallery retains 0.1/0.001, while strict
+captures retain 0.1/0.0001. Transcript regions record their fitting policy and
+actual viewport/rectangle. Candidate-only fitting does not establish equality
+with a native comparison's shared reference/candidate viewport: matched image and
+geometry inspection remains required before any equivalence approval.
+Thinking, tools and output disclosures run in their recorded cumulative order;
+Filter opens with its close button focused and scroll body at zero. Phone
+drawer/account states use the compact controls. A failed assertion or omitted
+capture stays a failure.
 The report pins the browser version, imported production sources, preview/fixture
 digests, fonts and lockfiles, locale, timezone and clock. Captures write
 candidate images and a report to the usual UI output directory. The reference map is deliberately empty while
@@ -101,6 +126,14 @@ keys. The [migration handoff](../../docs/design/session-inspection/storybook-mig
 records the CI-only checkpoint commands and deferred workflow activation.
 Existing pixel thresholds, ratchets, masks, dimensions, required captures and
 the served/native interaction suites stay under their current comparators.
+`storybook-gates.json` records their workflow/executable owners, active or
+conditional status, retained disposition and any additional presentation successor.
+It also records inspected per-owner no-mask evidence, capture paint normalization
+and the three inactive historical provenance artifacts under
+`visual-coverage.json` authority. CI checks workflow matrix membership, functional
+group registrations, execution paths, mask declarations and historical authority.
+The preservation executable owner is `preservation.mjs`; its policy dependency
+remains `preservation-contract.mjs`.
 
 - Every functional assertion stays required, including live updates, session order,
   embedding, approval reviews, transcript paging, and error navigation.

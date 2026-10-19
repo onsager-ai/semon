@@ -19,7 +19,7 @@ export function referenceErrors(map, plan) {
         record.decision !== 'accepted' || !/^baselines\/storybook\/(?!.*(?:^|\/)\.\.(?:\/|$)).+\.png$/.test(record.path ?? '') ||
         record.storyId !== item.storyId || (record.interactionId ?? null) !== (item.interactionId ?? null) ||
         record.width !== item.width || record.scheme !== item.scheme ||
-        record.threshold !== 0.1 || record.maxRatio !== 0.0001 ||
+        record.threshold !== (item.pixelPolicy?.threshold ?? 0.1) || record.maxRatio !== (item.pixelPolicy?.maxRatio ?? 0.0001) ||
         !['sha256', 'sourceDigest', 'captureDigest'].every((field) => digest(record[field])) ||
         !/^[a-f0-9]{40}$/.test(record.reviewedRevision ?? '') ||
         !text(record.reviewedBy) || !text(record.rationale) || !text(record.reviewedAt) || !Number.isFinite(Date.parse(record.reviewedAt)) ||

@@ -119,6 +119,12 @@ body,
   min-height: 100%;
 }
 
+/* The workbench root replaces the served document's direct .app parent. Keep
+   that test-owned parent at the same viewport height for full route owners. */
+#storybook-root:has(> [data-storybook-route]) {
+  height: 100%;
+}
+
 body {
   background: var(--ground);
   color: var(--ink);

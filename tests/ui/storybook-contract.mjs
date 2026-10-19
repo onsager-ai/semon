@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { makeCapturePlan } from './storybook-plan.mjs';
 import { referenceErrors } from './storybook-references.mjs';
 import { EXPECTED, REFERENCE, THRESHOLD, MAX_RATIO, expectedPixelCoverage } from './preservation-contract.mjs';
+import { successorErrors, routeStoryIds, routeStories } from './storybook-legacy.mjs';
+import { GROUPS } from './suite-plan.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -16,7 +18,7 @@ const gallerySource = fs.readFileSync(path.join(root, 'ui/tests/fixtures/design-
 const libraryIndex = fs.readFileSync(path.join(root, 'ui/src/lib/index.ts'), 'utf8');
 const storyIndex = readJson(contract.storyIndex);
 const availableStories = new Set(Object.entries(storyIndex.entries ?? {})
-  .filter(([id, entry]) => entry.type === 'story' && id.startsWith(contract.ownedStoryPrefix)).map(([id]) => id));
+  .filter(([id, entry]) => entry.type === 'story' && (contract.ownedStoryPrefixes ?? [contract.ownedStoryPrefix]).some((prefix) => id.startsWith(prefix))).map(([id]) => id));
 const sameSet = (left, right) => Array.isArray(left) && new Set(left).size === left.length &&
   [...left].sort().join('\n') === [...right].sort().join('\n');
 function addStories(ids, source) {
@@ -31,11 +33,17 @@ function addCheck(id, source) {
   else mappedChecks.add(id);
 }
 if (contract.version !== 2 || inventory.version !== 1) errors.push('Unsupported migration contract version');
+if (contract.legacySuccessors !== 'storybook-legacy.mjs' || contract.gateInventory !== 'storybook-gates.json' || !sameSet(contract.ownedStoryPrefixes, ['semon-production-owners--', 'semon-legacy-routes--', 'semon-legacy-gallery--'])) errors.push('Complete Storybook successor/gate ownership is required');
 if (contract.pixelPolicy.threshold !== THRESHOLD || contract.pixelPolicy.maxRatio !== MAX_RATIO ||
     !sameSet(contract.pixelPolicy.dimensions, [390, 820, 1280]) || !sameSet(contract.pixelPolicy.schemes, ['light', 'dark']))
   errors.push('Storybook must retain the strict pixel policy and full default matrix');
 for (const [id, file] of Object.entries(contract.servedChecks))
   if (!fs.existsSync(path.resolve(here, file))) errors.push(`Missing check file ${id}: ${file}`);
+// Existence alone accepted the constants-only module as a capture runner.
+if (contract.servedChecks.preservation !== 'preservation.mjs' || contract.preservation.source !== 'preservation-contract.mjs')
+  errors.push('Preservation executable owner/policy dependency changed');
+const preservationRunner = fs.readFileSync(path.join(here, 'preservation.mjs'), 'utf8');
+if (!preservationRunner.includes('captureStableFrame(') || !preservationRunner.includes("from './preservation-contract.mjs'")) errors.push('Preservation owner is not the executable capture runner');
 for (const surface of contract.productionSurfaces) {
   addStories(surface.storyIds, `surface ${surface.id}`);
   for (const id of surface.servedChecks ?? []) addCheck(id, `surface ${surface.id}`);
@@ -53,6 +61,17 @@ try { plan = makeCapturePlan(contract, inventory, [...availableStories]); }
 catch (error) { errors.push(error.message); }
 for (const interaction of contract.interactionCaptures ?? []) addStories([interaction.storyId], `interaction ${interaction.id}`);
 const planByKey = new Map(plan.map((item) => [item.key, item]));
+addStories([...routeStoryIds, 'semon-legacy-gallery--gallery'], 'complete legacy presentation owners');
+const routeSource = fs.readFileSync(path.join(root, 'ui/stories/LegacyRoutes.stories.tsx'), 'utf8');
+for (const owner of ['createShellChrome', 'createRecentRenderer', 'createViewerBar', 'renderHomeScreen', 'renderMachinesScreen', 'renderMachineScreen', 'renderSessionScreen', 'renderCausalTrace', 'renderCatalogList', 'createCatalogBrowser', 'renderSessionMenu', 'renderAnalyticsPresentation', 'releaseScreen'])
+  if (!routeSource.includes(owner + '(')) errors.push('Missing production route presentation owner ' + owner);
+const filterOwner = fs.readFileSync(path.join(root, 'ui/src/app/catalogBrowser.ts'), 'utf8');
+for (const owner of ['createFacetChrome', 'createSelect']) if (!filterOwner.includes(owner + '(')) errors.push('Shared route filter owner lost production control ' + owner);
+if (/\b(?:mountViewerApplication|createCatalogViewer)\s*\(/.test(routeSource)) errors.push('Route presentation stories must not mount transport/application owners');
+const retained = readJson('fixture-data/overhaul.json');
+if (!sameSet(routeStories.filter(([frame]) => frame.startsWith('session-')).map(([frame]) => frame.slice(8)), Object.keys(retained.TX))) errors.push('Named session stories must cover the entire retained transcript fixture');
+for (const [frame, , title] of routeStories.filter(([frame]) => frame.startsWith('session-')))
+  if (retained.SESS[frame.slice(8)]?.name !== title) errors.push('Named route story lost its retained fixture identity ' + frame);
 
 // Exact existing comparator keys remain independent captures. Never map a
 // machine detail or transcript route to a visually unrelated component story.
@@ -110,6 +129,53 @@ for (const state of gallery.states) for (const width of gallery.widths) for (con
     threshold: gallery.threshold, maxRatio: gallery.maxRatio,
   });
 addStories(contract.gallery.storyIds, 'gallery');
+errors.push(...successorErrors([...servedCases.keys()], plan));
+const successors = new Map(plan.filter((item) => item.legacyKey).map((item) => [item.legacyKey, item]));
+for (const item of plan.filter((row) => row.legacyKey)) {
+  const old = servedCases.get(item.legacyKey);
+  if (!old) continue;
+  if (item.width !== old.viewport[0] || item.viewport.height !== old.viewport[1] || item.scheme !== old.theme || item.viewport.deviceScaleFactor !== (item.width === 390 ? 2 : 1)) errors.push('Changed legacy viewport/theme/scale ' + item.legacyKey);
+  if (item.pixelPolicy.threshold !== (old.threshold ?? THRESHOLD) || item.pixelPolicy.maxRatio !== (old.maxRatio ?? MAX_RATIO)) errors.push('Changed legacy successor pixel policy ' + item.legacyKey);
+  if (old.region && item.capture.selector !== visual.regions.find((row) => row.name === old.region)?.selector) errors.push('Changed exact legacy region selector ' + item.legacyKey);
+}
+
+const gates = readJson(contract.gateInventory);
+const workflow = fs.readFileSync(path.join(root, gates.authority), 'utf8');
+const matrix = /suite:\s*\[([^\]]+)\]/.exec(workflow)?.[1].split(',').map((item) => item.trim());
+if (gates.version !== 1 || !sameSet(gates.matrix, matrix ?? []) || gates.aggregate.check !== 'viewer browser checks' || !workflow.includes('name: ' + gates.aggregate.check)) errors.push('Native workflow/matrix gate inventory differs from its authority');
+const aggregateNeeds = /\n  browser:[\s\S]*?needs:\s*\[([^\]]+)\]/.exec(workflow)?.[1].split(',').map((item) => item.trim());
+if (!sameSet(gates.aggregate.needs, aggregateNeeds ?? []) || !['foundation', 'build', 'checks'].every((id) => aggregateNeeds?.includes(id))) errors.push('Required native aggregate dependencies differ from the gate inventory');
+const gateIds = new Set();
+for (const gate of gates.gates ?? []) {
+  if (!gate.id || gateIds.has(gate.id) || !gate.owner || !['active', 'conditional'].includes(gate.status) || !gate.disposition || !Object.hasOwn(gate, 'successor')) errors.push('Invalid/duplicate native gate disposition ' + gate.id);
+  gateIds.add(gate.id);
+  const file = gate.owner.split('#')[0];
+  if (!fs.existsSync(path.resolve(root, file))) errors.push('Missing native gate owner ' + file);
+  if (gate.id === 'build' && JSON.stringify(gate.reference) !== JSON.stringify(REFERENCE)) errors.push('Build reference provenance differs from preservation policy');
+  if (!file.startsWith('.github/') && !gate.id.startsWith('native-') && !workflow.includes(path.basename(file))) errors.push('Native gate executable is absent from the workflow ' + file);
+  if (gate.id === 'functional') {
+    if (!sameSet(Object.keys(gate.groups), Object.keys(GROUPS))) errors.push('Functional group inventory changed');
+    for (const [group, members] of Object.entries(GROUPS)) if (!sameSet(gate.groups[group], members)) errors.push('Functional group members differ: ' + group);
+  }
+  for (const member of gate.members ?? []) if (!fs.existsSync(path.resolve(root, member)) || !workflow.includes(path.basename(member))) errors.push('Native gate member is not executed by its workflow: ' + member);
+  if (gate.id.startsWith('native-')) {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'ui/package.json'), 'utf8'));
+    if (gate.job !== 'foundation' || pkg.scripts.test !== 'node --test tests/*.test.mjs' || !gate.owner.startsWith('ui/tests/') || !gate.owner.endsWith('.test.mjs')) errors.push('Native unit owner is not executed by foundation wildcard ' + gate.id);
+  }
+  if (gate.status === 'conditional' && (!gate.condition || !workflow.includes('inputs.refresh_diagnostics'))) errors.push('Conditional gate lost its execution condition ' + gate.id);
+}
+for (const id of ['foundation', 'build', 'functional', 'independent-interaction', 'native-navigation', 'native-selection', 'gaps', 'strict-preservation', 'strict-pixels', 'live', 'errors', 'performance', 'budget', 'order', 'pushed-parity', 'refresh-diagnostics', 'storybook']) if (!gateIds.has(id)) errors.push('Missing native gate disposition ' + id);
+if (!sameSet((gates.masks ?? []).map((entry) => entry.owner), ['tests/ui/pixels.mjs', 'tests/ui/preservation.mjs', 'tests/ui/gallery.mjs', 'tests/ui/compact-gallery.mjs', 'ui/tests/catalog-served.mjs', 'ui/tests/overview-served.mjs', 'tests/ui/storybook-capture.mjs'])) errors.push('Missing/unknown/duplicate inspected mask owner');
+for (const entry of gates.masks ?? []) {
+  const source = fs.readFileSync(path.resolve(root, entry.owner), 'utf8');
+  if (!Array.isArray(entry.masks) || entry.masks.length || !entry.evidence || !entry.disposition || !Object.hasOwn(entry, 'successor')) errors.push('Invalid inspected no-mask evidence ' + entry.owner);
+  if (/\bmask\s*:/.test(source)) errors.push('Capture owner acquired a mask; inventory requires explicit review ' + entry.owner);
+}
+if (!sameSet((gates.historical ?? []).map((entry) => entry.owner), ['tests/ui/pixel-baseline.json', 'tests/ui/historical-reference-map.json', 'tests/ui/historical-pixel-ratchet.json'])) errors.push('Missing/unknown/duplicate historical provenance disposition');
+for (const entry of gates.historical ?? []) {
+  const authorityField = entry.authority?.split('#')[1];
+  if (entry.status !== 'inactive' || !entry.disposition || !Object.hasOwn(entry, 'successor') || !visual[authorityField]?.includes(path.basename(entry.owner))) errors.push('Historical disposition lacks its source authority ' + entry.owner);
+}
 
 const pen = readJson(contract.pen.source), frameById = new Map();
 function collectFrames(nodes, parent = null) {
@@ -168,7 +234,7 @@ for (const id of frameById.keys())
 
 const resolvedTargets = new Map();
 for (const [id, target] of Object.entries(inventory.targets)) {
-  const types = ['storyId', 'interactionId', 'served'].filter((key) => Object.hasOwn(target, key));
+  const types = ['storyId', 'interactionId', 'legacyKeys'].filter((key) => Object.hasOwn(target, key));
   if (types.length !== 1) { errors.push(`target ${id}: exactly one executable owner required`); continue; }
   let keys = [];
   if (target.storyId) {
@@ -179,10 +245,9 @@ for (const [id, target] of Object.entries(inventory.targets)) {
     keys = plan.filter((item) => item.interactionId === target.interactionId).map((item) => item.key);
     if (!keys.length) errors.push(`target ${id}: unknown/missing interaction ${target.interactionId}`);
   } else {
-    const served = target.served;
-    if (!served.keys?.length || !target.expectedState || target.referenceDisposition !== 'preserve-exact-served-comparator') errors.push(`target ${id}: explicit served keys, expected state and disposition required`);
-    keys = (served.keys ?? []).map((key) => `${served.comparator}:${served.scope}:${served.kind}:${key}`);
-    for (const key of keys) if (!servedCases.has(key)) errors.push(`target ${id}: unknown exact served capture ${key}`);
+    if (!target.legacyKeys?.length || !target.expectedState || target.referenceDisposition !== 'pending-storybook-review') errors.push(`target ${id}: exact legacy successor keys, expected state and pending disposition required`);
+    keys = (target.legacyKeys ?? []).map((key) => successors.get(key)?.key);
+    for (const key of keys) if (!planByKey.has(key)) errors.push(`target ${id}: missing executable Storybook successor ${key}`);
   }
   resolvedTargets.set(id, keys);
 }
@@ -195,6 +260,7 @@ for (const binding of inventory.bindings) {
     if (!resolvedTargets.has(target)) errors.push(`binding: unknown capture target ${target}`);
     keys.push(...(resolvedTargets.get(target) ?? []));
   }
+  if (!keys.length || keys.some((key) => !planByKey.has(key))) errors.push('Active pen binding must resolve entirely to Storybook captures');
   for (const id of binding.frames ?? []) {
     if (!activeIds.has(id)) errors.push(`binding claims unknown/inactive pen frame ${id}`);
     if (frameBindings.has(id)) errors.push(`duplicate executable pen binding ${id}`);
@@ -216,6 +282,7 @@ const report = {
   activeStories: [...mappedStories].sort(), servedChecks: [...mappedChecks].sort(),
   executableStoryCaptures: plan.map((item) => ({ ...item, referenceDisposition: 'pending-storybook-review' })),
   exactServedCaptures: [...servedCases.values()], visualAcceptances: [...acceptanceKeys],
+  legacySuccessors: Object.fromEntries([...successors].map(([key, item]) => [key, item.key])), gateInventory: gates,
   penFrames: { active: activeIds.size, superseded: supersededIds.size, executable: frameBindings.size, inherited: 0 },
   frameBindings: Object.fromEntries(frameBindings), errors,
   retiredFrames: Object.fromEntries(retiredFrames),
