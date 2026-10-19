@@ -152,7 +152,7 @@ for (const scope of ['main', 'two-machines', 'pushed']) {
   const expectedFrames = new Set(plan.filter((item) => item.legacyKey && !item.legacyKey.startsWith('gallery:') &&
     (item.fixture.scope === scope || (scope === 'main' && item.fixture.scope === 'required'))).map((item) => item.fixture.frame));
   const records = nativeRecords.scopes?.[scope] ?? {};
-  if (!sameSet(expectedFrames, Object.keys(records))) errors.push('Missing/unknown native fixture frames in scope ' + scope);
+  if (!sameSet([...expectedFrames], Object.keys(records))) errors.push('Missing/unknown native fixture frames in scope ' + scope);
   for (const [frame, record] of Object.entries(records))
     if (!Array.isArray(record.responses) || !record.responses.length || !record.route)
       errors.push('Incomplete native fixture publication ' + scope + '/' + frame);

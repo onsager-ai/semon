@@ -58,6 +58,11 @@ export function NativeRouteOwner({ frame, scope }: NativeRouteArgs) {
     const bar = createViewerBar();
     const catalogBrowser = createCatalogBrowser({ canOpen: () => true, opened: idle, closed: idle, changed: idle, clearFilters: idle });
     const selected = route.v === 'session' ? fixture.selected().metadata : undefined;
+    const selectedRoot = selected ? document.createElement('div') : null;
+    if (selectedRoot) {
+      selectedRoot.className = 'catalog-session';
+      page.append(selectedRoot);
+    }
     const trace = route.v === 'trace' ? fixture.trace() : undefined;
     const meta = selected ?? trace?.metadata;
     const barHost = { ancestor: idle, crumb: idle, find: idle, closeFind: idle, query: idle,
@@ -188,12 +193,12 @@ export function NativeRouteOwner({ frame, scope }: NativeRouteArgs) {
       const snapshot = fixture.transcript();
       overview.markResults(fixture.source!, fixture.selected().page.relationship_context.handoffs
         .filter((row) => row.edge.kind === 'toyou' && row.edge.ask === 'result' && row.edge.from === selected.key).map((row) => row.edge.id));
-      renderSessionScreen(page, snapshot, transcriptHost);
+      renderSessionScreen(selectedRoot!, snapshot, transcriptHost);
       const jumpTarget = document.createElement('div'); jumpTarget.className = 'jump-wrap'; jumpTarget.hidden = true;
       const main = document.querySelector<HTMLElement>('#main')!;
       const syncJump = () => {
         const gap = phone() ? document.documentElement.scrollHeight - scrollY - innerHeight : main.scrollHeight - main.scrollTop - main.clientHeight;
-        updateSessionJump(page, gap > 80 || (fixture.selected().entries.at(-1)?.slot ?? -1) + 1 < fixture.selected().page.projection.total, 0, false, jumpTarget);
+        updateSessionJump(selectedRoot!, gap > 80 || (fixture.selected().entries.at(-1)?.slot ?? -1) + 1 < fixture.selected().page.projection.total, 0, false, jumpTarget);
       };
       effects.listen(window, 'scroll', syncJump, { passive: true });
       effects.listen(main, 'scroll', syncJump, { passive: true });
@@ -246,7 +251,12 @@ export function NativeRouteOwner({ frame, scope }: NativeRouteArgs) {
     return () => {
       panel?.destroy(); for (const dialog of dialogs) dialog.destroy();
       overview.destroy(); effects.destroy(); catalogBrowser.destroy();
-      releaseScreen(page); render(null, page); render(null, title); render(null, sources);
+      if (selectedRoot) {
+        releaseScreen(selectedRoot); render(null, selectedRoot); selectedRoot.remove();
+      } else {
+        releaseScreen(page); render(null, page);
+      }
+      render(null, title); render(null, sources);
       render(null, traceActions.firstElementChild ?? traceActions);
       recent.destroy(); bar.destroy(); chrome.destroy();
     };
