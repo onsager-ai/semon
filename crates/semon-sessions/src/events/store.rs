@@ -1036,6 +1036,7 @@ pub(crate) fn enqueue_facts(
     options: &crate::Options,
     before: &crate::Facts,
     after: &crate::Facts,
+    push_driven: bool,
 ) -> io::Result<()> {
     let (store, _) =
         SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
@@ -1217,11 +1218,13 @@ pub(crate) fn enqueue_facts(
             .map_err(io::Error::other)?;
         }
     }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_push_driven','1')",
-        [],
-    )
-    .map_err(io::Error::other)?;
+    if push_driven {
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_push_driven','1')",
+            [],
+        )
+        .map_err(io::Error::other)?;
+    }
     tx.commit().map_err(io::Error::other)
 }
 

@@ -288,7 +288,17 @@ impl ReceivedMachines {
         if read_facts(&copy).is_ok_and(|previous| previous == facts) {
             return;
         }
-        if let Err(error) = crate::write_facts(&copy, &facts) {
+        // This reader-owned copy is a producer input, unlike the receiver's
+        // incoming facts. follow() holds its discovery mutex; producers never
+        // acquire that mutex. Serialize publication under the same facts fence
+        // as hosted receivers, and retain dirty work if publication fails.
+        let publish = || -> io::Result<()> {
+            let intent =
+                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), &facts)?;
+            crate::write_facts(&copy, &facts)?;
+            intent.complete()
+        };
+        if let Err(error) = publish() {
             eprintln!("semon: received machine {name}: can't keep its facts: {error}");
         }
     }
@@ -334,4 +344,155 @@ fn read_facts(path: &Path) -> io::Result<Facts> {
     };
     serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn received_runtime_copy_journals_changes_but_not_heartbeats() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "semon-received-facts-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let incoming = root.join("input/machines/synthetic");
+        fs::create_dir_all(&incoming).unwrap();
+        let selected = "sessions/2026/10/19/selected.jsonl";
+        let log = incoming.join("codex").join(selected);
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(&log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-19T00:00:00Z\",\"payload\":{\"id\":\"selected\"}}\n").unwrap();
+        let receiver = ReceivedMachines::new(
+            root.join("input"),
+            &Options {
+                cache: root.join("reader/sessions-index.json"),
+                all: true,
+                ..Options::default()
+            },
+        );
+        let mut facts = Facts {
+            version: FACTS_VERSION,
+            hostname: "synthetic".into(),
+            codex_rollouts: Some([selected.to_owned()].into()),
+            ..Facts::default()
+        };
+        let mut warned = BTreeSet::new();
+        let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
+            crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
+            let listing = receiver.scan();
+            let seen = listing["synthetic"].as_ref().unwrap();
+            receiver.copy_facts("synthetic", seen, &[], warned);
+            receiver.options("synthetic", seen)
+        };
+        let options = copy(&facts, &mut warned);
+        assert!(
+            !crate::events::store::push_driven(&options).unwrap(),
+            "facts alone must not claim a journaled Raw transport"
+        );
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        for _ in 0..64 {
+            if evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap()
+            {
+                break;
+            }
+        }
+        assert!(
+            crate::source_projection_ready(&options, "codex", selected)
+                .unwrap()
+                .is_some(),
+            "fixture did not publish its runtime owner"
+        );
+        drop(evidence);
+        let revision = || {
+            let path = options.cache.with_extension("sqlite3");
+            if !path.exists() {
+                return 0_i64;
+            }
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .query_row(
+                    "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_source_revision'),0)",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let before = revision();
+        facts.codex_locks.insert("selected".into(), 42);
+        facts.proc_starts.insert(42, 100);
+        copy(&facts, &mut warned);
+        let changed = revision();
+        assert!(
+            changed > before,
+            "received runtime bypassed durable facts invalidation"
+        );
+        let facts_path = options.facts.as_ref().unwrap();
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(facts_path).unwrap().ino()
+        };
+        copy(&facts, &mut warned);
+        assert_eq!(revision(), changed, "heartbeat dirtied unchanged facts");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(facts_path).unwrap().ino(), inode);
+        }
+        facts.proc_starts.insert(42, 101);
+        copy(&facts, &mut warned);
+        assert!(revision() > changed, "process replacement was lost");
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        for _ in 0..64 {
+            if evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap()
+            {
+                break;
+            }
+        }
+        // Reference transport appends Raw without SessionSourceWrite. A
+        // byte-identical facts heartbeat must not disable ordinary discovery.
+        use std::io::Write;
+        let appended = b"{\"type\":\"response_item\",\"timestamp\":\"2026-10-19T00:00:01Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"synthetic reference append\"}]}}\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .unwrap()
+            .write_all(appended)
+            .unwrap();
+        copy(&facts, &mut warned);
+        let length = fs::metadata(&log).unwrap().len();
+        let mut discovered = false;
+        for _ in 0..64 {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    crate::model::now_ms(),
+                )
+                .unwrap();
+            discovered = crate::source_projection_ready(&options, "codex", selected)
+                .unwrap()
+                .is_some_and(|ready| ready.source.offset == length);
+            if discovered {
+                break;
+            }
+        }
+        assert!(
+            discovered,
+            "reference Raw append lost ordinary metadata discovery"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

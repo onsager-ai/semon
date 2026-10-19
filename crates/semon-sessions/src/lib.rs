@@ -99,6 +99,8 @@ pub use transcript_range::{
 };
 mod native_evidence;
 mod native_timing;
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
 pub use native_evidence::SessionSources;
 mod query_source;
 mod selected_read;
