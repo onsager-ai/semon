@@ -1395,8 +1395,12 @@ fn scan(
         // Stamped before it is read, so a line that lands during the read
         // counts toward the next version, not this one.
         let stamp = stamp_of(&path);
-        let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
-            continue;
+        let summary = match events::scan_file(&path, "claude", cache, dirty) {
+            Ok(summary) => summary,
+            Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(error);
+            }
+            Err(_) => continue,
         };
         let stamp = indexed_stamp(cache, &path, stamp);
         if let Role::Agent(agent) = &mut role {
@@ -1450,8 +1454,12 @@ fn scan(
             continue;
         }
         let stamp = stamp_of(&path);
-        let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
-            continue;
+        let summary = match events::scan_file(&path, "codex", cache, dirty) {
+            Ok(summary) => summary,
+            Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(error);
+            }
+            Err(_) => continue,
         };
         let stamp = indexed_stamp(cache, &path, stamp);
         let Some(header) = summary.codex_header.as_ref() else {
@@ -2670,15 +2678,15 @@ impl<'a> Builder<'a> {
                 .unwrap_or_else(|| self.texts.repo(cwd))
         });
         let billing_messages: Vec<events::MessageUsage> = usage.values().cloned().collect();
-        let codex_events: Vec<events::CodexUsageEvent> = if harness == "codex" {
-            files
-                .iter()
-                .flat_map(|file| file.summary.codex_usage_events().iter().cloned())
-                .collect()
+        let mut cost = if harness == "codex" {
+            let mut cost = crate::pricing::CostBuild::default();
+            for file in &files {
+                cost.merge(&file.summary.codex_cost());
+            }
+            cost.finish()
         } else {
-            Vec::new()
+            crate::pricing::calculate_cost(&billing_messages, &[])
         };
-        let mut cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
         if usage_evidence.is_some() || harness == "copilot" {
             cost.usd = None;
         }

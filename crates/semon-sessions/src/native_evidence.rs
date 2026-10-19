@@ -882,6 +882,16 @@ impl NativeEvidence {
         &self,
         work: &mut Work,
         now: i64,
+        before_build: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let complete = self.refresh_catalog_step(work, now, before_build)?;
+        Ok(complete && !work.usage_migration_pending)
+    }
+
+    fn refresh_catalog_step(
+        &self,
+        work: &mut Work,
+        now: i64,
         mut before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
         // Keep the existing receiver facts fence through derivation and the
@@ -897,6 +907,11 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
+        work.usage_migration_pending = work
+            .events
+            .as_mut()
+            .expect("event cache initialized")
+            .advance_native_usage_migration(&self.options)?;
         if work.events.as_ref().is_some_and(EventCache::is_scoped)
             && crate::events::store::recover_unsupported_catalog(&self.options)?
         {
@@ -1290,14 +1305,20 @@ impl NativeEvidence {
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
-        work.cold_catalog.is_some()
+        work.usage_migration_pending
+            || work.cold_catalog.is_some()
             || work.audit.is_some()
             || (work.pending_sources
                 && self.audit_request.load(Ordering::Acquire) == work.audit_revision)
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
-        work.cold_catalog.is_some()
+        work.usage_migration_pending
+            || work
+                .events
+                .as_ref()
+                .is_some_and(EventCache::native_usage_migration_pending)
+            || work.cold_catalog.is_some()
             || work.pending_sources
             || work.audit.is_some()
             || self.audit_request.load(Ordering::Acquire) != work.audit_revision
@@ -1377,6 +1398,7 @@ pub(crate) struct Work {
     observed_catalog_generation: Option<String>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
+    usage_migration_pending: bool,
     audit: Option<CatalogAudit>,
     audit_revision: u64,
     /// When the last native preparation started.

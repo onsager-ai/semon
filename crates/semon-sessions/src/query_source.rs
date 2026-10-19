@@ -85,11 +85,42 @@ impl Sources {
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
     ) -> io::Result<Self> {
-        Self::capture_inner(
-            options,
-            sources.map(|(source, chunks)| (source, chunks.map(ProofChunks::Complete))),
-            false,
-        )
+        let cache_path = crate::events::EventCache::path(&options.cache);
+        let mut db = None;
+        let mut proofs = Vec::new();
+        for (source, chunks) in sources {
+            let chunks = if let Some(chunks) = chunks {
+                ProofChunks::Complete(chunks)
+            } else {
+                if db.is_none() {
+                    let c = crate::events::store::focused_connection(&cache_path)?;
+                    c.busy_timeout(std::time::Duration::from_millis(100))
+                        .map_err(io::Error::other)?;
+                    db = Some(Arc::new(Mutex::new(c)));
+                }
+                let ledger = Ledger {
+                    stat: Stat {
+                        dev: source.dev,
+                        ino: source.ino,
+                        size: source.size,
+                        modified_ns: source.modified_ns,
+                        changed_ns: source.changed_ns,
+                    },
+                    offset: source.offset,
+                    prefix: source.prefix_sha256,
+                    tail: source.tail_sha256,
+                };
+                let focused = crate::events::store::chunk_proofs::Focused::with_db(
+                    db.as_ref().expect("proof connection opened").clone(),
+                    &cache_path,
+                    source.path.to_str().ok_or_else(unavailable)?,
+                    &ledger,
+                )?;
+                ProofChunks::Focused(Box::new(focused))
+            };
+            proofs.push((source, Some(chunks)));
+        }
+        Self::capture_inner(options, proofs.into_iter(), false)
     }
 
     fn capture_inner(

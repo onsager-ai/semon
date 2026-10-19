@@ -124,6 +124,32 @@ pub(super) fn read(
     Ok(Some(Arc::new(chunks)))
 }
 
+// Warm Tree metadata needs the ledger-bound proof root, not all historical
+// block hashes. Focused readers verify the selected pages against this root.
+pub(super) fn header_ready(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
+    let encoded: Option<Option<String>> = c
+        .query_row(
+            NATIVE_METADATA_VALUE,
+            [format!("{}header", prefix(path))],
+            |r| {
+                crate::selected_read::row(r, 512)?;
+                r.get(0)
+            },
+        )
+        .optional()?;
+    let Some(header) = encoded
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Header>(&s).ok())
+    else {
+        return Ok(false);
+    };
+    Ok(header.version == 1
+        && header.parser_version == CACHE_VERSION
+        && header.ledger == header_ledger(ledger)
+        && usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64))
+            == Ok(header.count))
+}
+
 #[derive(Serialize, Deserialize)]
 struct Repair {
     header: String,
