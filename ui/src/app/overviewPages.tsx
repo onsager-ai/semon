@@ -1348,7 +1348,7 @@ export function createOverviewPages(host: OverviewHost) {
     }
   }
   async function refresh(force = false) {
-    if (disposed || host.nativeContent) return;
+    if (disposed) return;
     if (!force && host.route() === 'analytics' && Date.now() < analyticsRetryAt) return;
     if (loading) {
       queued = true;
@@ -1357,7 +1357,8 @@ export function createOverviewPages(host: OverviewHost) {
     }
     cancelRetry();
     const route = host.route(),
-      sidebarOnly = !['home', 'analytics', 'machines', 'machine'].includes(route),
+      sidebarOnly =
+        !!host.nativeContent || !['home', 'analytics', 'machines', 'machine'].includes(route),
       ticket = ++epoch,
       requestedQuery =
         route === 'analytics'
@@ -1375,7 +1376,9 @@ export function createOverviewPages(host: OverviewHost) {
     loading = true;
     if (!sidebarOnly) host.root.setAttribute('aria-busy', 'true');
     const workspaceRead =
-      route === 'home' || route === 'machines' ? undefined : refreshWorkspace(current);
+      !sidebarOnly && (route === 'home' || route === 'machines')
+        ? undefined
+        : refreshWorkspace(current);
     try {
       if (sidebarOnly) {
         await workspaceRead;

@@ -3296,8 +3296,7 @@ export function createCatalogViewer(
       const previousLabel = sourceLabel(view.sourceKey);
       if (active === view && selection.accept(ticket, reply.identity)) {
         if (selection.selectedIdentity()?.owner_qualification === 'provisional')
-          view.note =
-            'Session identity is provisional while history is being discovered. Native controls are unavailable.';
+          view.note = 'Session identity is provisional while history is being discovered.';
         else if (view.note.startsWith('Session identity is provisional')) view.note = '';
         if (previousLabel !== sourceLabel(view.sourceKey)) {
           view.renderedRevision = -1;
@@ -3721,7 +3720,10 @@ export function createCatalogViewer(
     const observedSource = capabilities.source_key,
       observedEpoch = sourcesEpoch;
     try {
-      if (viewerHost?.nativePage) return;
+      if (viewerHost?.nativePage) {
+        if (viewerHost.nativePage.workspaceChrome) await overview.refresh();
+        return;
+      }
       if (
         navigation.route.v === 'home' ||
         navigation.route.v === 'analytics' ||
@@ -4031,6 +4033,7 @@ export function createCatalogViewer(
     if (viewerHost?.nativePage) {
       navigation.route = { v: 'machines' };
       chrome();
+      if (viewerHost.nativePage.workspaceChrome) void overview.refresh();
       return;
     }
     const queryParams = new URLSearchParams(location.search);
@@ -4074,6 +4077,7 @@ export function createCatalogViewer(
         if ((parts[1] === 's' || parts[1] === 'trace') && parts[3])
           void locateBookmark(decodeURIComponent(parts[3]));
       });
+      void overview.refresh();
       return;
     }
     if (

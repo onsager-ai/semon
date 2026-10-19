@@ -21,8 +21,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: viewer-ui-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: viewer-ui-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   foundation:
@@ -55,6 +55,11 @@ jobs:
           npm --prefix ui test
           npm --prefix ui run check:bundle
           npm --prefix ui run sizes
+
+      - name: Browser-check infrastructure regression tests
+        run: |
+          npm --prefix tests/ui ci --no-audit --no-fund
+          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs
 
   build:
     name: viewer test binaries
@@ -187,11 +192,8 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
-
-      - name: Browser-check infrastructure regression tests
-        run: |
-          npm --prefix ui ci --no-audit --no-fund
-          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/tap-hit.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs
+      - name: Install pinned UI consumer tooling
+        run: npm --prefix ui ci --no-audit --no-fund
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'

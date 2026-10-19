@@ -107,148 +107,211 @@ const list = (items) => ({
 
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
-    test(`native host chrome stays isolated from reader publications at ${width}px ${colorScheme}`, async () => {
-      const browser = await chromium.launch(),
-        page = await browser.newPage({
-          viewport: { width, height: 900 },
-          colorScheme,
-          isMobile: width === 390,
-          hasTouch: width === 390,
-        }),
-        requests = [],
-        errors = [];
-      try {
-        page.setDefaultTimeout(10000);
-        page.on('pageerror', (error) => errors.push(String(error)));
-        await page.route('http://catalog.test/**', (route) => {
-          const url = new URL(route.request().url());
-          if (url.pathname.startsWith('/api/')) {
-            requests.push(url.pathname + url.search);
-            return route.fulfill({ status: 503, json: { error: 'unexpected_native_chrome_read' } });
-          }
-          return fulfillCatalogStatic(route, url);
-        });
-        await page.goto('http://catalog.test/workspace/settings?machine=source-0');
-        await page.clock.install({ time: new Date('2026-10-18T00:00:00Z') });
-        await page.clock.pauseAt(new Date('2026-10-18T00:00:00.001Z'));
-        await page.addScriptTag({ content: outputFiles[0].text });
-        await page.evaluate(() => {
-          const element = document.createElement('section');
-          element.innerHTML =
-            '<form action="/native-save" method="post"><input name="task" value="Retained task"><button>Save native task</button></form>';
-          document.querySelector('#page').append(element);
-          window.nativeContent = element;
-          window.nativeInput = element.querySelector('input');
-          window.nativeDestroys = 0;
-          window.app = CatalogViewer.mountViewerApplication({
-            machinesPath: '/manage/machines',
-            nativePage: { title: 'Workspace settings', nav: 'machines' },
-            initialMachines: {
-              element,
-              destroy() {
-                window.nativeDestroys++;
-                element.remove();
+    for (const workspaceChrome of [false, true])
+      test(`native host chrome preserves forms with workspace chrome=${workspaceChrome} at ${width}px ${colorScheme}`, async () => {
+        const browser = await chromium.launch(),
+          page = await browser.newPage({
+            viewport: { width, height: 900 },
+            colorScheme,
+            isMobile: width === 390,
+            hasTouch: width === 390,
+          }),
+          requests = [],
+          errors = [];
+        let publication = 0;
+        try {
+          page.setDefaultTimeout(10000);
+          page.on('pageerror', (error) => errors.push(String(error)));
+          await page.route('http://catalog.test/**', (route) => {
+            const url = new URL(route.request().url());
+            if (url.pathname.startsWith('/api/')) {
+              requests.push(url.pathname + url.search);
+              if (workspaceChrome && url.pathname === '/api/viewer/home') {
+                publication++;
+                return route.fulfill({
+                  json: {
+                    api: 1,
+                    version: 'a'.repeat(64),
+                    now: 10000,
+                    next: { inbox: null, working: null, answered: null },
+                    totals: { waiting: 2, working: 0, answered: 0 },
+                    machines: [
+                      {
+                        key: 'source-0',
+                        label: 'Alpha',
+                        up: true,
+                        working: 0,
+                        sessions: 1,
+                        last: 10000,
+                      },
+                    ],
+                    recent: [
+                      {
+                        id: 'recent',
+                        source_key: 'source-0',
+                        catalog_key: 'recent',
+                        session: {
+                          name: 'Workspace Recent ' + publication,
+                          harness: 'claude',
+                          model: '',
+                          repo: null,
+                          state: 'idle',
+                          last: 10000,
+                          start: 9000,
+                          content_generation: 'b'.repeat(64),
+                        },
+                      },
+                    ],
+                    inbox: [],
+                    working: [],
+                    answered: [],
+                    observations: [],
+                    pending_observations:
+                      publication === 1 ? [] : [{ source_key: 'source-0', catalog_key: 'pending' }],
+                  },
+                });
+              }
+              return route.fulfill({
+                status: 503,
+                json: { error: 'unexpected_native_chrome_read' },
+              });
+            }
+            return fulfillCatalogStatic(route, url);
+          });
+          await page.goto('http://catalog.test/workspace/settings?machine=source-0');
+          await page.clock.install({ time: new Date('2026-10-18T00:00:00Z') });
+          await page.clock.pauseAt(new Date('2026-10-18T00:00:00.001Z'));
+          await page.addScriptTag({ content: outputFiles[0].text });
+          await page.evaluate((workspaceChrome) => {
+            const element = document.createElement('section');
+            element.innerHTML =
+              '<form action="/native-save" method="post"><input name="task" value="Retained task"><button>Save native task</button></form>';
+            document.querySelector('#page').append(element);
+            window.nativeContent = element;
+            window.nativeInput = element.querySelector('input');
+            window.nativeDestroys = 0;
+            window.app = CatalogViewer.mountViewerApplication({
+              machinesPath: '/manage/machines',
+              nativePage: { title: 'Workspace settings', nav: 'machines', workspaceChrome },
+              initialMachines: {
+                element,
+                destroy() {
+                  window.nativeDestroys++;
+                  element.remove();
+                },
               },
-            },
-          });
-        });
-        const assertNative = async () => {
-          assert.equal(
-            await page.evaluate(() => nativeContent === document.querySelector('#page > section')),
-            true,
-          );
-          assert.equal(
-            await page.evaluate(() => nativeInput === document.querySelector('#page input')),
-            true,
-          );
-          assert.equal(await page.locator('#lanes .srow').count(), 0);
-          assert.equal(await page.locator('#page .catalog-session').count(), 0);
-          assert.deepEqual(
-            requests,
-            [],
-            'native chrome must not start a workspace or selected read',
-          );
-          assert.deepEqual(errors, []);
-        };
-        await assertNative();
-        assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
-        assert.equal(
-          await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
-          '/analytics',
-        );
-        assert.equal(
-          await page.locator('#nav [data-go="machines"]').getAttribute('href'),
-          '/manage/machines',
-        );
-        if (width === 390) {
-          await page.getByRole('button', { name: 'Open menu', exact: true }).tap();
-          assert.equal(await page.locator('#lanes .srow').count(), 0);
-          await page.evaluate(() => {
-            window.nativeDrawerClosed = new Promise((resolve) =>
-              window.addEventListener('popstate', () => resolve(), { once: true }),
+            });
+          }, workspaceChrome);
+          const assertNative = async () => {
+            if (workspaceChrome) {
+              await page.locator('#lanes .srow').first().waitFor({ state: 'attached' });
+              assert.match(await page.locator('#lanes').textContent(), /Workspace Recent/);
+            }
+            assert.equal(
+              await page.evaluate(
+                () => nativeContent === document.querySelector('#page > section'),
+              ),
+              true,
             );
-          });
-          await page.keyboard.press('Escape');
-          await withDeadline(
-            page.evaluate(() => window.nativeDrawerClosed),
-            'native isolation drawer history close',
-          );
-          assert.equal(await page.evaluate(() => !!history.state?.drawer), false);
-        }
-        await page.locator('#page input').fill('Edited native task');
-        await page.locator('#page input').press('End');
-        await page.clock.runFor(8100);
-        await assertNative();
-        assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
-        assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
-        await page.evaluate(() => {
-          Object.defineProperty(document, 'visibilityState', {
-            configurable: true,
-            get: () => 'visible',
-          });
-          document.dispatchEvent(new Event('visibilitychange'));
-          window.dispatchEvent(new Event('semon:refresh'));
-        });
-        await page.clock.runFor(8100);
-        await assertNative();
-        // Native links leave this document. A same-document history notification
-        // cannot turn the native host into a source-selected reader either.
-        for (const path of [
-          '/sessions?machine=source-1',
-          '/s/native/shared?machine=source-1',
-          '/analytics',
-          '/',
-        ]) {
-          await page.evaluate((path) => {
-            history.pushState(null, '', path);
-            dispatchEvent(new PopStateEvent('popstate'));
-          }, path);
-          await page.clock.runFor(32);
+            assert.equal(
+              await page.evaluate(() => nativeInput === document.querySelector('#page input')),
+              true,
+            );
+            assert.equal(await page.locator('#lanes .srow').count(), workspaceChrome ? 1 : 0);
+            assert.equal(await page.locator('#page .catalog-session').count(), 0);
+            assert.deepEqual(
+              requests.filter((path) => !workspaceChrome || path !== '/api/viewer/home'),
+              [],
+              'native chrome may read compact workspace metadata, never select or prepare history',
+            );
+            assert.deepEqual(errors, []);
+          };
           await assertNative();
+          if (workspaceChrome)
+            assert.equal(await page.locator('#nav [data-go="home"] .cnt').textContent(), '2');
+          assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
+          assert.equal(
+            await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
+            '/analytics',
+          );
+          assert.equal(
+            await page.locator('#nav [data-go="machines"]').getAttribute('href'),
+            '/manage/machines',
+          );
+          if (width === 390) {
+            await page.getByRole('button', { name: 'Open menu', exact: true }).tap();
+            assert.equal(await page.locator('#lanes .srow').count(), workspaceChrome ? 1 : 0);
+            await page.evaluate(() => {
+              window.nativeDrawerClosed = new Promise((resolve) =>
+                window.addEventListener('popstate', () => resolve(), { once: true }),
+              );
+            });
+            await page.keyboard.press('Escape');
+            await withDeadline(
+              page.evaluate(() => window.nativeDrawerClosed),
+              'native isolation drawer history close',
+            );
+            assert.equal(await page.evaluate(() => !!history.state?.drawer), false);
+          }
+          await page.locator('#page input').fill('Edited native task');
+          await page.locator('#page input').press('End');
+          await page.clock.runFor(8100);
+          await assertNative();
+          if (workspaceChrome) {
+            await page.locator('#lanes').getByText('Workspace Recent 2', { exact: true }).waitFor();
+            assert.equal(publication, 2, 'native workspace chrome follows the existing cadence');
+          }
           assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
           assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
-        }
-        await page.evaluate(() => {
-          app.destroy();
-          app.destroy();
-        });
-        assert.equal(await page.evaluate(() => nativeDestroys), 1);
-        assert.equal(await page.locator('#page form').count(), 0);
-        await page.clock.runFor(8100);
-        assert.deepEqual(requests, []);
-        assert.deepEqual(errors, []);
-      } finally {
-        try {
-          if (!page.isClosed()) await page.evaluate(() => window.app?.destroy());
-          await withDeadline(
-            page.unrouteAll({ behavior: 'wait' }),
-            'native isolation routes drain',
-          );
+          await page.evaluate(() => {
+            Object.defineProperty(document, 'visibilityState', {
+              configurable: true,
+              get: () => 'visible',
+            });
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.dispatchEvent(new Event('semon:refresh'));
+          });
+          await page.clock.runFor(8100);
+          await assertNative();
+          // Native links leave this document. A same-document history notification
+          // cannot turn the native host into a source-selected reader either.
+          for (const path of [
+            '/sessions?machine=source-1',
+            '/s/native/shared?machine=source-1',
+            '/analytics',
+            '/',
+          ]) {
+            await page.evaluate((path) => {
+              history.pushState(null, '', path);
+              dispatchEvent(new PopStateEvent('popstate'));
+            }, path);
+            await page.clock.runFor(32);
+            await assertNative();
+            assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
+            assert.equal(await page.evaluate(() => document.activeElement === nativeInput), true);
+          }
+          await page.evaluate(() => {
+            app.destroy();
+            app.destroy();
+          });
+          assert.equal(await page.evaluate(() => nativeDestroys), 1);
+          assert.equal(await page.locator('#page form').count(), 0);
+          const readsAtDestroy = requests.length;
+          await page.clock.runFor(8100);
+          assert.equal(requests.length, readsAtDestroy, 'native chrome reads survived teardown');
+          assert.deepEqual(errors, []);
         } finally {
-          await withDeadline(browser.close(), 'native isolation browser close');
+          try {
+            if (!page.isClosed()) await page.evaluate(() => window.app?.destroy());
+            await withDeadline(
+              page.unrouteAll({ behavior: 'wait' }),
+              'native isolation routes drain',
+            );
+          } finally {
+            await withDeadline(browser.close(), 'native isolation browser close');
+          }
         }
-      }
-    });
+      });
 
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
@@ -1399,6 +1462,48 @@ for (const width of [390, 1280])
       await page.route('http://catalog.test/**', async (route) => {
         const url = new URL(route.request().url());
         requests.push(url.pathname + url.search);
+        if (url.pathname === '/api/viewer/home')
+          return route.fulfill({
+            json: {
+              api: 1,
+              version: 'a'.repeat(64),
+              now: 10000,
+              next: { inbox: null, working: null, answered: null },
+              totals: { waiting: 2, working: 0, answered: 0 },
+              machines: [
+                {
+                  key: 'one',
+                  label: 'Same hostname',
+                  up: true,
+                  working: 0,
+                  sessions: 1,
+                  last: 10000,
+                },
+              ],
+              recent: [
+                {
+                  id: 'chooser-recent',
+                  source_key: 'one',
+                  catalog_key: 'chooser-recent',
+                  session: {
+                    name: 'Source picker Recent',
+                    harness: 'claude',
+                    model: '',
+                    repo: null,
+                    state: 'idle',
+                    last: 10000,
+                    start: 9000,
+                    content_generation: 'b'.repeat(64),
+                  },
+                },
+              ],
+              inbox: [],
+              working: [],
+              answered: [],
+              observations: [],
+              pending_observations: [{ source_key: 'one', catalog_key: 'pending' }],
+            },
+          });
         if (url.pathname === '/api/session-capabilities')
           return url.searchParams.has('machine')
             ? route.fulfill({
@@ -1473,7 +1578,20 @@ for (const width of [390, 1280])
       await page
         .getByText('The source is updating or temporarily unavailable.', { exact: false })
         .waitFor();
+      await page
+        .locator('#lanes')
+        .getByText('Source picker Recent', { exact: true })
+        .waitFor({ state: 'attached' });
+      assert.equal(requests.filter((path) => path.startsWith('/api/viewer/home')).length, 1);
       assert.equal(requests.includes('/api/session-capabilities'), false);
+      assert.equal(
+        requests.some((path) =>
+          /^\/api\/(sessions|session-(observe|transcript|home|trace|fields|lookup|locate))(\?|$)/.test(
+            path,
+          ),
+        ),
+        false,
+      );
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
       assert.equal(
