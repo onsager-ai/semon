@@ -113,6 +113,13 @@ its completion witness is the native-publication success message in the CI log.
   byte bindings with exactly unchanged bounded text/geometry evidence, retaining
   all original reference pins, screenshot/evidence hash requirements, thresholds,
   coverage and raw findings. Final required CI must validate the delivered tree.
+- After Source #450 merged, runtime `b8a0453a` in
+  [run 39253904406](https://github.com/onsager-ai/semon/actions/runs/39253904406/artifacts/12187521876)
+  retained all six candidate/reference/diff PNG and bounded-evidence digests for
+  each of the 111 already reviewed states (42 preservation, 69 main). The only
+  stale binding was the runtime fingerprint. Its registry update preserves every
+  state, reference, artifact digest and original image-review provenance; the 68
+  preservation cases, 113 main frames and 162 strict regions remain required.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
