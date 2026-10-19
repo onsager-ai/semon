@@ -59,15 +59,15 @@ impl Projection {
     }
     pub(crate) fn with_staged_origin_turns(
         mut self,
-        context: Option<&crate::model::relation_stage::Context>,
+        origins: Option<&BTreeMap<String, crate::model::relation_stage::RelationOrigin>>,
         physical_sender: impl Fn(&str) -> bool,
     ) -> std::io::Result<Self> {
         use crate::model::relation_stage::OriginTurn;
-        let Some(context) = context else {
+        let Some(origins) = origins else {
             return Ok(self);
         };
         for edge in &mut self.edges {
-            let Some(relation) = edge["id"].as_str().and_then(|id| context.relations.get(id))
+            let Some(relation) = edge["id"].as_str().and_then(|id| origins.get(id))
             else {
                 continue;
             };
