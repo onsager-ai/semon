@@ -1,3 +1,4 @@
+import { catalogSessionKey } from './catalogIdentity';
 export interface CatalogSourceCandidate {
   candidate_key: string;
   source: { root: string; path: string };
@@ -7,6 +8,7 @@ export interface CatalogSourceCandidate {
 }
 import { render } from 'preact';
 export interface CatalogListItem {
+  machine?: { key: string; label: string };
   key: string;
   name: string;
   harness: string;
@@ -51,6 +53,7 @@ export interface CatalogListSnapshot {
   model?: string;
   query?: string;
   metadataSearch?: boolean;
+  globalUnion?: boolean;
   searchPartial?: boolean;
   searchIndexIncomplete?: boolean;
   more: boolean;
@@ -71,10 +74,13 @@ export function catalogFilterDescription(
   sourceLabel: string,
   observation: string,
   metadataSearch: boolean,
+  globalUnion = false,
 ): CatalogFilterDescription {
-  const searchQualification = metadataSearch
-    ? 'Metadata search checks session names, IDs, repositories, branches, models and harnesses in this source only. Conversation text and history across sources are unavailable.'
-    : 'Metadata search is unavailable for this source. Conversation text and history across sources are unavailable.';
+  const searchQualification = globalUnion
+    ? 'Metadata search checks session names, IDs, repositories, branches, models and harnesses across this workspace. Conversation text search is unavailable.'
+    : metadataSearch
+      ? 'Metadata search checks session names, IDs, repositories, branches, models and harnesses in this source only. Conversation text and history across sources are unavailable.'
+      : 'Metadata search is unavailable for this source. Conversation text and history across sources are unavailable.';
   return {
     searchQualification,
     description: `Selected source: ${sourceLabel}. ${observation}. ${searchQualification} Ordered by latest recorded activity.`,
@@ -138,7 +144,9 @@ export function renderCatalogList(
         <summary>Search scope</summary>
         <p class="catalog-note">
           {snapshot.metadataSearch
-            ? 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
+            ? snapshot.globalUnion
+              ? 'Search includes names, IDs, repositories, branches, models and harnesses across this workspace. Conversation text search is unavailable.'
+              : 'Search includes names, IDs, repositories, branches, models and harnesses. Conversation text and history across sources are unavailable.'
             : 'Text search and history across sources are unavailable.'}
         </p>
       </details>
@@ -420,7 +428,7 @@ export function renderCatalogList(
               <div class="list">
                 {group.items.map((item) => (
                   <SessionRowView
-                    key={item.key}
+                    key={catalogSessionKey(item)}
                     row={item.presentation!}
                     host={{ session: () => host.session(item) }}
                   />
@@ -441,7 +449,7 @@ export function renderCatalogList(
                 : Math.min(5, group.children.length);
             const row = (item: CatalogListItem, child = false) => (
               <SessionRowView
-                key={item.key}
+                key={catalogSessionKey(item)}
                 child={child}
                 row={
                   item.presentation ?? {

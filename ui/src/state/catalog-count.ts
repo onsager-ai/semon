@@ -1,3 +1,4 @@
+import { catalogSessionKey } from './catalog-wire';
 import type { CatalogPage, CatalogSession } from './catalog-wire';
 
 /** Evidence about an accepted bounded list page, not a workspace census. */
@@ -28,7 +29,7 @@ export function completeCatalogCount({
   more,
 }: {
   page: CatalogPage | null;
-  items: readonly Pick<CatalogSession, 'key'>[];
+  items: readonly Pick<CatalogSession, 'key' | 'machine'>[];
   witness: CatalogCountWitness | null;
   source: string;
   filters: string;
@@ -55,10 +56,10 @@ export function completeCatalogCount({
     items.length !== page.items.length
   )
     return false;
-  const keys = new Set(page.items.map((item) => item.key));
+  const keys = new Set(page.items.map(catalogSessionKey));
   return (
     keys.size === page.items.length &&
-    new Set(items.map((item) => item.key)).size === items.length &&
-    items.every((item) => keys.has(item.key))
+    new Set(items.map(catalogSessionKey)).size === items.length &&
+    items.every((item) => keys.has(catalogSessionKey(item)))
   );
 }
