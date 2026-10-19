@@ -136,6 +136,17 @@ survive that transfer; admission does not close a healthy writer or reopen its
 index. The host must transfer lifecycle ownership and retain custody/admission
 fences. Closing the admitted set closes those original observers too.
 
+For hosted sources whose Raw and Facts changes are journaled, an unrelated
+runtime observation can advance an active semantic stage's runtime fence without
+resetting its native identity/relationship progress. Facts invalidation includes
+indexed staged owners before their first Catalog publication and their native
+parent/PID dependencies. Each batch still checks the exact source claims,
+consumed ledgers, native roles, Catalog generation and prepared runtime; changed
+dependencies reset through the existing witness checks. Unjournaled/local
+observations and staged negative source-custody proofs retain the conservative
+epoch reset. This lets a large historical component finish while unrelated
+sessions start and stop, so the pending new-source journal remains reachable.
+
 The native Event Index connection reuses at most 32 compiled SQL statements for
 per-source ledger checks and row writes. Bound values clear when a statement
 returns to the connection cache; generation checks still execute within each

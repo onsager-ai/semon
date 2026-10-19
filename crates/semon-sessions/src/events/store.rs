@@ -971,7 +971,9 @@ pub(crate) fn enqueue_sources(
 }
 
 fn enqueue_native_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusqlite::Result<()> {
-    let mut statement=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2")?;
+    // Facts can change before a new owner has its first published Catalog row.
+    // Keep those staged observations under the same exact-source revision fence.
+    let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 UNION SELECT i.source_path FROM catalog_semantic_inputs i JOIN catalog_semantic_sources s USING(source_path) WHERE i.harness=?1 AND i.native_id=?2 AND s.index_done=1 AND EXISTS(SELECT 1 FROM catalog_semantic_stage) UNION SELECT own.source_path FROM catalog_semantic_native n JOIN catalog_semantic_owner_sources own USING(session_key) JOIN catalog_semantic_sources s USING(source_path) WHERE n.harness=?1 AND n.native_id=?2 AND s.index_done=1 AND EXISTS(SELECT 1 FROM catalog_semantic_stage) UNION SELECT d.source_path FROM catalog_native_dependencies d JOIN catalog_semantic_sources s USING(source_path) WHERE d.harness=?1 AND d.native_id=?2 AND s.index_done=1 AND EXISTS(SELECT 1 FROM catalog_semantic_stage)")?;
     let paths = statement
         .query_map(params![harness, id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1000,7 +1002,7 @@ pub(crate) fn enqueue_pid(options: &crate::Options, pid: u32) -> io::Result<()> 
 }
 fn enqueue_dependency_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusqlite::Result<()> {
     let paths = {
-        let mut statement=tx.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.lifecycle='current' AND s.source_path=d.source_path)")?;
+        let mut statement=tx.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND (EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.lifecycle='current' AND s.source_path=d.source_path) OR EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=d.source_path AND s.index_done=1 AND EXISTS(SELECT 1 FROM catalog_semantic_stage)))")?;
         statement
             .query_map(params![harness, id], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?
@@ -1068,7 +1070,7 @@ pub(crate) fn enqueue_facts(
         // These fields are actual dependencies of every recorded observation.
         // Queue their source paths; bounded workers still never build a cohort.
         let paths = {
-            let mut statement=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current'").map_err(io::Error::other)?;
+            let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' UNION SELECT source_path FROM catalog_semantic_sources WHERE index_done=1 AND EXISTS(SELECT 1 FROM catalog_semantic_stage)").map_err(io::Error::other)?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))
                 .map_err(io::Error::other)?
@@ -2242,8 +2244,9 @@ impl IndexStore for SqliteStore {
         &mut self,
         paths: &[String],
         runtime: &str,
+        journaled_runtime: bool,
     ) -> Result<Outcome, StoreError> {
-        self.semantic_begin(paths, runtime)
+        self.semantic_begin_with_journal(paths, runtime, journaled_runtime)
     }
     fn semantic_batch(
         &mut self,
