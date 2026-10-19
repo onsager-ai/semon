@@ -84,13 +84,18 @@ test('the workflow matrix and functional condition reach every declared group', 
 
 // Evaluate the real workflow expressions for independent events and PR revisions.
 test('Rust supersedes only earlier revisions of the same PR', () => {
-  const workflow = fs.readFileSync(new URL('../../.github/workflows/rust.yml', import.meta.url), 'utf8');
+  const workflow = fs.readFileSync(
+    new URL('../../.github/workflows/rust.yml', import.meta.url),
+    'utf8',
+  );
   const group = workflow.match(/^  group: (.+)$/m)[1];
   const cancel = workflow.match(/^  cancel-in-progress: \$\{\{ (.+) \}\}$/m)[1];
   const policy = (event, number = undefined, ref = 'refs/heads/main') => {
     const context = { github: { event_name: event, ref, event: { pull_request: { number } } } };
     return {
-      group: group.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expr) => vm.runInNewContext(expr, context)),
+      group: group.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expr) =>
+        vm.runInNewContext(expr, context),
+      ),
       cancel: vm.runInNewContext(cancel, context),
     };
   };
