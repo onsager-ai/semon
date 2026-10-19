@@ -6,7 +6,9 @@ use crate::model::relation_stage::{
 };
 use std::collections::BTreeSet;
 
-const RECIPE: &str = "recorded-origin-turn-v1";
+// Older in-flight stages have not registered unpublished runtime dependencies.
+// Rebuild them once before allowing journal-qualified runtime rebasing.
+const RECIPE: &str = "recorded-origin-turn-journaled-runtime-v2";
 fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -2728,7 +2730,10 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
+            .execute(
+                "UPDATE meta SET value='recorded-origin-turn-v1' WHERE key='catalog_semantic_recipe'",
+                [],
+            )
             .unwrap();
         let epoch: i64 = store
             .connection
