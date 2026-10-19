@@ -258,7 +258,18 @@ for (const width of [390, 1280])
           await page.clock.runFor(8100);
           await assertNative();
           if (workspaceChrome) {
-            await page.locator('#lanes').getByText('Workspace Recent 2', { exact: true }).waitFor();
+            await page
+              .locator('#lanes')
+              .getByText('Workspace Recent 2', { exact: true })
+              .waitFor({
+                state: width === 390 ? 'attached' : 'visible',
+              });
+            if (width === 390)
+              assert.equal(
+                await page.evaluate(() => document.body.classList.contains('drawer-open')),
+                false,
+                'the drawer stays closed while Recent refreshes',
+              );
             assert.equal(publication, 2, 'native workspace chrome follows the existing cadence');
           }
           assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
