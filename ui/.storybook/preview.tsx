@@ -24,6 +24,7 @@ const preview: Preview = {
     (Story, context) => {
       const theme = context.globals.theme === 'dark' ? 'dark' : 'light';
       document.documentElement.dataset.theme = theme;
+      if (context.parameters.testOnlyRustFixture) return <Story />;
       return (
         <div class="storybook-stage" data-theme={theme}>
           <Story />
