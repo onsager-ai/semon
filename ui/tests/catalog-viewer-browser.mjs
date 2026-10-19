@@ -166,7 +166,8 @@ for (const width of [390, 1280])
                     working: [],
                     answered: [],
                     observations: [],
-                    pending_observations: [{ source_key: 'source-0', catalog_key: 'pending' }],
+                    pending_observations:
+                      publication === 1 ? [] : [{ source_key: 'source-0', catalog_key: 'pending' }],
                   },
                 });
               }
@@ -226,6 +227,8 @@ for (const width of [390, 1280])
             assert.deepEqual(errors, []);
           };
           await assertNative();
+          if (workspaceChrome)
+            assert.equal(await page.locator('#nav [data-go="home"] .cnt').textContent(), '2');
           assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
           assert.equal(
             await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
@@ -237,7 +240,7 @@ for (const width of [390, 1280])
           );
           if (width === 390) {
             await page.getByRole('button', { name: 'Open menu', exact: true }).tap();
-            assert.equal(await page.locator('#lanes .srow').count(), 0);
+            assert.equal(await page.locator('#lanes .srow').count(), workspaceChrome ? 1 : 0);
             await page.evaluate(() => {
               window.nativeDrawerClosed = new Promise((resolve) =>
                 window.addEventListener('popstate', () => resolve(), { once: true }),
