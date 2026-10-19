@@ -31,22 +31,40 @@ const publicAssets = new Map([
   ['/fonts/jetbrains-mono-latin-ext.woff2', 'fonts/jetbrains-mono/latin-ext.woff2'],
   ['/mark.svg', 'mark.svg'],
 ]);
-const sourceFiles = ['viewer.css', 'select.css', 'shell.css', ...publicAssets.values()].map((file) => path.join(sessionSource, file));
+const sourceFiles = ['viewer.css', 'select.css', 'shell.css', ...publicAssets.values()].map(
+  (file) => path.join(sessionSource, file),
+);
 function canonicalAssets() {
   return {
     name: 'semon-canonical-story-assets',
     enforce: 'pre',
-    resolveId(id) { if (publicAssets.has(id)) return path.join(sessionSource, publicAssets.get(id)); },
+    resolveId(id) {
+      if (publicAssets.has(id)) return path.join(sessionSource, publicAssets.get(id));
+    },
     generateBundle() {
       for (const [url, file] of publicAssets)
-        this.emitFile({ type: 'asset', fileName: url.slice(1), source: fs.readFileSync(path.join(sessionSource, file)) });
+        this.emitFile({
+          type: 'asset',
+          fileName: url.slice(1),
+          source: fs.readFileSync(path.join(sessionSource, file)),
+        });
     },
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
         const file = publicAssets.get(request.url?.split('?')[0]);
-        if (!file) { next(); return; }
-        if (request.method !== 'GET') { response.writeHead(405); response.end(); return; }
-        response.writeHead(200, { 'Content-Type': file.endsWith('.svg') ? 'image/svg+xml' : 'font/woff2', 'Cache-Control': 'no-store' });
+        if (!file) {
+          next();
+          return;
+        }
+        if (request.method !== 'GET') {
+          response.writeHead(405);
+          response.end();
+          return;
+        }
+        response.writeHead(200, {
+          'Content-Type': file.endsWith('.svg') ? 'image/svg+xml' : 'font/woff2',
+          'Cache-Control': 'no-store',
+        });
         response.end(fs.readFileSync(path.join(sessionSource, file)));
       });
     },
@@ -62,14 +80,22 @@ export default {
   viteFinal: async (config) => {
     config.resolve ??= {};
     config.resolve.dedupe = [
-      ...new Set([...(config.resolve.dedupe ?? []), 'preact', 'preact/hooks', 'preact/jsx-runtime']),
+      ...new Set([
+        ...(config.resolve.dedupe ?? []),
+        'preact',
+        'preact/hooks',
+        'preact/jsx-runtime',
+      ]),
     ];
     config.plugins ??= [];
     config.plugins.push(canonicalAssets());
-    if (fixturePlugin) config.plugins.push((await import(pathToFileURL(fixturePlugin).href)).default());
+    if (fixturePlugin)
+      config.plugins.push((await import(pathToFileURL(fixturePlugin).href)).default());
     config.server ??= {};
     config.server.fs ??= {};
-    config.server.fs.allow = [...new Set([...(config.server.fs.allow ?? []), uiRoot, ...sourceFiles, ...consumerFiles])];
+    config.server.fs.allow = [
+      ...new Set([...(config.server.fs.allow ?? []), uiRoot, ...sourceFiles, ...consumerFiles]),
+    ];
     return config;
   },
 };

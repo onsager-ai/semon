@@ -146,10 +146,17 @@ const sessionRow: SessionRowData = {
 export const SessionRow: Story = {
   render: () => (
     <main class="page storybook-component-frame">
-      <div class="ph"><h1>Sessions</h1><div class="sub">Recent activity</div></div>
+      <div class="ph">
+        <h1>Sessions</h1>
+        <div class="sub">Recent activity</div>
+      </div>
       <div class="list">
         <SessionRowView row={sessionRow} host={{ session() {} }} />
-        <SessionRowView row={{ ...sessionRow, id: 'child-1', name: 'Check visual diffs' }} child host={{ session() {} }} />
+        <SessionRowView
+          row={{ ...sessionRow, id: 'child-1', name: 'Check visual diffs' }}
+          child
+          host={{ session() {} }}
+        />
       </div>
     </main>
   ),
@@ -164,8 +171,13 @@ export const KeyboardFocus: Story = {
       }, []);
       return (
         <main class="page storybook-component-frame" ref={frame}>
-          <div class="ph"><h1>Keyboard focus</h1><div class="sub">Session navigation</div></div>
-          <div class="list"><SessionRowView row={sessionRow} host={{ session() {} }} /></div>
+          <div class="ph">
+            <h1>Keyboard focus</h1>
+            <div class="sub">Session navigation</div>
+          </div>
+          <div class="list">
+            <SessionRowView row={sessionRow} host={{ session() {} }} />
+          </div>
         </main>
       );
     }
@@ -219,7 +231,10 @@ export const Tooltip: Story = {
       }, []);
       return (
         <main class="page storybook-component-frame">
-          <div class="ph"><h1>Tooltip</h1><div class="sub">Keyboard and pointer description</div></div>
+          <div class="ph">
+            <h1>Tooltip</h1>
+            <div class="sub">Keyboard and pointer description</div>
+          </div>
           <button type="button" data-tip="A recorded source may be incomplete while history loads.">
             Source status
           </button>
@@ -354,8 +369,22 @@ export const AnalyticsLoaded: Story = {
                 heading: 'By harness',
                 key: 'harness',
                 rows: [
-                  { key: 'codex', name: 'Codex', count: '11', width: 72, hours: '2h 12m', cost: '$0.28' },
-                  { key: 'claude', name: 'Claude', count: '7', width: 46, hours: '1h 12m', cost: '$0.14' },
+                  {
+                    key: 'codex',
+                    name: 'Codex',
+                    count: '11',
+                    width: 72,
+                    hours: '2h 12m',
+                    cost: '$0.28',
+                  },
+                  {
+                    key: 'claude',
+                    name: 'Claude',
+                    count: '7',
+                    width: 46,
+                    hours: '1h 12m',
+                    cost: '$0.14',
+                  },
                 ],
               },
             ],
@@ -597,12 +626,27 @@ export const SessionMenu: Story = {
               { key: 'copy', text: 'Copy session ID' },
               { key: 'trace', text: 'Open trace' },
             ],
-            path: [{ id: 'session-1', name: 'Visual contract review', harness: 'codex', harnessName: 'Codex' }],
+            path: [
+              {
+                id: 'session-1',
+                name: 'Visual contract review',
+                harness: 'codex',
+                harnessName: 'Codex',
+              },
+            ],
             status: 'Working',
             state: 'work',
             stateLabel: 'Working',
             details: [{ label: 'Model', value: 'gpt-6', mono: true }],
-            cost: { figure: '$0.04', caption: 'Recorded cost', note: 'Available usage', details: [], runs: [], models: [], includesRuns: false },
+            cost: {
+              figure: '$0.04',
+              caption: 'Recorded cost',
+              note: 'Available usage',
+              details: [],
+              runs: [],
+              models: [],
+              includesRuns: false,
+            },
             notice: '',
             icons: { chevron: 'M6 9l6 6 6-6', copy: 'M8 8h12v12H8z' },
             command: 'codex resume session-1',
@@ -626,7 +670,11 @@ export const TraceEmpty: Story = {
           fold() {},
           committed() {},
         };
-        renderTraceScreen(root, { empty: true, hops: [], observation: 'No trace is available.' }, host);
+        renderTraceScreen(
+          root,
+          { empty: true, hops: [], observation: 'No trace is available.' },
+          host,
+        );
         return () => releaseScreen(root);
       }}
     />
@@ -687,7 +735,10 @@ export const TraceFlow: Story = {
                 icon: 'M6 12h12M12 6l6 6-6 6',
                 handoff: 'handoff-1',
                 turn: 'turn-child',
-                parts: [{ className: 'who', text: 'Codex' }, { className: 'verb', text: 'started a phone layout check.' }],
+                parts: [
+                  { className: 'who', text: 'Codex' },
+                  { className: 'verb', text: 'started a phone layout check.' },
+                ],
                 time: '10:16',
                 brief: 'Verify compact related-session rows at 334px.',
                 result: 'Touch controls remain available.',
@@ -875,9 +926,25 @@ export const LongTranscript: Story = {
                 traceIcon: 'M6 4v10a4 4 0 0 0 4 4h8',
                 stateLabel: 'Complete',
                 entries: [
-                  { kind: 'message', key: 'long-request', flavor: 'user', text: 'Read the full report and preserve its content.' },
-                  { kind: 'thought', key: 'long-thought', mode: 'readable', label: 'Planning', text: 'Inspect the source, compare the visible states, and keep the complete finding available.' },
-                  { kind: 'message', key: 'long-answer', flavor: 'assistant', text: longRecordedText },
+                  {
+                    kind: 'message',
+                    key: 'long-request',
+                    flavor: 'user',
+                    text: 'Read the full report and preserve its content.',
+                  },
+                  {
+                    kind: 'thought',
+                    key: 'long-thought',
+                    mode: 'readable',
+                    label: 'Planning',
+                    text: 'Inspect the source, compare the visible states, and keep the complete finding available.',
+                  },
+                  {
+                    kind: 'message',
+                    key: 'long-answer',
+                    flavor: 'assistant',
+                    text: longRecordedText,
+                  },
                 ],
               },
             },
