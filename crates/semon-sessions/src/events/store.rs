@@ -2274,6 +2274,14 @@ impl IndexStore for SqliteStore {
     ) -> Result<crate::model::relation_stage::Selection, StoreError> {
         self.semantic_selection(epoch, selector)
     }
+    fn semantic_replay_page(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> Result<crate::model::relation_stage::Context, StoreError> {
+        self.semantic_replay(epoch, owners, after)
+    }
     fn publish_semantic_catalog(
         &mut self,
         batch: &crate::model::relation_stage::Batch,

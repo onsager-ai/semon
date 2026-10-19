@@ -4047,12 +4047,28 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
 
 #[test]
 fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
+    assert_staged_bidirectional_message_pages(80);
+}
+
+#[test]
+fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
+    assert_staged_bidirectional_message_pages(360);
+}
+
+fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let home = Home::new();
+    let ts = |hour: i64, minute: i64| {
+        format!(
+            "2026-09-{:02}T{:02}:{minute:02}:00.000Z",
+            24 + hour / 24,
+            hour % 24
+        )
+    };
     let mut alpha = vec![human("alpha", ts(6, 0), "Coordinate a conversation")];
     // Offset the two native message pages so the same send is observed with
     // different incident subsets. Its preceding receipt still owns its turn.
     let mut beta = vec![peer("beta", ts(6, 1), "prelude", "Outside", 101, "Start")];
-    for n in 0..80 {
+    for n in 0..rounds {
         let minute = 7 + n / 10;
         let second = (n % 10) * 4;
         let forward = format!("forward-{n:03}");
@@ -4248,7 +4264,7 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Buil
     drop(cache);
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
     let mut complete = false;
-    for _ in 0..128 {
+    for _ in 0..512 {
         if evidence
             .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
             .unwrap()

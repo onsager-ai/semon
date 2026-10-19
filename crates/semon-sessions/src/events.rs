@@ -1144,6 +1144,16 @@ pub(crate) trait IndexStore: Send {
         Err(StoreError::Data("semantic staging unavailable".into()))
     }
 
+    fn semantic_replay_page(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> Result<crate::model::relation_stage::Context, StoreError> {
+        let _ = (epoch, owners, after);
+        Err(StoreError::Data("semantic replay unavailable".into()))
+    }
+
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
@@ -1691,6 +1701,19 @@ impl EventCache {
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .semantic_select(epoch, selector)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn semantic_replay_page(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> io::Result<crate::model::relation_stage::Context> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_replay_page(epoch, owners, after)
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
