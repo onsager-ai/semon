@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The TSX bench for docs/design/tsx.md, run by .github/workflows/tsx-bench.yml and nowhere else: it downloads bundlers and
+# The TSX bench for docs/design/tsx.md, run explicitly for historical comparisons: it downloads bundlers and
 # bundles with them, which is CI-only work. For each bundler (esbuild, Bun, Vite) and runtime (h, Preact, Solid, lit-html)
 # it bundles the same sample (src/) as one IIFE and records the install footprint, cold and warm bundle times, output
 # sizes, the viewer's banned-string test run against each bundle, a single-file transform (no bundling) and tsc --noEmit.

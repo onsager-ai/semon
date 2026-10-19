@@ -56,23 +56,12 @@ jobs:
           npm --prefix ui run check:bundle
           npm --prefix ui run sizes
 
-      - name: Prepare generated assets for thermal-restricted review
-        if: failure() && (github.event.pull_request.number == 438 || github.event_name == 'workflow_dispatch')
-        run: npm --prefix ui run build
-      - name: Retain generated assets without bypassing freshness
-        if: failure() && (github.event.pull_request.number == 438 || github.event_name == 'workflow_dispatch')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: ui-generated-review
-          path: crates/semon-sessions/src/*.generated.js
-          if-no-files-found: error
-
   build:
     name: viewer test binaries
     needs: foundation
     runs-on: ubuntu-latest
-    # Recovery UI review builds the candidate and three exact historical refs.
-    timeout-minutes: ${{ github.event.pull_request.number == 438 && 25 || 15 }}
+    # Manual diagnostics also build the pinned recovery baseline.
+    timeout-minutes: ${{ inputs.refresh_diagnostics && 25 || 15 }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,10 +92,10 @@ jobs:
       - name: Strip debug symbols from transferred binaries
         run: strip --strip-debug target/debug/semon target/debug/examples/ui-account-server
 
-      # Temporary recovery qualification; ordinary runs build only the candidate.
+      # Manual refresh diagnostics compare the candidate with an exact baseline.
       # Keep the exact candidate binary while reusing dependencies for the baseline.
       - name: Build the pinned recovery baseline for refresh comparison
-        if: github.event.pull_request.number == 438 || inputs.refresh_diagnostics
+        if: inputs.refresh_diagnostics
         env:
           REFRESH_BASELINE: c402e481dbe23bcf03841e47b5f7eccd14c0e426
         run: |
@@ -129,19 +118,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Build the pinned before candidate for historical comparison
-        if: github.event.pull_request.number == 438
-        run: |
-          BEFORE=$(node --input-type=module -e 'import { BEFORE } from "./tests/ui/preservation-contract.mjs"; console.log(BEFORE)')
-          git fetch --no-tags --depth=1 origin "$BEFORE"
-          git worktree add --detach "$RUNNER_TEMP/ui-before" "$BEFORE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-before/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-          mkdir -p target/ui-before
-          cp target/debug/semon target/ui-before/semon
-
-      # The selected application is a required reference for every candidate,
-      # including main/manual runs; it is not a PR-number-specific diagnostic.
+      # The selected application remains a required reference on every event.
       - name: Build the selected complete UI reference
         run: |
           UI_REFERENCE=$(node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; console.log(REFERENCE.source)')
@@ -156,14 +133,6 @@ jobs:
           path: target/debug/semon
           if-no-files-found: error
           retention-days: 1
-      - name: Retain the exact before candidate binary
-        if: github.event.pull_request.number == 438
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: viewer-ui-before-binary
-          path: target/ui-before/semon
-          if-no-files-found: error
-          retention-days: 1
 
   checks:
     name: viewer / ${{ matrix.suite }}
@@ -171,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
     # Product deadlines and every other suite's existing allowance stay unchanged.
-    timeout-minutes: ${{ matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) && 30 || 15 }}
+    timeout-minutes: ${{ matrix.suite == 'performance' && inputs.refresh_diagnostics && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -195,16 +164,10 @@ jobs:
         with:
           name: viewer-ui-reference-binary
           path: target/ui-reference
-      - name: Download the freshly verified before candidate
-        if: matrix.suite == 'visual' && github.event.pull_request.number == 438
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: viewer-ui-before-binary
-          path: target/ui-before
       - name: Restore executable permissions
         run: chmod +x target/debug/semon target/debug/examples/ui-account-server
       - name: Restore baseline executable permissions
-        if: matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics)
+        if: matrix.suite == 'performance' && inputs.refresh_diagnostics
         run: chmod +x target/debug/semon-refresh-baseline
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -323,27 +286,6 @@ jobs:
           SEMON_PIXEL_SCOPE=main node pixels.mjs || failed=1
           exit "$failed"
 
-      - name: Capture the before candidate under the same comparison protocol
-        if: ${{ !cancelled() && matrix.suite == 'visual' && github.event.pull_request.number == 438 }}
-        run: |
-          reference_url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log")
-          chmod +x target/ui-before/semon
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-before/semon sessions --serve --listen 127.0.0.1:8771 \
-            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-before-index.json" \
-            < /dev/null > "$RUNNER_TEMP/ui-before.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-before.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-before.log"; exit 1; }
-          cd tests/ui
-          BEFORE=$(node --input-type=module -e 'import { BEFORE } from "./preservation-contract.mjs"; console.log(BEFORE)')
-          SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}" SEMON_UI_OUT="$SEMON_UI_OUT/before" \
-            SEMON_PRESERVATION_CANDIDATE="$BEFORE" \
-            SEMON_VISUAL_CANDIDATE_BIN="$GITHUB_WORKSPACE/target/ui-before/semon" \
-            SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" node preservation.mjs --historical-before
-
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
         working-directory: tests/ui
@@ -364,11 +306,11 @@ jobs:
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
           SEMON_PERF_SOURCE: ${{ github.sha }}
-          SEMON_PERF_REFRESH_DIAGNOSTICS: ${{ (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) && '1' || '0' }}
+          SEMON_PERF_REFRESH_DIAGNOSTICS: ${{ inputs.refresh_diagnostics && '1' || '0' }}
         run: node checks/perf.mjs
 
       - name: Same-run pinned baseline live-refresh comparison
-        if: ${{ !cancelled() && matrix.suite == 'performance' && (github.event.pull_request.number == 438 || inputs.refresh_diagnostics) }}
+        if: ${{ !cancelled() && matrix.suite == 'performance' && inputs.refresh_diagnostics }}
         working-directory: tests/ui
         env:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon-refresh-baseline
