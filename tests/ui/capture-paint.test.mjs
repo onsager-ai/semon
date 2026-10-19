@@ -82,13 +82,11 @@ test('independent visual browsers retain exact rounded-edge and text pixels', as
         );
       const first = await shot();
       for (const offset of [1, 300, 0, 11, 0]) {
-        await page.locator('aside').evaluate(
-          (node, offset) => {
-            node.scrollTop = offset;
-          },
-          offset,
-        );
-        if (offset === 0) assert.deepEqual(await shot(), first, 'repaint retains exact edge pixels');
+        await page.locator('aside').evaluate((node, offset) => {
+          node.scrollTop = offset;
+        }, offset);
+        if (offset === 0)
+          assert.deepEqual(await shot(), first, 'repaint retains exact edge pixels');
       }
       return first;
     } finally {
