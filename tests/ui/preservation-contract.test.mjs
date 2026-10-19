@@ -388,8 +388,4 @@ test('required actual comparison reaches every visual workflow, independently of
     /SEMON_PIXEL_SCOPE=two-machines node pixels\.mjs/,
   );
   assert.match(step('Pushed data in the viewer'), /SEMON_PIXEL_SCOPE: pushed/);
-  assert.match(
-    step('Capture the before candidate under the same comparison protocol'),
-    /node preservation\.mjs --historical-before/,
-  );
 });

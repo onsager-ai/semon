@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# A newer PR revision supersedes only that PR's earlier Rust run.
+concurrency:
+  group: rust-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: fmt, clippy, test
