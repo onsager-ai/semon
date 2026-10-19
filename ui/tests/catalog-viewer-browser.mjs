@@ -1114,9 +1114,13 @@ for (const width of [390, 1280])
           await page.screenshot({
             path: process.env.SEMON_CATALOG_OUT + '/selected-' + width + '-' + colorScheme + '.png',
           });
+        // Finish the opening tail transaction before measuring reader-owned
+        // geometry. The append below must preserve that settled anchor.
+        await page.clock.runFor(2100);
         await page
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.scrollIntoView({ block: 'start' }));
+        await page.clock.runFor(50);
         const focusTarget = page.getByRole('button', {
           name: 'Session menu: details, cost and actions',
         });
@@ -1136,7 +1140,10 @@ for (const width of [390, 1280])
         const anchorAfter = await page
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.getBoundingClientRect().top);
-        assert.ok(Math.abs(anchorBefore - anchorAfter) < 2);
+        assert.ok(
+          Math.abs(anchorBefore - anchorAfter) < 2,
+          JSON.stringify({ anchorBefore, anchorAfter }),
+        );
         assert.match(
           await page.locator('#page [data-entry-key="one:6"]').innerText(),
           /and final native text chunk/,
@@ -1450,7 +1457,7 @@ for (const width of [390, 1280])
           body: url.pathname === '/viewer.css' ? css : html,
         });
       });
-      await page.goto('http://catalog.test/sessions' + (width === 1280 ? '?choose_source=1' : ''));
+      await page.goto('http://catalog.test/sessions?choose_source=1');
       await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
       await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
       await page.addScriptTag({ content: outputFiles[0].text });
@@ -3052,11 +3059,19 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
     await menu.focus();
     releaseFirstAnchor();
     await page.locator('#page [data-entry-key="one:0"]').waitFor();
+    await page.waitForFunction(() =>
+      document
+        .querySelector('#page [data-entry-key="one:0"]')
+        ?.textContent.includes('Anchor target record'),
+    );
+    // The accepted range schedules its anchor placement on the next frame.
+    // Advance the paused clock before inspecting content-visibility text.
+    await page.clock.runFor(34);
     assert.match(
       await page.locator('#page [data-entry-key="one:0"]').innerText(),
       /Anchor target record/,
     );
-    assert.match(await field.innerText(), /Final field segment\./);
+    assert.match(await field.textContent(), /Final field segment\./);
     assert.equal(anchorReads, 2, 'one 409 may re-resolve the same turn once');
     assert.equal(await menu.evaluate((node) => node === document.activeElement), true);
     assert.deepEqual(

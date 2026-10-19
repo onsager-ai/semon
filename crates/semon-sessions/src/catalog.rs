@@ -452,6 +452,8 @@ pub fn validate_session_catalog_query(query: &str) -> Result<(), ViewerReply> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cursor {
+    #[serde(skip)]
+    inclusive: bool,
     #[serde(default)]
     scope: CatalogReadScope,
     version: u32,
@@ -683,7 +685,11 @@ fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<Cata
             connection,
             &index,
             &filters,
-            "last_ms = ? AND session_key > ?",
+            if cursor.inclusive {
+                "last_ms = ? AND session_key >= ?"
+            } else {
+                "last_ms = ? AND session_key > ?"
+            },
             args,
             limit,
         )?;
@@ -1009,6 +1015,7 @@ fn read_page(
             .cursor
             .as_ref()
             .map(|cursor| crate::catalog_search::Position {
+                inclusive: cursor.inclusive,
                 last: cursor.last,
                 key: cursor.key.clone(),
             });
@@ -1110,6 +1117,7 @@ fn read_page(
     }
     let next = if let Some(position) = search_next {
         Some(serde_json::to_string(&Cursor {
+            inclusive: false,
             scope: request.scope,
             version: 1,
             generation: generation.clone(),
@@ -1126,6 +1134,7 @@ fn read_page(
             .last()
             .map(|row| {
                 serde_json::to_string(&Cursor {
+                    inclusive: false,
                     scope: request.scope,
                     version: 1,
                     generation: generation.clone(),
@@ -1514,6 +1523,194 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn workspace_search_resumes_after_each_bounded_scan_frontier() {
+        let a = Fixture::new();
+        let b = Fixture::new();
+        a.publish(600);
+        let mut paths = std::collections::BTreeSet::new();
+        for key in ["session-00000", "session-00550", "session-00999"] {
+            paths.insert(b.codex_source(key, None, 1));
+        }
+        let path = b.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(path).unwrap();
+        facts.codex_rollouts = Some(paths);
+        crate::write_facts(path, &facts).unwrap();
+        b.publish_existing();
+        let sources = [
+            crate::OverviewSource {
+                key: "a".into(),
+                label: "Alpha".into(),
+                options: a.options.clone(),
+                up: false,
+            },
+            crate::OverviewSource {
+                key: "b".into(),
+                label: "Beta".into(),
+                options: b.options.clone(),
+                up: false,
+            },
+        ];
+        let base = "scope=retained_history&q=session&harness=codex&limit=2";
+        let mut query = base.to_owned();
+        let mut found = Vec::new();
+        let mut partial = false;
+        let mut cursors = std::collections::BTreeSet::new();
+        for _ in 0..12 {
+            let result = session_catalog_union(&sources, "workspace", &query);
+            assert_eq!(
+                result.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&result.body)
+            );
+            let value: Value = serde_json::from_slice(&result.body).unwrap();
+            partial |= value["search"]["partial"] == true;
+            found.extend(
+                value["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["key"].as_str().unwrap().to_owned()),
+            );
+            let Some(cursor) = value["next_cursor"].as_str() else {
+                break;
+            };
+            assert!(
+                cursors.insert(cursor.to_owned()),
+                "scan frontier must advance"
+            );
+            query = format!("{base}&cursor={}", crate::viewer::percent_encode(cursor));
+        }
+        assert!(
+            partial,
+            "fixture must exhaust the existing 512-candidate search budget"
+        );
+        assert_eq!(
+            found,
+            vec!["session-00000", "session-00550", "session-00999"]
+        );
+    }
+
+    #[test]
+    fn workspace_union_pages_duplicate_ids_and_timestamps_without_native_reads() {
+        let a = Fixture::new();
+        let b = Fixture::new();
+        a.publish(8);
+        b.publish(8);
+        let sources = vec![
+            crate::OverviewSource {
+                key: "a".into(),
+                label: "Alpha".into(),
+                options: a.options.clone(),
+                up: false,
+            },
+            crate::OverviewSource {
+                key: "b".into(),
+                label: "Beta".into(),
+                options: b.options.clone(),
+                up: false,
+            },
+        ];
+        let mut query = "scope=retained_history&limit=3".to_owned();
+        let mut identities = Vec::new();
+        let mut first_cursor = None;
+        for _ in 0..20 {
+            let result = session_catalog_union(&sources, "workspace-a", &query);
+            assert_eq!(
+                result.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&result.body)
+            );
+            let value: Value = serde_json::from_slice(&result.body).unwrap();
+            for item in value["items"].as_array().unwrap() {
+                assert!(item.get("details").is_none());
+                identities.push((
+                    item["last"].as_i64().unwrap_or(0),
+                    item["key"].as_str().unwrap().to_owned(),
+                    item["machine"]["key"].as_str().unwrap().to_owned(),
+                ));
+            }
+            let Some(cursor) = value["next_cursor"].as_str() else {
+                break;
+            };
+            first_cursor.get_or_insert_with(|| cursor.to_owned());
+            query = format!(
+                "scope=retained_history&limit=3&cursor={}",
+                crate::viewer::percent_encode(cursor)
+            );
+        }
+        assert_eq!(identities.len(), 16);
+        let mut expected = identities.clone();
+        expected.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        expected.dedup();
+        assert_eq!(identities, expected);
+        let cursor = crate::viewer::percent_encode(&first_cursor.unwrap());
+        for (workspace, extra) in [
+            ("workspace-b", ""),
+            ("workspace-a", "&harness=codex"),
+            ("workspace-a", "&scope=current"),
+        ] {
+            let result = session_catalog_union(
+                &sources,
+                workspace,
+                &format!("limit=3&cursor={cursor}{extra}"),
+            );
+            assert_eq!(result.status, 400);
+        }
+        assert_eq!(
+            session_catalog_union(&sources[..1], "workspace-a", &query).status,
+            409
+        );
+        let empty = session_catalog_union(&[], "empty", "scope=retained_history");
+        assert_eq!(empty.status, 200);
+        let empty: Value = serde_json::from_slice(&empty.body).unwrap();
+        assert_eq!(empty["items"], json!([]));
+        assert_eq!(empty["next_cursor"], Value::Null);
+        let single = session_catalog_union(
+            &sources[..1],
+            "workspace-a",
+            "scope=retained_history&limit=100",
+        );
+        assert_eq!(single.status, 200);
+        let single: Value = serde_json::from_slice(&single.body).unwrap();
+        assert_eq!(single["items"].as_array().unwrap().len(), 8);
+        let filtered = session_catalog_union(&sources, "workspace-a", "harness=codex");
+        assert_eq!(filtered.status, 200);
+        let filtered: Value = serde_json::from_slice(&filtered.body).unwrap();
+        assert_eq!(filtered["items"], json!([]));
+        let searching = session_catalog_union(&sources, "workspace-a", "q=session&limit=100");
+        assert_eq!(
+            searching.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&searching.body)
+        );
+        let searching: Value = serde_json::from_slice(&searching.body).unwrap();
+        assert_eq!(searching["items"].as_array().unwrap().len(), 16);
+        // Raw body contents change behind an unchanged published Catalog. Lists
+        // still read metadata; selected detail/restore is not consulted.
+        fs::write(a.source("session-00000"), "not a native log").unwrap();
+        let listed = session_catalog_union(&sources, "workspace-a", "limit=100");
+        assert_eq!(listed.status, 200);
+        let listed: Value = serde_json::from_slice(&listed.body).unwrap();
+        assert_eq!(listed["items"].as_array().unwrap().len(), 16);
+        let mut missing = sources[0].clone();
+        missing.key = "missing".into();
+        missing.options.cache = a.root.join("missing-index");
+        assert_eq!(
+            session_catalog_union(&[sources[0].clone(), missing], "workspace-a", "limit=3").status,
+            503
+        );
+        let many: Vec<_> = (0..65).map(|_| sources[0].clone()).collect();
+        assert_eq!(session_catalog_union(&many, "workspace-a", "").status, 503);
     }
 
     fn cursor_query(cursor: &Value) -> String {
@@ -6697,6 +6894,7 @@ mod tests {
             model: None,
             q: None,
             cursor: Some(Cursor {
+                inclusive: false,
                 scope: CatalogReadScope::Current,
                 version: 1,
                 generation: "0".repeat(64),
@@ -6800,3 +6998,7 @@ mod tests {
         }
     }
 }
+
+#[path = "catalog_union.rs"]
+mod union;
+pub use union::session_catalog_union;

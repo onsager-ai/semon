@@ -225,6 +225,7 @@ pub(crate) fn publish_current_measured(
 
 /// A host authorizes each configured source before and after these reads.
 /// `up` is an observed machine fact, never inferred from cached history.
+#[derive(Clone)]
 pub struct OverviewSource {
     pub key: String,
     pub label: String,
