@@ -3,6 +3,7 @@
 // Pause removals are never painted back into either UI or silently exempted.
 import fs from 'node:fs';
 import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
+import { nativePresentationWitness } from './storybook-presentation-witness.mjs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
@@ -391,6 +392,9 @@ async function capture(candidate, reference, key) {
         caret: 'hide',
       });
       fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
+      if (name === 'candidate')
+        fs.writeFileSync(path.join(out, key + '-candidate-presentation.json'),
+          JSON.stringify(await nativePresentationWitness(page, bytes), null, 2) + '\n');
       evidenceBySide[name] = await snapshot(page);
       if (includeChromeDiagnostics)
         evidenceBySide[name].chromeDiagnostics = await snapshotChromeDiagnostics(page);

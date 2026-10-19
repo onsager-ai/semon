@@ -14,6 +14,9 @@ import {
   captureIdentityDigest,
 } from './storybook-references.mjs';
 import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
+import { applyCaptureScroll } from './storybook-scroll.mjs';
+import { presentationWitness } from './storybook-presentation-witness.mjs';
+import { nativeWitness } from './storybook-native-artifacts.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const readJson = (file) => JSON.parse(fs.readFileSync(path.resolve(here, file), 'utf8'));
@@ -61,8 +64,18 @@ const provenanceFiles = [
   'tests/ui/storybook-legacy.mjs',
   'tests/ui/storybook-gates.json',
   'ui/stories/LegacyRoutes.stories.tsx',
-  'ui/stories/LegacyRoutes.data.ts',
-  'ui/stories/LegacyRoutes.analytics.ts',
+  'ui/stories/LegacyNativeRoute.tsx',
+  'ui/stories/LegacyNative.presentation.ts',
+  'ui/stories/LegacyNative.records.json',
+  'tests/ui/storybook-scroll.mjs',
+  'tests/ui/storybook-presentation-witness.mjs',
+  'tests/ui/storybook-native-routes.mjs',
+  'tests/ui/storybook-native-records.mjs',
+  'tests/ui/storybook-native-parity.mjs',
+  'tests/ui/storybook-native-artifacts.mjs',
+  'tests/ui/pixels.mjs',
+  'tests/ui/preservation.mjs',
+  'tests/ui/gallery.mjs',
   'ui/stories/LegacyGallery.stories.tsx',
   'tests/ui/fixture-data/overhaul.json',
   'tests/ui/fixture.mjs',
@@ -190,6 +203,14 @@ try {
       captureDigest: captureIdentityDigest(item),
     };
     try {
+      if (item.legacyKey && !item.legacyKey.startsWith('gallery:')) {
+        const native = nativeWitness(process.env.SEMON_STORYBOOK_NATIVE_ARTIFACT_ROOT, item).value;
+        result.nativeStateDigest = sha256(JSON.stringify(native.preferences));
+        await context.addInitScript((preferences) => {
+          for (const [key, value] of Object.entries(preferences))
+            if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value);
+        }, native.preferences);
+      }
       await context.clock.install({ time: new Date(item.clock ?? '2026-10-19T12:00:00.000Z') });
       const page = await context.newPage();
       await context.route('**/*', (route) =>
@@ -210,6 +231,13 @@ try {
         { waitUntil: 'networkidle', timeout: 30000 },
       );
       await page.waitForSelector('#storybook-root > *', { timeout: 15000 });
+      if (item.legacyKey && !item.legacyKey.startsWith('gallery:'))
+        await page.waitForSelector('[data-storybook-route="legacy"][data-native-ready="true"]');
+      // Region menus are opened over the native top position. Cancel initial
+      // following before the modal makes the topbar inert, as pixels.mjs does
+      // when its preceding topbar region is captured.
+      if (item.capture?.scroll === 'region-top')
+        await applyCaptureScroll(page, item.capture.scroll);
       await perform(page, item.actions);
       await verifyAssertions(page, item.assertions);
       if (storyId.endsWith('--keyboard-focus'))
@@ -232,13 +260,10 @@ try {
         throw new Error(
           `horizontal document overflow ${geometry.documentWidth}px > ${geometry.viewportWidth}px`,
         );
-      if (item.capture?.top)
-        await page.evaluate(() => {
-          window.scrollTo(0, 0);
-          const main = document.querySelector('#main');
-          if (main) main.scrollTop = 0;
-        });
+      if (item.capture?.scroll)
+        await applyCaptureScroll(page, item.capture.scroll, { input: item.capture.scroll !== 'region-top' });
       if (item.capture?.viewportHeight === 'fit-transcript-and-dock-plus-80') {
+        const native = nativeWitness(process.env.SEMON_STORYBOOK_NATIVE_ARTIFACT_ROOT, item).value;
         const target = page.locator(item.capture.selector);
         const box = await target.boundingBox();
         if (!box || (await target.count()) !== 1)
@@ -247,7 +272,7 @@ try {
         const dockHeight = (await dock.count()) ? ((await dock.boundingBox())?.height ?? 0) : 0;
         await page.setViewportSize({
           width,
-          height: Math.ceil(Math.max(viewport.height, box.y + box.height + dockHeight + 80)),
+          height: native.viewport[1],
         });
         const after = await target.boundingBox();
         if (
@@ -256,12 +281,18 @@ try {
           Math.abs(box.height - after.height) > 0.5
         )
           throw new Error('Transcript geometry changed while fitting capture viewport');
+        if (after.y + after.height + dockHeight + 80 > native.viewport[1])
+          throw Error('Story transcript does not fit the retained native shared viewport');
       }
       if (item.expectedState?.includes('sessions-filter-open'))
         await verifyAssertions(page, [
           { kind: 'visible', selector: '.filters-sheet .vb', scrollTop: 0 },
           { kind: 'focused', selector: '.filters-sheet[open] .vclose' },
         ]);
+      // Fitted viewports can deliver a final resize observation. Apply and
+      // verify the exact scroll identity after that geometry has settled.
+      if (item.capture?.scroll)
+        result.actualScroll = await applyCaptureScroll(page, item.capture.scroll, { input: item.capture.scroll !== 'region-top' });
       const file = path.join(
         output,
         storyId,
@@ -291,7 +322,13 @@ try {
           ? captureStableFrame(page, options)
           : page.screenshot(options);
       };
-      const bytes = item.capture?.stablePaint ? await withCapturePaint(page, shot) : await shot();
+      let witness;
+      const captureWithWitness = async () => {
+        const bytes = await shot();
+        if (item.legacyKey) witness = await presentationWitness(page, item.capture?.selector);
+        return bytes;
+      };
+      const bytes = item.capture?.stablePaint ? await withCapturePaint(page, captureWithWitness) : await captureWithWitness();
       fs.writeFileSync(file, bytes);
       result.actualViewport = page.viewportSize();
       result.captureGeometry = item.capture?.selector
@@ -299,6 +336,11 @@ try {
         : null;
       result.candidate = path.relative(here, file);
       result.sha256 = sha256(bytes);
+      if (item.legacyKey) {
+        const witnessPath = file.replace(/\.png$/, '-presentation.json');
+        fs.writeFileSync(witnessPath, JSON.stringify(witness, null, 2) + '\n');
+        result.presentationWitness = path.relative(here, witnessPath);
+      }
       await perform(page, item.postCaptureActions);
       await verifyAssertions(page, item.postCaptureAssertions);
       if (pageErrors.length) throw new Error(pageErrors.join('; '));
