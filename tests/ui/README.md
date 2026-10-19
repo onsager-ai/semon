@@ -5,7 +5,7 @@ builds the test-clock binary and account fixture once, transfers those binaries
 to isolated runners, and runs twelve suites in parallel. Each runner owns its
 servers, fixture directories, and report artifact (`viewer-ui-<suite>`). Failures
 in one suite do not cancel the others; a skipped or failed suite fails the aggregate.
-New commits cancel superseded runs on the same PR or branch.
+New PR commits cancel superseded runs of that PR. Main and manual events have separate concurrency groups and do not cancel running validation. Infrastructure regressions run once in the required foundation job before binary builds and browser fan-out. The touch hit-testing regressions need Chromium and run once in the required interaction suite.
 
 Functional groups live in `suite-plan.mjs`. `checks/run.mjs` verifies that every
 registered check belongs to exactly one group before running anything. Adding a
@@ -81,7 +81,7 @@ its completion witness is the native-publication success message in the CI log.
   still fail. Turning them into hard limits requires calibrating the budgets.
 
 Workflow dispatch exposes `exhaustive` for deeper touch audits.
-`refresh_diagnostics` also runs the candidate harness against pinned recovery baseline `c402e481dbe23bcf03841e47b5f7eccd14c0e426`; recovery PR #438 enables this comparison automatically. Both binaries use the same runner, locked browser, long fixture, viewports and 4× CPU throttle. The original three append samples and assertions remain; eight additional appends sweep 0/750/1500/2250 ms after naturally occurring selected-metadata requests twice. Each still appends ten records. `perf.json` and `refresh-baseline/perf.json` retain per-endpoint CDP admission/response/completion/failure/cancellation, observed JSON generation/refresh state, and marker DOM-commit/two-frame-visible times. These are browser observations, not server worker-admission or index-publication timestamps; returned generations bound when changed evidence first becomes observable. No extra product polling or timer changes are introduced. Timing remains report-only; missing markers, instrumentation and page errors fail as before.
+`refresh_diagnostics` also runs the candidate harness against pinned recovery baseline `c402e481dbe23bcf03841e47b5f7eccd14c0e426`. This comparison runs only on explicit manual dispatch. Both binaries use the same runner, locked browser, long fixture, viewports and 4× CPU throttle. The original three append samples and assertions remain; eight additional appends sweep 0/750/1500/2250 ms after naturally occurring selected-metadata requests twice. Each still appends ten records. `perf.json` and `refresh-baseline/perf.json` retain per-endpoint CDP admission/response/completion/failure/cancellation, observed JSON generation/refresh state, and marker DOM-commit/two-frame-visible times. These are browser observations, not server worker-admission or index-publication timestamps; returned generations bound when changed evidence first becomes observable. No extra product polling or timer changes are introduced. Timing remains report-only; missing markers, instrumentation and page errors fail as before.
 The infrastructure tests (capture network lifecycle, `suite-plan`, pixel diff, tap hit-testing, catalog cache,
 catalog wire validation, bounded DOM evidence, and preservation contracts) guard
 coverage selection, exact artifact approval bindings and the actual comparison
