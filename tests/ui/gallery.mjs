@@ -102,9 +102,17 @@ try {
         await visuals.capture(page, `${state}-${width}-${scheme}`);
         // Additional unapproved migration witness; the original comparator,
         // screenshot options, thresholds and baseline ownership above stay intact.
-        fs.writeFileSync(path.join(out, `${state}-${width}-${scheme}-presentation.json`),
-          JSON.stringify(await nativePresentationWitness(page,
-            fs.readFileSync(path.join(out, `${state}-${width}-${scheme}.png`))), null, 2) + '\n');
+        fs.writeFileSync(
+          path.join(out, `${state}-${width}-${scheme}-presentation.json`),
+          JSON.stringify(
+            await nativePresentationWitness(
+              page,
+              fs.readFileSync(path.join(out, `${state}-${width}-${scheme}.png`)),
+            ),
+            null,
+            2,
+          ) + '\n',
+        );
       };
       await audit('primitives');
       // Keyboard opens and selects through the real shared Select controller.

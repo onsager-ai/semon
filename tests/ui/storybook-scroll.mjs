@@ -31,7 +31,16 @@ export async function applyCaptureScroll(page, policy = 'top', { input = true } 
     await page.mouse.move(point.x, point.y);
     await page.mouse.wheel(0, -100000);
   }
-  if (!['top', 'region-top', 'preservation-reset', 'document-tail', 'main-tail', 'gallery-action-position'].includes(policy))
+  if (
+    ![
+      'top',
+      'region-top',
+      'preservation-reset',
+      'document-tail',
+      'main-tail',
+      'gallery-action-position',
+    ].includes(policy)
+  )
     throw Error('Unknown capture scroll policy ' + policy);
   await page.evaluate(async (policy) => {
     const main = document.querySelector('#main');
@@ -50,8 +59,18 @@ export async function applyCaptureScroll(page, policy = 'top', { input = true } 
       mainTail: main ? Math.max(0, main.scrollHeight - main.clientHeight) : 0,
     };
   });
-  const expectedWindow = policy === 'gallery-action-position' ? actual.window : policy === 'document-tail' ? actual.documentTail : 0,
-    expectedMain = policy === 'gallery-action-position' ? actual.main : policy === 'main-tail' ? actual.mainTail : 0;
+  const expectedWindow =
+      policy === 'gallery-action-position'
+        ? actual.window
+        : policy === 'document-tail'
+          ? actual.documentTail
+          : 0,
+    expectedMain =
+      policy === 'gallery-action-position'
+        ? actual.main
+        : policy === 'main-tail'
+          ? actual.mainTail
+          : 0;
   if (Math.abs(actual.window - expectedWindow) > 1 || Math.abs(actual.main - expectedMain) > 1)
     throw Error('Capture scroll policy did not settle: ' + JSON.stringify({ policy, actual }));
   return { policy, ...actual };

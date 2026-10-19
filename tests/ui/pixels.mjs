@@ -885,7 +885,11 @@ async function regionShot(page, region, key, side) {
     ? await page.screenshot({ clip, animations: 'disabled', caret: 'hide' })
     : await target.screenshot({ animations: 'disabled', caret: 'hide' });
   if (side === 'candidate')
-    saveJson(key, 'candidate-presentation', await nativePresentationWitness(page, bytes, region.selector));
+    saveJson(
+      key,
+      'candidate-presentation',
+      await nativePresentationWitness(page, bytes, region.selector),
+    );
   if (region.open) await closeRegionPanel(page, region, key);
   save(key, side, bytes);
   return {
