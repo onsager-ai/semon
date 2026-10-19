@@ -273,8 +273,6 @@ export function catalogTranscriptBlocks(
           },
         },
       });
-      if (more?.length)
-        label('Full result unavailable for this source. The recorded preview is shown.');
     } else if (entry.k === 'h') {
       const related = relationshipView?.(item);
       if (related) {
@@ -361,10 +359,13 @@ export function catalogTranscriptBlocks(
         action: field.action,
       });
     } else if (clipped) label('Recorded text preview. The complete source text is not loaded.');
-    if (freshness && freshness.state !== 'cached')
-      label(
-        'Source observation is ' + freshness.state + '. Previously loaded content is retained.',
-      );
+    if (
+      freshness &&
+      freshness.state !== 'cached' &&
+      (entry.k === 'u' || entry.k === 'a') &&
+      !entry.text
+    )
+      label('Content unavailable.');
     if (entry.img?.length) label('Attachments unavailable for this source.');
     return { kind: 'loose' as const, key: entry_id, entries: views };
   });

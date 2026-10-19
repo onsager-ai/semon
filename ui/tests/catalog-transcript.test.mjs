@@ -358,3 +358,74 @@ test('runtime observation fences loaded ranges while preserving their source ide
   assert.equal(fresh.selectedPage().projection.errorsGeneration, 'c'.repeat(64));
   assert.equal(fresh.entries()[0].entry.text, 'New qualified runtime rendering');
 });
+
+test('initially incomplete native bodies can recover under the same qualified projection', () => {
+  const store = new CatalogTranscriptStore();
+  store.select({ source_key: 'source', catalog_key: 'session' });
+  const missing = page();
+  missing.entries[0].text = '';
+  missing.entries[0].freshness = { state: 'incomplete' };
+  store.accept(store.request(0, 2), missing);
+  const version = store.revision;
+  const recovered = page();
+  recovered.entries[0].freshness = { state: 'cached' };
+  assert.equal(store.accept(store.request(0, 2), recovered), true);
+  assert.equal(store.entries()[0].entry.text, 'Original native text');
+  assert.ok(store.revision > version);
+
+  for (const change of [
+    (body) => body.entries[0].provenance.offset++,
+    (body) => body.entries[0].provenance.source.prefix_sha256.fill(9),
+    (body) => (body.entries[0].entry_id = 'different-event'),
+    (body) => (body.entries[0].observed_at = 100),
+    (body) => (body.entries[0].turn = 'different-turn'),
+    (body) => (body.projection.generation = 'c'.repeat(64)),
+    (body) => (body.projection.errors_generation = 'c'.repeat(64)),
+  ]) {
+    const guarded = new CatalogTranscriptStore();
+    guarded.select({ source_key: 'source', catalog_key: 'session' });
+    guarded.accept(guarded.request(0, 2), missing);
+    const changed = page();
+    change(changed);
+    assert.throws(() => guarded.accept(guarded.request(0, 2), changed));
+    assert.equal(guarded.entries()[0].entry.text, '');
+  }
+});
+
+test('failed native message, thought, tool and action reads recover without crossing source fences', () => {
+  for (const state of ['incomplete', 'unavailable'])
+    for (const entry of [
+      { k: 'u', text: 'Native user message' },
+      { k: 'a', text: 'Native assistant message' },
+      { k: 'think', text: 'Native thought' },
+      { k: 'tool', name: 'exec_command', arg: 'synthetic command', out: 'Native result', ok: true },
+      { k: 'h', id: 'native-action', text: 'Native action prompt' },
+    ]) {
+      const store = new CatalogTranscriptStore();
+      store.select({ source_key: 'source', catalog_key: 'session' });
+      const complete = page();
+      complete.entries[0] = { ...complete.entries[0], ...entry };
+      complete.entries[0].field = {
+        name: entry.k === 'tool' ? 'out' : 'text',
+        chunks: 1,
+        complete: true,
+      };
+      const missing = structuredClone(complete);
+      delete missing.entries[0].field;
+      missing.entries[0][entry.k === 'tool' ? 'out' : 'text'] = '';
+      missing.entries[0].freshness = { state };
+      store.accept(store.request(0, 2), missing);
+      assert.deepEqual(store.incompleteRange(), { first: 0, end: 2 });
+      assert.equal(store.accept(store.request(0, 2), complete), true);
+      assert.equal(store.incompleteRange(), null);
+      const recovered = store.entries()[0];
+      assert.equal(
+        recovered.entry.k === 'tool'
+          ? recovered.entry.out
+          : recovered.entry.k === 'h'
+            ? recovered.native_action_text
+            : recovered.entry.text,
+        entry.k === 'tool' ? entry.out : entry.text,
+      );
+    }
+});

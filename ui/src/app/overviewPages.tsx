@@ -286,7 +286,16 @@ export function createOverviewPages(host: OverviewHost) {
     rail = false,
     selectedMetadata?: CatalogSession | null,
   ): RecentSnapshot {
-    const machines = workspaceHome?.machines ?? home?.machines ?? [],
+    const machines =
+        workspaceHome?.machines ??
+        home?.machines ??
+        Array.from(
+          new Map(
+            catalog.flatMap((row) =>
+              row.machine ? [[row.machine.key, row.machine] as const] : [],
+            ),
+          ).values(),
+        ),
       borrowed = workspaceHome
         ? recentRows
         : source
@@ -297,7 +306,10 @@ export function createOverviewPages(host: OverviewHost) {
       : borrowed.length
         ? borrowed
             .map((row) => {
-              const observed = catalog.find((item) => item.key === row.catalog_key);
+              const observed = catalog.find(
+                (item) =>
+                  item.key === row.catalog_key && (item.machine?.key ?? source) === row.source_key,
+              );
               return observed
                 ? {
                     ...row,
@@ -315,11 +327,18 @@ export function createOverviewPages(host: OverviewHost) {
             })
             .concat(
               catalog
-                .filter((item) => !borrowed.some((row) => row.catalog_key === item.key))
+                .filter(
+                  (item) =>
+                    !borrowed.some(
+                      (row) =>
+                        row.catalog_key === item.key &&
+                        row.source_key === (item.machine?.key ?? source),
+                    ),
+                )
                 .slice(0, 60)
                 .map((row) => ({
-                  id: JSON.stringify([source, row.key]),
-                  source_key: source!,
+                  id: JSON.stringify([row.machine?.key ?? source, row.key]),
+                  source_key: row.machine?.key ?? source!,
                   catalog_key: row.key,
                   contentGeneration: null,
                   session: {
@@ -341,8 +360,8 @@ export function createOverviewPages(host: OverviewHost) {
             .sort((a, b) => b.session.last - a.session.last)
             .slice(0, 60)
         : catalog.slice(0, 60).map((row) => ({
-            id: JSON.stringify([source, row.key]),
-            source_key: source!,
+            id: JSON.stringify([row.machine?.key ?? source, row.key]),
+            source_key: row.machine?.key ?? source!,
             catalog_key: row.key,
             contentGeneration: null,
             session: {

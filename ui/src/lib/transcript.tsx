@@ -137,6 +137,7 @@ export interface SessionSnapshot {
   id: string;
   name: string;
   observation?: string;
+  observationSummary?: string;
   blocks: readonly TranscriptBlock[];
   started?: { lead: string; machine: string };
   before?: PagerView;
@@ -296,6 +297,8 @@ class SessionRuntime extends Component<{ owner: SessionOwner }> {
     const value = this.props.owner.snapshot.runtime;
     if (!value) return null;
     const observation = value.observation;
+    // No owned runtime is an ordinary saved-history state, not a read failure.
+    if (!observation) return null;
     return (
       <section class="local-control" aria-label="Environment status">
         <p role="status">
@@ -1067,11 +1070,20 @@ export function renderSessionScreen(
           <h1>{screenText(view.name)}</h1>
         </div>
         <section class="transcript" aria-label="Transcript">
-          {view.observation && view.observation !== 'Cached history' && (
-            <p class="empty" role="status" data-transcript-observation="">
-              {screenText(view.observation)}
-            </p>
-          )}
+          {view.observation &&
+            view.observation !== 'Cached history' &&
+            (view.observationSummary ? (
+              <details class="catalog-scope vnote transcript-observation">
+                <summary>{view.observationSummary}</summary>
+                <p role="status" data-transcript-observation="">
+                  {screenText(view.observation)}
+                </p>
+              </details>
+            ) : (
+              <p class="empty" role="status" data-transcript-observation="">
+                {screenText(view.observation)}
+              </p>
+            ))}
           <div class="turns">
             <SessionPager owner={state} where="before" />
             {state.blocks.map((block) =>

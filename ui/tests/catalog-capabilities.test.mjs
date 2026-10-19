@@ -42,7 +42,18 @@ test('catalog capability advertisement preserves unavailable features and reject
     { filters: ['q'] },
     { order: 'global' },
     { full_text_search: true },
-    { global_union: true },
+    { global_union: true, source_key: 'source' },
   ])
     assert.throws(() => parseCatalogCapabilities({ ...capabilities(), ...change }));
+});
+
+test('workspace Catalog explicitly advertises the optional source scope', () => {
+  const value = parseCatalogCapabilities({
+    ...capabilities(),
+    source_key: '',
+    global_union: true,
+    order: 'last_desc_key_asc_machine_asc',
+  });
+  assert.equal(value.global_union, true);
+  assert.equal(value.source_key, '');
 });

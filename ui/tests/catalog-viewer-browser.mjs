@@ -1177,9 +1177,13 @@ for (const width of [390, 1280])
           await page.screenshot({
             path: process.env.SEMON_CATALOG_OUT + '/selected-' + width + '-' + colorScheme + '.png',
           });
+        // Finish the opening tail transaction before measuring reader-owned
+        // geometry. The append below must preserve that settled anchor.
+        await page.clock.runFor(2100);
         await page
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.scrollIntoView({ block: 'start' }));
+        await page.clock.runFor(50);
         const focusTarget = page.getByRole('button', {
           name: 'Session menu: details, cost and actions',
         });
@@ -1199,7 +1203,10 @@ for (const width of [390, 1280])
         const anchorAfter = await page
           .locator('#page [data-entry-key="one:0"]')
           .evaluate((node) => node.getBoundingClientRect().top);
-        assert.ok(Math.abs(anchorBefore - anchorAfter) < 2);
+        assert.ok(
+          Math.abs(anchorBefore - anchorAfter) < 2,
+          JSON.stringify({ anchorBefore, anchorAfter }),
+        );
         assert.match(
           await page.locator('#page [data-entry-key="one:6"]').innerText(),
           /and final native text chunk/,
@@ -1555,7 +1562,7 @@ for (const width of [390, 1280])
           body: url.pathname === '/viewer.css' ? css : html,
         });
       });
-      await page.goto('http://catalog.test/sessions' + (width === 1280 ? '?choose_source=1' : ''));
+      await page.goto('http://catalog.test/sessions?choose_source=1');
       await page.clock.install({ time: new Date('2026-10-07T00:00:00Z') });
       await page.clock.pauseAt(new Date('2026-10-07T00:01:00Z'));
       await page.addScriptTag({ content: outputFiles[0].text });
@@ -3170,11 +3177,19 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
     await menu.focus();
     releaseFirstAnchor();
     await page.locator('#page [data-entry-key="one:0"]').waitFor();
+    await page.waitForFunction(() =>
+      document
+        .querySelector('#page [data-entry-key="one:0"]')
+        ?.textContent.includes('Anchor target record'),
+    );
+    // The accepted range schedules its anchor placement on the next frame.
+    // Advance the paused clock before inspecting content-visibility text.
+    await page.clock.runFor(34);
     assert.match(
       await page.locator('#page [data-entry-key="one:0"]').innerText(),
       /Anchor target record/,
     );
-    assert.match(await field.innerText(), /Final field segment\./);
+    assert.match(await field.textContent(), /Final field segment\./);
     assert.equal(anchorReads, 2, 'one 409 may re-resolve the same turn once');
     assert.equal(await menu.evaluate((node) => node === document.activeElement), true);
     assert.deepEqual(
@@ -3607,3 +3622,91 @@ test('child activity reads stay separate from event previews and honor participa
     await browser.close();
   }
 });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    for (const failure of ['observation', 'content'])
+      test(`selected ${failure} recovers without a new projection at ${width}px ${colorScheme}`, async () => {
+        const browser = await chromium.launch();
+        try {
+          const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
+          page.setDefaultTimeout(10000);
+          let transcriptReads = 0,
+            observationReads = 0;
+          const errors = [];
+          page.on('pageerror', (error) => errors.push(String(error)));
+          await page.route('http://catalog.test/**', async (route) => {
+            const url = new URL(route.request().url());
+            if (url.pathname === '/api/session-capabilities')
+              return route.fulfill({ json: capabilities(true) });
+            if (url.pathname === '/api/session-identity')
+              return route.fulfill({ json: { api: 1, identity: identity('one') } });
+            if (url.pathname === '/api/sessions') {
+              if (url.searchParams.has('sid')) {
+                observationReads++;
+                if (failure === 'observation' && observationReads === 1)
+                  return route.abort('failed');
+              }
+              return route.fulfill({
+                json: list([
+                  {
+                    ...meta('one'),
+                    transcript: {
+                      generation: 'b'.repeat(64),
+                      errors_generation: 'b'.repeat(64),
+                      total: 65,
+                    },
+                  },
+                ]),
+              });
+            }
+            if (url.pathname === '/api/session-transcript') {
+              const body = transcript('one', url.searchParams);
+              transcriptReads++;
+              if (failure === 'content' && transcriptReads === 1) {
+                body.entries[0].text = '';
+                body.entries[0].freshness = { state: 'incomplete' };
+                body.freshness.state = 'incomplete';
+              }
+              return route.fulfill({ json: body });
+            }
+            return fulfillCatalogStatic(route, url);
+          });
+          await page.goto('http://catalog.test/sessions?machine=source');
+          await page.clock.install({ time: new Date('2026-10-19T00:00:00Z') });
+          await page.clock.pauseAt(new Date('2026-10-19T00:00:00.001Z'));
+          await page.addScriptTag({ content: outputFiles[0].text });
+          await page.evaluate(() => {
+            window.app = CatalogViewer.mountViewerApplication({
+              machinesPath: '/machines',
+              loadMachines: async () => {
+                throw Error('No global native inventory');
+              },
+            });
+          });
+          await page.locator('#page [data-id="one"]').click();
+          await page.locator('#page [data-entry-key="one:5"]').waitFor({ state: 'attached' });
+          if (failure === 'observation')
+            await page
+              .getByText('Source observation is unavailable. Retrying…', { exact: true })
+              .waitFor({ state: 'attached' });
+          await page.clock.runFor(11000);
+          if (failure === 'content') {
+            await page
+              .locator('#page [data-entry-key="one:5"]')
+              .filter({ hasText: 'Original one record 5' })
+              .waitFor();
+            assert.ok(transcriptReads >= 2, 'incomplete native bytes were never reobserved');
+          } else {
+            await page
+              .getByText('Source observation is unavailable. Retrying…', { exact: true })
+              .waitFor({ state: 'detached' });
+            assert.ok(observationReads >= 2, 'no successful source reobservation');
+            assert.equal(transcriptReads, 1, 'metadata recovery reread unchanged native content');
+          }
+          assert.deepEqual(errors, []);
+          await page.evaluate(() => app.destroy());
+        } finally {
+          await browser.close();
+        }
+      });
