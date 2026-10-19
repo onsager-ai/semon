@@ -10,17 +10,46 @@ const sessionSource = decodeURIComponent(
 const external = process.env.SEMON_STORYBOOK_EXTERNAL_STORY;
 const consumerRoot = process.env.SEMON_STORYBOOK_CONSUMER_ROOT;
 const fixturePlugin = process.env.SEMON_STORYBOOK_FIXTURE_PLUGIN;
+function declaredFiles(name) {
+  const raw = process.env[name];
+  if (!raw) return [];
+  assert.ok(raw.length <= 8192, `${name} is too large`);
+  const files = JSON.parse(raw);
+  assert.ok(Array.isArray(files) && files.length <= 8);
+  assert.ok(files.every((file) => typeof file === 'string'));
+  assert.equal(new Set(files).size, files.length);
+  return files;
+}
+const externalStories = [...(external ? [external] : []), ...declaredFiles('SEMON_STORYBOOK_EXTERNAL_STORIES')];
+const evidenceFiles = declaredFiles('SEMON_STORYBOOK_EXTERNAL_FILES');
 const consumerFiles = [];
-if (external || fixturePlugin || consumerRoot) {
+if (externalStories.length || evidenceFiles.length || fixturePlugin || consumerRoot) {
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'External synthetic stories are CI-only');
   assert.ok(consumerRoot && path.isAbsolute(consumerRoot));
   assert.equal(fs.realpathSync(consumerRoot), consumerRoot);
-  for (const file of [external, fixturePlugin].filter(Boolean)) {
+  assert.ok(externalStories.length > 0 && externalStories.length <= 8);
+  assert.equal(new Set(externalStories).size, externalStories.length);
+  for (const file of [...externalStories, fixturePlugin].filter(Boolean)) {
     assert.ok(path.isAbsolute(file) && file.startsWith(consumerRoot + path.sep));
     assert.equal(fs.realpathSync(file), file);
   }
-  assert.ok(external?.endsWith('.stories.tsx'));
+  assert.ok(externalStories.every((file) => file.endsWith('.stories.tsx')));
   consumerFiles.push(consumerRoot);
+  if (evidenceFiles.length) {
+    const checkout = process.env.SEMON_STORYBOOK_CONSUMER_CHECKOUT;
+    assert.ok(checkout && path.isAbsolute(checkout));
+    assert.equal(fs.realpathSync(checkout), checkout);
+    assert.ok(fs.existsSync(path.join(checkout, '.git')), 'Consumer must be an explicit checkout');
+    assert.ok(consumerRoot.startsWith(checkout + path.sep));
+    for (const file of evidenceFiles) {
+      assert.ok(path.isAbsolute(file) && file.startsWith(checkout + path.sep));
+      assert.equal(fs.realpathSync(file), file);
+      assert.ok(file.endsWith('.json'), 'Only explicit evidence JSON is supported');
+      const stat = fs.statSync(file);
+      assert.ok(stat.isFile() && stat.size > 0 && stat.size <= 10 * 1024 * 1024);
+      consumerFiles.push(file);
+    }
+  }
 }
 // These are the only public crate assets the workbench consumes. They are
 // bundled/copied individually; the Rust source directory is never a staticDir.
@@ -33,6 +62,11 @@ const publicAssets = new Map([
 ]);
 const sourceFiles = ['viewer.css', 'select.css', 'shell.css', ...publicAssets.values()].map(
   (file) => path.join(sessionSource, file),
+);
+// Official, individually imported harness artwork; never expose its directory.
+sourceFiles.push(
+  decodeURIComponent(new URL('../../assets/harnesses/codex-black.svg', import.meta.url).pathname),
+  decodeURIComponent(new URL('../../assets/harnesses/codex.svg', import.meta.url).pathname),
 );
 function canonicalAssets() {
   return {
@@ -72,7 +106,7 @@ function canonicalAssets() {
 }
 
 export default {
-  stories: ['../stories/**/*.stories.@(js|jsx|mjs|ts|tsx)', ...(external ? [external] : [])],
+  stories: ['../stories/**/*.stories.@(js|jsx|mjs|ts|tsx)', ...externalStories],
   framework: {
     name: '@storybook/preact-vite',
     options: {},
