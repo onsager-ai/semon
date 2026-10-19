@@ -53,9 +53,12 @@ for (const surface of contract.productionSurfaces) {
   addStories(surface.storyIds, `production surface ${surface.id}`);
   for (const checkId of surface.servedChecks ?? []) addCheck(checkId, `production surface ${surface.id}`);
   for (const module of surface.modules ?? []) {
-    const ownerPath = path.resolve(root, 'ui/stories', module) + '.tsx';
+    const ownerPath = path.resolve(root, 'ui/stories', module);
+    const hasSourceFile = ['', '.ts', '.tsx', '.js', '.mjs'].some((extension) =>
+      fs.existsSync(ownerPath + extension),
+    );
     const baseName = path.basename(module);
-    if (!fs.existsSync(ownerPath)) {
+    if (!hasSourceFile) {
       errors.push(`production surface ${surface.id}: missing production owner ${module}`);
     }
     const directlyImported = storySource.includes(`../src/lib/${baseName}`) || storySource.includes(`../src/app/${baseName}`);
@@ -118,15 +121,23 @@ collectFrames(pen.children);
 
 const activePenIds = new Set();
 const activeRoots = [];
+const supersededPenIds = new Set();
+const declaredRoots = new Set(contract.pen.roots.map((entry) => entry.id));
+const sourceRoots = new Set(
+  (pen.children ?? []).filter((node) => node.type === 'frame').map((node) => node.id),
+);
+for (const id of sourceRoots) if (!declaredRoots.has(id)) errors.push(`unmapped top-level pen frame ${id}`);
+for (const id of declaredRoots) if (!sourceRoots.has(id)) errors.push(`declared pen root ${id} is not top-level`);
+
 for (const rootEntry of contract.pen.roots) {
+  if (!['active', 'superseded'].includes(rootEntry.disposition)) {
+    errors.push(`pen root ${rootEntry.id} needs an explicit active or superseded disposition`);
+  }
   const rootFrame = frameById.get(rootEntry.id);
   if (!rootFrame) {
     errors.push(`pen root ${rootEntry.id} is missing from ${contract.pen.source}`);
     continue;
   }
-  addStories(rootEntry.storyIds, `pen root ${rootEntry.id}`);
-  addCheck(contract.pen.servedCheck, `pen root ${rootEntry.id}`);
-  activePenIds.add(rootEntry.id);
   const descendants = [...frameById.entries()]
     .filter(([, value]) => {
       let parent = value.parent;
@@ -137,17 +148,47 @@ for (const rootEntry of contract.pen.roots) {
       return false;
     })
     .map(([id]) => id);
-  for (const id of descendants) {
-    if (contract.pen.supersededDescendants[id]) continue;
-    activePenIds.add(id);
-    activeRoots.push({ id, inheritedFrom: rootEntry.id });
+  const isActive = rootEntry.disposition === 'active';
+  const groups = isActive
+    ? contract.pen.activeDescendantGroups
+    : contract.pen.supersededDescendantGroups;
+  const declaredDescendants = groups
+    .filter((group) => group.root === rootEntry.id)
+    .flatMap((group) => group.ids);
+  if (
+    new Set(declaredDescendants).size !== declaredDescendants.length ||
+    [...new Set(declaredDescendants)].sort().join('\n') !== [...descendants].sort().join('\n')
+  ) {
+    errors.push(`pen root ${rootEntry.id}: ${rootEntry.disposition} descendant list is missing, duplicated, or contains an unknown frame`);
+  }
+  if (groups.filter((item) => item.root === rootEntry.id).length !== 1) {
+    errors.push(`pen root ${rootEntry.id}: expected exactly one complete descendant group`);
+  }
+  if (isActive) {
+    addStories(rootEntry.storyIds, `pen root ${rootEntry.id}`);
+    addCheck(contract.pen.servedCheck, `pen root ${rootEntry.id}`);
+    activePenIds.add(rootEntry.id);
+    for (const id of descendants) {
+      activePenIds.add(id);
+      activeRoots.push({ id, inheritedFrom: rootEntry.id });
+    }
+  } else {
+    if (rootEntry.storyIds?.length) errors.push(`superseded pen root ${rootEntry.id} must not claim active Storybook owners`);
+    if (!rootEntry.reason) errors.push(`superseded pen root ${rootEntry.id} needs a current-source rationale`);
+    supersededPenIds.add(rootEntry.id);
+    for (const id of descendants) supersededPenIds.add(id);
   }
 }
 
-const supersededIds = Object.keys(contract.pen.supersededDescendants);
-for (const id of supersededIds) {
-  if (!frameById.has(id)) errors.push(`superseded pen descendant ${id} is missing from source`);
-  if (activePenIds.has(id)) errors.push(`pen descendant ${id} is both active and superseded`);
+for (const group of contract.pen.activeDescendantGroups) {
+  if (!declaredRoots.has(group.root)) errors.push(`active pen descendant group references unknown root ${group.root}`);
+}
+for (const group of contract.pen.supersededDescendantGroups) {
+  if (!declaredRoots.has(group.root)) errors.push(`superseded pen descendant group references unknown root ${group.root}`);
+}
+for (const id of frameById.keys()) {
+  if (!activePenIds.has(id) && !supersededPenIds.has(id)) errors.push(`unclassified pen frame ${id}`);
+  if (activePenIds.has(id) && supersededPenIds.has(id)) errors.push(`pen frame ${id} is both active and superseded`);
 }
 for (const [id, storyIds] of Object.entries(contract.pen.descendantStories ?? {})) {
   if (!activePenIds.has(id)) errors.push(`pen descendant story mapping ${id} is not active`);
@@ -167,7 +208,7 @@ const report = {
   visualCoverage: { frames: visualFrames.size, ids: [...visualFrames.keys()].sort() },
   visualAcceptances: acceptanceKeys.size,
   galleryStates: gallery.states?.length ?? 0,
-  penFrames: { active: activePenIds.size, superseded: supersededIds.length, inherited: activeRoots.length },
+  penFrames: { active: activePenIds.size, superseded: supersededPenIds.size, inherited: activeRoots.length },
   errors,
 };
 const out = path.resolve(process.env.SEMON_UI_OUT ?? path.join(here, 'out'), 'storybook');
