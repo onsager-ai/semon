@@ -249,7 +249,6 @@ function capture(
       source: 'ui/stories/LegacyNative.records.json',
       scope,
       frame,
-      revision: process.env.GITHUB_SHA ?? null,
       policyDependencies: ['tests/ui/fixture.mjs', 'tests/ui/storybook-native-records.mjs'],
       nativeState: 'exact-current-head-native-witness preferences',
     },

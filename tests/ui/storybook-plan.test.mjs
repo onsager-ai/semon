@@ -351,12 +351,29 @@ test('references remain pending until exact provenance and a real review are rec
   );
 });
 
-test('reviewed historical references compare across source revisions without rewriting provenance', () => {
-  const item = plan()[0],
-    bytes = Buffer.from('synthetic reviewed reference bytes');
+test('legacy capture identities stay stable across candidate revisions while references retain provenance', () => {
+  const bytes = Buffer.from('synthetic reviewed reference bytes');
   const digest = (value) => createHash('sha256').update(value).digest('hex');
   const historicalRevision = 'a'.repeat(40),
     currentRevision = 'b'.repeat(40);
+  const previousRevision = process.env.GITHUB_SHA;
+  let historicalPlan, currentPlan;
+  try {
+    process.env.GITHUB_SHA = historicalRevision;
+    historicalPlan = legacyCapturePlan();
+    process.env.GITHUB_SHA = currentRevision;
+    currentPlan = legacyCapturePlan();
+  } finally {
+    if (previousRevision === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previousRevision;
+  }
+  const identities = (items) => items.map((item) => [item.key, captureIdentityDigest(item)]);
+  assert.deepEqual(identities(currentPlan), identities(historicalPlan));
+  const key = 'pixels:main:frame:desktop-light|session-harbor';
+  const item = historicalPlan.find((candidate) => candidate.legacyKey === key);
+  const currentItem = currentPlan.find((candidate) => candidate.legacyKey === key);
+  assert.ok(item, 'a concrete selected-session route item is present');
+  assert.ok(currentItem, 'the same exact selected-session route item is present at the candidate revision');
   const historicalSource = digest('reviewed production sources'),
     currentSource = digest('edited production sources');
   const currentCandidate = { sourceDigest: currentSource, sourceRevision: currentRevision };
@@ -384,7 +401,7 @@ test('reviewed historical references compare across source revisions without rew
   const before = structuredClone(record);
   assert.notEqual(currentSource, historicalSource);
   assert.notEqual(currentRevision, historicalRevision);
-  assert.deepEqual(referenceComparisonErrors(record, item, bytes, currentCandidate), []);
+  assert.deepEqual(referenceComparisonErrors(record, currentItem, bytes, currentCandidate), []);
   assert.deepEqual(record, before, 'validation must not rewrite historical metadata');
   for (const field of [
     'sourceDigest',
@@ -395,12 +412,12 @@ test('reviewed historical references compare across source revisions without rew
   ]) {
     const invalid = structuredClone(record);
     delete invalid[field];
-    assert.ok(referenceComparisonErrors(invalid, item, bytes, currentCandidate).length, field);
+    assert.ok(referenceComparisonErrors(invalid, currentItem, bytes, currentCandidate).length, field);
   }
   assert.ok(
     referenceComparisonErrors(
       { ...record, sourceDigest: 'not-a-digest' },
-      item,
+      currentItem,
       bytes,
       currentCandidate,
     ).length,
@@ -408,33 +425,34 @@ test('reviewed historical references compare across source revisions without rew
   assert.ok(
     referenceComparisonErrors(
       { ...record, reviewedRevision: currentRevision.slice(1) },
-      item,
+      currentItem,
       bytes,
       currentCandidate,
     ).length,
   );
+  for (const changed of [
+    { expectedState: 'different state' },
+    { capture: { ...currentItem.capture, scroll: 'top' } },
+    { viewport: { ...currentItem.viewport, height: currentItem.viewport.height + 1 } },
+  ]) {
+    assert.match(
+      referenceComparisonErrors(record, { ...currentItem, ...changed }, bytes, currentCandidate).join('\n'),
+      /capture identity changed/,
+    );
+  }
+  assert.ok(
+    referenceComparisonErrors(record, { ...currentItem, width: 820 }, bytes, currentCandidate).length,
+  );
+  assert.ok(
+    referenceComparisonErrors(record, { ...currentItem, scheme: 'dark' }, bytes, currentCandidate).length,
+  );
+  assert.ok(
+    referenceComparisonErrors({ ...record, maxRatio: 0.5 }, currentItem, bytes, currentCandidate).length,
+  );
   assert.match(
     referenceComparisonErrors(
       record,
-      { ...item, expectedState: 'different state' },
-      bytes,
-      currentCandidate,
-    ).join('\n'),
-    /capture identity changed/,
-  );
-  assert.ok(
-    referenceComparisonErrors(record, { ...item, width: 820 }, bytes, currentCandidate).length,
-  );
-  assert.ok(
-    referenceComparisonErrors(record, { ...item, scheme: 'dark' }, bytes, currentCandidate).length,
-  );
-  assert.ok(
-    referenceComparisonErrors({ ...record, maxRatio: 0.5 }, item, bytes, currentCandidate).length,
-  );
-  assert.match(
-    referenceComparisonErrors(
-      record,
-      item,
+      currentItem,
       Buffer.from('changed reference bytes'),
       currentCandidate,
     ).join('\n'),
