@@ -225,3 +225,25 @@ test('catalog status distinguishes current, retained and unavailable observation
     assert.throws(() => parseCatalogPage(input), /Invalid/);
   }
 });
+
+test('workspace pages require per-row machines and allow duplicate source-local IDs', () => {
+  const value = {
+    ...page(),
+    machine: '',
+    machine_info: { key: '', label: 'All machines', freshness: 'cached' },
+    capabilities: { ...page().capabilities, global_union: true },
+    items: [
+      { ...session(), machine: { key: 'a', label: 'Alpha' } },
+      { ...session(), machine: { key: 'b', label: 'Beta' } },
+    ],
+  };
+  assert.equal(parseCatalogPage(value).items.length, 2);
+  assert.throws(() => parseCatalogPage({ ...value, items: [session()] }));
+  assert.throws(() => parseCatalogPage({ ...value, items: [value.items[0], value.items[0]] }));
+});
+
+test('focused pages reject another machine identity', () => {
+  const value = page();
+  value.items = [{ ...session(), machine: { key: 'another-source', label: 'Other' } }];
+  assert.throws(() => parseCatalogPage(value));
+});

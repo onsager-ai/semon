@@ -1,3 +1,4 @@
+import { compareCatalogKeys } from '../lib/catalogIdentity';
 import { readShellPreference, writeShellPreference } from '../lib/navigation';
 import {
   parseCatalogSourceCandidates,
@@ -13,7 +14,12 @@ import type { ViewerApplication } from './viewer';
 import { object, text } from '../domain/validate';
 import type { ViewerHost } from '../viewer-host';
 import { parseCatalogCapabilities, type CatalogCapabilities } from '../state/catalog-capabilities';
-import { parseCatalogPage, type CatalogPage, type CatalogSession } from '../state/catalog-wire';
+import {
+  catalogSessionKey,
+  parseCatalogPage,
+  type CatalogPage,
+  type CatalogSession,
+} from '../state/catalog-wire';
 import {
   catalogCountWitness,
   completeCatalogCount,
@@ -368,7 +374,7 @@ export function createCatalogViewer(
         return true;
       }
       if (destination.key !== 'sessions') return false;
-      if (capabilities.source_key) goList();
+      if (capabilities.source_key || capabilities.global_union) goList();
       else {
         history.pushState(null, '', '/sessions');
         fromLocation();
@@ -630,8 +636,10 @@ export function createCatalogViewer(
       overviewRequests.delete(controller);
     }
   };
-  const currentParams = () => new URLSearchParams({ machine: capabilities.source_key });
+  const currentParams = () =>
+    new URLSearchParams(capabilities.source_key ? { machine: capabilities.source_key } : {});
   const sourceLabel = (key: string) => {
+    if (!key && capabilities.global_union) return 'All machines';
     const identity = selection.selectedIdentity();
     return (
       (active?.sourceKey === key ? active.sourceLabel : null) ??
@@ -648,6 +656,8 @@ export function createCatalogViewer(
     else if (repo) value.set('repo', repo);
     if (model) value.set('model', model);
     if (query) value.set('q', query);
+    if (active && new URLSearchParams(location.search).get('all_machines') === '1')
+      value.set('all_machines', '1');
     return value;
   };
   const saveFilters = () =>
@@ -656,6 +666,7 @@ export function createCatalogViewer(
   let groupBy = 'recent';
   function applyListFilters(values: CatalogFilters) {
     if (
+      (values.machine === undefined || values.machine === capabilities.source_key) &&
       harness === values.harness &&
       repo === values.repo &&
       model === values.model &&
@@ -664,12 +675,36 @@ export function createCatalogViewer(
       return;
     cancelCandidate();
     ({ harness, repo, model, q: query } = values);
+    page = null;
+    countWitness = null;
+    items = [];
+    cursor = null;
+    if (
+      viewerHost?.catalogSources &&
+      values.machine !== undefined &&
+      values.machine !== capabilities.source_key
+    ) {
+      const next = browsingParams();
+      if (values.machine) next.set('machine', values.machine);
+      else next.delete('machine');
+      history.pushState({ v: 'sessions' }, '', '/sessions?' + next);
+      fromLocation();
+      return;
+    }
     saveFilters();
     void loadList(false);
   }
   function clearListFilters() {
     cancelCandidate();
+    if (viewerHost?.catalogSources && capabilities.source_key) {
+      applyListFilters({ machine: '', harness: '', repo: '', model: '', q: '' });
+      return;
+    }
     harness = repo = model = query = '';
+    page = null;
+    countWitness = null;
+    items = [];
+    cursor = null;
     saveFilters();
     void loadList(false);
     root.querySelector<HTMLInputElement>('#sq')?.focus();
@@ -697,8 +732,11 @@ export function createCatalogViewer(
     },
     clearFilters: clearListFilters,
   });
-  const params = () =>
-    new URLSearchParams({ machine: capabilities.source_key, scope: 'retained_history' });
+  const params = () => {
+    const value = currentParams();
+    value.set('scope', 'retained_history');
+    return value;
+  };
   const overview = createOverviewPages({
     effects: scope,
     orderScope,
@@ -1152,7 +1190,16 @@ export function createCatalogViewer(
         {
           home: viewerHost?.navigation?.paths?.home ?? '/',
           analytics: viewerHost?.navigation?.paths?.analytics ?? '/analytics',
-          sessions: '/sessions?' + browsingParams(),
+          sessions:
+            '/sessions?' +
+            (() => {
+              const p = browsingParams();
+              if (p.has('all_machines')) {
+                p.delete('machine');
+                p.delete('all_machines');
+              }
+              return p;
+            })(),
           machines: machinesHref(),
         },
         overview.waitingCount() === undefined ? {} : { home: overview.waitingCount()! },
@@ -1922,15 +1969,20 @@ export function createCatalogViewer(
           }
         : null;
     const descendants = new Map<string, CatalogSession[]>(),
-      loaded = new Map(items.map((item) => [item.key, item]));
+      loaded = new Map(items.map((item) => [catalogSessionKey(item), item]));
     for (const item of items) {
-      const seen = new Set([item.key]);
-      let parent = item.parent;
+      const seen = new Set([catalogSessionKey(item)]);
+      let parent = item.parent
+        ? catalogSessionKey({ key: item.parent, machine: item.machine })
+        : null;
       while (parent && !seen.has(parent) && loaded.has(parent)) {
         seen.add(parent);
         if (showApprovalReviews || item.presentation_kind !== 'Approval review')
           descendants.set(parent, [...(descendants.get(parent) ?? []), item]);
-        parent = loaded.get(parent)!.parent;
+        const ancestor = loaded.get(parent)!;
+        parent = ancestor.parent
+          ? catalogSessionKey({ key: ancestor.parent, machine: ancestor.machine })
+          : null;
       }
     }
     const ordered = orderRows(
@@ -1941,11 +1993,19 @@ export function createCatalogViewer(
       'sessions',
       items
         .filter((item) => showApprovalReviews || item.presentation_kind !== 'Approval review')
-        .map((item) => ({ ...item, id: item.key })),
-      (a, b) => (b.last ?? 0) - (a.last ?? 0) || a.key.localeCompare(b.key),
+        .map((item) => ({ ...item, id: catalogSessionKey(item) })),
+      (a, b) =>
+        (b.last ?? 0) - (a.last ?? 0) ||
+        (capabilities.global_union
+          ? compareCatalogKeys(a.key, b.key)
+          : a.key.localeCompare(b.key)) ||
+        compareCatalogKeys(a.machine?.key ?? '', b.machine?.key ?? ''),
     ).map((item) => ({
       ...item,
-      presentation: catalogSessionRow(item, item.parent ? [] : descendants.get(item.key)),
+      presentation: catalogSessionRow(
+        item,
+        item.parent ? [] : descendants.get(catalogSessionKey(item)),
+      ),
     }));
     const observationState: CatalogObservationState = page?.freshness ?? 'cached',
       observation = {
@@ -1960,12 +2020,21 @@ export function createCatalogViewer(
         selectedSourceLabel,
         observation,
         capabilities.metadata_search,
+        capabilities.global_union,
       );
     catalogBrowser.update(
-      { harness, repo, model, q: query },
+      {
+        machine: viewerHost?.catalogSources ? capabilities.source_key : undefined,
+        harness,
+        repo,
+        model,
+        q: query,
+      },
       items,
       capabilities.source_key,
       filterDescription,
+      sourceItems,
+      !!viewerHost?.catalogSources,
     );
     const groupKey = (item: CatalogSession) =>
       groupBy === 'project'
@@ -1973,7 +2042,7 @@ export function createCatalogViewer(
         : groupBy === 'harness'
           ? (HARNESS[item.harness] ?? item.harness)
           : groupBy === 'machine'
-            ? sourceLabel(capabilities.source_key)
+            ? (item.machine?.label ?? sourceLabel(capabilities.source_key))
             : '';
     const titles = [...new Set(ordered.map(groupKey))].sort(
       (a, b) =>
@@ -2029,6 +2098,7 @@ export function createCatalogViewer(
         model,
         query,
         metadataSearch: capabilities.metadata_search,
+        globalUnion: capabilities.global_union,
         searchPartial: page?.search?.partial ?? false,
         searchIndexIncomplete: page?.search ? !page.search.index_complete : false,
         more: cursor !== null,
@@ -2039,10 +2109,27 @@ export function createCatalogViewer(
           drawList();
         },
         session(item) {
-          void goSession(
-            item.key,
-            items.find((row) => row.key === item.key),
-          );
+          if (item.machine) {
+            saveSource();
+            const p = browsingParams();
+            p.set('machine', item.machine.key);
+            p.set('all_machines', '1');
+            history.pushState(
+              { v: 'session', id: item.key },
+              '',
+              '/s/' +
+                encodeURIComponent(item.harness) +
+                '/' +
+                encodeURIComponent(item.key) +
+                '?' +
+                p,
+            );
+            fromLocation();
+          } else
+            void goSession(
+              item.key,
+              items.find((row) => row.key === item.key),
+            );
         },
         children(key, expanded) {
           if (expanded) listExpanded.add(cacheKey(key));
@@ -2091,7 +2178,7 @@ export function createCatalogViewer(
   async function loadList(append: boolean) {
     if (
       disposed ||
-      !capabilities.source_key ||
+      (!capabilities.source_key && !capabilities.global_union) ||
       (navigation.route.v !== 'sessions' && !active) ||
       (append && updating)
     )
@@ -2120,7 +2207,12 @@ export function createCatalogViewer(
         (append && page?.generation !== next.generation)
       )
         throw new Error('History changed; refresh this list before loading another page.');
-      if (append && next.items.some((item) => items.some((old) => old.key === item.key)))
+      if (
+        append &&
+        next.items.some((item) =>
+          items.some((old) => catalogSessionKey(old) === catalogSessionKey(item)),
+        )
+      )
         throw new Error('History page repeated a session. Refresh this list.');
       const pendingFacts = next.items.some(
         (item) =>
@@ -2134,6 +2226,9 @@ export function createCatalogViewer(
       if (capabilities.source_candidates && !candidateLoaded) void loadCandidates(false);
       cursor = next.next_cursor;
       items = append ? [...items, ...next.items].slice(-300) : next.items;
+      // Explicit pagination admits the newly requested rows immediately. The
+      // passive observation ordering must not hold them outside the viewport.
+      if (append) ordering.scopes.delete('sessions');
       updating = false;
       drawList();
       chrome();
@@ -2324,6 +2419,14 @@ export function createCatalogViewer(
     else if (!sourcesOpen) listScroll = scroll;
   }
   function goList(push = true) {
+    if (push && active && new URLSearchParams(location.search).get('all_machines') === '1') {
+      const p = browsingParams();
+      p.delete('machine');
+      p.delete('all_machines');
+      history.pushState({ v: 'sessions' }, '', '/sessions?' + p);
+      fromLocation();
+      return;
+    }
     leaveScreen();
     navigation.route = { v: 'sessions' };
     if (push) history.pushState(navigation.route, '', '/sessions?' + browsingParams());
@@ -3601,7 +3704,7 @@ export function createCatalogViewer(
         return;
       }
       void overview.refresh();
-      if (!capabilities.source_key) return;
+      if (!capabilities.source_key && !capabilities.global_union) return;
       const next = parseCatalogCapabilities(
         await api('/api/session-capabilities?' + currentParams()),
       );
@@ -3615,7 +3718,9 @@ export function createCatalogViewer(
         void loadCandidates(false);
       if (active) void loadIdentity(active);
       if (ready && active && !active.store.selectedPage()) void loadSelected(active);
-      await refreshMetadata(observedSource, observedEpoch);
+      if (capabilities.global_union) {
+        if (!active && !sourcesOpen && items.length <= 60) await loadList(false);
+      } else await refreshMetadata(observedSource, observedEpoch);
     } catch (error) {
       if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
         return;
@@ -3654,7 +3759,7 @@ export function createCatalogViewer(
     );
   }
   async function loadSources(append: boolean) {
-    if (disposed || !sourcesOpen || sourcesUpdating) return;
+    if (disposed || sourcesUpdating) return;
     const epoch = ++sourcesEpoch,
       p = new URLSearchParams({ limit: '60' });
     if (append && sourceCursor !== null) p.set('cursor', sourceCursor);
@@ -3663,7 +3768,7 @@ export function createCatalogViewer(
     drawSources();
     try {
       const next = parseCatalogSources(await api('/api/session-sources?' + p));
-      if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+      if (disposed || epoch !== sourcesEpoch) return;
       if (
         append &&
         next.items.some((item) => sourceItems.some((old) => old.source_key === item.source_key))
@@ -3673,7 +3778,7 @@ export function createCatalogViewer(
       sourceCursor = next.next_cursor;
       sourcesRetryDelay = 1000;
     } catch (error) {
-      if (disposed || !sourcesOpen || epoch !== sourcesEpoch) return;
+      if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
       if (retryable(error)) {
         scope.timeout(() => {
@@ -3684,13 +3789,16 @@ export function createCatalogViewer(
     } finally {
       if (!disposed && epoch === sourcesEpoch) {
         sourcesUpdating = false;
-        drawSources();
+        if (sourcesOpen) drawSources();
+        else drawList();
+        if (sourceCursor !== null && !sourcesOpen && sourceItems.length < 64)
+          void loadSources(true);
       }
     }
   }
   function saveSource() {
     preserveScroll();
-    if (!capabilities.source_key) return;
+    if (!capabilities.source_key && !capabilities.global_union) return;
     sourceViews.delete(capabilities.source_key);
     sourceViews.set(capabilities.source_key, {
       page,
@@ -3728,7 +3836,7 @@ export function createCatalogViewer(
     drawSources();
     try {
       const next = parseCatalogCapabilities(
-        await api('/api/session-capabilities?' + new URLSearchParams({ machine: key })),
+        await api('/api/session-capabilities?' + new URLSearchParams(key ? { machine: key } : {})),
       );
       if (disposed || epoch !== sourcesEpoch) return;
       if (next.source_key !== key)
@@ -3785,19 +3893,28 @@ export function createCatalogViewer(
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
+      if (!sourcesOpen) {
+        note = sourcesNote;
+        updating = false;
+        drawList();
+      }
       if (retryable(error))
         scope.timeout(() => {
           if (
             !disposed &&
             epoch === sourcesEpoch &&
-            new URLSearchParams(location.search).get('machine') === key
+            (new URLSearchParams(location.search).get('machine') ?? '') === key
           )
             void switchSource(key, false);
         }, 1000);
     } finally {
       if (!disposed && epoch === sourcesEpoch) {
         sourcesUpdating = false;
-        drawSources();
+        if (sourcesOpen) drawSources();
+        else {
+          drawList();
+          if (viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
+        }
       }
     }
   }
@@ -3915,7 +4032,10 @@ export function createCatalogViewer(
       return;
     }
     const machine = queryParams.get('machine');
-    if (queryParams.get('choose_source') === '1' || (viewerHost?.catalogSources && !machine)) {
+    if (
+      queryParams.get('choose_source') === '1' ||
+      (viewerHost?.catalogSources && !machine && /^\/(s|trace)\//.test(location.pathname))
+    ) {
       void showSources().then(() => {
         const parts = location.pathname.split('/');
         if ((parts[1] === 's' || parts[1] === 'trace') && parts[3])
@@ -3923,15 +4043,26 @@ export function createCatalogViewer(
       });
       return;
     }
-    if (!capabilities.source_key || (machine && machine !== capabilities.source_key)) {
-      if (machine || viewerHost?.catalogSources) void showSources();
-      else {
+    if (
+      (!capabilities.source_key && !capabilities.global_union) ||
+      (viewerHost?.catalogSources
+        ? (machine ?? '') !== capabilities.source_key
+        : !!machine && machine !== capabilities.source_key)
+    ) {
+      if (machine) void showSources();
+      else if (viewerHost?.catalogSources) {
+        leaveScreen();
+        sourcesOpen = false;
+        navigation.route = { v: 'sessions' };
+        updating = true;
+        drawList();
+      } else {
         leaveScreen();
         navigation.route = { v: 'sessions' };
         sourcesOpen = true;
         drawSources();
       }
-      if (machine) void switchSource(machine, false);
+      if (machine || viewerHost?.catalogSources) void switchSource(machine ?? '', false);
       else
         void api('/api/session-capabilities')
           .then((value) => {
@@ -3956,10 +4087,20 @@ export function createCatalogViewer(
           });
       return;
     }
+    const beforeFilters = countFilters();
     harness = queryParams.get('harness') ?? '';
     repo = queryParams.get('no_repo') === '1' ? '__none__' : (queryParams.get('repo') ?? '');
     model = queryParams.get('model') ?? '';
     query = queryParams.get('q') ?? '';
+    if (beforeFilters !== countFilters()) {
+      ++listEpoch;
+      page = null;
+      countWitness = null;
+      items = [];
+      cursor = null;
+      updating = false;
+    }
+    if (!sourcesOpen && viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
     const parts = location.pathname.split('/').filter(Boolean);
     if (parts[0] === 'trace' && parts[2] && parts[3]) {
       goCausal(decodeURIComponent(parts[2]), decodeURIComponent(parts[3]));
