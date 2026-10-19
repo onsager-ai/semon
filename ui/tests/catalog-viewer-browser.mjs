@@ -3808,12 +3808,87 @@ for (const width of [390, 1280])
               );
             },
           },
+          account: {
+            name: 'Hosted account',
+            login: 'hosted',
+            initials: 'HA',
+            workspaces: [],
+            links: [
+              { label: 'Account', href: '/account', method: 'get', danger: false },
+              { label: 'Sessions', href: '/sessions', method: 'get', danger: false },
+            ],
+          },
         });
         window.sharedApp = document.querySelector('.app');
         window.sharedSidebar = document.querySelector('#sidebar');
       });
       await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
       assert.equal(await page.locator('form').getAttribute('method'), 'post');
+      const openAccount = async () => {
+        if (
+          width === 390 &&
+          !(await page.locator('body').evaluate((node) => node.classList.contains('drawer-open')))
+        )
+          await page.locator('#lead-btn').click();
+        await page
+          .locator(width === 390 ? '#account-drawer .account-trigger' : '#topbar .account-trigger')
+          .click();
+      };
+      await openAccount();
+      // Modified clicks must reach the browser without changing the application
+      // route or consuming the phone sheet's history entry.
+      for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey']) {
+        assert.equal(
+          await page.evaluate((modifier) => {
+            let intercepted;
+            document.addEventListener(
+              'click',
+              (event) => {
+                intercepted = event.defaultPrevented;
+                event.preventDefault();
+              },
+              { once: true },
+            );
+            document.querySelector('.account-popover a[href="/account"]').dispatchEvent(
+              new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                button: 0,
+                [modifier]: true,
+              }),
+            );
+            return intercepted;
+          }, modifier),
+          false,
+          modifier + ': account menu consumed a modified click',
+        );
+      }
+      await page.locator('.account-popover a[href="/account"]').click();
+      await page.getByRole('heading', { name: 'Account', exact: true }).waitFor();
+      assert.deepEqual(
+        await page.evaluate(() => ({
+          app: sharedApp === document.querySelector('.app'),
+          sidebar: sharedSidebar === document.querySelector('#sidebar'),
+          sheet: !!history.state?.sheet,
+          drawer: document.body.classList.contains('drawer-open'),
+          menu: !!document.querySelector('.account-popover'),
+        })),
+        { app: true, sidebar: true, sheet: false, drawer: false, menu: false },
+        'account menu navigation replaced the document or retained an overlay',
+      );
+      await page.goBack();
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => !!history.state?.sheet), false);
+      await openAccount();
+      await page.locator('.account-popover a[href="/sessions"]').click();
+      await page.locator('#page [data-session-row="list"]').waitFor();
+      assert.equal(
+        await page.evaluate(() => sharedApp === document.querySelector('.app')),
+        true,
+        'account menu reader link replaced the application document',
+      );
+      await page.goBack();
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
       const navigate = async (key) => {
         if (
           width === 390 &&
