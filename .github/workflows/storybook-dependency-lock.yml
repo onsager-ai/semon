@@ -67,6 +67,7 @@ jobs:
         run: |
           node canonical/agent-config/sync.mjs --repo consumer --source canonical --revision b5b75ec6c404f20ee7e7ee7f0d963b9c9749f9b8
           node consumer/.agents/sync.mjs --repo consumer --source canonical --check
+          git -C consumer add --intent-to-add .agents .claude
           git -C consumer diff --binary > "$RUNNER_TEMP/agent-config-review.patch"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

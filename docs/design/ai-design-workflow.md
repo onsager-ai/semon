@@ -1,9 +1,6 @@
 # AI-assisted design in Semon
 
-Use the pinned ui-design workflow from `.agents/skills/ui-design/SKILL.md`
-(Claude's discovery projection is generated). Optional pen.dev tooling is
-configured once at user level by its integration setup reference. Do not add
-repository MCP files, duplicate vendor skills or personal credentials here.
+Use the repository-selected ui-design workflow from `.agents/skills/ui-design/SKILL.md` (Claude's discovery projection is generated). The normal workflow is source-first and requires no pen.dev account, key, application, integration or tool call. Do not add repository MCP files, duplicate vendor skills or personal credentials here.
 
 Current user setup selects `--harness codex`; Claude Code installation, user
 configuration and live validation are deferred. The generated Claude discovery
@@ -11,23 +8,9 @@ projection remains for future compatibility.
 
 ## Source and design ownership
 
-Read the [UI design brief](ui-design-brief.md) before UI edits, and
-reconcile its applicable scope with the current task and settled product decisions.
-The editable [session inspection canvas](session-inspection/session-inspection.pen)
-records layout and interaction intent; [delivery evidence](session-inspection/README.md)
-links historical explorations, actual before/after captures and checks.
-Reuse semantic tokens and established components. Update the canvas when layout
-or interaction intent changes, compare representative implementation screenshots
-at matching widths/themes/states, and explain intentional deviations in the PR.
-Review visual diffs before updating baselines. These controls extend this existing
-brief and the pinned skill; they do not create another instruction system.
+Read the [UI design brief](ui-design-brief.md), current product contracts and settled decisions before UI edits. Implement behavior and layout in the owning production Preact/CSS sources, reusing semantic tokens, components and controllers. The [session inspection canvas](session-inspection/session-inspection.pen) and [delivery evidence](session-inspection/README.md) preserve historical intent and review records; editing or opening a canvas is optional and does not establish acceptance.
 
-Preserve the applicable parts of the existing rendered viewer as the default
-visual baseline. Pen.dev canvases describe workflow intent within that foundation;
-they do not replace its fonts, type scale, controls or compact spacing. Calibrate
-design artifacts from computed product styles and use actual UI screenshots for
-visual review. Document an intentional foundation change separately when the
-task calls for one.
+Preserve applicable parts of the existing rendered viewer and its approved references unless current requirements justify a change. The product CSS and contracts own fonts, type scale, controls and compact spacing. Design canvases are optional exploration or historical intent and never replace source tokens, production behavior or the active visual acceptance references.
 
 Read [the design contract](design-contract.md), [viewer ownership](viewer-ownership.md),
 [UI source/build guidance](../../ui/README.md) and
@@ -70,6 +53,8 @@ value is not evidence that a correctly source-scoped candidate should broaden
 its reads; check the fixture and actual behavior before attributing the value
 difference to a test defect.
 
+For complete migration of the original pen.dev acceptance baselines, use the product-owned [Storybook contract inventory](../../tests/ui/storybook-contract.json). It must account for every original root frame and active descendant, plus the current visual acceptance, visual coverage, gallery and native/product surface contracts. Each active state maps to production UI, a deterministic Storybook story and its required Playwright interactions/captures, or to an explicitly identified served/native test when Storybook is not the correct renderer. Every retired or inactive state needs a governing product decision and reason. Do not call a pilot or partial screen set a complete migration. The brief and settled product contracts determine intent; canvas files and old exports remain historical evidence.
+
 View representative actual reference/candidate images and diffs for each cause,
 including relevant interaction states, before a full regression cycle. Group
 repeated sizes/themes by cause without reducing required coverage. Record the
@@ -85,19 +70,11 @@ delivered tree. Keep product behavior/availability checks separate from pixel
 regression; neither can establish the other's result. No new approval service or
 machine-enforced semantic-review gate is introduced here.
 
-## Tool workflow
+## Source, story and capture workflow
 
-Start with source extraction, not a new visual identity. Read semantic roles
-from the current production CSS and components. A derived design brief or .pen
-library records its source commit and both themes, and must be reconciled with
-the shared contract and current requirements before reuse.
+Start from current product requirements, contracts and semantic roles in the production CSS/components. Make the smallest deterministic Storybook state using the actual production components and sanitized fixtures. Use the product's locked renderer and Playwright setup to exercise each mapped interaction and capture every required viewport/theme. Inspect the actual reference, candidate and diff images for each distinct change family. Refine production sources when the evidence reveals a defect; do not repair only the fixture or capture input.
 
-Use pen.dev for editable canvas refinement, variables, reusable components and
-exports. Desktop MCP requires the same-host app; cloud sessions use the supported
-headless CLI. Confirm the document, save deliberately and inspect actual exported
-images. Implement authorized changes in authored Preact/CSS using existing owners.
-Stitch is retired; its archived outputs are historical evidence and cannot become
-new design or pixel authority. Do not run its setup, generation or MCP workflows.
+Present justified reference changes as clearly unapproved candidates in a reviewable Git change, with original evidence, provenance, reason and thresholds preserved. CI compares and uploads evidence but cannot rewrite, approve or commit references. A human review through the existing product process records acceptance. Story fixtures establish presentation states only; existing native, backend, authorization and runtime gates establish their own behavior. Stitch is retired; its archived outputs remain historical evidence and are not active design or pixel authority.
 
 ## Sharing and acceptance
 
@@ -108,10 +85,4 @@ domain layout. Do not add a second token package, cross-repo symlinks, auto-sync
 design projects or duplicate CSS/token authorities. Independent product pages
 can differ while shared controls retain their contract.
 
-Future frontend changes use the existing static design policy, typed/security/
-bundle checks, gallery interaction coverage, text/touch audits and pixel ratchets
-from [tests/ui/README.md](../../tests/ui/README.md) and `.github/workflows/ui.yml`.
-Compare 390/820/1280px and light/dark with approved references, including focus,
-keyboard, reduced motion and relevant lifecycle states. Inspect screenshot diffs
-before intentional baseline updates; preserve every threshold and required suite.
-Setup itself changes no production UI, generated bundle or approved baseline.
+Frontend changes use the existing static design policy, typed/security/bundle checks, gallery interaction coverage, text/touch audits and pixel ratchets from [tests/ui/README.md](../../tests/ui/README.md) and `.github/workflows/ui.yml`. The crosswalk lists all required migration states. Capture the declared viewports, themes, focus, keyboard, reduced-motion and lifecycle variants; retain every existing threshold and required suite. Keep generated bundles owned by their build tools. A story/visual pass does not qualify native runtime behavior.
