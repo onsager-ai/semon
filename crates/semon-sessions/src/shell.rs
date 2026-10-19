@@ -46,7 +46,7 @@ pub const FAVICON_SVG: &str = include_str!("favicon.svg");
 /// the same labels and icons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct NavLink<'a> {
-    /// The viewer's name for the destination: `home`, `sessions`, `analytics` or `machines`.
+    /// The viewer's name for the destination: `sessions`, `analytics` or `machines`.
     pub key: &'a str,
     pub label: &'a str,
     /// The viewer's own path for it. An embedding page that serves a destination at another path links there instead.
@@ -82,7 +82,7 @@ pub struct NavigationDestination {
 impl NavigationPolicy {
     pub fn html(&self, route: &str) -> String {
         let current = match route {
-            "session" | "trace" | "sources" => "sessions",
+            "home" | "session" | "trace" | "sources" => "sessions",
             "machine" => "machines",
             route => route,
         };
@@ -325,7 +325,11 @@ mod tests {
             super::session_sidebar("<a & \"b\">", "")
                 .contains("<span class=\"brandname\">&lt;a &amp; &quot;b&quot;&gt;</span>")
         );
-        let nav = super::NAV[3].html(super::NAV[3].path, true);
+        let machine = super::NAV
+            .iter()
+            .find(|link| link.key == "machines")
+            .unwrap();
+        let nav = machine.html(machine.path, true);
         assert!(super::session_sidebar("Semon", &nav).contains(&format!(
             "<nav id=\"nav\" aria-label=\"Pages\">\n{nav}</nav>"
         )));

@@ -2,10 +2,17 @@
 
 The hosted Viewer has one bounded, source-scoped application. A document mounts
 `createCatalogViewer` through `mountViewerApplication`; replacement destroys the
-previous mount first. Home, Analytics, Sessions, selected transcripts and Trace
+previous mount first. Analytics, Sessions, selected transcripts and Trace
 share that shell, navigation and effect lifetime. Query parameters do not choose
 an application architecture. Old compatibility markers are removed while
 preserving supported destinations, source selection and reading anchors.
+
+Sessions is the default destination at `/`. The core navigation contains Sessions,
+Analytics and Machines. Home is no longer an application page, and its inbox and
+status sections are not moved into Sessions. The compact workspace Home API still
+supplies Recent, machine views and Analytics through their existing owners.
+Retained `initialHome` interfaces below describe optional compatibility content;
+they do not select an active landing page.
 
 | Owner | State and effects | Acceptance boundary |
 | --- | --- | --- |

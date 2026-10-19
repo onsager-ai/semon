@@ -105,6 +105,108 @@ const list = (items) => ({
   next_cursor: null,
 });
 
+for (const width of [390, 820, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`root opens existing Sessions without Home at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      const page = await browser.newPage({ viewport: { width, height: 860 }, colorScheme });
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      try {
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({
+              json: {
+                ...capabilities(false),
+                metadata_search: true,
+                filters: ['harness', 'repo', 'q'],
+              },
+            });
+          if (url.pathname === '/api/sessions')
+            return route.fulfill({
+              json: {
+                ...list([meta('one'), meta('two')]),
+                search: {
+                  semantics: 'unicode_lowercase_substring',
+                  fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+                  candidates: 2,
+                  partial: false,
+                  index_complete: true,
+                  candidate_budget: 512,
+                  byte_budget: 2097152,
+                },
+              },
+            });
+          if (url.pathname === '/api/viewer/home')
+            return route.fulfill({
+              json: {
+                api: 1,
+                version: 'a'.repeat(64),
+                now: 10000,
+                next: { inbox: null, working: null, answered: null },
+                totals: { waiting: 0, working: 0, answered: 0 },
+                machines: [],
+                recent: [],
+                inbox: [],
+                working: [],
+                answered: [],
+                observations: [],
+              },
+            });
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/?machine=source&q=Session&harness=claude#retained');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+        });
+        await page.locator('#page .nrow').first().waitFor();
+        const url = new URL(page.url());
+        assert.equal(url.pathname, '/sessions');
+        assert.equal(url.searchParams.get('machine'), 'source');
+        assert.equal(url.searchParams.get('q'), 'Session');
+        assert.equal(url.searchParams.get('harness'), 'claude');
+        assert.equal(url.hash, '#retained');
+        assert.deepEqual(
+          await page
+            .locator('#nav [data-go]')
+            .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-go'))),
+          ['sessions', 'analytics', 'machines'],
+        );
+        assert.equal(
+          await page.locator('#nav [aria-current="page"]').getAttribute('data-go'),
+          'sessions',
+        );
+        assert.equal(await page.locator('#page .nrow').count(), 2);
+        assert.doesNotMatch(
+          await page.locator('#page').innerText(),
+          /Needs you|Working now|invalid history view/,
+        );
+        assert.equal(await page.getByRole('searchbox').inputValue(), 'Session');
+        await page.evaluate(() => {
+          history.pushState(null, '', '/?machine=source&q=Session#back');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+        await page.locator('#page .nrow').first().waitFor();
+        assert.equal(new URL(page.url()).pathname, '/sessions');
+        assert.equal(new URL(page.url()).hash, '#back');
+        assert.deepEqual(errors, []);
+        const out = process.env.SEMON_UI_OUT;
+        if (out) {
+          await mkdir(out, { recursive: true });
+          await page.screenshot({
+            path: `${out}/sessions-${width}-${colorScheme}.png`,
+            fullPage: true,
+          });
+        }
+        await page.evaluate(() => window.app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
+
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
     for (const workspaceChrome of [false, true])
@@ -227,9 +329,14 @@ for (const width of [390, 1280])
             assert.deepEqual(errors, []);
           };
           await assertNative();
-          if (workspaceChrome)
-            assert.equal(await page.locator('#nav [data-go="home"] .cnt').textContent(), '2');
-          assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
+          assert.equal(await page.locator('#nav [data-go="home"]').count(), 0);
+          assert.equal(
+            new URL(
+              await page.locator('#nav [data-go="sessions"]').getAttribute('href'),
+              page.url(),
+            ).pathname,
+            '/sessions',
+          );
           assert.equal(
             await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
             '/analytics',
@@ -646,8 +753,8 @@ for (const width of [390, 1280])
         await page.clock.runFor(32);
         assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
         assert.equal(
-          (await page.locator('#nav [data-go="home"]').textContent()).replace(/\s/g, ''),
-          'Home',
+          await page.locator('#nav [data-go="home"]').count(),
+          0,
           'retired waiting totals cannot publish while the current workspace body is held',
         );
         await page.evaluate(() => window.releaseCurrentWorkspaceBody());
@@ -662,10 +769,10 @@ for (const width of [390, 1280])
         );
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
         assert.equal((await page.locator('#lanes .row-machine').count()) > 1, true);
-        const homeText = () => page.locator('#nav [data-go="home"]').textContent();
-        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        const homeCount = () => page.locator('#nav [data-go="home"]').count();
+        assert.equal(await homeCount(), 0);
         assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
-        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.equal(await homeCount(), 0);
         assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-1/);
 
         stage = 'open focused session';
@@ -701,7 +808,7 @@ for (const width of [390, 1280])
                     ?.includes('unavailable'),
             mode === 'ready',
           );
-          assert.equal((await homeText()).replace(/\s/g, ''), mode === 'ready' ? 'Home4' : 'Home');
+          assert.equal(await homeCount(), 0);
           await ready(
             'workspace rows after ' + mode,
             (label) => document.querySelector('#lanes')?.textContent.includes(label),
@@ -744,7 +851,7 @@ for (const width of [390, 1280])
           /context is unavailable/,
         );
         assert.equal(await page.locator('#page .agent-edges path').count(), 0);
-        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.equal(await homeCount(), 0);
         assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
         assert.equal(

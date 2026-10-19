@@ -363,7 +363,7 @@ export function createCatalogViewer(
     },
     navigate(destination) {
       if (viewerHost?.nativePage) return false;
-      if (destination.key === 'home' || destination.key === 'analytics') {
+      if (destination.key === 'analytics') {
         goOverview(destination.key);
         return true;
       }
@@ -853,10 +853,10 @@ export function createCatalogViewer(
     render(null, root);
     root.replaceChildren();
   }
-  function goOverview(route: 'home' | 'analytics' | 'machines', push = true) {
+  function goOverview(route: 'analytics' | 'machines', push = true) {
     leaveScreen();
     navigation.route = { v: route };
-    if (push) history.pushState(navigation.route, '', route === 'home' ? '/' : '/' + route);
+    if (push) history.pushState(navigation.route, '', '/' + route);
     shell.closeDrawer(true);
     overview.draw();
     void overview.refresh();
@@ -1196,7 +1196,6 @@ export function createCatalogViewer(
               ? 'sessions'
               : route,
         {
-          home: viewerHost?.navigation?.paths?.home ?? '/',
           analytics: viewerHost?.navigation?.paths?.analytics ?? '/analytics',
           sessions:
             '/sessions?' +
@@ -1210,7 +1209,6 @@ export function createCatalogViewer(
             })(),
           machines: machinesHref(),
         },
-        overview.waitingCount() === undefined ? {} : { home: overview.waitingCount()! },
       ),
       rail,
     );
@@ -4036,6 +4034,9 @@ export function createCatalogViewer(
       if (viewerHost.nativePage.workspaceChrome) void overview.refresh();
       return;
     }
+    if (location.pathname === '/') {
+      history.replaceState({ v: 'sessions' }, '', '/sessions' + location.search + location.hash);
+    }
     const queryParams = new URLSearchParams(location.search);
     const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
     if (machineBookmark && !viewerHost?.nativePage) {
@@ -4059,12 +4060,8 @@ export function createCatalogViewer(
       goOverview('machines', false);
       return;
     }
-    if (
-      location.pathname === '/' ||
-      location.pathname === '/analytics' ||
-      location.pathname === '/timeline'
-    ) {
-      goOverview(location.pathname === '/' ? 'home' : 'analytics', false);
+    if (location.pathname === '/analytics' || location.pathname === '/timeline') {
+      goOverview('analytics', false);
       return;
     }
     const machine = queryParams.get('machine');

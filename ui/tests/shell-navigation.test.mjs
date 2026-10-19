@@ -13,7 +13,11 @@ const { projectShellNavigation, parseShellNavigation, withReturnPath } = await i
 );
 const input = () => ({
   leading: [{ key: 'new-session', label: 'New session', icon: 'M4 4h16', href: '/sessions/new' }],
-  paths: { home: '/?compat=1', analytics: '/analytics?compat=1', machines: '/machines' },
+  paths: {
+    sessions: '/sessions?compat=1',
+    analytics: '/analytics?compat=1',
+    machines: '/machines',
+  },
   trailing: [
     {
       key: 'runtime-pending',
@@ -26,6 +30,7 @@ const input = () => ({
 test('all entry paths share destination order; selected context only changes the active state', () => {
   const policy = parseShellNavigation(input());
   for (const [route, active] of [
+    ['home', 'sessions'],
     ['sources', 'sessions'],
     ['sessions', 'sessions'],
     ['session', 'sessions'],
@@ -38,17 +43,17 @@ test('all entry paths share destination order; selected context only changes the
     const rows = projectShellNavigation(policy, route);
     assert.deepEqual(
       rows.map((row) => row.key),
-      ['new-session', 'home', 'sessions', 'analytics', 'machines', 'runtime-pending'],
+      ['new-session', 'sessions', 'analytics', 'machines', 'runtime-pending'],
     );
     assert.equal(rows.find((row) => row.current)?.key, active);
-    assert.equal(rows[1].href, '/?compat=1');
-    assert.equal(rows[3].href, '/analytics?compat=1');
+    assert.equal(rows[1].href, '/sessions?compat=1');
+    assert.equal(rows[2].href, '/analytics?compat=1');
     assert(rows.every((row) => row.count === undefined));
   }
   const rows = projectShellNavigation(policy, 'session', {
     sessions: '/sessions?machine=one&q=task',
   });
-  assert.equal(rows[2].href, '/sessions?machine=one&q=task');
+  assert.equal(rows[1].href, '/sessions?machine=one&q=task');
 });
 test('host navigation cannot replace core identity or accept unsafe destinations', () => {
   for (const href of ['//foreign.test', 'javascript:alert(1)', '/\\foreign', '/\u0000bad']) {
@@ -57,7 +62,7 @@ test('host navigation cannot replace core identity or accept unsafe destinations
     assert.equal(parseShellNavigation(policy), undefined);
   }
   const duplicate = input();
-  duplicate.trailing[0].key = 'home';
+  duplicate.trailing[0].key = 'sessions';
   assert.equal(parseShellNavigation(duplicate), undefined);
   const repeated = input();
   repeated.trailing[0].key = 'new-session';

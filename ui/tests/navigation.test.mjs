@@ -13,12 +13,13 @@ const { NavigationController } = await import(
 );
 test('route observers receive the selected canonical source destination and unsubscribe', () => {
   const navigation = new NavigationController();
+  assert.deepEqual(navigation.route, { v: 'sessions' });
   const observed = [];
   const unsubscribe = navigation.subscribeRoute(() => observed.push(navigation.route));
   navigation.route = { v: 'session', id: 'qualified-catalog-key' };
   navigation.route = { v: 'trace', sid: 'qualified-catalog-key', turn: 'recorded-turn' };
   unsubscribe();
-  navigation.route = { v: 'home' };
+  navigation.route = { v: 'sessions' };
   assert.deepEqual(observed, [
     { v: 'session', id: 'qualified-catalog-key' },
     { v: 'trace', sid: 'qualified-catalog-key', turn: 'recorded-turn' },
