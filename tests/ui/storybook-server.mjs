@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const types = { '.css': 'text/css', '.html': 'text/html', '.ico': 'image/x-icon', '.js': 'text/javascript', '.json': 'application/json', '.map': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.woff2': 'font/woff2' };
+export function storybookPolicy(html) {
+  assert.ok(html.length <= 2 * 1024 * 1024, 'Storybook HTML bootstrap size exceeded');
+  const hashes = [];
+  for (const match of html.toString('utf8').matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+    if (/(?:^|\s)src\s*=/i.test(match[1])) continue;
+    const content = match[2].replace(/\r\n?/g, '\n');
+    hashes.push(`'sha256-${createHash('sha256').update(content).digest('base64')}'`);
+  }
+  return `default-src 'self'; script-src 'self' ${[...new Set(hashes)].join(' ')}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'`;
+}
 export function staticPath(raw) {
   assert.ok(typeof raw === 'string' && raw.length <= 8192 && raw.startsWith('/') && !raw.startsWith('//'));
   const decoded = decodeURIComponent(raw.split(/[?#]/, 1)[0]);
@@ -51,8 +62,10 @@ export async function createStorybookServer(directory, options = {}) {
       assert.equal(fs.realpathSync(asset), asset);
       const stat = fs.statSync(asset);
       assert.ok(stat.isFile() && stat.size <= 64 * 1024 * 1024);
-      response.writeHead(200, { 'Content-Type': types[path.extname(asset)] ?? 'application/octet-stream', 'Content-Length': stat.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'" });
+      const html = path.extname(asset) === '.html' ? fs.readFileSync(asset) : null;
+      response.writeHead(200, { 'Content-Type': types[path.extname(asset)] ?? 'application/octet-stream', 'Content-Length': stat.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...(html ? { 'Content-Security-Policy': storybookPolicy(html) } : {}) });
       if (request.method === 'HEAD') response.end();
+      else if (html) response.end(html);
       else fs.createReadStream(asset, { flags: fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW }).on('error', () => response.destroy()).pipe(response);
     } catch { if (!response.headersSent) reply(400, 'Request refused'); else response.destroy(); }
   });

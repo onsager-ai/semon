@@ -60,7 +60,7 @@ jobs:
         run: npm --prefix ui run storybook:typecheck
       - name: Build actual production stories
         id: build
-        if: ${{ !cancelled() && steps.typecheck.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
         run: npm --prefix ui run storybook:build
       - name: Validate exhaustive contract coverage
         id: contract
