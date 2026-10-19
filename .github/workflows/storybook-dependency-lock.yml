@@ -1,4 +1,4 @@
-name: Prepare Storybook dependency lock
+name: Prepare UI migration inputs
 
 on:
   push:
@@ -12,18 +12,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lock:
+  agents:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: consumer
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: onsager-ai/dev-skills
+          ref: b5b75ec6c404f20ee7e7ee7f0d963b9c9749f9b8
+          path: canonical
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.x
-      - name: Resolve the declared preview dependencies on CI
-        run: npm --prefix ui install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Prepare generated projections against the reviewed prerequisite
+        run: |
+          node canonical/agent-config/sync.mjs --repo consumer --source canonical --revision b5b75ec6c404f20ee7e7ee7f0d963b9c9749f9b8
+          node consumer/.agents/sync.mjs --repo consumer --source canonical --check
+          git -C consumer diff --binary > "$RUNNER_TEMP/agent-config-review.patch"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: storybook-dependency-lock
-          path: ui/package-lock.json
+          name: agent-config-review
+          path: ${{ runner.temp }}/agent-config-review.patch
           if-no-files-found: error
