@@ -20,7 +20,10 @@ function declaredFiles(name) {
   assert.equal(new Set(files).size, files.length);
   return files;
 }
-const externalStories = [...(external ? [external] : []), ...declaredFiles('SEMON_STORYBOOK_EXTERNAL_STORIES')];
+const externalStories = [
+  ...(external ? [external] : []),
+  ...declaredFiles('SEMON_STORYBOOK_EXTERNAL_STORIES'),
+];
 const evidenceFiles = declaredFiles('SEMON_STORYBOOK_EXTERNAL_FILES');
 const consumerFiles = [];
 if (externalStories.length || evidenceFiles.length || fixturePlugin || consumerRoot) {
@@ -70,7 +73,9 @@ sourceFiles.push(
 );
 // Native reader route stories import this single checked-in synthetic corpus.
 sourceFiles.push(
-  decodeURIComponent(new URL('../../tests/ui/fixture-data/overhaul.json', import.meta.url).pathname),
+  decodeURIComponent(
+    new URL('../../tests/ui/fixture-data/overhaul.json', import.meta.url).pathname,
+  ),
 );
 function canonicalAssets() {
   return {
