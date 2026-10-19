@@ -46,12 +46,14 @@ const availableStories = new Set(
 );
 
 for (const [checkId, relativeFile] of Object.entries(contract.servedChecks)) {
-  if (!fs.existsSync(path.resolve(here, relativeFile))) errors.push(`Missing check file for ${checkId}: ${relativeFile}`);
+  if (!fs.existsSync(path.resolve(here, relativeFile)))
+    errors.push(`Missing check file for ${checkId}: ${relativeFile}`);
 }
 
 for (const surface of contract.productionSurfaces) {
   addStories(surface.storyIds, `production surface ${surface.id}`);
-  for (const checkId of surface.servedChecks ?? []) addCheck(checkId, `production surface ${surface.id}`);
+  for (const checkId of surface.servedChecks ?? [])
+    addCheck(checkId, `production surface ${surface.id}`);
   for (const module of surface.modules ?? []) {
     const ownerPath = path.resolve(root, 'ui/stories', module);
     const hasSourceFile = ['', '.ts', '.tsx', '.js', '.mjs'].some((extension) =>
@@ -61,7 +63,9 @@ for (const surface of contract.productionSurfaces) {
     if (!hasSourceFile) {
       errors.push(`production surface ${surface.id}: missing production owner ${module}`);
     }
-    const directlyImported = storySource.includes(`../src/lib/${baseName}`) || storySource.includes(`../src/app/${baseName}`);
+    const directlyImported =
+      storySource.includes(`../src/lib/${baseName}`) ||
+      storySource.includes(`../src/app/${baseName}`);
     const barrelImported =
       gallerySource.includes("from '../../src/lib'") &&
       libraryIndex.includes(`from './${baseName}'`);
@@ -74,22 +78,30 @@ for (const surface of contract.productionSurfaces) {
 const interactionIds = new Set();
 for (const interaction of contract.interactionCaptures ?? []) {
   if (!interaction.id || interactionIds.has(interaction.id)) {
-    errors.push(`interaction capture has a missing or duplicate state ID: ${interaction.id ?? '(empty)'}`);
+    errors.push(
+      `interaction capture has a missing or duplicate state ID: ${interaction.id ?? '(empty)'}`,
+    );
   }
   interactionIds.add(interaction.id);
   addStories([interaction.storyId], `interaction state ${interaction.id}`);
   addCheck('visual-pixels', `interaction state ${interaction.id}`);
   if (!Array.isArray(interaction.widths) || interaction.widths.length === 0) {
-    errors.push(`interaction state ${interaction.id}: at least one explicit viewport width is required`);
+    errors.push(
+      `interaction state ${interaction.id}: at least one explicit viewport width is required`,
+    );
   }
   if (!Array.isArray(interaction.schemes) || interaction.schemes.length === 0) {
-    errors.push(`interaction state ${interaction.id}: at least one explicit color scheme is required`);
+    errors.push(
+      `interaction state ${interaction.id}: at least one explicit color scheme is required`,
+    );
   }
   if (!Array.isArray(interaction.actions) || interaction.actions.length === 0) {
     errors.push(`interaction state ${interaction.id}: an executable action sequence is required`);
   }
   if (!Array.isArray(interaction.assertions) || interaction.assertions.length === 0) {
-    errors.push(`interaction state ${interaction.id}: at least one visible-state assertion is required`);
+    errors.push(
+      `interaction state ${interaction.id}: at least one visible-state assertion is required`,
+    );
   }
   for (const assertion of [
     ...(interaction.assertions ?? []),
@@ -97,7 +109,9 @@ for (const interaction of contract.interactionCaptures ?? []) {
     ...(interaction.postCaptureAssertions ?? []),
   ]) {
     if (!['visible', 'absent'].includes(assertion.kind)) {
-      errors.push(`interaction state ${interaction.id}: unsupported assertion kind ${assertion.kind}`);
+      errors.push(
+        `interaction state ${interaction.id}: unsupported assertion kind ${assertion.kind}`,
+      );
     }
   }
   for (const width of interaction.widths ?? []) {
@@ -111,16 +125,21 @@ for (const interaction of contract.interactionCaptures ?? []) {
     }
   }
   for (const frameId of interaction.frames ?? []) {
-    if (contract.pen.roots.some((root) => root.id === frameId && root.disposition === 'active')) continue;
+    if (contract.pen.roots.some((root) => root.id === frameId && root.disposition === 'active'))
+      continue;
     if ((contract.pen.descendantStories?.[frameId] ?? []).includes(interaction.storyId)) continue;
-    errors.push(`interaction state ${interaction.id}: frame ${frameId} is not explicitly mapped to ${interaction.storyId}`);
+    errors.push(
+      `interaction state ${interaction.id}: frame ${frameId} is not explicitly mapped to ${interaction.storyId}`,
+    );
   }
 }
 
 const visualCoverage = readJson(path.resolve(here, contract.visualCoverage.source));
 const visualFrames = new Map();
 for (const frame of visualCoverage.frames) {
-  const matches = contract.visualCoverage.storyRules.filter((rule) => new RegExp(rule.pattern).test(frame));
+  const matches = contract.visualCoverage.storyRules.filter((rule) =>
+    new RegExp(rule.pattern).test(frame),
+  );
   if (matches.length !== 1) {
     errors.push(`visual frame ${frame}: expected one story rule, found ${matches.length}`);
     continue;
@@ -172,8 +191,10 @@ const declaredRoots = new Set(contract.pen.roots.map((entry) => entry.id));
 const sourceRoots = new Set(
   (pen.children ?? []).filter((node) => node.type === 'frame').map((node) => node.id),
 );
-for (const id of sourceRoots) if (!declaredRoots.has(id)) errors.push(`unmapped top-level pen frame ${id}`);
-for (const id of declaredRoots) if (!sourceRoots.has(id)) errors.push(`declared pen root ${id} is not top-level`);
+for (const id of sourceRoots)
+  if (!declaredRoots.has(id)) errors.push(`unmapped top-level pen frame ${id}`);
+for (const id of declaredRoots)
+  if (!sourceRoots.has(id)) errors.push(`declared pen root ${id} is not top-level`);
 
 for (const rootEntry of contract.pen.roots) {
   if (!['active', 'superseded'].includes(rootEntry.disposition)) {
@@ -205,7 +226,9 @@ for (const rootEntry of contract.pen.roots) {
     new Set(declaredDescendants).size !== declaredDescendants.length ||
     [...new Set(declaredDescendants)].sort().join('\n') !== [...descendants].sort().join('\n')
   ) {
-    errors.push(`pen root ${rootEntry.id}: ${rootEntry.disposition} descendant list is missing, duplicated, or contains an unknown frame`);
+    errors.push(
+      `pen root ${rootEntry.id}: ${rootEntry.disposition} descendant list is missing, duplicated, or contains an unknown frame`,
+    );
   }
   if (groups.filter((item) => item.root === rootEntry.id).length !== 1) {
     errors.push(`pen root ${rootEntry.id}: expected exactly one complete descendant group`);
@@ -219,22 +242,28 @@ for (const rootEntry of contract.pen.roots) {
       activeRoots.push({ id, inheritedFrom: rootEntry.id });
     }
   } else {
-    if (rootEntry.storyIds?.length) errors.push(`superseded pen root ${rootEntry.id} must not claim active Storybook owners`);
-    if (!rootEntry.reason) errors.push(`superseded pen root ${rootEntry.id} needs a current-source rationale`);
+    if (rootEntry.storyIds?.length)
+      errors.push(`superseded pen root ${rootEntry.id} must not claim active Storybook owners`);
+    if (!rootEntry.reason)
+      errors.push(`superseded pen root ${rootEntry.id} needs a current-source rationale`);
     supersededPenIds.add(rootEntry.id);
     for (const id of descendants) supersededPenIds.add(id);
   }
 }
 
 for (const group of contract.pen.activeDescendantGroups) {
-  if (!declaredRoots.has(group.root)) errors.push(`active pen descendant group references unknown root ${group.root}`);
+  if (!declaredRoots.has(group.root))
+    errors.push(`active pen descendant group references unknown root ${group.root}`);
 }
 for (const group of contract.pen.supersededDescendantGroups) {
-  if (!declaredRoots.has(group.root)) errors.push(`superseded pen descendant group references unknown root ${group.root}`);
+  if (!declaredRoots.has(group.root))
+    errors.push(`superseded pen descendant group references unknown root ${group.root}`);
 }
 for (const id of frameById.keys()) {
-  if (!activePenIds.has(id) && !supersededPenIds.has(id)) errors.push(`unclassified pen frame ${id}`);
-  if (activePenIds.has(id) && supersededPenIds.has(id)) errors.push(`pen frame ${id} is both active and superseded`);
+  if (!activePenIds.has(id) && !supersededPenIds.has(id))
+    errors.push(`unclassified pen frame ${id}`);
+  if (activePenIds.has(id) && supersededPenIds.has(id))
+    errors.push(`pen frame ${id} is both active and superseded`);
 }
 for (const [id, storyIds] of Object.entries(contract.pen.descendantStories ?? {})) {
   if (!activePenIds.has(id)) errors.push(`pen descendant story mapping ${id} is not active`);
@@ -245,7 +274,8 @@ for (const storyId of mappedStories) {
   if (!availableStories.has(storyId)) errors.push(`unknown Storybook story ID ${storyId}`);
 }
 for (const storyId of availableStories) {
-  if (!mappedStories.has(storyId)) errors.push(`orphaned Storybook story ${storyId} has no active contract mapping`);
+  if (!mappedStories.has(storyId))
+    errors.push(`orphaned Storybook story ${storyId} has no active contract mapping`);
 }
 
 const report = {
@@ -254,7 +284,11 @@ const report = {
   visualCoverage: { frames: visualFrames.size, ids: [...visualFrames.keys()].sort() },
   visualAcceptances: acceptanceKeys.size,
   galleryStates: gallery.states?.length ?? 0,
-  penFrames: { active: activePenIds.size, superseded: supersededPenIds.size, inherited: activeRoots.length },
+  penFrames: {
+    active: activePenIds.size,
+    superseded: supersededPenIds.size,
+    inherited: activeRoots.length,
+  },
   errors,
 };
 const out = path.resolve(process.env.SEMON_UI_OUT ?? path.join(here, 'out'), 'storybook');

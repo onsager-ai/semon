@@ -9,12 +9,11 @@ import { createStorybookServer } from './storybook-server.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const contract = JSON.parse(fs.readFileSync(path.join(here, 'storybook-contract.json'), 'utf8'));
-const referenceMap = JSON.parse(
-  fs.readFileSync(path.join(here, contract.referenceMap), 'utf8'),
-);
+const referenceMap = JSON.parse(fs.readFileSync(path.join(here, contract.referenceMap), 'utf8'));
 const storyDir = path.resolve(here, 'storybook-static');
 const storyIndexPath = path.join(storyDir, 'index.json');
-if (!fs.existsSync(storyIndexPath)) throw new Error('Build the Storybook static site before capture');
+if (!fs.existsSync(storyIndexPath))
+  throw new Error('Build the Storybook static site before capture');
 const storyIndex = JSON.parse(fs.readFileSync(storyIndexPath, 'utf8'));
 const storyIds = Object.entries(storyIndex.entries ?? {})
   .filter(([, entry]) => entry.type === 'story')
@@ -46,7 +45,9 @@ async function verifyAssertions(page, assertions, pageErrors, key) {
     if (assertion.text) {
       const visibleText = await target.innerText();
       if (!visibleText.includes(assertion.text)) {
-        pageErrors.push(`${key}: ${assertion.selector} did not include expected text: ${assertion.text}`);
+        pageErrors.push(
+          `${key}: ${assertion.selector} did not include expected text: ${assertion.text}`,
+        );
       }
     }
   }
@@ -93,33 +94,52 @@ try {
             await document.fonts.ready;
             await document.fonts.load('400 16px "Instrument Sans"');
             await document.fonts.load('400 12px "JetBrains Mono"');
-            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            await new Promise((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            );
           });
           const runtimeChecks = await page.evaluate(() => ({
             sans: document.fonts.check('400 16px "Instrument Sans"'),
             mono: document.fonts.check('400 12px "JetBrains Mono"'),
             viewportWidth: window.innerWidth,
             documentWidth: document.documentElement.scrollWidth,
-            focus: document.activeElement instanceof HTMLElement
-              ? {
-                  tag: document.activeElement.tagName,
-                  label: document.activeElement.getAttribute('aria-label'),
-                  sessionRow: document.activeElement.dataset.sessionRow,
-                }
-              : null,
+            focus:
+              document.activeElement instanceof HTMLElement
+                ? {
+                    tag: document.activeElement.tagName,
+                    label: document.activeElement.getAttribute('aria-label'),
+                    sessionRow: document.activeElement.dataset.sessionRow,
+                  }
+                : null,
           }));
-          if (!runtimeChecks.sans || !runtimeChecks.mono) pageErrors.push('required production font failed to load');
+          if (!runtimeChecks.sans || !runtimeChecks.mono)
+            pageErrors.push('required production font failed to load');
           if (runtimeChecks.documentWidth > runtimeChecks.viewportWidth + 1) {
-            pageErrors.push(`horizontal document overflow ${runtimeChecks.documentWidth}px > ${runtimeChecks.viewportWidth}px`);
+            pageErrors.push(
+              `horizontal document overflow ${runtimeChecks.documentWidth}px > ${runtimeChecks.viewportWidth}px`,
+            );
           }
           if (storyId.endsWith('--keyboard-focus') && runtimeChecks.focus?.sessionRow !== 'list') {
-            pageErrors.push(`keyboard-focus story did not focus the production session row: ${JSON.stringify(runtimeChecks.focus)}`);
+            pageErrors.push(
+              `keyboard-focus story did not focus the production session row: ${JSON.stringify(runtimeChecks.focus)}`,
+            );
           }
           const file = path.join(output, storyId, `${width}-${scheme}.png`);
           fs.mkdirSync(path.dirname(file), { recursive: true });
-          const bytes = await page.screenshot({ path: file, fullPage: true, animations: 'disabled' });
+          const bytes = await page.screenshot({
+            path: file,
+            fullPage: true,
+            animations: 'disabled',
+          });
           const key = `${storyId}|${width}|${scheme}`;
-          const result = { key, storyId, width, scheme, candidate: path.relative(here, file), sha256: sha256(bytes) };
+          const result = {
+            key,
+            storyId,
+            width,
+            scheme,
+            candidate: path.relative(here, file),
+            sha256: sha256(bytes),
+          };
           if (pageErrors.length) {
             failures.push(`${key}: ${pageErrors.join('; ')}`);
             result.pageErrors = pageErrors;
@@ -145,16 +165,24 @@ try {
                 approval.maxRatio !== contract.pixelPolicy.maxRatio ||
                 approval.interactionId != null
               ) {
-                failures.push(`${key}: reference binding does not match the fixed story capture contract`);
+                failures.push(
+                  `${key}: reference binding does not match the fixed story capture contract`,
+                );
                 result.reference = 'invalid-binding';
               } else if (sha256(referenceBytes) !== approval.sha256) {
                 failures.push(`${key}: approved reference digest changed`);
                 result.reference = 'digest-mismatch';
               } else {
-                const diff = compare(PNG.sync.read(referenceBytes), PNG.sync.read(bytes), approval.threshold);
+                const diff = compare(
+                  PNG.sync.read(referenceBytes),
+                  PNG.sync.read(bytes),
+                  approval.threshold,
+                );
                 result.ratio = diff.ratio;
                 if (diff.size || diff.ratio > approval.maxRatio) {
-                  failures.push(`${key}: ${diff.size ? 'image dimensions changed' : `pixel mismatch ${(100 * diff.ratio).toFixed(3)}%`}`);
+                  failures.push(
+                    `${key}: ${diff.size ? 'image dimensions changed' : `pixel mismatch ${(100 * diff.ratio).toFixed(3)}%`}`,
+                  );
                   const diffPath = path.join(output, storyId, `${width}-${scheme}-diff.png`);
                   fs.writeFileSync(diffPath, PNG.sync.write(diff.diff));
                   result.diff = path.relative(here, diffPath);
@@ -165,7 +193,9 @@ try {
           }
           results.push(result);
         } catch (error) {
-          failures.push(`${storyId}|${width}|${scheme}: ${error instanceof Error ? error.message : String(error)}`);
+          failures.push(
+            `${storyId}|${width}|${scheme}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         } finally {
           await context.close();
         }
@@ -194,7 +224,8 @@ try {
             : (pageErrors.push(`blocked nonlocal request ${route.request().url()}`), route.abort()),
         );
         page.on('response', (response) => {
-          if (response.status() >= 400) pageErrors.push(`HTTP ${response.status()} ${response.url()}`);
+          if (response.status() >= 400)
+            pageErrors.push(`HTTP ${response.status()} ${response.url()}`);
         });
         page.on('pageerror', (error) => pageErrors.push(error.message));
         const key = `${interaction.storyId}|${width}|${scheme}|${interaction.id}`;
@@ -219,7 +250,9 @@ try {
             await document.fonts.ready;
             await document.fonts.load('400 16px "Instrument Sans"');
             await document.fonts.load('400 12px "JetBrains Mono"');
-            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            await new Promise((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            );
           });
           const geometry = await page.evaluate(() => ({
             sans: document.fonts.check('400 16px "Instrument Sans"'),
@@ -227,13 +260,24 @@ try {
             viewportWidth: window.innerWidth,
             documentWidth: document.documentElement.scrollWidth,
           }));
-          if (!geometry.sans || !geometry.mono) pageErrors.push('required production font failed to load');
+          if (!geometry.sans || !geometry.mono)
+            pageErrors.push('required production font failed to load');
           if (geometry.documentWidth > geometry.viewportWidth + 1) {
-            pageErrors.push(`horizontal document overflow ${geometry.documentWidth}px > ${geometry.viewportWidth}px`);
+            pageErrors.push(
+              `horizontal document overflow ${geometry.documentWidth}px > ${geometry.viewportWidth}px`,
+            );
           }
-          const file = path.join(output, interaction.storyId, `state-${interaction.id}-${width}-${scheme}.png`);
+          const file = path.join(
+            output,
+            interaction.storyId,
+            `state-${interaction.id}-${width}-${scheme}.png`,
+          );
           fs.mkdirSync(path.dirname(file), { recursive: true });
-          const bytes = await page.screenshot({ path: file, fullPage: true, animations: 'disabled' });
+          const bytes = await page.screenshot({
+            path: file,
+            fullPage: true,
+            animations: 'disabled',
+          });
           const result = {
             key,
             storyId: interaction.storyId,
@@ -280,17 +324,29 @@ try {
                 approval.threshold !== contract.pixelPolicy.threshold ||
                 approval.maxRatio !== contract.pixelPolicy.maxRatio
               ) {
-                failures.push(`${key}: reference binding does not match the fixed interaction capture contract`);
+                failures.push(
+                  `${key}: reference binding does not match the fixed interaction capture contract`,
+                );
                 result.reference = 'invalid-binding';
               } else if (sha256(referenceBytes) !== approval.sha256) {
                 failures.push(`${key}: approved reference digest changed`);
                 result.reference = 'digest-mismatch';
               } else {
-                const diff = compare(PNG.sync.read(referenceBytes), PNG.sync.read(bytes), approval.threshold);
+                const diff = compare(
+                  PNG.sync.read(referenceBytes),
+                  PNG.sync.read(bytes),
+                  approval.threshold,
+                );
                 result.ratio = diff.ratio;
                 if (diff.size || diff.ratio > approval.maxRatio) {
-                  failures.push(`${key}: ${diff.size ? 'image dimensions changed' : `pixel mismatch ${(100 * diff.ratio).toFixed(3)}%`}`);
-                  const diffPath = path.join(output, interaction.storyId, `state-${interaction.id}-${width}-${scheme}-diff.png`);
+                  failures.push(
+                    `${key}: ${diff.size ? 'image dimensions changed' : `pixel mismatch ${(100 * diff.ratio).toFixed(3)}%`}`,
+                  );
+                  const diffPath = path.join(
+                    output,
+                    interaction.storyId,
+                    `state-${interaction.id}-${width}-${scheme}-diff.png`,
+                  );
                   fs.writeFileSync(diffPath, PNG.sync.write(diff.diff));
                   result.diff = path.relative(here, diffPath);
                 }
@@ -336,10 +392,12 @@ const provenance = Object.fromEntries(
 const report = {
   candidateOnly: true,
   approvedReferencesWritten: false,
-  captureDimensions: [...new Set([
-    ...contract.pixelPolicy.dimensions,
-    ...(contract.interactionCaptures ?? []).flatMap((item) => item.widths),
-  ])].sort((a, b) => a - b),
+  captureDimensions: [
+    ...new Set([
+      ...contract.pixelPolicy.dimensions,
+      ...(contract.interactionCaptures ?? []).flatMap((item) => item.widths),
+    ]),
+  ].sort((a, b) => a - b),
   colorSchemes: contract.pixelPolicy.schemes,
   interactionCaptureCount: contract.interactionCaptures?.length ?? 0,
   fixedClock: '2026-10-19T12:00:00.000Z',
@@ -360,5 +418,7 @@ if (pending.length || failures.length) {
   );
   process.exitCode = 1;
 } else {
-  console.log(`Storybook captures: ${results.length} candidate images matched all approved references.`);
+  console.log(
+    `Storybook captures: ${results.length} candidate images matched all approved references.`,
+  );
 }
