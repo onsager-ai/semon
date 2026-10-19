@@ -4055,8 +4055,11 @@ fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
     assert_staged_bidirectional_message_pages(360);
 }
 
-fn assert_staged_bidirectional_message_pages(rounds: u32) {
+fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let home = Home::new();
+    let ts = |hour: i64, minute: i64| {
+        format!("2026-09-{:02}T{:02}:{minute:02}:00.000Z", 24 + hour / 24, hour % 24)
+    };
     let mut alpha = vec![human("alpha", ts(6, 0), "Coordinate a conversation")];
     // Offset the two native message pages so the same send is observed with
     // different incident subsets. Its preceding receipt still owns its turn.
