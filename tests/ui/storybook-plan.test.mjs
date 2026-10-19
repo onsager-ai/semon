@@ -34,27 +34,59 @@ test('legacy capture identities retain native tail, region and preservation rese
   assert.equal(get('pixels:main:frame:phone-light|session-harbor').capture.scroll, 'document-tail');
   assert.equal(get('pixels:main:frame:desktop-light|session-harbor').capture.scroll, 'main-tail');
   assert.equal(get('pixels:main:frame:phone-light|home').capture.scroll, 'top');
-  assert.equal(get('pixels:main:region:phone-light|session-harbor|transcript').capture.scroll, 'region-top');
-  assert.equal(get('preservation:required:frame:390-light-session-harbor').capture.scroll, 'preservation-reset');
+  assert.equal(
+    get('pixels:main:region:phone-light|session-harbor|transcript').capture.scroll,
+    'region-top',
+  );
+  assert.equal(
+    get('preservation:required:frame:390-light-session-harbor').capture.scroll,
+    'preservation-reset',
+  );
   const selected = get('pixels:main:frame:phone-light|session-harbor');
-  assert.notEqual(captureIdentityDigest(selected), captureIdentityDigest({ ...selected,
-    capture: { ...selected.capture, scroll: 'top' } }));
+  assert.notEqual(
+    captureIdentityDigest(selected),
+    captureIdentityDigest({ ...selected, capture: { ...selected.capture, scroll: 'top' } }),
+  );
 });
 
 test('native artifact binding keeps all scopes and region keys separate', () => {
   const item = (legacyKey) => ({ legacyKey });
-  assert.equal(nativeArtifactPaths('/native', item('pixels:two-machines:frame:phone-light|machine-desktop')).image,
-    '/native/viewer-ui-transport/two-machines/pixels/phone-light_machine-desktop-candidate.png');
-  assert.equal(nativeArtifactPaths('/native', item('pixels:pushed:region:phone-light|session-harbor|transcript')).witness,
-    '/native/viewer-ui-transport/pushed/pixels/phone-light_session-harbor_transcript-candidate-presentation.json');
-  assert.equal(nativeArtifactPaths('/native', item('preservation:required:frame:390-light-harbor-thinking-open')).image,
-    '/native/viewer-ui-visual/preservation/390-light-harbor-thinking-open-candidate.png');
+  assert.equal(
+    nativeArtifactPaths('/native', item('pixels:two-machines:frame:phone-light|machine-desktop'))
+      .image,
+    '/native/viewer-ui-transport/two-machines/pixels/phone-light_machine-desktop-candidate.png',
+  );
+  assert.equal(
+    nativeArtifactPaths(
+      '/native',
+      item('pixels:pushed:region:phone-light|session-harbor|transcript'),
+    ).witness,
+    '/native/viewer-ui-transport/pushed/pixels/phone-light_session-harbor_transcript-candidate-presentation.json',
+  );
+  assert.equal(
+    nativeArtifactPaths(
+      '/native',
+      item('preservation:required:frame:390-light-harbor-thinking-open'),
+    ).image,
+    '/native/viewer-ui-visual/preservation/390-light-harbor-thinking-open-candidate.png',
+  );
 });
 
 test('native presentation comparison never normalizes source, text, order, disclosure or geometry', () => {
-  const native = { text: 'Sentinel', source: '["laptop","principal"]', open: true, box: [0, 44, 390, 60] };
+  const native = {
+    text: 'Sentinel',
+    source: '["laptop","principal"]',
+    open: true,
+    box: [0, 44, 390, 60],
+  };
   assert.deepEqual(witnessDifferences(native, structuredClone(native)), []);
-  for (const changed of [{ text: 'Principal' }, { source: '["desktop","principal"]' }, { open: false }, { box: [0, 45, 390, 60] }, { extra: 'unknown' }])
+  for (const changed of [
+    { text: 'Principal' },
+    { source: '["desktop","principal"]' },
+    { open: false },
+    { box: [0, 45, 390, 60] },
+    { extra: 'unknown' },
+  ])
     assert.ok(witnessDifferences(native, { ...native, ...changed }).length > 0);
   assert.ok(witnessDifferences([native, { text: 'next' }], [{ text: 'next' }, native]).length > 0);
 });
@@ -373,7 +405,10 @@ test('legacy capture identities stay stable across candidate revisions while ref
   const item = historicalPlan.find((candidate) => candidate.legacyKey === key);
   const currentItem = currentPlan.find((candidate) => candidate.legacyKey === key);
   assert.ok(item, 'a concrete selected-session route item is present');
-  assert.ok(currentItem, 'the same exact selected-session route item is present at the candidate revision');
+  assert.ok(
+    currentItem,
+    'the same exact selected-session route item is present at the candidate revision',
+  );
   const historicalSource = digest('reviewed production sources'),
     currentSource = digest('edited production sources');
   const currentCandidate = { sourceDigest: currentSource, sourceRevision: currentRevision };
@@ -412,7 +447,10 @@ test('legacy capture identities stay stable across candidate revisions while ref
   ]) {
     const invalid = structuredClone(record);
     delete invalid[field];
-    assert.ok(referenceComparisonErrors(invalid, currentItem, bytes, currentCandidate).length, field);
+    assert.ok(
+      referenceComparisonErrors(invalid, currentItem, bytes, currentCandidate).length,
+      field,
+    );
   }
   assert.ok(
     referenceComparisonErrors(
@@ -436,18 +474,26 @@ test('legacy capture identities stay stable across candidate revisions while ref
     { viewport: { ...currentItem.viewport, height: currentItem.viewport.height + 1 } },
   ]) {
     assert.match(
-      referenceComparisonErrors(record, { ...currentItem, ...changed }, bytes, currentCandidate).join('\n'),
+      referenceComparisonErrors(
+        record,
+        { ...currentItem, ...changed },
+        bytes,
+        currentCandidate,
+      ).join('\n'),
       /capture identity changed/,
     );
   }
   assert.ok(
-    referenceComparisonErrors(record, { ...currentItem, width: 820 }, bytes, currentCandidate).length,
+    referenceComparisonErrors(record, { ...currentItem, width: 820 }, bytes, currentCandidate)
+      .length,
   );
   assert.ok(
-    referenceComparisonErrors(record, { ...currentItem, scheme: 'dark' }, bytes, currentCandidate).length,
+    referenceComparisonErrors(record, { ...currentItem, scheme: 'dark' }, bytes, currentCandidate)
+      .length,
   );
   assert.ok(
-    referenceComparisonErrors({ ...record, maxRatio: 0.5 }, currentItem, bytes, currentCandidate).length,
+    referenceComparisonErrors({ ...record, maxRatio: 0.5 }, currentItem, bytes, currentCandidate)
+      .length,
   );
   assert.match(
     referenceComparisonErrors(
