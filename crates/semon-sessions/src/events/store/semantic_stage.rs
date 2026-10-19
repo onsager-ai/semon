@@ -1376,10 +1376,14 @@ impl SqliteStore {
             // machine activity must not discard this component's progress.
             // Local/unobserved runtime and negative custody keep their original
             // conservative epoch fence.
-            if !recipe_current(&tx).map_err(failure)? || (old != runtime && (!journaled || withdrawal_authority(&tx).map_err(failure)?.is_some())) {
+            if !recipe_current(&tx).map_err(failure)?
+                || (old != runtime
+                    && (!journaled || withdrawal_authority(&tx).map_err(failure)?.is_some()))
+            {
                 reset(&tx, runtime).map_err(failure)?;
             } else if old != runtime {
-                tx.execute("UPDATE catalog_semantic_stage SET runtime=?1", [runtime]).map_err(failure)?;
+                tx.execute("UPDATE catalog_semantic_stage SET runtime=?1", [runtime])
+                    .map_err(failure)?;
             }
         } else {
             if paths.is_empty() {
@@ -1850,7 +1854,11 @@ impl SqliteStore {
                 }
             }
             for (path, harness, id) in &prepared.indexed_native_parents {
-                tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)", params![path,harness,id]).map_err(failure)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",
+                    params![path, harness, id],
+                )
+                .map_err(failure)?;
                 native_frontier(&tx, harness, id).map_err(failure)?;
             }
             for (harness, id) in &prepared.lineage_dependencies {
@@ -1918,6 +1926,18 @@ impl SqliteStore {
                 for source in &endpoint.row.sources {
                     if let Some(pid) = endpoint.pid {
                         tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)", params![source.path.to_string_lossy().as_ref(),pid.to_string()]).map_err(failure)?;
+                    }
+                    if let Some(observations) = endpoint
+                        .row
+                        .query
+                        .as_ref()
+                        .and_then(|query| query["rows"].as_object())
+                    {
+                        for observation in observations.values() {
+                            if let Some(pid) = observation["summary"]["pid"].as_u64() {
+                                tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)", params![source.path.to_string_lossy().as_ref(),pid.to_string()]).map_err(failure)?;
+                            }
+                        }
                     }
                     tx.execute(
                         "INSERT OR IGNORE INTO catalog_semantic_owner_sources VALUES(?1,?2)",
