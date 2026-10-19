@@ -4876,6 +4876,101 @@ impl<'a> Builder<'a> {
         (turns, transcripts)
     }
 
+    /// Matching selects incident relationships, not the sender's turn boundaries.
+    /// Complete native receipts are needed even when their edges belong to a
+    /// different message page. These temporary boundaries carry no sender claim
+    /// and never enter the staged relationships or published projection.
+    fn complete_sender_turns(&mut self) -> io::Result<Option<Vec<Turn>>> {
+        let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
+            return Ok(None);
+        };
+        let senders: BTreeSet<_> = self
+            .handoffs
+            .iter()
+            .filter(|h| matches!(h.out.kind, "spawn" | "relay"))
+            .filter_map(|h| h.from)
+            .filter(|sender| !self.sessions[*sender].files.is_empty())
+            .collect();
+        let mut candidates = Vec::new();
+        for sender in &senders {
+            for file in &self.sessions[*sender].files {
+                if self.files[*file].harness() != "claude" {
+                    continue;
+                }
+                for (at, found) in self.files[*file].summary.events.iter().enumerate() {
+                    let at = (*file, at);
+                    if found.k == Kind::Xsm
+                        && !self.copied.contains(&at)
+                        && !self.placed.contains_key(&at)
+                    {
+                        candidates.push(at);
+                    }
+                }
+            }
+        }
+        let mut receipts = BTreeMap::<String, Option<Ref>>::new();
+        let mut boundaries = Vec::new();
+        for at in candidates {
+            let eligible = if let Some(id) = event(self.files, at).id.clone() {
+                let canonical = if let Some(canonical) = receipts.get(&id) {
+                    *canonical
+                } else {
+                    let selected = self.cache.semantic_select(
+                        epoch,
+                        &relation_stage::Selector::ClaudeReceipt { id: id.clone() },
+                    )?;
+                    let canonical = match selected.location {
+                        Some(location) => location.local(self)?,
+                        None => None,
+                    };
+                    receipts.insert(id, canonical);
+                    canonical
+                };
+                canonical == Some(at)
+            } else {
+                true
+            };
+            if eligible {
+                boundaries.push(at);
+            }
+        }
+        let original = self.handoffs.len();
+        for at in &boundaries {
+            let found = event(self.files, *at);
+            let receiver = self.of_file[at.0];
+            let source = found
+                .id
+                .as_ref()
+                .map(|id| format!("relay:{id}"))
+                .unwrap_or_else(|| format!("relay:recv:{}:{}", self.files[at.0].id, found.o));
+            let index = self.handoffs.len();
+            self.handoffs.push(H {
+                out: Handoff::new(
+                    stable_id("r", &source),
+                    "relay",
+                    (String::new(), self.sessions[receiver].key.clone()),
+                    found.t.unwrap_or(self.sessions[receiver].out.start),
+                    "done",
+                    "",
+                ),
+                from: None,
+                to: Some(receiver),
+                previews: None,
+                preview_owners: BTreeMap::new(),
+            });
+            self.placed.insert(*at, vec![(index, Place::In)]);
+        }
+        let mut turns = Vec::new();
+        for sender in senders {
+            turns.extend(self.split(sender, &self.entries(sender)).0);
+        }
+        for at in boundaries {
+            self.placed.remove(&at);
+        }
+        self.handoffs.truncate(original);
+        Ok(Some(turns))
+    }
+
     /// A stub has no transcript of its own: it shows the handoffs that name
     /// it, after a note that its activity isn't in these logs.
     fn stub_transcript(&self, index: usize) -> Transcript {
@@ -7868,8 +7963,12 @@ fn build_sources_inner(
     }
     match target {
         BuildTarget::Sources => {
-            let relationships =
-                relation_stage::Context::capture(&builder, published_facts.as_ref(), &turns);
+            let sender_turns = builder.complete_sender_turns()?;
+            let relationships = relation_stage::Context::capture(
+                &builder,
+                published_facts.as_ref(),
+                sender_turns.as_deref().unwrap_or(&turns),
+            );
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
             let mut message_dependencies = Some(Vec::new());

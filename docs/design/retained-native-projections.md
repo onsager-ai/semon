@@ -147,6 +147,14 @@ observations and staged negative source-custody proofs retain the conservative
 epoch reset. This lets a large historical component finish while unrelated
 sessions start and stop, so the pending new-source journal remains reachable.
 
+Selected relationship pages derive sender-turn witnesses from the physical
+sender's complete native receipt boundaries. Indexed canonical receipt lookups
+preserve the existing first-receipt and copied-prefix rules without admitting
+additional physical sources or publishing unselected relationships. The
+temporary boundaries are discarded before staged relationship capture; the
+existing parent-turn conflict checks remain. Earlier staged recipes rebuild
+once so partial-page turn witnesses cannot survive into publication.
+
 The native Event Index connection reuses at most 32 compiled SQL statements for
 per-source ledger checks and row writes. Bound values clear when a statement
 returns to the connection cache; generation checks still execute within each
