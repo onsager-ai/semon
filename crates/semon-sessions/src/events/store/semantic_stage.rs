@@ -1856,9 +1856,11 @@ impl SqliteStore {
                 }
             }
             for (path, harness, id) in &prepared.indexed_native_parents {
+                // Runtime invalidation must not introduce relationship-discovery
+                // edges before the corresponding owner is published.
                 tx.execute(
                     "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",
-                    params![path, harness, id],
+                    params![path, format!("runtime:native:{harness}"), id],
                 )
                 .map_err(failure)?;
                 native_frontier(&tx, harness, id).map_err(failure)?;
