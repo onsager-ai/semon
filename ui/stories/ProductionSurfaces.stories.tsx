@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { render } from 'preact';
 import type { Meta, StoryObj } from '@storybook/preact-vite';
-import markUrl from '../../crates/semon-sessions/src/mark.svg?url';
+import codexLightAssetUrl from '../../assets/harnesses/codex-black.svg?url&no-inline';
+import codexDarkAssetUrl from '../../assets/harnesses/codex.svg?url&no-inline';
 import { mountDesignGallery } from '../tests/fixtures/design-gallery';
 import {
   HomeView,
@@ -18,6 +19,10 @@ import { renderCatalogList, type CatalogListHost } from '../src/lib/catalog';
 import { createFacetChrome } from '../src/lib/facets';
 import { createSelect } from '../src/lib/select';
 import { installTooltip } from '../src/lib/tooltip';
+import { createShellChrome } from '../src/lib/shell';
+import { createRecentRenderer, type RecentItem } from '../src/lib/recent';
+import navigation from '../src/lib/navigation.json';
+import './fixtures.css';
 import { renderSessionMenu, type SessionMenuHost } from '../src/lib/session-menu';
 import { renderTraceScreen, type TraceHost } from '../src/lib/trace';
 import { releaseScreen } from '../src/lib/screens';
@@ -26,6 +31,10 @@ import {
   type SessionSnapshot,
   type TranscriptHost,
 } from '../src/lib/transcript';
+
+// Keep Vite's emitted assets inside the production Recent same-origin path contract.
+const codexLightUrl = new URL(codexLightAssetUrl, document.baseURI).pathname;
+const codexDarkUrl = new URL(codexDarkAssetUrl, document.baseURI).pathname;
 
 const meta = {
   title: 'Semon/Production owners',
@@ -69,8 +78,8 @@ const homeSnapshot: HomeSnapshot = {
       harness: {
         id: 'codex',
         name: 'Codex',
-        light: markUrl,
-        dark: markUrl,
+        light: codexLightUrl,
+        dark: codexDarkUrl,
         darkTheme: false,
       },
       activity: ['Working', 'Inspecting sources', 0],
@@ -131,8 +140,8 @@ const sessionRow: SessionRowData = {
   harness: {
     id: 'codex',
     name: 'Codex',
-    light: markUrl,
-    dark: markUrl,
+    light: codexLightUrl,
+    dark: codexDarkUrl,
     darkTheme: false,
   },
   model: 'gpt-6',
@@ -185,29 +194,92 @@ export const KeyboardFocus: Story = {
   },
 };
 
-function Mounted({ mount }: { mount(root: HTMLElement): () => void }) {
+function Mounted({ mount, className = 'page storybook-component-frame' }: { mount(root: HTMLElement): () => void; className?: string }) {
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!root.current) return;
     return mount(root.current);
   }, [mount]);
-  return <main class="page storybook-component-frame" ref={root} />;
+  return <main class={className} ref={root} />;
 }
 
-export const ComponentGallery: Story = {
-  render: () => (
-    <div class="app storybook-component-frame">
-      <Mounted mount={mountDesignGallery} />
-    </div>
-  ),
+function GalleryMount() {
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (root.current) return mountDesignGallery(root.current);
+  }, []);
+  return <div class="app" ref={root} />;
+}
+
+export const ComponentGallery: Story = { render: () => <GalleryMount /> };
+
+export const NavigationRecent: Story = {
+  render: () => {
+    function RecentOwner() {
+      const root = useRef<HTMLDivElement>(null);
+      useEffect(() => {
+        if (!root.current) return;
+        const chrome = createShellChrome({
+          account: { place() {}, opened() {}, closed() {}, navigate: () => true, submit: () => true },
+          navigate: () => true, drawerOpened() {}, drawerClosed() {}, railChanged() {},
+        });
+        chrome.mount(root.current);
+        chrome.update(navigation.map((item) => ({ ...item, href: item.path, current: item.key === 'sessions' })), false);
+        const title = document.createElement('div');
+        title.className = 'ttl';
+        title.textContent = 'Sessions';
+        chrome.topbar({ titleSlot: title, lead: { label: 'Open menu', icon: 'M4 7h16M4 12h16M4 17h16' } });
+        const item = (id: string, name: string, depth = 0, children?: RecentItem[]): RecentItem => ({
+          id, name, label: name, state: 'idle', stateLabel: 'Complete', age: '8m',
+          model: 'gpt-6', modelTip: 'gpt-6', harness: sessionRow.harness,
+          fields: [], rail: false, open: true, depth, stuck: false, children,
+        });
+        let items = [
+          item('deps', 'deps audit'),
+          item('offline', 'feat/offline-sync', 0, [
+            item('review', 'Review offline-sync diff', 1, [item('flush', 'Check flush ordering', 2)]),
+          ]),
+          item('harbor', 'harbor', 0, [item('retry', 'Check retry safety', 1)]),
+        ];
+        const recent = createRecentRenderer(chrome.slots.recent, {
+          open() {}, all() {}, fewer() {},
+          toggle(id, open) {
+            const update = (rows: RecentItem[]): RecentItem[] => rows.map((row) => ({
+              ...row, open: row.id === id ? open : row.open,
+              children: row.children ? update([...row.children]) : undefined,
+            }));
+            items = update(items);
+            recent.update({ items, empty: false });
+          },
+        });
+        recent.update({ items, empty: false });
+        const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') chrome.closeDrawer(); };
+        document.addEventListener('keydown', escape);
+        return () => {
+          document.removeEventListener('keydown', escape);
+          recent.destroy();
+          chrome.destroy();
+        };
+      }, []);
+      return <div class="app" ref={root} />;
+    }
+    return <RecentOwner />;
+  },
 };
 
 export const GalleryLifecycle: Story = {
   render: () => {
     function LifecycleOwner() {
       const [mounted, setMounted] = useState(true);
+      const owner = useRef<HTMLElement>(null);
+      useEffect(() => {
+        const node = owner.current;
+        const unmount = () => setMounted(false);
+        node?.addEventListener('storybook:unmount', unmount);
+        return () => node?.removeEventListener('storybook:unmount', unmount);
+      }, []);
       return (
-        <main class="page storybook-component-frame">
+        <main class="page storybook-component-frame" ref={owner} data-storybook-owner="gallery-lifecycle">
           <button
             type="button"
             aria-label={mounted ? 'Unmount gallery' : 'Mount gallery'}
@@ -215,7 +287,7 @@ export const GalleryLifecycle: Story = {
           >
             {mounted ? 'Unmount gallery' : 'Mount gallery'}
           </button>
-          {mounted && <Mounted mount={mountDesignGallery} />}
+          {mounted && <GalleryMount />}
         </main>
       );
     }
@@ -719,8 +791,8 @@ export const TraceFlow: Story = {
                   harness: {
                     id: 'codex',
                     name: 'Codex',
-                    light: markUrl,
-                    dark: markUrl,
+                    light: codexLightUrl,
+                    dark: codexDarkUrl,
                     darkTheme: false,
                   },
                   session: 'session-1',
@@ -879,7 +951,7 @@ const compactReaderSnapshot: SessionSnapshot = {
             name: 'Check the phone layout',
             state: 'done',
             stateLabel: 'Complete',
-            mark: { id: 'codex', name: 'Codex', light: markUrl, dark: markUrl, darkTheme: false },
+            mark: { id: 'codex', name: 'Codex', light: codexLightUrl, dark: codexDarkUrl, darkTheme: false },
             meta: 'Codex · 3m',
             brief: 'Check the narrow reader and touch targets.',
             result: 'The name, status and disclosure remain visible.',
@@ -902,7 +974,35 @@ const compactReaderSnapshot: SessionSnapshot = {
 };
 
 export const CompactReader: Story = {
-  render: () => <Mounted mount={(root) => mountTranscript(root, compactReaderSnapshot)} />,
+  parameters: { componentWidthFixture: true },
+  render: () => <Mounted className="page storybook-exact-reader" mount={(root) => mountTranscript(root, compactReaderSnapshot)} />,
+};
+
+export const CollapsedTool: Story = {
+  render: () => (
+    <Mounted mount={(root) => mountTranscript(root, {
+      id: 'session-collapsed',
+      name: 'Inspect recorded sync work',
+      blocks: [{ kind: 'turn', turn: {
+        id: 'turn-collapsed',
+        traceIcon: 'M6 4v10a4 4 0 0 0 4 4h8',
+        stateLabel: 'Complete',
+        entries: [
+          { kind: 'message', flavor: 'user', text: 'Run the sync tests again; if retry_backoff still fails, fix it and hand the offline flush to Codex.' },
+          { kind: 'thought', key: 'sync-thought', mode: 'readable', label: 'Thinking', text: 'The retry test needs a fixed seed so I can check whether the extra attempt is a timing issue.' },
+          { kind: 'message', flavor: 'assistant', text: 'Running the sync suite first. I will fix retry_backoff before handing anything off.' },
+          { kind: 'tool', key: 'collapsed-tool', entryKey: 'collapsed-tool-entry', step: {
+            className: 'step', key: 'collapsed-tool', entryKey: 'collapsed-tool-entry',
+            running: false, background: false, waiting: false,
+            verb: 'Run', label: 'cargo test -p harbor-sync', named: false, status: 'Complete',
+            icon: 'M4 6h16M4 12h16M4 18h16', chevron: 'M9 18l6-6-6-6',
+            data: { name: 'Bash', arg: 'cargo test -p harbor-sync', out: 'All sync tests passed.', ok: true },
+          } },
+        ],
+      } }],
+      order: ['turn-collapsed'],
+    })} />
+  ),
 };
 
 const longRecordedText = Array.from(
@@ -956,6 +1056,15 @@ export const LongTranscript: Story = {
   ),
 };
 
+const failedCommandOutput = [
+  ...Array.from({ length: 30 }, (_, index) => `test sync_case_${index + 1} ... ok`),
+  '', 'failures:', '', '---- queue::retry_backoff stdout ----',
+  'seed 0x5f3a: expected 3 attempts, got 4',
+  'thread queue::retry_backoff panicked at crates/sync/src/queue.rs:212:9:',
+  'assertion left == right failed', '  left: 4', ' right: 3', '',
+  'test result: FAILED. 127 passed; 1 failed',
+].join('\n');
+
 export const FailureInspection: Story = {
   render: () => (
     <Mounted
@@ -976,14 +1085,14 @@ export const FailureInspection: Story = {
                     kind: 'message',
                     key: 'request',
                     flavor: 'user',
-                    text: 'Run the visual check and report failures.',
+                    text: 'Run the sync tests again; if retry_backoff still fails, fix it and hand the offline flush to Codex.',
                   },
                   {
                     kind: 'tool',
                     key: 'failed-tool',
                     entryKey: 'failed-tool-entry',
                     step: {
-                      className: 'tool-failed',
+                      className: 'step err',
                       key: 'failed-tool',
                       entryKey: 'failed-tool-entry',
                       tid: 'tool-1',
@@ -999,9 +1108,9 @@ export const FailureInspection: Story = {
                       chevron: 'M9 18l6-6-6-6',
                       data: {
                         name: 'Bash',
-                        arg: 'npm run ui:check',
+                        arg: 'cargo test -p harbor-sync',
                         cwd: '/workspace/semon',
-                        out: 'Error: screenshot “trace-harbor-h1” differs from the approved reference.\nExpected the recorded child result and trace action to remain visible.',
+                        out: failedCommandOutput,
                         ok: false,
                       },
                     },

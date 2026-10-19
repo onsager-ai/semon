@@ -1,304 +1,227 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeCapturePlan } from './storybook-plan.mjs';
+import { referenceErrors } from './storybook-references.mjs';
+import { EXPECTED, REFERENCE, THRESHOLD, MAX_RATIO, expectedPixelCoverage } from './preservation-contract.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
-const uiStories = path.join(root, 'ui/stories/ProductionSurfaces.stories.tsx');
-const galleryFixture = path.join(root, 'ui/tests/fixtures/design-gallery.tsx');
-const storySource = fs.readFileSync(uiStories, 'utf8');
-const gallerySource = fs.readFileSync(galleryFixture, 'utf8');
+const readJson = (file) => JSON.parse(fs.readFileSync(path.resolve(here, file), 'utf8'));
+const contract = readJson('storybook-contract.json');
+const inventory = readJson(contract.stateBindings);
+const errors = [], mappedStories = new Set(), mappedChecks = new Set();
+const storySource = fs.readFileSync(path.join(root, 'ui/stories/ProductionSurfaces.stories.tsx'), 'utf8');
+const gallerySource = fs.readFileSync(path.join(root, 'ui/tests/fixtures/design-gallery.tsx'), 'utf8');
 const libraryIndex = fs.readFileSync(path.join(root, 'ui/src/lib/index.ts'), 'utf8');
-const contract = readJson(path.join(here, 'storybook-contract.json'));
-const errors = [];
-const mappedStories = new Set();
-const mappedChecks = new Set();
-
-function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
-}
-
-function addStories(storyIds, source) {
-  if (!Array.isArray(storyIds) || storyIds.length === 0) {
-    errors.push(`${source}: at least one Storybook owner is required`);
-    return;
+const storyIndex = readJson(contract.storyIndex);
+const availableStories = new Set(Object.entries(storyIndex.entries ?? {})
+  .filter(([id, entry]) => entry.type === 'story' && id.startsWith(contract.ownedStoryPrefix)).map(([id]) => id));
+const sameSet = (left, right) => Array.isArray(left) && new Set(left).size === left.length &&
+  [...left].sort().join('\n') === [...right].sort().join('\n');
+function addStories(ids, source) {
+  if (!Array.isArray(ids) || !ids.length) { errors.push(`${source}: explicit Storybook owner required`); return; }
+  for (const id of ids) {
+    if (!availableStories.has(id)) errors.push(`${source}: unknown story ${id}`);
+    mappedStories.add(id);
   }
-  for (const storyId of storyIds) mappedStories.add(storyId);
 }
-
-function addCheck(checkId, source) {
-  if (!Object.hasOwn(contract.servedChecks, checkId)) {
-    errors.push(`${source}: unknown served check ${checkId}`);
-    return;
-  }
-  mappedChecks.add(checkId);
+function addCheck(id, source) {
+  if (!Object.hasOwn(contract.servedChecks, id)) errors.push(`${source}: unknown served check ${id}`);
+  else mappedChecks.add(id);
 }
-
-const storyIndexPath = path.resolve(here, contract.storyIndex);
-if (!fs.existsSync(storyIndexPath)) {
-  throw new Error(`Missing ${contract.storyIndex}; run the Storybook static build first`);
-}
-const storyIndex = readJson(storyIndexPath);
-const availableStories = new Set(
-  Object.entries(storyIndex.entries ?? {})
-    .filter(([id, entry]) => entry.type === 'story' && id.startsWith(contract.ownedStoryPrefix))
-    .map(([id]) => id),
-);
-
-for (const [checkId, relativeFile] of Object.entries(contract.servedChecks)) {
-  if (!fs.existsSync(path.resolve(here, relativeFile)))
-    errors.push(`Missing check file for ${checkId}: ${relativeFile}`);
-}
-
+if (contract.version !== 2 || inventory.version !== 1) errors.push('Unsupported migration contract version');
+if (contract.pixelPolicy.threshold !== THRESHOLD || contract.pixelPolicy.maxRatio !== MAX_RATIO ||
+    !sameSet(contract.pixelPolicy.dimensions, [390, 820, 1280]) || !sameSet(contract.pixelPolicy.schemes, ['light', 'dark']))
+  errors.push('Storybook must retain the strict pixel policy and full default matrix');
+for (const [id, file] of Object.entries(contract.servedChecks))
+  if (!fs.existsSync(path.resolve(here, file))) errors.push(`Missing check file ${id}: ${file}`);
 for (const surface of contract.productionSurfaces) {
-  addStories(surface.storyIds, `production surface ${surface.id}`);
-  for (const checkId of surface.servedChecks ?? [])
-    addCheck(checkId, `production surface ${surface.id}`);
+  addStories(surface.storyIds, `surface ${surface.id}`);
+  for (const id of surface.servedChecks ?? []) addCheck(id, `surface ${surface.id}`);
   for (const module of surface.modules ?? []) {
-    const ownerPath = path.resolve(root, 'ui/stories', module);
-    const hasSourceFile = ['', '.ts', '.tsx', '.js', '.mjs'].some((extension) =>
-      fs.existsSync(ownerPath + extension),
-    );
-    const baseName = path.basename(module);
-    if (!hasSourceFile) {
-      errors.push(`production surface ${surface.id}: missing production owner ${module}`);
-    }
-    const directlyImported =
-      storySource.includes(`../src/lib/${baseName}`) ||
-      storySource.includes(`../src/app/${baseName}`);
-    const barrelImported =
-      gallerySource.includes("from '../../src/lib'") &&
-      libraryIndex.includes(`from './${baseName}'`);
-    if (!directlyImported && !barrelImported) {
-      errors.push(`production surface ${surface.id}: owner ${module} is not imported by a story`);
-    }
+    const file = path.resolve(root, 'ui/stories', module), name = path.basename(module);
+    if (!['', '.ts', '.tsx', '.js', '.mjs'].some((extension) => fs.existsSync(file + extension)))
+      errors.push(`surface ${surface.id}: missing owner ${module}`);
+    const direct = storySource.includes(`../src/lib/${name}`) || storySource.includes(`../src/app/${name}`);
+    const barrel = gallerySource.includes("from '../../src/lib'") && libraryIndex.includes(`from './${name}'`);
+    if (!direct && !barrel) errors.push(`surface ${surface.id}: production owner is not imported: ${module}`);
   }
 }
+let plan = [];
+try { plan = makeCapturePlan(contract, inventory, [...availableStories]); }
+catch (error) { errors.push(error.message); }
+for (const interaction of contract.interactionCaptures ?? []) addStories([interaction.storyId], `interaction ${interaction.id}`);
+const planByKey = new Map(plan.map((item) => [item.key, item]));
 
-const interactionIds = new Set();
-for (const interaction of contract.interactionCaptures ?? []) {
-  if (!interaction.id || interactionIds.has(interaction.id)) {
-    errors.push(
-      `interaction capture has a missing or duplicate state ID: ${interaction.id ?? '(empty)'}`,
-    );
-  }
-  interactionIds.add(interaction.id);
-  addStories([interaction.storyId], `interaction state ${interaction.id}`);
-  addCheck('visual-pixels', `interaction state ${interaction.id}`);
-  if (!Array.isArray(interaction.widths) || interaction.widths.length === 0) {
-    errors.push(
-      `interaction state ${interaction.id}: at least one explicit viewport width is required`,
-    );
-  }
-  if (!Array.isArray(interaction.schemes) || interaction.schemes.length === 0) {
-    errors.push(
-      `interaction state ${interaction.id}: at least one explicit color scheme is required`,
-    );
-  }
-  if (!Array.isArray(interaction.actions) || interaction.actions.length === 0) {
-    errors.push(`interaction state ${interaction.id}: an executable action sequence is required`);
-  }
-  if (!Array.isArray(interaction.assertions) || interaction.assertions.length === 0) {
-    errors.push(
-      `interaction state ${interaction.id}: at least one visible-state assertion is required`,
-    );
-  }
-  for (const assertion of [
-    ...(interaction.assertions ?? []),
-    ...(interaction.actions ?? []).flatMap((action) => action.assertionsAfter ?? []),
-    ...(interaction.postCaptureAssertions ?? []),
-  ]) {
-    if (!['visible', 'absent'].includes(assertion.kind)) {
-      errors.push(
-        `interaction state ${interaction.id}: unsupported assertion kind ${assertion.kind}`,
-      );
-    }
-  }
-  for (const width of interaction.widths ?? []) {
-    if (!Number.isInteger(width) || width < 300 || width > 2560) {
-      errors.push(`interaction state ${interaction.id}: invalid viewport width ${width}`);
-    }
-  }
-  for (const scheme of interaction.schemes ?? []) {
-    if (!contract.pixelPolicy.schemes.includes(scheme)) {
-      errors.push(`interaction state ${interaction.id}: unknown color scheme ${scheme}`);
-    }
-  }
-  for (const frameId of interaction.frames ?? []) {
-    if (contract.pen.roots.some((root) => root.id === frameId && root.disposition === 'active'))
-      continue;
-    if ((contract.pen.descendantStories?.[frameId] ?? []).includes(interaction.storyId)) continue;
-    errors.push(
-      `interaction state ${interaction.id}: frame ${frameId} is not explicitly mapped to ${interaction.storyId}`,
-    );
+// Exact existing comparator keys remain independent captures. Never map a
+// machine detail or transcript route to a visually unrelated component story.
+const servedCases = new Map();
+function servedCase(comparator, scope, kind, key, check, details) {
+  const id = `${comparator}:${scope}:${kind}:${key}`;
+  if (servedCases.has(id)) errors.push(`duplicate served capture ${id}`);
+  servedCases.set(id, { comparator, scope, kind, key, servedCheck: check, ...details });
+  addCheck(check, id);
+}
+const visual = readJson(contract.visualCoverage.source);
+if (!sameSet(contract.visualCoverage.frames, visual.frames)) errors.push('Exact visual frame inventory has missing/unknown/duplicate routes');
+for (const field of ['scopes', 'regions'])
+  if (JSON.stringify(contract.visualCoverage[field]) !== JSON.stringify(visual[field])) errors.push(`Exact visual ${field} inventory differs from the served manifest`);
+for (const scope of Object.keys(visual.scopes)) {
+  const coverage = expectedPixelCoverage(scope);
+  for (const kind of ['frame', 'region']) for (const key of coverage[kind === 'frame' ? 'frames' : 'regions']) {
+    const [scheme, frame, region] = key.split('|');
+    servedCase('pixels', scope, kind, key, contract.visualCoverage.servedCheck, {
+      viewport: scheme.startsWith('phone-') ? [390, 844] : [1280, 860],
+      theme: scheme.endsWith('-dark') ? 'dark' : 'light', frame, region: region ?? null,
+      expectedState: `Exact served ${frame}${region ? ` region ${region}` : ''}; ${contract.visualCoverage.expectedState}`,
+      referenceDisposition: contract.visualCoverage.referenceDisposition,
+      reference: scope === 'pushed' ? 'served-parity' : REFERENCE,
+    });
   }
 }
-
-const visualCoverage = readJson(path.resolve(here, contract.visualCoverage.source));
-const visualFrames = new Map();
-for (const frame of visualCoverage.frames) {
-  const matches = contract.visualCoverage.storyRules.filter((rule) =>
-    new RegExp(rule.pattern).test(frame),
-  );
-  if (matches.length !== 1) {
-    errors.push(`visual frame ${frame}: expected one story rule, found ${matches.length}`);
-    continue;
-  }
-  const storyIds = matches[0].storyIds;
-  addStories(storyIds, `visual frame ${frame}`);
-  addCheck(contract.visualCoverage.servedCheck, `visual frame ${frame}`);
-  visualFrames.set(frame, {
-    storyIds,
-    servedCheck: contract.visualCoverage.servedCheck,
+const declaredPreservation = contract.preservation.widths.flatMap((width) => contract.preservation.schemes.flatMap((theme) =>
+  [...contract.preservation.states, ...(width === 390 ? contract.preservation.phoneOnlyStates : [])].map((state) => `${width}-${theme}-${state}`)));
+if (!sameSet(declaredPreservation, EXPECTED)) errors.push('Strict preservation inventory has missing/unknown/duplicate states');
+for (const key of EXPECTED) {
+  const [, width, theme, state] = /^(\d+)-(light|dark)-(.+)$/.exec(key);
+  servedCase('preservation', 'required', 'frame', key, contract.preservation.servedCheck, {
+    viewport: [Number(width), Number(width) === 390 ? 844 : 860], theme,
+    expectedState: `Exact strict-preservation state ${state}, including its existing interaction setup`,
+    referenceDisposition: contract.preservation.referenceDisposition, reference: REFERENCE,
   });
 }
-
-const acceptance = readJson(path.resolve(here, contract.visualAcceptance.source));
-const acceptanceKeys = new Set();
+const acceptance = readJson(contract.visualAcceptance.source), acceptanceKeys = new Set();
 for (const item of acceptance.acceptances ?? []) {
-  const key = `${item.comparator}:${item.scope}:${item.key}`;
-  if (acceptanceKeys.has(key)) errors.push(`duplicate visual acceptance key ${key}`);
+  const key = `${item.comparator}:${item.scope}:${item.kind}:${item.key}`;
+  if (acceptanceKeys.has(key)) errors.push(`duplicate visual acceptance ${key}`);
+  if (!servedCases.has(key)) errors.push(`visual acceptance has no exact served capture: ${key}`);
   acceptanceKeys.add(key);
-  const checkId = contract.visualAcceptance.comparatorChecks[item.comparator];
-  if (!checkId) errors.push(`visual acceptance ${key}: comparator has no served check`);
-  else addCheck(checkId, `visual acceptance ${key}`);
+  addCheck(contract.visualAcceptance.comparatorChecks[item.comparator], key);
 }
+const gallery = readJson(contract.gallery.source);
+if (!sameSet(contract.gallery.states, gallery.states)) errors.push('Gallery state inventory has missing/unknown/duplicate states');
+for (const field of ['widths', 'schemes', 'threshold', 'maxRatio'])
+  if (JSON.stringify(contract.gallery[field]) !== JSON.stringify(gallery[field])) errors.push(`Gallery ${field} differs from its existing comparator`);
+for (const state of gallery.states) for (const width of gallery.widths) for (const theme of gallery.schemes)
+  servedCase('gallery', 'required', 'frame', `${state}-${width}-${theme}`, contract.gallery.servedCheck, {
+    viewport: [width, 844], theme, expectedState: `Production gallery ${state}; existing keyboard, touch and overlay sequence`,
+    referenceDisposition: 'preserve-existing-gallery-baseline', reference: 'baselines/gallery',
+    threshold: gallery.threshold, maxRatio: gallery.maxRatio,
+  });
+addStories(contract.gallery.storyIds, 'gallery');
 
-const gallery = readJson(path.resolve(here, contract.gallery.source));
-for (const state of gallery.states ?? []) {
-  addStories(contract.gallery.storyIds, `gallery state ${state}`);
-  addCheck(contract.gallery.servedCheck, `gallery state ${state}`);
-}
-
-const pen = readJson(path.resolve(here, contract.pen.source));
-const frameById = new Map();
+const pen = readJson(contract.pen.source), frameById = new Map();
 function collectFrames(nodes, parent = null) {
   for (const node of nodes ?? []) {
     if (node.type === 'frame' && typeof node.id === 'string') {
+      if (frameById.has(node.id)) errors.push(`duplicate pen frame ${node.id}`);
       frameById.set(node.id, { node, parent });
       collectFrames(node.children, node.id);
-    } else {
-      collectFrames(node.children, parent);
-    }
+    } else collectFrames(node.children, parent);
   }
 }
 collectFrames(pen.children);
+// Adding a second canvas must require a deliberate inventory update as well.
+function penFiles(directory) {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const file = path.join(directory, entry.name);
+    return entry.isDirectory() ? penFiles(file) : file.endsWith('.pen') ? [file] : [];
+  });
+}
+if (!sameSet(penFiles(path.join(root, 'docs/design')), [path.resolve(here, contract.pen.source)]))
+  errors.push('Unknown or missing design canvas: update the full migration inventory');
+const activeIds = new Set(), supersededIds = new Set();
+const roots = new Set((pen.children ?? []).filter((node) => node.type === 'frame').map((node) => node.id));
+if (!sameSet(contract.pen.roots.map((entry) => entry.id), [...roots])) errors.push('Missing/unknown/duplicate pen root disposition');
+for (const entry of contract.pen.roots) {
+  if (!['active', 'superseded'].includes(entry.disposition)) { errors.push(`invalid disposition ${entry.id}`); continue; }
+  const descendants = [...frameById].filter(([, value]) => {
+    let parent = value.parent;
+    while (parent) { if (parent === entry.id) return true; parent = frameById.get(parent)?.parent; }
+    return false;
+  }).map(([id]) => id);
+  const groups = (entry.disposition === 'active' ? contract.pen.activeDescendantGroups : contract.pen.supersededDescendantGroups)
+    .filter((group) => group.root === entry.id);
+  if (groups.length !== 1 || !sameSet(groups[0]?.ids, descendants)) errors.push(`pen root ${entry.id}: incomplete/unknown/duplicate descendant classification`);
+  if (entry.disposition === 'superseded' && (!entry.reason || !entry.decisionSource || !fs.existsSync(path.resolve(root, entry.decisionSource))))
+    errors.push(`superseded pen root ${entry.id}: governing decision source and reason required`);
+  const set = entry.disposition === 'active' ? activeIds : supersededIds;
+  for (const id of [entry.id, ...descendants]) set.add(id);
+}
+for (const group of [...contract.pen.activeDescendantGroups, ...contract.pen.supersededDescendantGroups])
+  if (!roots.has(group.root)) errors.push(`unknown descendant classification root ${group.root}`);
+const retiredFrames = new Map();
+for (const disposition of inventory.retiredFrames ?? []) {
+  if (disposition.disposition !== 'superseded' || !disposition.reason?.trim() ||
+      !disposition.decisionSource || !fs.existsSync(path.resolve(root, disposition.decisionSource)) || !disposition.frames?.length)
+    errors.push('Retired descendant requires explicit IDs, a governing decision source and a reason');
+  for (const id of disposition.frames ?? []) {
+    if (!activeIds.has(id) || roots.has(id) || retiredFrames.has(id)) errors.push(`unknown/duplicate/non-descendant retirement ${id}`);
+    activeIds.delete(id);
+    supersededIds.add(id);
+    retiredFrames.set(id, { disposition: disposition.disposition, reason: disposition.reason, decisionSource: disposition.decisionSource });
+  }
+}
+for (const id of frameById.keys())
+  if (activeIds.has(id) === supersededIds.has(id)) errors.push(`unclassified/ambiguous pen frame ${id}`);
 
-const activePenIds = new Set();
-const activeRoots = [];
-const supersededPenIds = new Set();
-const declaredRoots = new Set(contract.pen.roots.map((entry) => entry.id));
-const sourceRoots = new Set(
-  (pen.children ?? []).filter((node) => node.type === 'frame').map((node) => node.id),
-);
-for (const id of sourceRoots)
-  if (!declaredRoots.has(id)) errors.push(`unmapped top-level pen frame ${id}`);
-for (const id of declaredRoots)
-  if (!sourceRoots.has(id)) errors.push(`declared pen root ${id} is not top-level`);
-
-for (const rootEntry of contract.pen.roots) {
-  if (!['active', 'superseded'].includes(rootEntry.disposition)) {
-    errors.push(`pen root ${rootEntry.id} needs an explicit active or superseded disposition`);
-  }
-  const rootFrame = frameById.get(rootEntry.id);
-  if (!rootFrame) {
-    errors.push(`pen root ${rootEntry.id} is missing from ${contract.pen.source}`);
-    continue;
-  }
-  const descendants = [...frameById.entries()]
-    .filter(([, value]) => {
-      let parent = value.parent;
-      while (parent) {
-        if (parent === rootEntry.id) return true;
-        parent = frameById.get(parent)?.parent ?? null;
-      }
-      return false;
-    })
-    .map(([id]) => id);
-  const isActive = rootEntry.disposition === 'active';
-  const groups = isActive
-    ? contract.pen.activeDescendantGroups
-    : contract.pen.supersededDescendantGroups;
-  const declaredDescendants = groups
-    .filter((group) => group.root === rootEntry.id)
-    .flatMap((group) => group.ids);
-  if (
-    new Set(declaredDescendants).size !== declaredDescendants.length ||
-    [...new Set(declaredDescendants)].sort().join('\n') !== [...descendants].sort().join('\n')
-  ) {
-    errors.push(
-      `pen root ${rootEntry.id}: ${rootEntry.disposition} descendant list is missing, duplicated, or contains an unknown frame`,
-    );
-  }
-  if (groups.filter((item) => item.root === rootEntry.id).length !== 1) {
-    errors.push(`pen root ${rootEntry.id}: expected exactly one complete descendant group`);
-  }
-  if (isActive) {
-    addStories(rootEntry.storyIds, `pen root ${rootEntry.id}`);
-    addCheck(contract.pen.servedCheck, `pen root ${rootEntry.id}`);
-    activePenIds.add(rootEntry.id);
-    for (const id of descendants) {
-      activePenIds.add(id);
-      activeRoots.push({ id, inheritedFrom: rootEntry.id });
-    }
+const resolvedTargets = new Map();
+for (const [id, target] of Object.entries(inventory.targets)) {
+  const types = ['storyId', 'interactionId', 'served'].filter((key) => Object.hasOwn(target, key));
+  if (types.length !== 1) { errors.push(`target ${id}: exactly one executable owner required`); continue; }
+  let keys = [];
+  if (target.storyId) {
+    addStories([target.storyId], `target ${id}`);
+    keys = target.widths.flatMap((width) => target.schemes.map((theme) => `${target.storyId}|${width}|${theme}`));
+    for (const key of keys) if (!planByKey.has(key)) errors.push(`target ${id}: missing executable story capture ${key}`);
+  } else if (target.interactionId) {
+    keys = plan.filter((item) => item.interactionId === target.interactionId).map((item) => item.key);
+    if (!keys.length) errors.push(`target ${id}: unknown/missing interaction ${target.interactionId}`);
   } else {
-    if (rootEntry.storyIds?.length)
-      errors.push(`superseded pen root ${rootEntry.id} must not claim active Storybook owners`);
-    if (!rootEntry.reason)
-      errors.push(`superseded pen root ${rootEntry.id} needs a current-source rationale`);
-    supersededPenIds.add(rootEntry.id);
-    for (const id of descendants) supersededPenIds.add(id);
+    const served = target.served;
+    if (!served.keys?.length || !target.expectedState || target.referenceDisposition !== 'preserve-exact-served-comparator') errors.push(`target ${id}: explicit served keys, expected state and disposition required`);
+    keys = (served.keys ?? []).map((key) => `${served.comparator}:${served.scope}:${served.kind}:${key}`);
+    for (const key of keys) if (!servedCases.has(key)) errors.push(`target ${id}: unknown exact served capture ${key}`);
+  }
+  resolvedTargets.set(id, keys);
+}
+const frameBindings = new Map(), usedTargets = new Set();
+for (const binding of inventory.bindings) {
+  if (!binding.frames?.length || !binding.targets?.length || !binding.visibleOwnership?.trim()) errors.push('Every binding needs explicit frame IDs, capture targets and visible ownership');
+  const keys = [];
+  for (const target of binding.targets ?? []) {
+    usedTargets.add(target);
+    if (!resolvedTargets.has(target)) errors.push(`binding: unknown capture target ${target}`);
+    keys.push(...(resolvedTargets.get(target) ?? []));
+  }
+  for (const id of binding.frames ?? []) {
+    if (!activeIds.has(id)) errors.push(`binding claims unknown/inactive pen frame ${id}`);
+    if (frameBindings.has(id)) errors.push(`duplicate executable pen binding ${id}`);
+    frameBindings.set(id, { name: frameById.get(id)?.node.name, captures: keys, visibleOwnership: binding.visibleOwnership });
   }
 }
-
-for (const group of contract.pen.activeDescendantGroups) {
-  if (!declaredRoots.has(group.root))
-    errors.push(`active pen descendant group references unknown root ${group.root}`);
+for (const id of activeIds) if (!frameBindings.has(id)) errors.push(`active pen frame lacks an executable binding: ${id}`);
+for (const id of resolvedTargets.keys()) if (!usedTargets.has(id)) errors.push(`unused capture target ${id}`);
+for (const interaction of contract.interactionCaptures ?? []) for (const frame of interaction.frames ?? []) {
+  const captures = frameBindings.get(frame)?.captures ?? [];
+  if (!plan.some((item) => item.interactionId === interaction.id && captures.includes(item.key)))
+    errors.push(`interaction ${interaction.id}: frame ${frame} has no matching executable binding`);
 }
-for (const group of contract.pen.supersededDescendantGroups) {
-  if (!declaredRoots.has(group.root))
-    errors.push(`superseded pen descendant group references unknown root ${group.root}`);
-}
-for (const id of frameById.keys()) {
-  if (!activePenIds.has(id) && !supersededPenIds.has(id))
-    errors.push(`unclassified pen frame ${id}`);
-  if (activePenIds.has(id) && supersededPenIds.has(id))
-    errors.push(`pen frame ${id} is both active and superseded`);
-}
-for (const [id, storyIds] of Object.entries(contract.pen.descendantStories ?? {})) {
-  if (!activePenIds.has(id)) errors.push(`pen descendant story mapping ${id} is not active`);
-  addStories(storyIds, `pen descendant ${id}`);
-}
-
-for (const storyId of mappedStories) {
-  if (!availableStories.has(storyId)) errors.push(`unknown Storybook story ID ${storyId}`);
-}
-for (const storyId of availableStories) {
-  if (!mappedStories.has(storyId))
-    errors.push(`orphaned Storybook story ${storyId} has no active contract mapping`);
-}
+for (const id of availableStories) if (!mappedStories.has(id)) errors.push(`orphaned story ${id}`);
+const approved = readJson(contract.referenceMap);
+errors.push(...referenceErrors(approved, plan));
 
 const report = {
-  activeStories: [...mappedStories].sort(),
-  servedChecks: [...mappedChecks].sort(),
-  visualCoverage: { frames: visualFrames.size, ids: [...visualFrames.keys()].sort() },
-  visualAcceptances: acceptanceKeys.size,
-  galleryStates: gallery.states?.length ?? 0,
-  penFrames: {
-    active: activePenIds.size,
-    superseded: supersededPenIds.size,
-    inherited: activeRoots.length,
-  },
-  errors,
+  activeStories: [...mappedStories].sort(), servedChecks: [...mappedChecks].sort(),
+  executableStoryCaptures: plan.map((item) => ({ ...item, referenceDisposition: 'pending-storybook-review' })),
+  exactServedCaptures: [...servedCases.values()], visualAcceptances: [...acceptanceKeys],
+  penFrames: { active: activeIds.size, superseded: supersededIds.size, executable: frameBindings.size, inherited: 0 },
+  frameBindings: Object.fromEntries(frameBindings), errors,
+  retiredFrames: Object.fromEntries(retiredFrames),
 };
 const out = path.resolve(process.env.SEMON_UI_OUT ?? path.join(here, 'out'), 'storybook');
 fs.mkdirSync(out, { recursive: true });
 fs.writeFileSync(path.join(out, 'contract-report.json'), JSON.stringify(report, null, 2) + '\n');
-if (errors.length) {
-  console.error(errors.join('\n'));
-  process.exitCode = 1;
-} else {
-  console.log(
-    `Storybook contract: ${mappedStories.size} stories, ${visualFrames.size} visual frames, ${acceptanceKeys.size} exact visual acceptance records, ${activePenIds.size} active pen frames; ${mappedChecks.size} served checks.`,
-  );
-}
+if (errors.length) { console.error(errors.join('\n')); process.exitCode = 1; }
+else console.log(`Storybook contract: ${mappedStories.size} stories, ${plan.length} executable captures, ${servedCases.size} exact served states, ${frameBindings.size} explicit pen bindings; no inherited coverage.`);
