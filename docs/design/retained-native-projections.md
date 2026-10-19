@@ -155,6 +155,15 @@ temporary boundaries are discarded before staged relationship capture; the
 existing parent-turn conflict checks remain. Earlier staged recipes rebuild
 once so partial-page turn witnesses cannot survive into publication.
 
+Final owner publication replays incident relationships through indexed read-only
+pages of at most 64 relations and 1 MiB of metadata. A single owner's complete
+incident set may span pages; it is not required to fit one page. Each page
+qualifies the stage epoch, and the final publication retains all source, runtime
+and generation fences. Replay preserves producer relationship/placement order
+and compact sender-turn witnesses while discarding each metadata page. Only the
+selected owners' native derived model is assembled, outside the SQLite writer
+transaction; unrelated component sources are not admitted.
+
 The native Event Index connection reuses at most 32 compiled SQL statements for
 per-source ledger checks and row writes. Bound values clear when a statement
 returns to the connection cache; generation checks still execute within each

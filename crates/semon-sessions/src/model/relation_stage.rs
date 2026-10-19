@@ -84,6 +84,15 @@ pub(crate) struct Context {
     pub(crate) native_events: Vec<NativeEvent>,
     pub(crate) companions: Vec<String>,
     pub(crate) matching_locations: Option<Vec<Location>>,
+    /// Final replay reads incident relationships in bounded, read-only pages.
+    pub(crate) replay_owners: Vec<String>,
+}
+
+pub(crate) struct RelationOrigin {
+    pub(crate) from: String,
+    pub(crate) kind: String,
+    pub(crate) to: Option<String>,
+    pub(crate) source_turn: OriginTurn,
 }
 
 #[derive(Clone, Debug)]
@@ -725,6 +734,15 @@ impl Context {
             if builder.ids.contains_key(&relation.id) {
                 return Err(io::Error::other("duplicate staged native relation"));
             }
+            builder.staged_origins.insert(
+                relation.id.clone(),
+                RelationOrigin {
+                    from: relation.from.clone(),
+                    kind: relation.kind.clone(),
+                    to: relation.to.clone(),
+                    source_turn: relation.source_turn.clone(),
+                },
+            );
             let kind = match relation.kind.as_str() {
                 "spawn" => "spawn",
                 "relay" => "relay",
@@ -818,6 +836,56 @@ impl Context {
                     return Err(io::Error::other("duplicate staged native after placement"));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Keep native producer ordering while discarding each metadata page before
+    /// reading the next. Only the selected owners' derived model is retained.
+    pub(super) fn replay(&self, builder: &mut Builder<'_>) -> io::Result<()> {
+        self.install(builder)?;
+        if self.replay_owners.is_empty() {
+            return Ok(());
+        }
+        let epoch = self
+            .epoch
+            .ok_or_else(|| io::Error::other("semantic replay epoch missing"))?;
+        let mut after = String::new();
+        let mut order = BTreeMap::new();
+        loop {
+            let page = builder
+                .cache
+                .semantic_replay_page(epoch, &self.replay_owners, &after)?;
+            let Some(last) = page.relations.keys().next_back() else {
+                break;
+            };
+            after.clone_from(last);
+            for relation in page.relations.values() {
+                order.insert(relation.id.clone(), relation.order.clone());
+            }
+            page.install(builder)?;
+        }
+        let old: Vec<_> = builder.handoffs.iter().map(|h| h.out.id.clone()).collect();
+        builder.handoffs.sort_by(|a, b| {
+            order[&a.out.id]
+                .cmp(&order[&b.out.id])
+                .then_with(|| a.out.id.cmp(&b.out.id))
+        });
+        builder.ids = builder
+            .handoffs
+            .iter()
+            .enumerate()
+            .map(|(at, h)| (h.out.id.clone(), at))
+            .collect();
+        let remap: Vec<_> = old.iter().map(|id| builder.ids[id]).collect();
+        for entries in builder.placed.values_mut() {
+            for (at, _) in entries.iter_mut() {
+                *at = remap[*at];
+            }
+            entries.sort_by_key(|(at, _)| *at);
+        }
+        for at in builder.head.values_mut().chain(builder.after.values_mut()) {
+            *at = remap[*at];
         }
         Ok(())
     }
