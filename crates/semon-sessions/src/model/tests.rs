@@ -4059,12 +4059,56 @@ fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
         let backward = format!("backward-{n:03}");
         let send = format!("send-{n:03}");
         let reply = format!("reply-{n:03}");
-        alpha.push(assistant("alpha", ts(minute, second), vec![tool(&send, "SendMessage", json!({"to":"beta","message":"Forward"}))]));
-        alpha.push(result("alpha", ts(minute, second), &send, "sent", false, json!({"success":true,"msg_id":forward})));
-        beta.push(peer("beta", ts(minute, second + 1), &forward, "Alpha", 102, "Forward"));
-        beta.push(assistant("beta", ts(minute, second + 2), vec![tool(&reply, "SendMessage", json!({"to":"alpha","message":"Backward"}))]));
-        beta.push(result("beta", ts(minute, second + 2), &reply, "sent", false, json!({"success":true,"msg_id":backward})));
-        alpha.push(peer("alpha", ts(minute, second + 3), &backward, "Beta", 103, "Backward"));
+        alpha.push(assistant(
+            "alpha",
+            ts(minute, second),
+            vec![tool(
+                &send,
+                "SendMessage",
+                json!({"to":"beta","message":"Forward"}),
+            )],
+        ));
+        alpha.push(result(
+            "alpha",
+            ts(minute, second),
+            &send,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":forward}),
+        ));
+        beta.push(peer(
+            "beta",
+            ts(minute, second + 1),
+            &forward,
+            "Alpha",
+            102,
+            "Forward",
+        ));
+        beta.push(assistant(
+            "beta",
+            ts(minute, second + 2),
+            vec![tool(
+                &reply,
+                "SendMessage",
+                json!({"to":"alpha","message":"Backward"}),
+            )],
+        ));
+        beta.push(result(
+            "beta",
+            ts(minute, second + 2),
+            &reply,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":backward}),
+        ));
+        alpha.push(peer(
+            "alpha",
+            ts(minute, second + 3),
+            &backward,
+            "Beta",
+            103,
+            "Backward",
+        ));
     }
     home.top("alpha", &alpha);
     home.top("beta", &beta);
@@ -4076,9 +4120,19 @@ fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     for turn in &oracle.turns {
         for edge in &turn.sent {
-            let actual: String = db.query_row("SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2", rusqlite::params![turn.sid, edge], |row| row.get(0)).unwrap();
+            let actual: String = db
+                .query_row(
+                    "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                    rusqlite::params![turn.sid, edge],
+                    |row| row.get(0),
+                )
+                .unwrap();
             let actual: Value = serde_json::from_str(&actual).unwrap();
-            assert_eq!(actual["source_turn"], json!(turn.id), "{edge} recorded sender turn");
+            assert_eq!(
+                actual["source_turn"],
+                json!(turn.id),
+                "{edge} recorded sender turn"
+            );
         }
     }
 }
