@@ -162,3 +162,20 @@ acceptance of that exact draft. Unknown delivery remains blocked from replay.
 The written staging requirements are the implementation contract when the owner
 authenticated Site cannot be opened. This section changes the conversation reader
 only; new-task composer variants retain their existing design contracts.
+
+## 12. Optional Machine filter for hosted Sessions
+
+The current Sessions task supersedes the hosted machine-selection landing step.
+`/sessions` reads all authorized machines in the current workspace, with the
+existing compact Filter sheet defaulting to `All machines`. A concrete Machine
+selection updates the URL and starts a new first page. Preserve flat two-line
+rows, grouping, existing sort/filters and browser history. Add the machine label
+to existing row metadata; source-qualified identity remains independent of labels.
+Selecting a row records its exact machine in the detail URL. Returning to the
+workspace list retains its filters. Standalone source reading is unchanged.
+
+Preserve existing shared tokens and control geometry. Update only references of
+the superseded hosted picker/default Machine state; generic filter and reader
+baselines remain authoritative. Review desktop/mobile list, open Machine filter,
+loading, empty and unavailable states in both themes using actual served data.
+The session canvas's `Hosted Sessions · optional Machine` note records this change.

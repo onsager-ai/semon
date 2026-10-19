@@ -1,3 +1,5 @@
+import { catalogSessionKey } from '../lib/catalogIdentity';
+export { catalogSessionKey } from '../lib/catalogIdentity';
 import { array, boolean, number, object, text } from '../domain/validate';
 import {
   parseRecordedStatus,
@@ -22,6 +24,7 @@ export type {
 
 /** Metadata and fenced recorded status are partial observations, never control authority. */
 export interface CatalogSession {
+  machine?: { key: string; label: string };
   lifecycle: 'current' | 'retained';
   transcript?: { generation: string; errorsGeneration: string; total: number };
   details?: SessionDetails;
@@ -76,8 +79,8 @@ export interface CatalogPage {
     partial: boolean;
     candidates: number;
     index_complete: boolean;
-    candidate_budget: 512;
-    byte_budget: 2097152;
+    candidate_budget: number;
+    byte_budget: number;
   } | null;
 }
 const nullable = <T>(value: unknown, parse: (value: unknown) => T): T | null =>
@@ -148,6 +151,16 @@ export function parseCatalogSession(value: unknown): CatalogSession {
   if (row.lifecycle !== 'current' && row.lifecycle !== 'retained')
     throw new Error('Invalid catalog lifecycle');
   return {
+    machine:
+      row.machine === undefined
+        ? undefined
+        : (() => {
+            const machine = object(row.machine),
+              key = text(machine.key),
+              label = text(machine.label);
+            if (!key || !label) throw Error('Invalid catalog machine');
+            return { key, label };
+          })(),
     lifecycle: row.lifecycle,
     details: row.details == null ? undefined : parseSessionDetails(row.details),
     status: parseRecordedStatus(row.status),
@@ -188,7 +201,7 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     ...observations(row),
   };
 }
-function searchObservation(value: unknown): CatalogPage['search'] {
+function searchObservation(value: unknown, union = false): CatalogPage['search'] {
   if (value === undefined || value === null) return null;
   const row = object(value),
     fields = strings(row.fields),
@@ -200,10 +213,10 @@ function searchObservation(value: unknown): CatalogPage['search'] {
     fields.some(
       (field) => !['name', 'key', 'repo', 'branch', 'model', 'harness'].includes(field),
     ) ||
-    row.candidate_budget !== 512 ||
-    row.byte_budget !== 2097152 ||
+    row.candidate_budget !== (union ? 64 * 512 : 512) ||
+    row.byte_budget !== (union ? 64 * 2097152 : 2097152) ||
     candidates < 0 ||
-    candidates > 512
+    candidates > (union ? 64 * 512 : 512)
   )
     throw new Error('Unsupported metadata search observation');
   return {
@@ -212,8 +225,8 @@ function searchObservation(value: unknown): CatalogPage['search'] {
     partial: boolean(row.partial),
     candidates,
     index_complete: boolean(row.index_complete),
-    candidate_budget: 512,
-    byte_budget: 2097152,
+    candidate_budget: union ? 64 * 512 : 512,
+    byte_budget: union ? 64 * 2097152 : 2097152,
   };
 }
 export function parseCatalogPage(value: unknown): CatalogPage {
@@ -228,13 +241,17 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     collectionFreshness = page.freshness === 'updating' ? 'updating' : freshness(page.freshness);
   if (
     page.api !== 1 ||
+    (capabilities.global_union === true &&
+      (machine !== '' || items.some((item) => !item.machine))) ||
     (completeness !== 'partial' && completeness !== 'complete') ||
     (collectionFreshness === 'updating' && completeness !== 'partial') ||
+    (capabilities.global_union !== true &&
+      items.some((item) => item.machine && item.machine.key !== machine)) ||
     info.key !== machine ||
     (info.freshness !== 'cached' && info.freshness !== 'unavailable') ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
     items.length > 100 ||
-    new Set(items.map((item) => item.key)).size !== items.length ||
+    new Set(items.map(catalogSessionKey)).size !== items.length ||
     (next !== null && (!next || next.length > 8192))
   )
     throw new Error('Invalid catalog page');
@@ -258,7 +275,7 @@ export function parseCatalogPage(value: unknown): CatalogPage {
     },
     items,
     next_cursor: next,
-    search: searchObservation(page.search),
+    search: searchObservation(page.search, capabilities.global_union === true),
   };
 }
 
