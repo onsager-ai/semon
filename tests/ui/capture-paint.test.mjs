@@ -62,18 +62,35 @@ test('independent visual browsers retain exact rounded-edge and text pixels', as
     try {
       const page = await browser.newPage({ viewport: { width: 820, height: 860 } });
       await page.setContent(`<style>
-        body { background: #f7f8f5; color: #191d1b; font: 15px/22px sans-serif; }
-        aside { position: sticky; top: 0; width: 280px; clip-path: inset(1px 0 0); }
-        button { border: 0; border-radius: 9px; background: #f0f2ed;
-          width: 278px; height: 48px; text-align: left; color: inherit; }
+        body { margin: 0; background: #fff; color: #191d1b; font: 15px/22px sans-serif; }
+        aside { position: fixed; inset: 0 auto 0 0; width: 296px;
+          background: #f7f7f5; overflow-y: auto; }
+        .spacer { height: 293px; }
+        .tree { position: sticky; top: 0; margin: 0 4px 0 8px;
+          background: #f7f7f5; clip-path: inset(1px 0 0); }
+        button { border: 0; border-radius: 9px; background: #f1f2ef;
+          width: 284px; height: 49px; text-align: left; color: inherit; }
+        .tail { height: 1200px; }
         article { margin-left: 296px; width: 443.375px; }
         article p { border-radius: 6px; padding: 13.25px; background: #fff; }
         svg { width: 15px; height: 15px; fill: none; stroke: currentColor; }
-      </style><aside><button>harbor · Working</button></aside>
+      </style><aside><div class="spacer"></div><div class="tree"><button>harbor · Working</button></div><div class="tail"></div></aside>
       <article><p>${label}</p><svg viewBox="0 0 24 24"><path d="M4 4v8h14m-4-4 4 4-4 4"/></svg></article>`);
-      return await withCapturePaint(page, () =>
-        captureStableFrame(page, { animations: 'allow', caret: 'hide' }),
-      );
+      const shot = () =>
+        withCapturePaint(page, () =>
+          captureStableFrame(page, { animations: 'allow', caret: 'hide' }),
+        );
+      const first = await shot();
+      for (const offset of [1, 300, 0, 11, 0]) {
+        await page.locator('aside').evaluate(
+          (node, offset) => {
+            node.scrollTop = offset;
+          },
+          offset,
+        );
+        if (offset === 0) assert.deepEqual(await shot(), first, 'repaint retains exact edge pixels');
+      }
+      return first;
     } finally {
       await browser.close();
     }

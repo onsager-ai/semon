@@ -28,8 +28,20 @@ export const launch = ({ baselineRaster = false } = {}) =>
     args: [
       '--disable-gpu',
       '--font-render-hinting=none',
-      // Exact visual evidence must not select a different Skia CPU path per runner.
-      ...(baselineRaster ? ['--disable-skia-runtime-opts'] : []),
+      // Deterministic rendering stages, while Playwright keeps normal frame
+      // scheduling (enable-begin-frame-control requires a separate CDP driver).
+      ...(baselineRaster
+        ? [
+            '--disable-skia-runtime-opts',
+            '--run-all-compositor-stages-before-draw',
+            '--disable-new-content-rendering-timeout',
+            '--disable-threaded-animation',
+            '--disable-threaded-scrolling',
+            '--disable-checker-imaging',
+            '--disable-image-animation-resync',
+            '--disable-partial-raster',
+          ]
+        : []),
     ],
     ...(process.platform === 'linux'
       ? {
