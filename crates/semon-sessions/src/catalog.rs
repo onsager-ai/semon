@@ -1526,6 +1526,195 @@ mod tests {
     }
 
     #[test]
+    fn native_usage_history_restart_converges_without_repair_revision_churn() {
+        use std::io::Write;
+
+        for count in [8, 8192] {
+            let fixture = Fixture::new();
+            let relative = fixture.codex_source("usage-history", None, 1);
+            let path = fixture.options.codex_home.join(&relative);
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}})
+            )
+            .unwrap();
+            for n in 0..count {
+                let record = json!({"type":"token_usage_record","timestamp":"2026-10-01T00:00:00Z","payload":{
+                    "thread_id":"usage-history","session_id":"native-session","turn_id":format!("turn-{n:08}"),
+                    "response_id":format!("response-{n:08}-{}", "x".repeat(96)),"future_field":{"ignored":true},
+                    "usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,
+                        "cached_input_tokens":3,"cache_write_input_tokens":0,"reasoning_output_tokens":1}}});
+                writeln!(file, "{record}").unwrap();
+                if n == 0 {
+                    writeln!(file, "{record}").unwrap();
+                }
+            }
+            writeln!(file, "{}", json!({"type":"token_usage_record","payload":{
+                "thread_id":"usage-history","session_id":"native-session","turn_id":"zero","response_id":"zero",
+                "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,
+                    "cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}})).unwrap();
+            drop(file);
+            let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+            facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
+            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+
+            // Persist, release every Index, and reopen before unchanged repair.
+            {
+                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let index =
+                    crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+                assert_eq!(index.tokens("codex").input, count * 10);
+            }
+            let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            let revision = || {
+                db.query_row(
+                    "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+            };
+            let before = revision();
+            for _ in 0..3 {
+                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let index =
+                    crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+                assert_eq!(index.tokens("codex").input, count * 10);
+                assert_eq!(
+                    revision(),
+                    before,
+                    "unchanged metadata repair advanced source revision"
+                );
+            }
+
+            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let mut work = crate::viewer::lock(&evidence.work);
+            let mut complete = false;
+            for _ in 0..128 {
+                if evidence
+                    .refresh_catalog(&mut work, crate::model::now_ms())
+                    .unwrap()
+                {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(
+                complete,
+                "usage history prevented bounded Catalog convergence"
+            );
+            assert!(!evidence.catalog_pending(&work));
+            drop(work);
+            evidence.retire();
+            let (status, page) = fixture.body("scope=retained_history&limit=60");
+            assert_eq!(status, 200, "{page}");
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            let root_bytes: i64 = db
+                .query_row(
+                    "SELECT octet_length(value) FROM meta WHERE key=?1",
+                    [format!("native_tree_summary:{}", path.display())],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                root_bytes < 8192,
+                "tree root grew with usage history: {root_bytes}"
+            );
+            // Save a real semantic claim, evict the Tree representation during
+            // identity work, and require that same epoch to reach publication.
+            // This exercises the original witness_claim failure chain, beyond
+            // a successful small single-batch Catalog request.
+            let staged = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let mut work = crate::viewer::lock(&staged.work);
+            staged
+                .prepare_events(&mut work, crate::model::now_ms())
+                .unwrap();
+            assert_eq!(
+                work.events
+                    .as_mut()
+                    .unwrap()
+                    .begin_semantic_stage(
+                        &[path.to_string_lossy().into_owned()],
+                        &crate::native_evidence::query_runtime_generation(&fixture.options)
+                            .unwrap()
+                    )
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+            let epoch: i64 = db
+                .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+                .unwrap();
+            let stable_revision = revision();
+            let mut phases = std::collections::BTreeSet::new();
+            let mut repaired = false;
+            let mut finished = false;
+            for _ in 0..256 {
+                let phase: Option<String> = db
+                    .query_row("SELECT phase FROM catalog_semantic_stage", [], |r| r.get(0))
+                    .ok();
+                if let Some(phase) = phase {
+                    phases.insert(phase.clone());
+                    if phase == "identity" && !repaired {
+                        db.execute(
+                            "UPDATE meta SET value='malformed representation' WHERE key=?1",
+                            [format!("native_tree_summary:{}", path.display())],
+                        )
+                        .unwrap();
+                        // Evict every in-memory Index before forcing repair.
+                        work.events.as_mut().unwrap().release_published_indexes();
+                        repaired = true;
+                    }
+                    assert_eq!(
+                        db.query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r
+                            .get::<_, i64>(0))
+                            .unwrap(),
+                        epoch,
+                        "representation repair reset the semantic epoch"
+                    );
+                }
+                let complete = match staged.refresh_catalog(&mut work, crate::model::now_ms()) {
+                    Ok(complete) => complete,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && error.to_string().contains("projection repair pending") =>
+                    {
+                        false
+                    }
+                    Err(error) => panic!("semantic repair failed: {error}"),
+                };
+                assert_eq!(
+                    revision(),
+                    stable_revision,
+                    "representation repair invalidated its saved claim"
+                );
+                if complete {
+                    finished = true;
+                    break;
+                }
+            }
+            assert!(
+                finished && repaired,
+                "semantic representation repair did not finish"
+            );
+            for phase in ["indexing", "identity", "relations", "publication"] {
+                assert!(
+                    phases.contains(phase),
+                    "missing semantic phase {phase}: {phases:?}"
+                );
+            }
+            drop(work);
+            staged.retire();
+            assert_eq!(fixture.body("scope=retained_history&limit=60").0, 200);
+            eprintln!(
+                "usage-projection count={count} root_bytes={root_bytes} semantic_phases={phases:?} stable_epoch={epoch} revision_before={before} revision_after={}",
+                revision()
+            );
+        }
+    }
+
+    #[test]
     fn workspace_search_resumes_after_each_bounded_scan_frontier() {
         let a = Fixture::new();
         let b = Fixture::new();
@@ -3106,7 +3295,7 @@ mod tests {
                 connection
                     .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                     .unwrap(),
-                28
+                crate::events::store::SCHEMA_VERSION as u32
             );
         }
     }
@@ -3152,7 +3341,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            28
+            crate::events::store::SCHEMA_VERSION
         );
         assert_eq!(
             connection
