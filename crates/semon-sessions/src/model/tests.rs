@@ -4047,12 +4047,21 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
 
 #[test]
 fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
+    assert_staged_bidirectional_message_pages(80);
+}
+
+#[test]
+fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
+    assert_staged_bidirectional_message_pages(360);
+}
+
+fn assert_staged_bidirectional_message_pages(rounds: u32) {
     let home = Home::new();
     let mut alpha = vec![human("alpha", ts(6, 0), "Coordinate a conversation")];
     // Offset the two native message pages so the same send is observed with
     // different incident subsets. Its preceding receipt still owns its turn.
     let mut beta = vec![peer("beta", ts(6, 1), "prelude", "Outside", 101, "Start")];
-    for n in 0..80 {
+    for n in 0..rounds {
         let minute = 7 + n / 10;
         let second = (n % 10) * 4;
         let forward = format!("forward-{n:03}");
