@@ -508,6 +508,41 @@ impl NativeEvidence {
         ))
     }
 
+    fn semantic_write_conflict(
+        &self,
+        cache: &EventCache,
+        batch: &model::relation_stage::Batch,
+        operation: &'static str,
+        outcome: &crate::events::Outcome,
+    ) -> io::Error {
+        // Fixed labels, bounded counters and an existing opaque cache ID only.
+        // Never include paths, runtime/facts values, claims or native payloads.
+        let producer = crate::native_timing::id(&EventCache::path(&self.options.cache));
+        let kind = if operation == "finish" {
+            "completion"
+        } else {
+            "publication"
+        };
+        let reason =
+            cache
+                .semantic_rejection()
+                .unwrap_or(if *outcome == crate::events::Outcome::Stale {
+                    "store_version"
+                } else {
+                    "unspecified"
+                });
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "semantic {kind} changed: producer={producer} operation={operation} phase={:?} epoch={} revision={} sources={} outcome={outcome:?} reason={reason}",
+                batch.phase,
+                batch.epoch,
+                batch.source_revision,
+                batch.paths.len(),
+            ),
+        )
+    }
+
     /// Resume semantic work before the ordinary journal drain. Source claims
     /// remain pending until the epoch's relationships and owner projections are
     /// qualified; losing this Work does not lose any progress or grant readiness.
@@ -542,13 +577,11 @@ impl NativeEvidence {
         before_build()?;
         work.built_at = Some(Instant::now());
         if batch.paths.is_empty() {
-            if batch.phase == Phase::Publication
-                && cache.finish_semantic_stage(batch.epoch)? != crate::events::Outcome::Written
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "semantic completion changed",
-                ));
+            if batch.phase == Phase::Publication {
+                let outcome = cache.finish_semantic_stage(batch.epoch)?;
+                if outcome != crate::events::Outcome::Written {
+                    return Err(self.semantic_write_conflict(cache, &batch, "finish", &outcome));
+                }
             }
             return Ok(true);
         }
@@ -630,9 +663,15 @@ impl NativeEvidence {
             return Ok(true);
         }
         if outcome != crate::events::Outcome::Written {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "semantic publication changed",
+            return Err(self.semantic_write_conflict(
+                cache,
+                &batch,
+                if batch.phase == Phase::Publication {
+                    "publish"
+                } else {
+                    "record"
+                },
+                &outcome,
             ));
         }
         if batch.phase == Phase::Publication {
@@ -1955,6 +1994,49 @@ impl Snapshot {
 #[cfg(test)]
 mod catalog_owner_tests {
     use super::*;
+
+    #[test]
+    fn semantic_conflict_diagnostics_are_bounded_and_do_not_include_native_inputs() {
+        let (root, options, input) = audit_fixture();
+        let evidence = NativeEvidence::new(options.clone());
+        let cache = EventCache::open_scoped(&options.cache).unwrap();
+        let mut batch = model::relation_stage::Batch {
+            epoch: 7,
+            phase: model::relation_stage::Phase::Indexing,
+            paths: vec![input.full_path(&options).to_string_lossy().into_owned()],
+            source_revision: 9,
+            base_generation: Some("private-generation-value".into()),
+            runtime: "private-runtime-value".into(),
+            context: Default::default(),
+            relation_cursor: Some("private-relation-cursor".into()),
+        };
+        for operation in ["record", "publish", "finish"] {
+            if operation != "record" {
+                batch.phase = model::relation_stage::Phase::Publication;
+            }
+            let error = evidence.semantic_write_conflict(
+                &cache,
+                &batch,
+                operation,
+                &crate::events::Outcome::Conflict,
+            );
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            let message = error.to_string();
+            assert!(message.len() < 384);
+            assert!(message.contains(&format!("operation={operation}")));
+            assert!(
+                message
+                    .contains("epoch=7 revision=9 sources=1 outcome=Conflict reason=unspecified")
+            );
+            assert!(!message.contains(root.to_string_lossy().as_ref()));
+            assert!(!message.contains(&input.path));
+            assert!(!message.contains("private-"));
+        }
+        evidence.retire();
+        drop(cache);
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn audit_fixture() -> (PathBuf, Options, crate::Input) {
         let root = std::env::temp_dir().join(format!(

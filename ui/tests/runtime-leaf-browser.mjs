@@ -184,3 +184,62 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+for (const width of [390, 1280])
+  test(`unlinked mirrored history has no runtime warning block at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      await page.goto('about:blank');
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        const root = document.createElement('div');
+        document.body.append(root);
+        RuntimeLeaf.renderSessionScreen(
+          root,
+          {
+            id: 'mirrored',
+            name: 'Mirrored history',
+            order: [],
+            blocks: [
+              {
+                kind: 'loose',
+                key: 'body',
+                entries: [
+                  {
+                    kind: 'message',
+                    key: 'body',
+                    entryKey: 'body',
+                    flavor: 'assistant',
+                    text: 'Readable history',
+                  },
+                ],
+              },
+            ],
+            runtime: {
+              observation: null,
+              delivery: 'current',
+              reason: 'This history is mirrored; no owned managed environment is linked.',
+            },
+          },
+          {
+            committed() {},
+            trace() {},
+            session() {},
+            machine() {},
+            sender() {},
+            toolAll() {},
+            script() {},
+            image() {},
+            background() {},
+            pager() {},
+            jump() {},
+          },
+        );
+      });
+      assert.equal(await page.getByRole('region', { name: 'Environment status' }).count(), 0);
+      assert.equal(await page.getByText('Readable history', { exact: true }).count(), 1);
+    } finally {
+      await browser.close();
+    }
+  });

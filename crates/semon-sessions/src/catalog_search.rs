@@ -711,6 +711,7 @@ mod tests {
 
 #[derive(Clone)]
 pub(crate) struct Position {
+    pub(crate) inclusive: bool,
     pub(crate) last: i64,
     pub(crate) key: String,
 }
@@ -907,6 +908,7 @@ fn posting_page(
             statement
                 .query_map(rusqlite::params_from_iter(args), |row| {
                     Ok(Position {
+                        inclusive: false,
                         last: row.get(0)?,
                         key: row.get(1)?,
                     })
@@ -924,7 +926,15 @@ fn posting_page(
         let mut args = base.clone();
         args.push(rusqlite::types::Value::Integer(after.last));
         args.push(rusqlite::types::Value::Text(after.key.clone()));
-        read("last_ms=?3 AND session_key>?4", args, limit)?;
+        read(
+            if after.inclusive {
+                "last_ms=?3 AND session_key>=?4"
+            } else {
+                "last_ms=?3 AND session_key>?4"
+            },
+            args,
+            limit,
+        )?;
         let remaining = limit - found.len();
         if remaining > 0 {
             let mut args = base;
@@ -936,6 +946,7 @@ fn posting_page(
                 statement
                     .query_map(rusqlite::params_from_iter(args), |row| {
                         Ok(Position {
+                            inclusive: false,
                             last: row.get(0)?,
                             key: row.get(1)?,
                         })

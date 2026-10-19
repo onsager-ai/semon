@@ -341,3 +341,40 @@ test('outgoing human questions and peer relays retain the established heading an
   assert.equal(relay.parts[2].action.id, 'peer');
   assert.equal(relay.parts[0].action, undefined);
 });
+
+test('tool previews keep qualified expansion without repeating availability warnings in the transcript', () => {
+  const call = entry(0, 'turn', {
+    k: 'tool',
+    name: 'exec_command',
+    arg: 'synthetic command',
+    out: 'Recorded preview',
+    ok: true,
+    more: ['legacy-output-reference'],
+  });
+  for (const expanded of [false, true]) {
+    const shown = values(
+      catalogTranscriptBlocks([call], () =>
+        expanded
+          ? {
+              text: 'Complete recorded output',
+              note: 'Complete recorded text loaded.',
+            }
+          : {
+              note: 'Recorded text preview.',
+              action: { label: 'Load recorded text', busy: false, run() {} },
+            },
+      ),
+    ).flatMap((row) => (row.kind === 'group' ? row.entries : [row]));
+    assert.equal(shown.filter((item) => item.kind === 'tool').length, 1);
+    assert.equal(
+      shown.some((item) => item.kind === 'label' && item.text.includes('Full result unavailable')),
+      false,
+    );
+    assert.equal(shown.find((item) => item.kind === 'tool').step.data.more, undefined);
+    if (expanded)
+      assert.equal(
+        shown.find((item) => item.kind === 'tool').step.data.out,
+        'Complete recorded output',
+      );
+  }
+});
