@@ -46,9 +46,9 @@ jobs:
         run: |
           npm --prefix ui ci --no-audit --no-fund
           npm --prefix tests/ui ci --no-audit --no-fund
-      - name: Test the finite static preview server
+      - name: Test the static preview server and executable migration plan
         id: server-tests
-        run: node --test tests/ui/storybook-server.test.mjs
+        run: node --test tests/ui/storybook-server.test.mjs tests/ui/storybook-plan.test.mjs
       - name: Install pinned Playwright Chromium
         id: browser
         if: ${{ !cancelled() && steps.server-tests.outcome == 'success' }}
@@ -71,6 +71,9 @@ jobs:
         if: ${{ !cancelled() && steps.contract.outcome == 'success' }}
         continue-on-error: true
         run: npm --prefix tests/ui run storybook:capture
+      - name: Report functional rendering independently of approval
+        if: ${{ !cancelled() && steps.capture.outcome != 'skipped' }}
+        run: node tests/ui/storybook-report.mjs --render-only
       - name: Prepare authored formatting corrections for review
         if: ${{ !cancelled() }}
         run: |
@@ -88,30 +91,7 @@ jobs:
           if-no-files-found: warn
       - name: Report render failures separately from pending approvals
         if: ${{ always() && steps.capture.outcome != 'skipped' }}
-        run: |
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          const file = 'tests/ui/out/storybook/candidates/capture-report.json';
-          if (!fs.existsSync(file)) {
-            console.error('Storybook render failure: capture produced no report.');
-            process.exit(1);
-          }
-          const report = JSON.parse(fs.readFileSync(file, 'utf8'));
-          if (report.failures.length) {
-            console.error(`Storybook render/comparison failures: ${report.failures.length}`);
-            for (const failure of report.failures) console.error(`- ${failure}`);
-          }
-          if (report.pending.length) {
-            console.error(`Storybook references pending separate review: ${report.pending.length}`);
-            for (const key of report.pending) console.error(`- ${key}`);
-          }
-          if (report.failures.length || report.pending.length) process.exit(1);
-          if ('${{ steps.capture.outcome }}' !== 'success') {
-            console.error('Storybook capture step failed despite an empty report.');
-            process.exit(1);
-          }
-          console.log(`All ${report.results.length} Storybook captures matched reviewed references.`);
-          NODE
+        run: node tests/ui/storybook-report.mjs
   agents:
     runs-on: ubuntu-latest
     timeout-minutes: 5

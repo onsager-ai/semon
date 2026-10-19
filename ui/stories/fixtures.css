@@ -1,0 +1,8 @@
+/* Test-owned parent sizing only: the actual compact summary and disclosure keep
+   their production classes, tokens and geometry. No gutter is subtracted from
+   the declared 334/696px component widths. */
+.page.storybook-exact-reader {
+  width: 100%;
+  max-width: 696px;
+  padding-inline: 0;
+}

@@ -30,31 +30,75 @@ its completion witness is the native-publication success message in the CI log.
 
 ### Storybook owner and coverage crosswalk
 
-`storybook-contract.json` derives the required migration set from the current
-visual acceptance records, 39-frame visual coverage manifest, component-gallery
-states, and every top-level session-inspection pen frame. The contract lists all
-active roots and descendant frame IDs explicitly, and records the two historical
-linked-session roots superseded by the compact disclosure design. The optional
-hosted Sessions Machine-filter state maps to the production facet/select owners.
-Compact reader captures exercise the expanded related-session details at 334px
-and 696px; failure inspection captures expanded recorded tool output; catalog
-scope, tooltip, and Machine-filter captures assert their open states. Stories
-import Semon's production owners for Home, Sessions/Catalog, Sources candidates,
-Machines, Analytics, Trace, transcript states, menus, filters, sheets and shared
-controls. Existing served and native checks continue to exercise the actual
-application routes.
+`storybook-contract.json` inventories the current visual acceptance records,
+exact visual frames/regions/scopes, strict preservation states, component-gallery
+states and every real session-inspection pen frame. `storybook-state-bindings.json`
+binds every active frame explicitly to an executable story/interaction matrix or
+an exact existing served comparator key. Shared container captures require a
+written visible-ownership explanation. Historical standalone Sources navigation
+rows have explicit superseded dispositions under the current Sessions ownership
+contract; they are not claimed visible in a successor screenshot. Ancestor inheritance and regular-expression
+story aliases do not establish coverage. The two superseded linked-session roots
+retain their governing brief and descendant classifications.
+
+Every exported story has an expected state and assertions. Populated Recent uses
+the production shell/Recent renderers and asserts all six named rows, including
+nested descendants, inside the capture's viewport and clipping ancestors. The
+collapsed-tool story asserts the actual closed production step. Catalog and reader
+components claim their own content; complete route chrome remains bound to exact
+served frames. Machine details keep their route-specific frame/region keys and
+never resolve to the Machines inventory story. Compact component fixtures assert
+actual 334/696px widths, using test-owned parent sizing with production child CSS.
+Keyboard, touch, focus, tooltip, open account/drawer, sheet/panel, source scope,
+loading, empty, failure, long text and 41-line failed output have explicit states.
+The modal teardown event belongs only to the story owner, so teardown executes
+while the modal is open, followed by cleanup and an operable remount.
 
 After `npm --prefix ui run storybook:build`,
 `npm --prefix tests/ui run storybook:contract` derives each required frame and
 exact acceptance record, verifies the story IDs against Storybook's built index,
-and rejects unknown, missing or orphaned mappings. `npm --prefix
+and rejects unknown, missing, duplicate or orphaned mappings. Contract validation
+and capture share `storybook-plan.mjs`; tests cover singular-action regressions,
+viewport-specific sequences, scoped teardown and invalid reference provenance.
+`npm --prefix
 tests/ui run storybook:capture` captures each story at 390, 820 and 1280 CSS
 pixels in light and dark schemes, then runs the required interaction captures
-at their declared widths. The report pins the browser version, source and
-fixture digests, fonts and lockfile, locale, timezone and clock. Captures write
+at their declared widths. A failed assertion or omitted capture stays a failure.
+The report pins the browser version, imported production sources, preview/fixture
+digests, fonts and lockfiles, locale, timezone and clock. Captures write
 candidate images and a report to the usual UI output directory. The reference map is deliberately empty while
 these Storybook captures await separate review. A missing or unapproved
 reference is a pending failure; capture cannot write or approve a baseline.
+The v2 reference schema requires image, source and capture digests, exact
+story/state/viewport/theme, fixed thresholds, review provenance and an explanation
+of source/state/geometry equivalence. Native accepted PNG bindings do not
+automatically approve a different Storybook composition.
+
+The approved source digest and reviewed revision describe the historical
+reference. They need not match a later candidate's production source digest or
+revision. Capture validates that historical provenance, the reference image hash
+and the unchanged capture/state/viewport/theme contract before comparing current
+pixels with the historical image at the fixed thresholds. Reports retain current
+candidate provenance and historical reference provenance separately; a source edit
+with unchanged pixels does not require bulk reference reapproval.
+
+Assertions apply an optional text filter before checking cardinality. Visible,
+hidden and focused assertions default to exactly one matching element; `absent`
+requires zero matches across the entire selector, and `hidden` requires a present
+hidden node. An explicit plural `count` requires a `rows` array of that length with
+distinct attribute identities and expected text in DOM order. Capture waits for
+the exact count, checks every row's visibility/identity/text and rechecks the count.
+Unexpected extra matches fail with a cardinality error. The current catalog
+fixture has one declared `session-1` row; the SessionRow fixture declares both
+parent and child. A synthetic six-row regression covers plural visibility,
+missing/extra/hidden rows and incorrect identities/text without selecting a first
+match. Status paragraphs keep their unique expected-text filter; account menu
+assertions scope the actual `.account-popover` owner.
+`node tests/ui/storybook-report.mjs --render-only` diagnoses functional rendering;
+`node tests/ui/storybook-report.mjs` remains the final approval gate and fails for
+candidate-only images. Both cross-check the full contract report and exact result
+keys. The [migration handoff](../../docs/design/session-inspection/storybook-migration-handoff.md)
+records the CI-only checkpoint commands and deferred workflow activation.
 Existing pixel thresholds, ratchets, masks, dimensions, required captures and
 the served/native interaction suites stay under their current comparators.
 

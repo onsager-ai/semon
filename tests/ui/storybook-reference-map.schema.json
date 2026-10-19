@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reviewed Storybook references (candidate capture never writes this map)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "version", "approved", "pending"],
+  "properties": {
+    "$schema": {"const": "./storybook-reference-map.schema.json"},
+    "version": {"const": 2},
+    "pending": {"type": "string", "minLength": 1},
+    "approved": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision", "path", "sha256", "storyId", "width", "scheme", "threshold", "maxRatio", "sourceDigest", "captureDigest", "reviewedRevision", "reviewedBy", "reviewedAt", "rationale", "provenance"],
+        "properties": {
+          "decision": {"const": "accepted"},
+          "path": {"type": "string", "pattern": "^baselines/storybook/.+\\.png$"},
+          "sha256": {"$ref": "#/$defs/digest"},
+          "storyId": {"type": "string", "pattern": "^semon-production-owners--.+$"},
+          "interactionId": {"type": "string", "minLength": 1},
+          "width": {"enum": [334, 390, 696, 820, 1280]},
+          "scheme": {"enum": ["light", "dark"]},
+          "threshold": {"const": 0.1},
+          "maxRatio": {"const": 0.0001},
+          "sourceDigest": {"$ref": "#/$defs/digest", "description": "Historical source digest of the reviewed reference; it need not equal the current candidate source digest."},
+          "captureDigest": {"$ref": "#/$defs/digest", "description": "Exact capture contract identity, independent of production source bytes."},
+          "reviewedRevision": {"type": "string", "pattern": "^[a-f0-9]{40}$", "description": "Historical revision inspected for this reference approval."},
+          "reviewedBy": {"type": "string", "minLength": 1},
+          "reviewedAt": {"type": "string", "format": "date-time"},
+          "rationale": {"type": "string", "minLength": 1},
+          "provenance": {
+            "type": "object", "additionalProperties": false,
+            "required": ["source", "state", "geometry"],
+            "properties": {
+              "source": {"type": "string", "minLength": 1},
+              "state": {"type": "string", "minLength": 1},
+              "geometry": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+}

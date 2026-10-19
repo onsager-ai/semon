@@ -32,6 +32,14 @@ The preview loads the canonical viewer, select and shell styles, font subsets,
 and harness mark from their source locations; it does not serve the crate source
 directory or use pen.dev credentials.
 
+`tsconfig.storybook.json` inherits strict authored-source checking and sets
+`skipLibCheck: true` only for this workbench. CI run 39260976777 exposed errors
+inside upstream Storybook declarations referring to optional React and
+`@storybook/react` renderer peers; the extracted failure log reported no authored
+preview/story error. Skipping declaration internals avoids installing unused
+renderers or adding declaration stubs. Authored errors still fail this tsc command.
+Production `tsconfig.lib.json` retains `strict: true` and `skipLibCheck: false`.
+
 ```sh
 npm --prefix ui run storybook
 npm --prefix ui run storybook:typecheck
@@ -48,6 +56,9 @@ missing or unapproved captures remain pending failures. CI never writes or
 approves references. The Storybook contract crosswalk maps required visual
 states to real owner stories or the existing served/native product checks; it
 does not replace those checks or alter their comparators.
+The compact reader's test-owned parent omits workbench/page horizontal gutters
+and caps at 696px so its 334/696px captures verify actual component width. Its
+production summary/disclosure markup, tokens and touch rules are unchanged.
 
 `src/lib/index.ts` is the shared component/type entry; lib modules import no
 viewer state. `src/application.ts` exposes the typed application mount/destroy boundary.

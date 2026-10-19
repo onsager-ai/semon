@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "stateBindings": "storybook-state-bindings.json",
   "ownedStoryPrefix": "semon-production-owners--",
   "storyIndex": "storybook-static/index.json",
   "referenceMap": "storybook-reference-map.json",
@@ -125,6 +126,7 @@
       ],
       "storyIds": [
         "semon-production-owners--compact-reader",
+        "semon-production-owners--collapsed-tool",
         "semon-production-owners--failure-inspection",
         "semon-production-owners--transcript-empty",
         "semon-production-owners--long-transcript"
@@ -186,56 +188,40 @@
   "visualCoverage": {
     "source": "visual-coverage.json",
     "servedCheck": "visual-pixels",
-    "storyRules": [
-      {
-        "pattern": "^analytics$",
-        "storyIds": [
-          "semon-production-owners--analytics-loaded"
-        ]
-      },
-      {
-        "pattern": "^home$",
-        "storyIds": [
-          "semon-production-owners--home"
-        ]
-      },
-      {
-        "pattern": "^machines?$|^machine-",
-        "storyIds": [
-          "semon-production-owners--machines"
-        ]
-      },
-      {
-        "pattern": "^session-",
-        "storyIds": [
-          "semon-production-owners--compact-reader",
-          "semon-production-owners--failure-inspection",
-          "semon-production-owners--long-transcript"
-        ]
-      },
-      {
-        "pattern": "^sessions$",
-        "storyIds": [
-          "semon-production-owners--sessions-catalog"
-        ]
-      },
-      {
-        "pattern": "^trace-",
-        "storyIds": [
-          "semon-production-owners--trace-flow"
-        ]
-      },
-      {
-        "pattern": "^drawer$",
-        "storyIds": [
-          "semon-production-owners--component-gallery"
-        ]
-      }
-    ]
+    "frames": [
+      "analytics", "drawer", "home", "machine-laptop", "machines",
+      "session-a-docs", "session-a-index", "session-a-parse", "session-a-review",
+      "session-a-review-grep", "session-a-scan", "session-a-store", "session-advisor",
+      "session-atlas", "session-atlas-ingest", "session-deps", "session-h-codex",
+      "session-h-failed", "session-h-review", "session-h-review-codex", "session-harbor",
+      "session-l-sub", "session-ledger", "session-principal", "session-q-codex",
+      "session-q-plan", "session-quill", "session-sentinel", "sessions",
+      "trace-a-review-a-h-review", "trace-atlas-h12", "trace-atlas-ingest-a-ask",
+      "trace-h-review-h3", "trace-harbor-h1", "trace-ledger-h16", "trace-principal-h8",
+      "trace-quill-h4", "trace-sentinel-sentinel_0"
+    ],
+    "referenceDisposition": "preserve-exact-served-comparator",
+    "scopes": {
+      "main": {"frames": "all", "schemes": ["phone-light", "phone-dark", "desktop-light"]},
+      "two-machines": {"frames": ["machines", "machine-laptop", "machine-desktop"], "schemes": ["phone-light", "phone-dark", "desktop-light", "desktop-dark"]},
+      "pushed": {"frames": ["home", "sessions", "analytics", "session-harbor", "session-deps"], "schemes": ["phone-light", "phone-dark", "desktop-light"]}
+    },
+    "regions": [
+      {"name": "machine-content", "selector": "#page", "top": true, "screens": ["machine-"]},
+      {"name": "topbar", "selector": "#topbar", "top": true, "screens": ["home", "sessions", "machines", "machine-", "session-"]},
+      {"name": "menu", "selector": "dialog.panel", "open": "#more-btn", "screens": ["session-harbor", "session-atlas-ingest", "session-deps"]},
+      {"name": "transcript", "selector": "#page section[aria-label=\"Transcript\"]", "screens": ["session-"]}
+    ],
+    "expectedState": "Each exact route and region is captured by pixels.mjs against the pinned complete application; machine details retain their own route and #page geometry. These are not aliases for component stories."
   },
   "preservation": {
     "source": "preservation-contract.mjs",
-    "servedCheck": "preservation"
+    "servedCheck": "preservation",
+    "states": ["home", "sessions", "session-harbor", "harbor-thinking-open", "harbor-tools-open", "harbor-tool-output-open", "session-atlas-ingest", "session-deps", "session-h-failed", "analytics", "sessions-filter-open"],
+    "widths": [390, 820, 1280],
+    "schemes": ["light", "dark"],
+    "phoneOnlyStates": ["drawer"],
+    "referenceDisposition": "preserve-exact-served-comparator"
   },
   "visualAcceptance": {
     "source": "visual-acceptance.json",
@@ -246,6 +232,8 @@
   },
   "gallery": {
     "source": "gallery-visual.json",
+    "states": ["primitives", "select", "account", "sheet", "panel"],
+    "widths": [390, 820, 1280], "schemes": ["light", "dark"], "threshold": 0.1, "maxRatio": 0.001,
     "storyIds": [
       "semon-production-owners--component-gallery"
     ],
@@ -254,102 +242,29 @@
   "pen": {
     "source": "../../docs/design/session-inspection/session-inspection.pen",
     "roots": [
-      {
-        "id": "Nt3eb",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--sessions-catalog"
-        ]
-      },
-      {
-        "id": "BYbh8",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--filtered-catalog"
-        ]
-      },
-      {
-        "id": "raaGL",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--session-row"
-        ]
-      },
-      {
-        "id": "gZYIY",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--filtered-catalog"
-        ]
-      },
-      {
-        "id": "nGo6u",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--failure-inspection",
-          "semon-production-owners--long-transcript"
-        ]
-      },
-      {
-        "id": "Oo357",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--catalog-loading",
-          "semon-production-owners--catalog-empty",
-          "semon-production-owners--catalog-failure",
-          "semon-production-owners--loading-empty-error",
-          "semon-production-owners--keyboard-focus",
-          "semon-production-owners--source-candidates"
-        ]
-      },
-      {
-        "id": "gbtK3",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--sessions-catalog"
-        ]
-      },
-      {
-        "id": "vGVHj",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--compact-reader",
-          "semon-production-owners--long-transcript"
-        ]
-      },
+      {"id": "Nt3eb", "disposition": "active"},
+      {"id": "BYbh8", "disposition": "active"},
+      {"id": "raaGL", "disposition": "active"},
+      {"id": "gZYIY", "disposition": "active"},
+      {"id": "nGo6u", "disposition": "active"},
+      {"id": "Oo357", "disposition": "active"},
+      {"id": "gbtK3", "disposition": "active"},
+      {"id": "vGVHj", "disposition": "active"},
       {
         "id": "S2P8p",
         "disposition": "superseded",
-        "storyIds": [],
-        "reason": "Design brief section 10 supersedes this historical linked-session composition with compact session disclosure."
+        "reason": "Design brief section 10 supersedes this historical linked-session composition with compact session disclosure.",
+        "decisionSource": "docs/design/ui-design-brief.md"
       },
       {
         "id": "WIlub",
         "disposition": "superseded",
-        "storyIds": [],
-        "reason": "Design brief section 10 supersedes this historical linked-session composition with compact session disclosure."
+        "reason": "Design brief section 10 supersedes this historical linked-session composition with compact session disclosure.",
+        "decisionSource": "docs/design/ui-design-brief.md"
       },
-      {
-        "id": "uGNh2",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--compact-reader"
-        ]
-      },
-      {
-        "id": "pkKQT",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--compact-reader"
-        ]
-      },
-      {
-        "id": "workspaceSessions20261019",
-        "disposition": "active",
-        "storyIds": [
-          "semon-production-owners--machine-filter"
-        ]
-      }
+      {"id": "uGNh2", "disposition": "active"},
+      {"id": "pkKQT", "disposition": "active"},
+      {"id": "workspaceSessions20261019", "disposition": "active"}
     ],
     "activeDescendantGroups": [
       {
@@ -492,36 +407,6 @@
         "ids": []
       }
     ],
-    "descendantStories": {
-      "workspaceSessions20261019": [
-        "semon-production-owners--machine-filter"
-      ],
-      "uGNh2": [
-        "semon-production-owners--compact-reader"
-      ],
-      "FPbSc": [
-        "semon-production-owners--compact-reader"
-      ],
-      "DikBn": [
-        "semon-production-owners--compact-reader"
-      ],
-      "GdtyG": [
-        "semon-production-owners--compact-reader"
-      ],
-      "S8I0nF": [
-        "semon-production-owners--compact-reader"
-      ],
-      "kD4Pe": [
-        "semon-production-owners--failure-inspection"
-      ],
-      "V6i5L": [
-        "semon-production-owners--failure-inspection"
-      ],
-      "C3JzD2": [
-        "semon-production-owners--filtered-catalog"
-      ]
-    },
-    "servedCheck": "visual-pixels",
     "supersededDescendantGroups": [
       {
         "root": "S2P8p",
@@ -547,16 +432,19 @@
       "storyId": "semon-production-owners--compact-reader",
       "widths": [
         334,
-        696
+        390,
+        696,
+        820,
+        1280
       ],
       "schemes": [
         "light",
         "dark"
       ],
-      "action": {
+      "actions": [{
         "kind": "click",
         "selector": "button[aria-label=\"Expand Check the phone layout details\"]"
-      },
+      }],
       "assertions": [
         {
           "kind": "visible",
@@ -575,21 +463,32 @@
       "id": "failed-tool-output-expanded",
       "storyId": "semon-production-owners--failure-inspection",
       "widths": [
+        390,
+        820,
         1280
       ],
       "schemes": [
         "light",
         "dark"
       ],
-      "action": {
+      "actions": [{
         "kind": "click",
         "selector": "[data-e=\"failed-tool\"] button"
-      },
+      }],
       "assertions": [
         {
           "kind": "visible",
           "selector": "[data-e=\"failed-tool\"] .out",
-          "text": "Expected the recorded child result and trace action to remain visible."
+          "text": "test result: FAILED. 127 passed; 1 failed"
+        },
+        {
+          "kind": "visible",
+          "selector": "[data-e=\"failed-tool\"] .viewall",
+          "text": "View all 41 lines"
+        },
+        {
+          "kind": "visible",
+          "selector": "[data-e=\"failed-tool\"] .io .copy[aria-label=\"Copy\"]"
         }
       ],
       "frames": [
@@ -601,16 +500,18 @@
       "id": "source-scope-expanded",
       "storyId": "semon-production-owners--filtered-catalog",
       "widths": [
+        390,
+        820,
         1280
       ],
       "schemes": [
         "light",
         "dark"
       ],
-      "action": {
+      "actions": [{
         "kind": "click",
         "selector": "details.catalog-scope > summary"
-      },
+      }],
       "assertions": [
         {
           "kind": "visible",
@@ -633,11 +534,11 @@
         "light",
         "dark"
       ],
-      "action": {
+      "actions": [{
         "kind": "hover",
-        "selector": "button[data-tip]"
-      },
-      "waitMs": 650,
+        "selector": "button[data-tip]",
+        "waitMs": 650
+      }],
       "assertions": [
         {
           "kind": "visible",
@@ -685,6 +586,7 @@
       "storyId": "semon-production-owners--gallery-lifecycle",
       "widths": [
         390,
+        820,
         1280
       ],
       "schemes": [
@@ -704,12 +606,12 @@
           ]
         },
         {
-          "kind": "click",
-          "selector": "button[aria-label=\"Unmount gallery\"]",
+          "kind": "owner-unmount",
+          "selector": "[data-storybook-owner=\"gallery-lifecycle\"]",
           "assertionsAfter": [
             {
               "kind": "absent",
-              "selector": "dialog[open]"
+              "selector": "dialog"
             },
             {
               "kind": "absent",
@@ -728,12 +630,26 @@
         {
           "kind": "click",
           "selector": "button[aria-label=\"Mount gallery\"]"
+        },
+        {
+          "kind": "click",
+          "selector": "#sheet-trigger",
+          "assertionsAfter": [{ "kind": "visible", "selector": "dialog[open]" }]
+        },
+        {
+          "kind": "press",
+          "selector": "dialog[open]",
+          "key": "Escape"
         }
       ],
       "postCaptureAssertions": [
         {
           "kind": "visible",
           "selector": "#sheet-trigger"
+        },
+        {
+          "kind": "absent",
+          "selector": "dialog[open]"
         }
       ],
       "frames": []
@@ -742,6 +658,7 @@
       "storyId": "semon-production-owners--component-gallery",
       "widths": [
         390,
+        820,
         1280
       ],
       "schemes": [
@@ -768,6 +685,7 @@
       "storyId": "semon-production-owners--component-gallery",
       "widths": [
         390,
+        820,
         1280
       ],
       "schemes": [
@@ -794,6 +712,7 @@
       "storyId": "semon-production-owners--component-gallery",
       "widths": [
         390,
+        820,
         1280
       ],
       "schemes": [
@@ -802,19 +721,80 @@
       ],
       "frames": [],
       "id": "gallery-account-menu-open",
-      "actions": [
-        {
-          "kind": "click",
-          "selector": "button[aria-label=\"Ada Example account menu\"]"
-        }
-      ],
+      "widthActions": {
+        "390": [
+          { "kind": "tap", "selector": "#lead-btn" },
+          { "kind": "tap", "selector": "#account-drawer .account-trigger" }
+        ],
+        "1280": [
+          { "kind": "click", "selector": "#topbar .account-widget-desktop button[aria-label=\"Ada Example account menu\"]" }
+        ],
+        "820": [
+          { "kind": "tap", "selector": "#topbar .account-widget-desktop .account-trigger" }
+        ]
+      },
+      "actions": [],
       "assertions": [
         {
           "kind": "visible",
-          "selector": "[role=\"menu\"]",
+          "selector": ".account-popover[role=\"menu\"]",
           "text": "Sign out"
         }
       ]
+    },
+    {
+      "id": "gallery-select-keyboard",
+      "storyId": "semon-production-owners--component-gallery",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"], "frames": [],
+      "actions": [
+        {"kind": "focus", "selector": "#select-root .sh-select-trigger"},
+        {"kind": "press", "selector": "#select-root .sh-select-trigger", "key": "ArrowDown"}
+      ],
+      "assertions": [{"kind": "visible", "selector": "[role=\"listbox\"]"}, {"kind": "visible", "selector": "[role=\"option\"][data-value=\"new\"]", "text": "Newest first"}],
+      "postCaptureActions": [{"kind": "press", "selector": "[role=\"listbox\"]", "key": "Escape"}],
+      "postCaptureAssertions": [{"kind": "focused", "selector": "#select-root .sh-select-trigger"}, {"kind": "hidden", "selector": "[role=\"listbox\"]"}]
+    },
+    {
+      "id": "tooltip-keyboard",
+      "storyId": "semon-production-owners--tooltip",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"], "frames": [],
+      "actions": [{"kind": "focus", "selector": "button[data-tip]", "waitMs": 650}],
+      "assertions": [{"kind": "focused", "selector": "button[data-tip]"}, {"kind": "visible", "selector": "[role=\"tooltip\"]", "text": "A recorded source may be incomplete while history loads."}]
+    },
+    {
+      "id": "recent-phone-drawer",
+      "storyId": "semon-production-owners--navigation-recent",
+      "widths": [390], "schemes": ["light", "dark"], "frames": [],
+      "actions": [{"kind": "tap", "selector": "#lead-btn"}],
+      "assertions": [
+        {"kind": "visible", "selector": "#sidebar", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"deps\"]", "text": "deps audit", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"offline\"]", "text": "feat/offline-sync", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"review\"]", "text": "Review offline-sync diff", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"flush\"]", "text": "Check flush ordering", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"harbor\"]", "text": "harbor", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"retry\"]", "text": "Check retry safety", "inViewport": true}
+      ],
+      "postCaptureActions": [{"kind": "press", "selector": "#drawer-close", "key": "Escape"}],
+      "postCaptureAssertions": [{"kind": "hidden", "selector": "#sidebar"}]
+    },
+    {
+      "id": "recent-keyboard-collapse",
+      "storyId": "semon-production-owners--navigation-recent",
+      "widths": [820, 1280], "schemes": ["light", "dark"], "frames": [],
+      "actions": [{"kind": "focus", "selector": ".treeitem[data-id=\"offline\"] > .tree-row .srow"}, {"kind": "press", "selector": ".treeitem[data-id=\"offline\"] > .tree-row .srow", "key": "ArrowLeft"}],
+      "assertions": [{"kind": "visible", "selector": ".treeitem[data-id=\"offline\"][aria-expanded=\"false\"]"}, {"kind": "hidden", "selector": ".srow[data-id=\"review\"]"}],
+      "postCaptureActions": [{"kind": "press", "selector": ".treeitem[data-id=\"offline\"] > .tree-row .srow", "key": "ArrowRight"}],
+      "postCaptureAssertions": [{"kind": "visible", "selector": ".srow[data-id=\"review\"]"}, {"kind": "visible", "selector": ".srow[data-id=\"flush\"]"}]
+    },
+    {
+      "id": "compact-keyboard-expanded",
+      "storyId": "semon-production-owners--compact-reader",
+      "widths": [334, 390, 696, 820, 1280], "schemes": ["light", "dark"], "frames": [],
+      "actions": [{"kind": "focus", "selector": "button.cc-toggle"}, {"kind": "press", "selector": "button.cc-toggle", "key": "Enter"}],
+      "assertions": [{"kind": "visible", "selector": ".cc-details", "text": "The name, status and disclosure remain visible."}, {"kind": "focused", "selector": "button.cc-toggle[aria-expanded=\"true\"]"}],
+      "postCaptureActions": [{"kind": "press", "selector": "button.cc-toggle", "key": "Enter"}],
+      "postCaptureAssertions": [{"kind": "hidden", "selector": ".cc-details"}, {"kind": "focused", "selector": "button.cc-toggle[aria-expanded=\"false\"]"}]
     }
   ]
 }
