@@ -3160,8 +3160,7 @@ export function createCatalogViewer(
       const previousLabel = sourceLabel(view.sourceKey);
       if (active === view && selection.accept(ticket, reply.identity)) {
         if (selection.selectedIdentity()?.owner_qualification === 'provisional')
-          view.note =
-            'Session identity is provisional while history is being discovered.';
+          view.note = 'Session identity is provisional while history is being discovered.';
         else if (view.note.startsWith('Session identity is provisional')) view.note = '';
         if (previousLabel !== sourceLabel(view.sourceKey)) {
           view.renderedRevision = -1;
