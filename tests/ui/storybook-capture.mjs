@@ -47,6 +47,8 @@ const output = path.resolve(
 );
 fs.mkdirSync(output, { recursive: true });
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const progress = (key, stage, startedAt) =>
+  console.log(`[storybook-capture] ${key} stage=${stage} elapsedMs=${Date.now() - startedAt}`);
 const provenanceFiles = [
   'ui/stories/ProductionSurfaces.stories.tsx',
   'ui/stories/fixtures.css',
@@ -172,11 +174,15 @@ function compareReference(item, bytes, result) {
 let browser,
   server,
   browserVersion = null;
+const runStartedAt = Date.now();
 try {
+  progress('run', 'server setup', runStartedAt);
   server = await createStorybookServer(storyDir);
+  progress('run', 'browser setup', runStartedAt);
   browser = await launch({ baselineRaster: true });
   browserVersion = browser.version();
   const captureOne = async (item) => {
+    const itemStartedAt = Date.now();
     const { storyId, width, scheme } = item;
     const viewport = item.viewport ?? {
       width,
@@ -185,6 +191,7 @@ try {
       isMobile: width <= 390,
       hasTouch: width < 1000,
     };
+    progress(item.key, 'context creation', itemStartedAt);
     const context = await browser.newContext({
       viewport: { width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor,
@@ -204,6 +211,7 @@ try {
     };
     try {
       if (item.legacyKey && !item.legacyKey.startsWith('gallery:')) {
+        progress(item.key, 'native init setup', itemStartedAt);
         const native = nativeWitness(process.env.SEMON_STORYBOOK_NATIVE_ARTIFACT_ROOT, item).value;
         result.nativeStateDigest = sha256(JSON.stringify(native.preferences));
         await context.addInitScript((preferences) => {
@@ -212,6 +220,7 @@ try {
             else localStorage.setItem(key, value);
         }, native.preferences);
       }
+      progress(item.key, 'clock setup', itemStartedAt);
       await context.clock.install({ time: new Date(item.clock ?? '2026-10-19T12:00:00.000Z') });
       const page = await context.newPage();
       await context.route('**/*', (route) =>
@@ -227,28 +236,36 @@ try {
       const args = Object.entries(item.args ?? {})
         .map(([key, value]) => `${key}:${value}`)
         .join(';');
+      progress(item.key, 'navigation', itemStartedAt);
       await page.goto(
         `${server.origin}/iframe.html?id=${encodeURIComponent(storyId)}&viewMode=story&globals=theme%3A${scheme}${args ? '&args=' + encodeURIComponent(args) : ''}`,
         { waitUntil: 'networkidle', timeout: 30000 },
       );
+      progress(item.key, 'root readiness', itemStartedAt);
       await page.waitForSelector('#storybook-root > *', { timeout: 15000 });
-      if (item.legacyKey && !item.legacyKey.startsWith('gallery:'))
+      if (item.legacyKey && !item.legacyKey.startsWith('gallery:')) {
+        progress(item.key, 'native readiness', itemStartedAt);
         await page.waitForSelector('[data-storybook-route="legacy"][data-native-ready="true"]');
+      }
       // Region menus are opened over the native top position. Cancel initial
       // following before the modal makes the topbar inert, as pixels.mjs does
       // when its preceding topbar region is captured.
       if (item.capture?.scroll === 'region-top')
         await applyCaptureScroll(page, item.capture.scroll);
+      progress(item.key, 'actions', itemStartedAt);
       await perform(page, item.actions);
+      progress(item.key, 'assertions', itemStartedAt);
       await verifyAssertions(page, item.assertions);
       if (storyId.endsWith('--keyboard-focus'))
         await verifyAssertions(page, [{ kind: 'focused', selector: '[data-session-row="list"]' }]);
+      progress(item.key, 'fonts and paint', itemStartedAt);
       await page.evaluate(async () => {
         await document.fonts.ready;
         await document.fonts.load('400 16px "Instrument Sans"');
         await document.fonts.load('400 12px "JetBrains Mono"');
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       });
+      progress(item.key, 'geometry and scroll', itemStartedAt);
       const geometry = await page.evaluate(() => ({
         sans: document.fonts.check('400 16px "Instrument Sans"'),
         mono: document.fonts.check('400 12px "JetBrains Mono"'),
@@ -333,6 +350,7 @@ try {
         if (item.legacyKey) witness = await presentationWitness(page, item.capture?.selector);
         return bytes;
       };
+      progress(item.key, 'screenshot and witness', itemStartedAt);
       const bytes = item.capture?.stablePaint
         ? await withCapturePaint(page, captureWithWitness)
         : await captureWithWitness();
@@ -348,6 +366,7 @@ try {
         fs.writeFileSync(witnessPath, JSON.stringify(witness, null, 2) + '\n');
         result.presentationWitness = path.relative(here, witnessPath);
       }
+      progress(item.key, 'post-capture assertions', itemStartedAt);
       await perform(page, item.postCaptureActions);
       await verifyAssertions(page, item.postCaptureAssertions);
       if (pageErrors.length) throw new Error(pageErrors.join('; '));
@@ -356,14 +375,18 @@ try {
         compareReference(item, bytes, result);
       } catch (error) {
         result.comparisonError = error instanceof Error ? error.message : String(error);
+        progress(item.key, 'comparison error', itemStartedAt);
         failures.push(`${item.key}: ${result.comparisonError}`);
       }
     } catch (error) {
+      progress(item.key, 'error', itemStartedAt);
       result.error = error instanceof Error ? error.message : String(error);
       failures.push(`${item.key}: ${result.error}`);
     } finally {
       results.push(result);
+      progress(item.key, 'cleanup', itemStartedAt);
       await context.close();
+      progress(item.key, 'completed', itemStartedAt);
     }
   };
   // The complete inventory contains hundreds of isolated pages. Three bounded
@@ -389,8 +412,14 @@ try {
     }),
   );
 } finally {
-  if (browser) await browser.close();
-  if (server) await server.close();
+  if (browser) {
+    progress('run', 'browser teardown', runStartedAt);
+    await browser.close();
+  }
+  if (server) {
+    progress('run', 'server teardown', runStartedAt);
+    await server.close();
+  }
 }
 
 const expectedKeys = new Set(plan.map((item) => item.key));
