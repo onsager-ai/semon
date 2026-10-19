@@ -1710,7 +1710,9 @@ impl EventCache {
         owners: &[String],
         after: &str,
     ) -> io::Result<crate::model::relation_stage::Context> {
-        self.store.as_mut().ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .semantic_replay_page(epoch, owners, after)
             .map_err(|error| io::Error::other(error.to_string()))
     }

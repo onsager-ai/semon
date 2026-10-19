@@ -67,8 +67,7 @@ impl Projection {
             return Ok(self);
         };
         for edge in &mut self.edges {
-            let Some(relation) = edge["id"].as_str().and_then(|id| origins.get(id))
-            else {
+            let Some(relation) = edge["id"].as_str().and_then(|id| origins.get(id)) else {
                 continue;
             };
             if edge["from"].as_str() != Some(relation.from.as_str())
