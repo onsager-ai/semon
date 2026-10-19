@@ -123,8 +123,14 @@ addStories(
   [...routeStoryIds, 'semon-legacy-gallery--gallery'],
   'complete legacy presentation owners',
 );
-const routeExports = fs.readFileSync(path.join(root, 'ui/stories/LegacyRoutes.stories.tsx'), 'utf8');
-if (!routeExports.includes("from './LegacyNativeRoute'") || !routeExports.includes('component: NativeRouteOwner'))
+const routeExports = fs.readFileSync(
+  path.join(root, 'ui/stories/LegacyRoutes.stories.tsx'),
+  'utf8',
+);
+if (
+  !routeExports.includes("from './LegacyNativeRoute'") ||
+  !routeExports.includes('component: NativeRouteOwner')
+)
   errors.push('Legacy exports lost the native presentation composition');
 const routeSource = fs.readFileSync(path.join(root, 'ui/stories/LegacyNativeRoute.tsx'), 'utf8');
 for (const owner of [
@@ -142,17 +148,41 @@ for (const owner of [
   if (!routeSource.includes(owner + '('))
     errors.push('Missing production route presentation owner ' + owner);
 const overviewSource = fs.readFileSync(path.join(root, 'ui/src/app/overviewPages.tsx'), 'utf8');
-for (const owner of ['renderHomeScreen', 'renderMachinesScreen', 'renderMachineScreen', 'renderAnalyticsPresentation', 'selectRecentChildren', 'selectRecentRoots'])
-  if (!overviewSource.includes(owner + '(')) errors.push('Native overview lost production presentation owner ' + owner);
-const nativeRecords = JSON.parse(fs.readFileSync(path.join(root, 'ui/stories/LegacyNative.records.json'), 'utf8'));
-if (nativeRecords.version !== 1 || !/^[a-f0-9]{40}$/.test(nativeRecords.sourceRevision ?? '') ||
-    (process.env.GITHUB_SHA && nativeRecords.sourceRevision !== process.env.GITHUB_SHA))
-  errors.push('Legacy native fixture records must be generated from this exact CI head before Storybook build');
+for (const owner of [
+  'renderHomeScreen',
+  'renderMachinesScreen',
+  'renderMachineScreen',
+  'renderAnalyticsPresentation',
+  'selectRecentChildren',
+  'selectRecentRoots',
+])
+  if (!overviewSource.includes(owner + '('))
+    errors.push('Native overview lost production presentation owner ' + owner);
+const nativeRecords = JSON.parse(
+  fs.readFileSync(path.join(root, 'ui/stories/LegacyNative.records.json'), 'utf8'),
+);
+if (
+  nativeRecords.version !== 1 ||
+  !/^[a-f0-9]{40}$/.test(nativeRecords.sourceRevision ?? '') ||
+  (process.env.GITHUB_SHA && nativeRecords.sourceRevision !== process.env.GITHUB_SHA)
+)
+  errors.push(
+    'Legacy native fixture records must be generated from this exact CI head before Storybook build',
+  );
 for (const scope of ['main', 'two-machines', 'pushed']) {
-  const expectedFrames = new Set(plan.filter((item) => item.legacyKey && !item.legacyKey.startsWith('gallery:') &&
-    (item.fixture.scope === scope || (scope === 'main' && item.fixture.scope === 'required'))).map((item) => item.fixture.frame));
+  const expectedFrames = new Set(
+    plan
+      .filter(
+        (item) =>
+          item.legacyKey &&
+          !item.legacyKey.startsWith('gallery:') &&
+          (item.fixture.scope === scope || (scope === 'main' && item.fixture.scope === 'required')),
+      )
+      .map((item) => item.fixture.frame),
+  );
   const records = nativeRecords.scopes?.[scope] ?? {};
-  if (!sameSet([...expectedFrames], Object.keys(records))) errors.push('Missing/unknown native fixture frames in scope ' + scope);
+  if (!sameSet([...expectedFrames], Object.keys(records)))
+    errors.push('Missing/unknown native fixture frames in scope ' + scope);
   for (const [frame, record] of Object.entries(records))
     if (!Array.isArray(record.responses) || !record.responses.length || !record.route)
       errors.push('Incomplete native fixture publication ' + scope + '/' + frame);
