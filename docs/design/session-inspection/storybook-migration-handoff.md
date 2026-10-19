@@ -42,7 +42,8 @@ its native projection equivalence still requires the CI comparison evidence.
 
 `storybook-gates.json` records the authoritative workflow matrix, foundation,
 build, functional members, independent/native suites, visual/transport/order/live/
-performance owners, conditional diagnostics, per-inspected-runner no-mask evidence,
+performance owners, conditional diagnostics, the permanent required Storybook job,
+the CI lexical census owner and its limits, per-inspected-runner no-mask evidence,
 paint policy and inactive historical artifacts. Preservation now points to the
 executable `preservation.mjs` and separately retains its constants dependency.
 The validator checks actual workflow/group ownership rather than file existence
@@ -66,13 +67,15 @@ behavior are source-reviewed only until CI returns. Fixture projection and
 native/Storybook image equivalence remain unverified, including exact analytics
 facts, paged native content and shared transcript-region geometry. These are
 remaining evidence/repair work, not accepted coverage or authorized baseline
-promotion. Approvals remain empty. The bootstrap remains active; the prepared
-final workflow patch stays unactivated until functional captures pass. Its
-commands already discover the new route files and exact plan; activation must
-also apply `/tmp/semon-storybook-final-gate-owner-20261019.patch` to reconcile the
-inventory's temporary workflow owner before removal. This additional patch is
-prepared only; it has not been applied. Root advanced HEAD to `f3e5a8ae` during
-this source work; all edits here remain uncommitted for root's checkpoint.
+promotion. Approvals remain empty. The permanent Storybook job is now wired into
+the Viewer UI aggregate. It consumes exact native visual, transport and interaction
+artifacts, merges only current-head records, and retains capture, census, parity,
+provenance and formatting evidence even when a draft gate fails. This wiring does
+not establish successful rendering, native parity or reference approval. The
+temporary dependency-lock/preview workflow has been removed. Canonical projections
+from revision `7bc8f25f90994045df487517d9e43ff5ae078320` are committed in this
+branch; prerequisite PR 26 remains pending landing. Root owns review, commit, push
+and CI feedback; no local validation was run under the stale thermal record.
 
 This source checkpoint does not complete visual acceptance. Root owns commit,
 push and CI feedback; no commit/push/merge/deploy/approval was performed here.
@@ -118,12 +121,13 @@ it to the protected `ui/.storybook/main.mjs` owner. No such edit was made here.
    actions and capture results fail. Actual 334/696px component widths are asserted
    alongside the 390/820/1280 viewport/theme matrix. Existing real-product/native
    suites retain their independent behavioral authority.
-3. CI and references: the existing branch bootstrap runs server and plan regression
-   tests, authored typecheck, build, contract, capture and separate render/approval
-   reports. Build remains independent of the typecheck outcome for evidence.
-   The v2 reference map remains empty. Candidate PNGs therefore fail the approval
-   gate even when the render-only gate succeeds. Source/capture/image digests and
-   exact state/geometry/review provenance are required for a future accepted entry.
+3. CI and references: the permanent Viewer UI Storybook job runs server and plan
+   regression tests, authored typecheck, build, contract, capture and separate
+   render/approval reports. Build remains independent of the typecheck outcome for
+   evidence. The v2 reference map remains empty. Candidate PNGs therefore fail the
+   approval gate even when the render-only gate succeeds. Source/capture/image
+   digests and exact state/geometry/review provenance are required for a future
+   accepted entry.
 
 ## CI-only commands for root
 
@@ -172,7 +176,7 @@ node tests/ui/storybook-report.mjs
 
 Capture intentionally returns nonzero for pending approvals; CI must still run
 the render-only report and always upload `tests/ui/out/storybook` and the static
-build. The bootstrap also uploads its authored-formatting patch. Apply reviewed
+build. The permanent Storybook job also uploads its authored-formatting patch. Apply reviewed
 formatting feedback through root's normal checkpoint process and rerun the exact
 head; formatting generated after capture does not change that capture's source
 provenance. Authored-source errors remain real failures. The preview-only
@@ -186,24 +190,31 @@ source/capture hashes and individual failures/pending approvals), candidate PNGs
 and any reference diffs. Source assertions are implementation reasoning, not a
 claim that browser execution or image inspection succeeded.
 
-## Required workflow integration after functional capture
+## Permanent Storybook CI wiring
 
-Per the takeover instruction, do not remove the temporary bootstrap or activate
-the final aggregate integration before functional capture is confirmed by CI.
-A complete focused job and required-aggregate update are prepared for root at
-`/tmp/semon-storybook-ui-integration-20261019.patch`; the full candidate workflow
-is `/tmp/semon-ui-workflow-20261019.yml`. The patch adds the Storybook job to the
-existing `.github/workflows/ui.yml` and includes its result in the existing
-`viewer browser checks` aggregate. It adds no push workflow and removes no native,
-served, foundation or product suite. The job always uploads evidence and keeps
-pending-reference failures required. It is intentionally not applied before the
-requested functional CI checkpoint.
+`.github/workflows/ui.yml#storybook` now performs the production build, exhaustive
+contract and capture, CI capture/mask census, render-only report, current-head
+native parity, and separately reviewed reference report. It runs after the
+foundation and binary build and may gather draft evidence when native matrix checks
+fail. Its final result is required by the existing `viewer browser checks`
+aggregate alongside foundation, build and every native suite. The original native
+preservation, pixel, two-machine, pushed-page and transport-model checks remain
+required; their artifact uploads feed the Storybook native merge. Native records
+must carry the exact current `GITHUB_SHA`. No records or references are fabricated,
+and candidate evidence does not create reference approvals.
 
-After the render-only gate passes, root can apply/reconcile that patch, retain
-any bootstrap artifact feedback still needed, then remove the temporary workflow
-in the coordinated final checkpoint. Run the entire existing Viewer UI aggregate
-on the resulting exact head. A passing Storybook render gate cannot substitute
-for native checks, actual matched-image inspection or independent Hub acceptance.
+The census runs in the permanent job and its artifact uploads even on failure;
+the failed census outcome remains a required failure. Its 46-record inventory last
+passed CI run 39275066383. New or changed files may require a refreshed inventory.
+The census is lexical over its declared authored JavaScript/TypeScript signals and
+does not claim runtime evaluation or a repository-wide no-mask assertion. CI also
+generates and uploads the authored formatting patch for root review. The removed
+temporary workflow no longer creates a parallel browser preview or bootstrap jobs.
+
+Run the complete Viewer UI workflow on the resulting exact head. Rendering,
+current-head parity, reviewed reference approval, actual matched-image inspection
+and independent Hub acceptance remain unverified until their CI evidence and human
+review are complete.
 
 No reference/candidate/diff images have been inspected in this takeover because
 local browsers, screenshots and image processing are forbidden. Full migration

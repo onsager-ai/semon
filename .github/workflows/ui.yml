@@ -306,6 +306,13 @@ jobs:
           SEMON_PIXEL_SCOPE=main node pixels.mjs || failed=1
           exit "$failed"
 
+      - name: Record current-head native Storybook witnesses
+        if: ${{ !cancelled() && matrix.suite == 'visual' }}
+        working-directory: tests/ui
+        env:
+          SEMON_STORYBOOK_NATIVE_SCOPE: main
+        run: node storybook-native-records.mjs
+
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
         working-directory: tests/ui
@@ -375,9 +382,13 @@ jobs:
           done
           [ -n "$reference_url" ] || { cat "$RUNNER_TEMP/two-machines-reference.log"; exit 1; }
           cd tests/ui
+          failed=0
           SEMON_BASE="$candidate_base" SEMON_TOKEN="$candidate_token" \
             SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" \
-            SEMON_PIXEL_SCOPE=two-machines node pixels.mjs
+            SEMON_PIXEL_SCOPE=two-machines node pixels.mjs || failed=1
+          SEMON_BASE="$candidate_base" SEMON_TOKEN="$candidate_token" \
+            SEMON_STORYBOOK_NATIVE_SCOPE=two-machines node storybook-native-records.mjs || failed=1
+          exit "$failed"
 
       # A second machine the way one really arrives: the sample fixture pushed over loopback (plain http, so no TLS) to `semon
       # receive`, which writes it under recv/machines/laptop. The token is written to a 0600 file and never echoed. Both the
@@ -440,13 +451,14 @@ jobs:
           [ -n "$url" ] || { cat "$RUNNER_TEMP/pushed-viewer.log"; exit 1; }
           export SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}"
           cd tests/ui
-          node pushed-parity.mjs --native-pages
           failed=0
+          node pushed-parity.mjs --native-pages || failed=1
           node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN" || failed=1
           node pixels.mjs || failed=1
           # An empty or short list of screens must not pass: 5 screens at 3 schemes.
           node -e 'const n = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results.length; if (n !== 15) { console.error("pixels compared " + n + " screens, expected 15"); process.exit(1); } console.log("pixels compared " + n + " screens")' \
             "$SEMON_UI_OUT/pixels.json" || failed=1
+          SEMON_STORYBOOK_NATIVE_SCOPE=pushed node storybook-native-records.mjs || failed=1
           exit "$failed"
 
       # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
@@ -468,10 +480,144 @@ jobs:
           path: tests/ui/out
           if-no-files-found: warn
 
+  storybook:
+    name: Storybook migration acceptance
+    needs: [foundation, build, checks]
+    if: ${{ !cancelled() && needs.foundation.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            tests/ui/package-lock.json
+      - name: Set native artifact root
+        run: echo "SEMON_STORYBOOK_NATIVE_ARTIFACT_ROOT=$RUNNER_TEMP/storybook-native" >> "$GITHUB_ENV"
+      - name: Download native visual records
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: viewer-ui-visual
+          path: ${{ runner.temp }}/storybook-native/viewer-ui-visual
+      - name: Download native transport records
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: viewer-ui-transport
+          path: ${{ runner.temp }}/storybook-native/viewer-ui-transport
+      - name: Download native interaction records
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: viewer-ui-interaction
+          path: ${{ runner.temp }}/storybook-native/viewer-ui-interaction
+      - name: Install locked product and preview tooling
+        id: install
+        run: |
+          npm --prefix ui ci --no-audit --no-fund
+          npm --prefix tests/ui ci --no-audit --no-fund
+      - name: Test the static preview server and executable migration plan
+        id: server-tests
+        if: ${{ !cancelled() }}
+        run: node --test tests/ui/storybook-server.test.mjs tests/ui/storybook-plan.test.mjs
+      - name: Install pinned Playwright Chromium
+        id: browser
+        if: ${{ !cancelled() }}
+        working-directory: tests/ui
+        run: npx playwright install --with-deps chromium
+      - name: Merge exact current-head native records
+        id: native-merge
+        if: ${{ !cancelled() }}
+        run: node tests/ui/storybook-native-records.mjs --merge "$RUNNER_TEMP/storybook-native"
+      - name: Check authored Storybook types
+        id: typecheck
+        if: ${{ !cancelled() }}
+        run: npm --prefix ui run storybook:typecheck
+      - name: Build actual production stories
+        id: build
+        if: ${{ !cancelled() && steps.native-merge.outcome == 'success' }}
+        run: npm --prefix ui run storybook:build
+      - name: Validate exhaustive contract coverage
+        id: contract
+        if: ${{ !cancelled() }}
+        run: npm --prefix tests/ui run storybook:contract
+      - name: Census Storybook capture and mask owners
+        id: census
+        if: ${{ !cancelled() }}
+        run: node tests/ui/storybook-census.mjs
+      - name: Capture production stories and interaction states
+        id: capture
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: npm --prefix tests/ui run storybook:capture
+      - name: Report functional rendering independently of approval
+        id: render-report
+        if: ${{ !cancelled() }}
+        run: node tests/ui/storybook-report.mjs --render-only
+      - name: Compare current-head native presentation parity
+        id: native-parity
+        if: ${{ !cancelled() }}
+        run: node tests/ui/storybook-native-parity.mjs
+      - name: Report separately reviewed reference approval
+        id: reference-report
+        if: ${{ !cancelled() }}
+        run: node tests/ui/storybook-report.mjs
+      - name: Prepare authored formatting corrections for review
+        id: formatting
+        if: ${{ !cancelled() }}
+        run: |
+          npm --prefix ui run format
+          npm --prefix ui exec -- prettier --write 'ui/.storybook/*.{mjs,tsx,css}' 'ui/stories/*.{ts,tsx}' ui/tsconfig.storybook.json
+          git diff --binary -- . ':(exclude)ui/stories/LegacyNative.records.json' > "$RUNNER_TEMP/storybook-format-review.patch"
+      - name: Upload capture census evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storybook-capture-census
+          path: tests/ui/out/storybook/census
+          if-no-files-found: warn
+      - name: Upload Storybook and census evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storybook-migration-evidence
+          path: |
+            tests/ui/storybook-static
+            tests/ui/out/storybook
+            ${{ runner.temp }}/storybook-format-review.patch
+          if-no-files-found: warn
+      - name: Require all Storybook gates
+        if: ${{ always() }}
+        env:
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          SERVER_TESTS_RESULT: ${{ steps.server-tests.outcome }}
+          BROWSER_RESULT: ${{ steps.browser.outcome }}
+          NATIVE_MERGE_RESULT: ${{ steps.native-merge.outcome }}
+          TYPECHECK_RESULT: ${{ steps.typecheck.outcome }}
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          CONTRACT_RESULT: ${{ steps.contract.outcome }}
+          CENSUS_RESULT: ${{ steps.census.outcome }}
+          CAPTURE_RESULT: ${{ steps.capture.outcome }}
+          RENDER_REPORT_RESULT: ${{ steps.render-report.outcome }}
+          NATIVE_PARITY_RESULT: ${{ steps.native-parity.outcome }}
+          REFERENCE_REPORT_RESULT: ${{ steps.reference-report.outcome }}
+          FORMATTING_RESULT: ${{ steps.formatting.outcome }}
+        run: |
+          for result in "$INSTALL_RESULT" "$SERVER_TESTS_RESULT" "$BROWSER_RESULT" "$NATIVE_MERGE_RESULT" \
+            "$TYPECHECK_RESULT" "$BUILD_RESULT" "$CONTRACT_RESULT" "$CENSUS_RESULT" "$CAPTURE_RESULT" \
+            "$RENDER_REPORT_RESULT" "$NATIVE_PARITY_RESULT" "$REFERENCE_REPORT_RESULT" "$FORMATTING_RESULT"; do
+            test "$result" = success || exit 1
+          done
+
   browser:
     name: viewer browser checks
     if: ${{ always() }}
-    needs: [foundation, build, checks]
+    needs: [foundation, build, checks, storybook]
     runs-on: ubuntu-latest
     steps:
       - name: Require every suite to pass
@@ -479,4 +625,5 @@ jobs:
           FOUNDATION_RESULT: ${{ needs.foundation.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
-        run: test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+          STORYBOOK_RESULT: ${{ needs.storybook.result }}
+        run: test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success && test "$STORYBOOK_RESULT" = success
