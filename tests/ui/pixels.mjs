@@ -2,6 +2,7 @@
 // compare two served copies for pushed-data parity. Historical frame names
 // and regions remain a coverage contract; the mockup renderers are not loaded.
 import fs from 'node:fs';
+import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
@@ -708,7 +709,11 @@ async function prepareFrame(page, phone, includePaintDiagnostics = false) {
   const beforeScreenshot = includePaintDiagnostics
     ? await snapshotPhoneHarborPaint(page)
     : undefined;
-  const bytes = await page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
+  const bytes = await captureStableFrame(page, {
+    fullPage: phone,
+    animations: 'allow',
+    caret: 'hide',
+  });
   return { bytes, beforeScreenshot };
 }
 
@@ -731,20 +736,22 @@ async function captureFrame(candidate, reference, key, phone) {
     ['reference', reference],
   ]) {
     try {
-      const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
-        bytes = prepared.bytes;
-      save(key, name, bytes);
-      evidenceBySide[name] = await snapshot(page);
-      if (includePaintDiagnostics)
-        evidenceBySide[name].phoneHarborPaint = {
-          beforeScreenshot: prepared.beforeScreenshot,
-          afterScreenshot: await snapshotPhoneHarborPaint(page),
+      await withCapturePaint(page, async () => {
+        const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
+          bytes = prepared.bytes;
+        save(key, name, bytes);
+        evidenceBySide[name] = await snapshot(page);
+        if (includePaintDiagnostics)
+          evidenceBySide[name].phoneHarborPaint = {
+            beforeScreenshot: prepared.beforeScreenshot,
+            afterScreenshot: await snapshotPhoneHarborPaint(page),
+          };
+        artifactDigests[name] = {
+          image: sha256(bytes),
+          evidence: saveJson(key, name, evidenceBySide[name]),
         };
-      artifactDigests[name] = {
-        image: sha256(bytes),
-        evidence: saveJson(key, name, evidenceBySide[name]),
-      };
-      images.push(PNG.sync.read(bytes));
+        images.push(PNG.sync.read(bytes));
+      });
     } catch (error) {
       report.errors.push(`${key} ${name} screenshot: ${error.message}`);
     }
