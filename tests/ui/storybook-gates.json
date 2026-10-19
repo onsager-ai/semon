@@ -1,7 +1,7 @@
 {
   "version": 1,
   "authority": ".github/workflows/ui.yml",
-  "aggregate": {"job": "browser", "check": "viewer browser checks", "needs": ["foundation", "build", "checks"], "status": "active", "disposition": "retained", "successor": null},
+  "aggregate": {"job": "browser", "check": "viewer browser checks", "needs": ["foundation", "build", "checks", "storybook"], "status": "active", "disposition": "retained", "successor": null},
   "matrix": ["navigation", "transcript", "shell", "interaction", "accessibility", "visual", "live", "order-phone", "order-desktop-light", "order-desktop-dark", "performance", "transport"],
   "gates": [
     {"id": "foundation", "owner": ".github/workflows/ui.yml#foundation", "status": "active", "disposition": "retained", "successor": null, "policy": "ui/package.json", "commands": ["fixture-data-equivalence.mjs", "format:check", "check:architecture", "check:design", "typecheck", "npm --prefix ui test", "check:bundle", "sizes"], "unitOwner": "ui/tests/*.test.mjs", "members": ["tests/ui/capture-network.test.mjs", "tests/ui/suite-plan.test.mjs", "tests/ui/pixel-diff.test.mjs", "tests/ui/checks/catalog-cache.test.mjs", "tests/ui/checks/catalog-wire.test.mjs", "tests/ui/visual-contract.test.mjs", "tests/ui/preservation-contract.test.mjs", "tests/ui/dom-evidence.test.mjs"]},
@@ -20,7 +20,7 @@
     {"id": "order", "owner": "tests/ui/checks/order.mjs", "suites": ["order-phone", "order-desktop-light", "order-desktop-dark"], "status": "active", "disposition": "retained", "successor": null},
     {"id": "pushed-parity", "owner": "tests/ui/pushed-parity.mjs", "suite": "transport", "modes": ["transport-model", "--native-pages"], "status": "active", "disposition": "retained", "successor": null},
     {"id": "refresh-diagnostics", "owner": "tests/ui/checks/perf.mjs", "suite": "performance", "status": "conditional", "condition": "workflow_dispatch refresh_diagnostics", "disposition": "retained", "successor": null, "reference": "c402e481dbe23bcf03841e47b5f7eccd14c0e426"},
-    {"id": "storybook", "owner": ".github/workflows/storybook-dependency-lock.yml", "status": "active", "disposition": "temporary feedback workflow; final aggregate integration prepared until functional rendering passes", "successor": ".github/workflows/ui.yml additional Storybook job (not activated)"}
+    {"id": "storybook", "owner": ".github/workflows/ui.yml#storybook", "status": "active", "disposition": "permanent required draft evidence, exhaustive render, current-head native parity and separately reviewed reference gate; approvals remain pending", "successor": null}
   ],
   "masks": [
     {"owner": "tests/ui/pixels.mjs", "status": "active", "disposition": "retained", "successor": "storybook-legacy.mjs exact frames/regions", "masks": [], "evidence": "Inspected captureFrame/regionShot options: no mask option; fullPage/clip/selector policies remain distinct."},
@@ -38,5 +38,5 @@
     {"owner": "tests/ui/historical-pixel-ratchet.json", "status": "inactive", "disposition": "original mockup ratios/dimensions retained as provenance, never active acceptance rules", "successor": null, "authority": "tests/ui/visual-coverage.json#historicalRatchetData"}
   ],
   "acceptance": {"owner": "tests/ui/visual-acceptance.json", "status": "active", "disposition": "retained without modification", "successor": null, "policy": "exact reviewed source/state/geometry/artifact bindings; Storybook approvals remain separately pending"},
-  "census": {"owner": "CI storybook-contract.mjs", "scope": "workflow owners, functional registration and inspected capture paths; broader repository mask census must run in CI", "uninspectedPaths": "No repository-wide no-mask assertion is made."}
+  "census": {"owner": ".github/workflows/ui.yml#storybook (tests/ui/storybook-census.mjs)", "path": "tests/ui/storybook-capture-owners.json", "report": "tests/ui/out/storybook/census", "scope": "CI lexical inventory of authored JavaScript/TypeScript direct screenshot calls, mask and maskColor options, masks metadata, shared capture-helper imports/calls, workflow owners and inspected capture paths", "status": "active", "disposition": "required CI evidence; upload on failure and preserve failed gate status", "inventory": {"records": 46, "lastPassingRun": "39275066383", "refresh": "New or changed files may require a CI inventory refresh; this recorded count is the last passing inventory, not evidence for the current head."}, "limitations": "Lexical source census only; it does not evaluate runtime behavior or establish blanket capture approval. No repository-wide no-mask assertion is made for uninspected paths."}
 }
