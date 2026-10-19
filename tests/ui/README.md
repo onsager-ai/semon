@@ -105,6 +105,21 @@ its completion witness is the native-publication success message in the CI log.
   browser processes and rejects changed visible text. Exact screenshot/evidence
   hashes, complete references, pixel tolerances and raw findings remain required;
   captures from this path still need image review and a passing final CI run.
+- That run also caught a separate `desktop-light|session-a-scan` sidebar-order
+  mismatch. It is **not accepted** by the notice-removal review. The readers can
+  independently cross the existing Recent idle-reorder boundary during sequential
+  captures. Main desktop comparisons now hold a real pointer in inert sidebar
+  padding before navigation/capture and require matching visible row names and
+  selection. This uses the readers' existing hover behavior; it does not change
+  product timers, sort either DOM, hide rows or waive the pixel result. Other
+  browser suites continue testing the actual idle and interaction behavior.
+- The [baseline-raster captures from run 39241106362](https://github.com/onsager-ai/semon/actions/runs/39241106362/artifacts/12181229277)
+  requalify 30 stale bindings with exactly unchanged bounded text/geometry
+  evidence. Tablet Thinking, desktop harbor and long phone quill images/diffs
+  were re-inspected against their approved change families. The separate
+  sidebar-order mismatch is excluded; it must pass with the consistent pointer
+  precondition and matching visible rows. This review does not claim that a fresh
+  capture has passed until the final required CI result is green.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
