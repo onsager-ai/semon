@@ -68,6 +68,10 @@ sourceFiles.push(
   decodeURIComponent(new URL('../../assets/harnesses/codex-black.svg', import.meta.url).pathname),
   decodeURIComponent(new URL('../../assets/harnesses/codex.svg', import.meta.url).pathname),
 );
+// Native reader route stories import this single checked-in synthetic corpus.
+sourceFiles.push(
+  decodeURIComponent(new URL('../../tests/ui/fixture-data/overhaul.json', import.meta.url).pathname),
+);
 function canonicalAssets() {
   return {
     name: 'semon-canonical-story-assets',
