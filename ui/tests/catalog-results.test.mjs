@@ -364,7 +364,7 @@ test('tool previews keep qualified expansion without repeating availability warn
               action: { label: 'Load recorded text', busy: false, run() {} },
             },
       ),
-    );
+    ).flatMap((row) => (row.kind === 'group' ? row.entries : [row]));
     assert.equal(shown.filter((item) => item.kind === 'tool').length, 1);
     assert.equal(
       shown.some((item) => item.kind === 'label' && item.text.includes('Full result unavailable')),
