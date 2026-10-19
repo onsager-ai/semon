@@ -16,7 +16,10 @@ test('Rust native navigation paths agree with the Viewer router defaults', async
   const rows = JSON.parse(
     await readFile(new URL('../src/lib/navigation.json', import.meta.url), 'utf8'),
   );
-  assert.equal(rows.length, 4);
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    ['sessions', 'analytics', 'machines'],
+  );
   const destinations = projectShellNavigation(undefined, 'home');
   for (const { key, path } of rows)
     assert.equal(destinations.find((row) => row.key === key)?.href, path, key + ' route contract');

@@ -87,7 +87,7 @@ export function projectShellNavigation(
   paths: Readonly<Record<string, string>> = {},
   counts: Readonly<Record<string, number>> = {},
 ): ShellDestination[] {
-  const current = ['session', 'trace', 'sources'].includes(route)
+  const current = ['home', 'session', 'trace', 'sources'].includes(route)
     ? 'sessions'
     : route === 'machine'
       ? 'machines'

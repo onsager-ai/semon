@@ -66,11 +66,11 @@ or trailing destinations; `subscribeNavigation` reports changes without requirin
 a content model. Its unsubscribe belongs to the reader's document lifetime.
 Hosts validate unknown policy JSON with `parseShellNavigation` before rendering.
 The canonical reader keeps source selection in Sessions context and labels scoped
-Recent rows with their machine. Home and Analytics share that reader. A
+Recent rows with their machine. Sessions is the default landing page; Analytics shares that reader. A
 `nativePage` mounts the same chrome over server content and preserves native forms
 and server navigation. An authenticated workspace host sets
 `nativePage.workspaceChrome` to share the bounded workspace Recent publication and
-Home count. This reads compact metadata only, with no preview hydration, source
+metadata. This reads compact metadata only, with no preview hydration, source
 selection or native observation/repair. Hosts without a workspace retain the
 empty Recent slot and issue no workspace reads. Compatibility markers
 are normalized away without selecting another reader.

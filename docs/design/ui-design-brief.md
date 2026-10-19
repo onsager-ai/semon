@@ -14,6 +14,14 @@ paused session control, SSH or managed runtime delivery.
 
 ## Foundation
 
+Sessions is the default application destination. The shared sidebar contains
+Sessions, Analytics and Machines; Home is no longer a page or navigation entry.
+The root URL opens Sessions while retaining its query and fragment. Keep the
+existing Sessions list, filters, grouping and ordering; do not move Home's inbox,
+Needs you or Working sections into Sessions. Older Home screenshots are historical
+references for the removed surface. Shared workspace metadata still supplies
+Recent and machine/analytics views through its existing bounded owner.
+
 Preserve the compact actual viewer, shared semantic CSS roles, Instrument Sans
 and JetBrains Mono, existing controls, flat rows, reading width and responsive
 navigation. The source in `crates/semon-sessions/src/viewer.css` owns tokens;
