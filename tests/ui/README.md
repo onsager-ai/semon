@@ -80,6 +80,19 @@ its completion witness is the native-publication success message in the CI log.
   reinspection and the final registry assess those exact current artifacts with
   zero pending/unreviewed findings. A fresh rerun can require fresh exact review;
   this record does not claim an automatically green visual CI aggregate.
+- The account-menu SPA follow-up re-inspects the [CI captures from run
+  39223065023](https://github.com/onsager-ai/semon/actions/runs/39223065023/artifacts/12172548963)
+  for PR #449 (source head `c71d5f9`, captured merge `e0670b9`). The changed runtime
+  fingerprint invalidates the preceding registry even where capture hashes match.
+  All 42 preservation and 69 main-frame findings retain their previously reviewed
+  states and causes. Actual candidate/reference/diff images were inspected for
+  phone tools, tablet Thinking, desktop expanded output, failed/returned children,
+  closed Atlas, long mobile full-page clipping, and the three changed desktop
+  main captures (parser, Principal, quill). Bounded evidence retains unchanged
+  shared styles and recorded content; the Atlas hidden-text distinction described
+  above remains limited to closed output. The current exact bindings record this
+  reinspection without changing references, thresholds, strict regions, coverage
+  or raw pixel results. CI must still validate the final registry and captures.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
