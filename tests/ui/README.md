@@ -93,6 +93,18 @@ its completion witness is the native-publication success message in the CI log.
   above remains limited to closed output. The current exact bindings record this
   reinspection without changing references, thresholds, strict regions, coverage
   or raw pixel results. CI must still validate the final registry and captures.
+- CI run `39239563956` retained the same runtime fingerprint, DOM/geometry
+  evidence and strict mismatch ratios, but 21 preservation and four main-frame
+  records changed PNG hashes. Individual-image inspection found only 1–2 channel
+  levels at a rounded sidebar edge and at most five levels on the sampled text
+  edges. Visual comparators now request Chromium's
+  [`--disable-skia-runtime-opts`](https://github.com/chromium/chromium/blob/main/content/public/common/content_switches.cc)
+  baseline CPU path on both independent applications, removing host CPU dispatch
+  as a source of byte variation. Other functional/performance browsers keep their
+  existing launch settings. The capture regression checks repeated independent
+  browser processes and rejects changed visible text. Exact screenshot/evidence
+  hashes, complete references, pixel tolerances and raw findings remain required;
+  captures from this path still need image review and a passing final CI run.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former

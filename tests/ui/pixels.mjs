@@ -1078,7 +1078,7 @@ try {
   report.candidateFingerprint = sha256(fs.readFileSync(candidateBinary));
   if (ENV.base === referenceBase)
     throw new Error('Candidate and reference servers must be independent');
-  browser = await launch();
+  browser = await launch({ baselineRaster: true });
   const D = await data(),
     original = sample('overhaul.json'),
     pinnedModel = selfParity ? null : await pinnedReferenceModel(referenceBase, referenceToken);

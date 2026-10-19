@@ -476,7 +476,7 @@ try {
     throw new Error('Both candidate and selected-reference servers are required');
   if (ENV.base === process.env.SEMON_PRESERVATION_BASE.replace(/\/$/, ''))
     throw new Error('Candidate and selected-reference servers must be independent');
-  browser = await launch();
+  browser = await launch({ baselineRaster: true });
   if (!/^[a-f0-9]{40}$/.test(report.candidate ?? ''))
     throw new Error('Candidate commit SHA is required for exact visual evidence');
   const candidateBinary = process.env.SEMON_VISUAL_CANDIDATE_BIN ?? process.env.SEMON_BIN;
