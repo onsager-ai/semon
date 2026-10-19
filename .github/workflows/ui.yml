@@ -197,7 +197,7 @@ jobs:
 
       - name: Browser touch infrastructure regression tests
         if: matrix.suite == 'interaction'
-        run: node --test tests/ui/tap-hit.test.mjs
+        run: node --test tests/ui/tap-hit.test.mjs tests/ui/capture-paint.test.mjs
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
