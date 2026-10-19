@@ -1455,6 +1455,48 @@ for (const width of [390, 1280])
       await page.route('http://catalog.test/**', async (route) => {
         const url = new URL(route.request().url());
         requests.push(url.pathname + url.search);
+        if (url.pathname === '/api/viewer/home')
+          return route.fulfill({
+            json: {
+              api: 1,
+              version: 'a'.repeat(64),
+              now: 10000,
+              next: { inbox: null, working: null, answered: null },
+              totals: { waiting: 2, working: 0, answered: 0 },
+              machines: [
+                {
+                  key: 'one',
+                  label: 'Same hostname',
+                  up: true,
+                  working: 0,
+                  sessions: 1,
+                  last: 10000,
+                },
+              ],
+              recent: [
+                {
+                  id: 'chooser-recent',
+                  source_key: 'one',
+                  catalog_key: 'chooser-recent',
+                  session: {
+                    name: 'Source picker Recent',
+                    harness: 'claude',
+                    model: '',
+                    repo: null,
+                    state: 'idle',
+                    last: 10000,
+                    start: 9000,
+                    content_generation: 'b'.repeat(64),
+                  },
+                },
+              ],
+              inbox: [],
+              working: [],
+              answered: [],
+              observations: [],
+              pending_observations: [{ source_key: 'one', catalog_key: 'pending' }],
+            },
+          });
         if (url.pathname === '/api/session-capabilities')
           return url.searchParams.has('machine')
             ? route.fulfill({
@@ -1529,7 +1571,20 @@ for (const width of [390, 1280])
       await page
         .getByText('The source is updating or temporarily unavailable.', { exact: false })
         .waitFor();
+      await page
+        .locator('#lanes')
+        .getByText('Source picker Recent', { exact: true })
+        .waitFor({ state: 'attached' });
+      assert.equal(requests.filter((path) => path.startsWith('/api/viewer/home')).length, 1);
       assert.equal(requests.includes('/api/session-capabilities'), false);
+      assert.equal(
+        requests.some((path) =>
+          /^\/api\/(sessions|session-(observe|transcript|home|trace|fields|lookup|locate))(\?|$)/.test(
+            path,
+          ),
+        ),
+        false,
+      );
       await page.clock.runFor(1100);
       await page.locator('[data-source-key="two"]').waitFor();
       assert.equal(

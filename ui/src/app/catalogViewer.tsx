@@ -3720,6 +3720,7 @@ export function createCatalogViewer(
     root.replaceChildren();
     shell.closeDrawer(true);
     drawSources();
+    void overview.refresh();
     if (!sourceItems.length) await loadSources(false);
   }
   async function switchSource(key: string, push = true) {
