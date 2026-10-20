@@ -23,6 +23,11 @@ const PAGE_SOURCE_REQUESTS: usize = 256;
 const RECORD_BYTES: usize = 128 * 1024;
 const READ_CHUNK: usize = 4096;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn reply(status: u16, value: Value) -> ViewerReply {
     ViewerReply {
         status,
@@ -136,8 +141,20 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
                 ));
             }
         }
-        let identity = match catalog::session_catalog_history_identity(options, source_key, &key) {
-            Ok(Some(identity)) => identity,
+        let mut db = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(Duration::from_millis(100))?;
+        let tx = db.transaction()?;
+        let identity = match catalog::catalog_selection_in_snapshot(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            &tx,
+        ) {
+            Ok(Some((identity, _))) => identity,
             Ok(None) => {
                 return Ok(catalog::error(
                     404,
@@ -148,12 +165,6 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
             }
             Err(_) => return Ok(unavailable()),
         };
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_millis(100))?;
-        let tx = db.transaction()?;
         let generation: Option<String> = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
@@ -248,12 +259,18 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
         if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
             return Ok(invalid_arguments());
         }
-        let (identity, session) = match catalog::catalog_selection(
+        let mut db = Connection::open_with_flags(
+            EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(Duration::from_millis(100))?;
+        let tx = db.transaction()?;
+        let (identity, session) = match catalog::catalog_selection_in_snapshot(
             options,
             source_key,
             &key,
             crate::CatalogReadScope::RetainedHistory,
-            false,
+            &tx,
         ) {
             Ok(Some(selected)) => selected,
             Ok(None) => {
@@ -266,12 +283,6 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
             }
             Err(_) => return Ok(unavailable()),
         };
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_millis(100))?;
-        let tx = db.transaction()?;
         let catalog_generation: Option<String> = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
@@ -489,6 +500,14 @@ fn read(
             false,
         ));
     };
+    if source_key.is_empty() || source_key.len() > 4096 || key.is_empty() || key.len() > 4096 {
+        return Ok(catalog::error(
+            400,
+            "invalid_arguments",
+            "Invalid selected identity.",
+            false,
+        ));
+    }
     let limit = argument("limit")
         .map(|value| value.parse::<usize>())
         .transpose();
@@ -512,7 +531,15 @@ fn read(
             false,
         ));
     }
-    let selected = catalog::catalog_selection(
+    let mut connection = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(100))?;
+    let transaction = connection.transaction()?;
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "transcript_before_snapshot");
+    let selected = catalog::catalog_selection_in_snapshot(
         options,
         source_key,
         &key,
@@ -521,7 +548,7 @@ fn read(
         } else {
             crate::CatalogReadScope::Current
         },
-        false,
+        &transaction,
     );
     let (identity, session) = match selected {
         Ok(Some(selected)) => selected,
@@ -551,12 +578,10 @@ fn read(
         }
         Err(CatalogIdentityError::Unavailable) => return Ok(unavailable()),
     };
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(100))?;
-    let transaction = connection.transaction()?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_SELECTION.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let catalog_generation: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
