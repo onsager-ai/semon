@@ -1757,6 +1757,20 @@ struct H {
     inline: bool,
 }
 
+/// A parent's message to its subagent, paired in [`Builder::down_messages`]
+/// and drawn in [`Builder::relays`].
+struct DownMessage {
+    spawner: usize,
+    child: usize,
+    /// The message as the child received it (`AGM_DOWN`).
+    down: Ref,
+    /// The spawner's `SendMessage` it pairs with.
+    send: Option<Ref>,
+    brief: String,
+    /// It reached an open run: it doesn't start the child's turn.
+    inline: bool,
+}
+
 /// Each spawner's sends that can be to one of its agents: the call, the
 /// agent id its result pins or resumes, and its `to` (plain name).
 type Deliveries = HashMap<usize, Vec<(Ref, Option<String>, String)>>;
@@ -1887,9 +1901,12 @@ struct Builder<'a> {
     shared_usage: BTreeMap<String, crate::claude_usage::Shared>,
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
-    /// A parent's sends drawn as its message to a subagent (the relay's
-    /// outgoing side, placed by [`Self::down_messages`]).
+    /// A parent's sends to its own subagents ([`Self::down_messages`]):
+    /// never relays to a name.
     down_sends: BTreeSet<Ref>,
+    /// Parents' messages to their subagents, paired and waiting to be drawn
+    /// among the relays.
+    pending_downs: Vec<DownMessage>,
     staged_endpoints: BTreeMap<String, relation_stage::Endpoint>,
     staged_origins: BTreeMap<String, relation_stage::RelationOrigin>,
     staged_epoch: Option<i64>,
@@ -1973,6 +1990,7 @@ impl<'a> Builder<'a> {
             shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
             down_sends: BTreeSet::new(),
+            pending_downs: Vec::new(),
             staged_endpoints: BTreeMap::new(),
             staged_origins: BTreeMap::new(),
             staged_epoch: None,
@@ -3395,8 +3413,9 @@ impl<'a> Builder<'a> {
         (runs, inline)
     }
 
-    /// Draws each message `child`'s parent sent it while it ran or to resume
-    /// it (`AGM_DOWN` in the child) as a relay from the spawner. Each pairs
+    /// Pairs each message `child`'s parent sent it while it ran or to resume
+    /// it (`AGM_DOWN` in the child), to be drawn as a relay from the spawner
+    /// among the other relays ([`Self::relays`]). Each pairs
     /// with one of the spawner's `SendMessage` calls to this agent, first by
     /// body, then by order, as [`Self::pair_sends`] does: the send is the
     /// relay's outgoing side. A send is to this agent when its result pins or
@@ -3527,41 +3546,90 @@ impl<'a> Builder<'a> {
         }
         for (index, down) in downs.iter().enumerate() {
             let send = claims[index].map(|claim| sends[claim]);
-            let file = &self.files[down.0];
-            let source = format!("relay:down:{}:{}", file.id, event(self.files, *down).o);
             let brief = match claims[index] {
                 Some(claim) => messages[claim].clone(),
                 None => bodies[index].clone(),
             };
-            let at = send
-                .and_then(|send| event(self.files, send).t)
-                .or(event(self.files, *down).t)
-                .unwrap_or(self.sessions[child].out.start);
-            let handoff = Handoff::new(
-                stable_id("r", &source),
-                "relay",
-                (
-                    self.sessions[spawner].key.clone(),
-                    self.sessions[child].key.clone(),
-                ),
-                at,
-                "done",
-                brief.as_deref().unwrap_or(""),
-            );
-            let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
-            self.handoffs[handoff].inline = inline.contains(down);
-            self.handoffs[handoff].previews = Some(BTreeMap::from([(
-                "brief",
-                match send {
-                    Some(send) => PreviewRef::new(send, "relay"),
-                    None => PreviewRef::new(*down, "received_down"),
-                },
-            )]));
-            if let Some(send) = send {
-                self.place(send, handoff, Place::Out);
-            }
-            self.place(*down, handoff, Place::In);
+            self.pending_downs.push(DownMessage {
+                spawner,
+                child,
+                down: *down,
+                send,
+                brief: brief.unwrap_or_default(),
+                inline: inline.contains(down),
+            });
         }
+    }
+
+    /// Where a relay sorts among the staged relations
+    /// (`relation_stage::Relation::order`, phase aside): its sender's first
+    /// source, then its outgoing placement. The shared builder draws relays
+    /// in this order so a staged replay keeps it.
+    fn relay_order(&self, from: usize, out: Option<Ref>) -> (String, u64, u32) {
+        let path = self.sessions[from]
+            .files
+            .first()
+            .map(|file| self.files[*file].path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (offset, block) = out.map_or((0, 0), |at| {
+            let found = event(self.files, at);
+            (found.o, found.b)
+        });
+        (path, offset, block)
+    }
+
+    /// A parent's message's handoff id, from where its child received it.
+    fn down_id(&self, message: &DownMessage) -> String {
+        let down = message.down;
+        stable_id(
+            "r",
+            &format!(
+                "relay:down:{}:{}",
+                self.files[down.0].id,
+                event(self.files, down).o
+            ),
+        )
+    }
+
+    /// Draws one parent's message to its subagent ([`Self::down_messages`]).
+    fn draw_down(&mut self, message: DownMessage) {
+        let id = self.down_id(&message);
+        let DownMessage {
+            spawner,
+            child,
+            down,
+            send,
+            brief,
+            inline,
+        } = message;
+        let at = send
+            .and_then(|send| event(self.files, send).t)
+            .or(event(self.files, down).t)
+            .unwrap_or(self.sessions[child].out.start);
+        let handoff = Handoff::new(
+            id,
+            "relay",
+            (
+                self.sessions[spawner].key.clone(),
+                self.sessions[child].key.clone(),
+            ),
+            at,
+            "done",
+            &brief,
+        );
+        let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+        self.handoffs[handoff].inline = inline;
+        self.handoffs[handoff].previews = Some(BTreeMap::from([(
+            "brief",
+            match send {
+                Some(send) => PreviewRef::new(send, "relay"),
+                None => PreviewRef::new(down, "received_down"),
+            },
+        )]));
+        if let Some(send) = send {
+            self.place(send, handoff, Place::Out);
+        }
+        self.place(down, handoff, Place::In);
     }
 
     /// A Codex run's spawner, the call that launched it when that is
@@ -3922,7 +3990,26 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Parents' messages to their subagents are relays too, drawn in
+        // relation order among the sends.
+        // Ties sort by handoff id, as staged relations do.
+        let mut downs: Vec<_> = std::mem::take(&mut self.pending_downs)
+            .into_iter()
+            .map(|message| {
+                (
+                    self.relay_order(message.spawner, message.send),
+                    self.down_id(&message),
+                    message,
+                )
+            })
+            .collect();
+        downs.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        let mut downs = downs.into_iter().peekable();
         for (at, reply) in sends {
+            let order = self.relay_order(self.of_file[at.0], Some(at));
+            while let Some((_, _, message)) = downs.next_if(|(key, _, _)| *key < order) {
+                self.draw_down(message);
+            }
             let from = self.of_file[at.0];
             let tool_id = event(self.files, at).id.clone().unwrap_or_default();
             let message = self.text(at, "message", |record, block| {
@@ -4003,6 +4090,9 @@ impl<'a> Builder<'a> {
             if let Some(receiver) = receiver {
                 self.place(receiver, handoff, Place::In);
             }
+        }
+        for (_, _, message) in downs {
+            self.draw_down(message);
         }
         // Received with no send in these logs: the sender is a stub keyed by
         // its process, or the sending subagent that `origin.from` names.
@@ -5462,12 +5552,27 @@ impl<'a> Builder<'a> {
                 boundaries.push(at);
             }
         }
+        // A subagent's send to `main` and its receipt: the relay is keyed by
+        // the send, so the receipt's turn takes the same id here.
+        let sent_by: HashMap<Ref, Ref> = self
+            .progress
+            .iter()
+            .map(|(send, receipt)| (*receipt, *send))
+            .collect();
         let original = self.handoffs.len();
         for at in &boundaries {
             let found = event(self.files, *at);
             let receiver = self.of_file[at.0];
             let source = relay_msg_id(found)
                 .map(|id| format!("relay:{id}"))
+                .or_else(|| {
+                    sent_by.get(at).map(|send| {
+                        format!(
+                            "relay:tool:{}",
+                            event(self.files, *send).id.as_deref().unwrap_or_default()
+                        )
+                    })
+                })
                 .unwrap_or_else(|| format!("relay:recv:{}:{}", self.files[at.0].id, found.o));
             let index = self.handoffs.len();
             self.handoffs.push(H {
