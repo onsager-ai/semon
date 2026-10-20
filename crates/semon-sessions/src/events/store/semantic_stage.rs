@@ -1059,6 +1059,23 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
             break;
         }
         let mut candidate = paths.clone();
+        // A subagent's send that isn't its hand-back names no message id:
+        // the model pairs it with the sender's own `SendMessage`, so the
+        // sender's log joins the page.
+        if own.event.k == super::super::Kind::Agm
+            && own.event.script & super::super::AGM_PROGRESS != 0
+            && let Some(sender) = own
+                .event
+                .peer
+                .as_ref()
+                .and_then(|peer| peer.sock.as_deref())
+                .or(own.event.id.as_deref())
+        {
+            let source:Option<String>=c.query_row("SELECT source_path FROM session_catalog_sources WHERE harness='claude' AND native_id=?1 AND lifecycle='current' ORDER BY source_path LIMIT 1",[sender],|r|r.get(0)).optional()?;
+            if let Some(source) = source {
+                candidate.extend(owner_closure(c, &source)?);
+            }
+        }
         for peer in &linked {
             let mut sources=c.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
             for source in sources.query_map([&peer.owner], |r| r.get::<_, String>(0))? {
