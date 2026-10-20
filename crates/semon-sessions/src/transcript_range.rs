@@ -14,7 +14,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 
 const MAX_LIMIT: usize = 100;
@@ -25,6 +25,7 @@ const READ_CHUNK: usize = 4096;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static AFTER_LOCAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -76,9 +77,10 @@ pub enum SessionSourceReadMode {
     #[default]
     ProviderOnly,
     LocalThenProvider,
-    /// Also admit the exact selected provider when the local revision fails
+    /// Qualify a changed local carrier with the exact ledger's persisted block
+    /// proofs, or admit the exact selected provider when that qualification fails
     /// before any bytes are read. The provider must independently qualify the
-    /// original consumed prefix; this never selects the newer local revision.
+    /// original consumed prefix; unqualified local bytes are never exposed.
     /// Changes during local I/O still fail closed without provider fallback.
     LocalOrPinnedProvider,
 }
@@ -785,7 +787,7 @@ enum ProjectionFence {
     CatalogPublication,
     ProjectionGeneration,
     ErrorsGeneration,
-    LocalSourceRevision,
+    LocalSourceRevision(crate::source_carrier::RevisionReason),
     SourceGeneration,
     SourceRange,
 }
@@ -799,7 +801,12 @@ fn stale(reason: ProjectionFence) -> ViewerReply {
     );
     let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
     body["resynchronize"] = json!(true);
-    body["fence_reason"] = json!(reason);
+    if let ProjectionFence::LocalSourceRevision(detail) = reason {
+        body["fence_reason"] = json!("local_source_revision");
+        body["local_revision_reason"] = json!(detail);
+    } else {
+        body["fence_reason"] = json!(reason);
+    }
     reply.body = body.to_string().into_bytes();
     reply
 }
@@ -814,7 +821,7 @@ impl std::fmt::Display for MissingLocalSource {
 impl std::error::Error for MissingLocalSource {}
 
 #[derive(Debug)]
-struct LocalRevisionChanged;
+struct LocalRevisionChanged(crate::source_carrier::RevisionReason, bool);
 impl std::fmt::Display for LocalRevisionChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("selected local revision changed before reading")
@@ -877,7 +884,10 @@ impl SessionSourceReader for Composite<'_> {
                 Err(error)
                     if self.provider.is_some()
                         && error.get_ref().is_some_and(|error| {
-                            error.is::<MissingLocalSource>() || error.is::<LocalRevisionChanged>()
+                            error.is::<MissingLocalSource>()
+                                || error
+                                    .downcast_ref::<LocalRevisionChanged>()
+                                    .is_some_and(|error| error.1)
                         }) =>
                 {
                     routes.insert(key, SourceCarrier::Provider);
@@ -906,8 +916,14 @@ impl SessionSourceReader for Composite<'_> {
 }
 
 struct Local<'a> {
+    options: &'a Options,
     sources: &'a BTreeMap<PathBuf, CatalogSource>,
     references: &'a BTreeMap<PathBuf, SessionSourceRef>,
+    mode: SessionSourceReadMode,
+    observed: std::sync::Mutex<BTreeMap<PathBuf, crate::events::Stat>>,
+    proofs: std::sync::Mutex<BTreeMap<PathBuf, crate::events::store::chunk_proofs::Focused>>,
+    block: std::sync::Mutex<Option<(PathBuf, usize, Arc<[u8]>)>>,
+    bytes_left: std::sync::Mutex<usize>,
 }
 impl SessionSourceReader for Local<'_> {
     fn read_range(
@@ -917,12 +933,15 @@ impl SessionSourceReader for Local<'_> {
         offset: u64,
         max: usize,
     ) -> io::Result<crate::SessionSourceRange> {
+        use crate::events::Stat;
+        use crate::source_carrier::{RevisionReason, ledger, mismatch, recheck};
         let path = self
             .references
             .iter()
             .find_map(|(path, known)| (known == reference).then_some(path))
             .ok_or_else(invalid)?;
         let source = self.sources.get(path).ok_or_else(invalid)?;
+        let ledger = ledger(source);
         let mut file = crate::sealed::LogFile::open(path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 io::Error::new(io::ErrorKind::NotFound, MissingLocalSource)
@@ -936,48 +955,121 @@ impl SessionSourceReader for Local<'_> {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         if expected.is_some_and(|expected| expected != generation)
+            || max == 0
             || max > crate::SESSION_SOURCE_CHUNK_MAX
             || offset > reference.offset
             || max as u64 > reference.offset - offset
         {
             return Err(invalid());
         }
-        let check = |metadata: &std::fs::Metadata| {
-            #[cfg(unix)]
-            let identity = {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            };
-            #[cfg(not(unix))]
-            let identity = (0, 0);
-            identity == (source.dev, source.ino)
-                && source
-                    .changed_ns
-                    .is_some_and(|token| Some(token) == crate::events::change_time_ns(metadata))
-                && metadata.len() == source.size
-                && metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .map(|time| time.as_nanos())
-                    == Some(source.modified_ns)
-        };
-        if !check(&file.metadata()?) {
-            return Err(io::Error::new(
+        let before = Stat::from_metadata(&file.metadata()?)?;
+        let reason = mismatch(&ledger.stat, &before);
+        let rejected = |reason| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
-                LocalRevisionChanged,
+                LocalRevisionChanged(reason, true),
+            )
+        };
+        let mut observed = self.observed.lock().map_err(|_| invalid())?;
+        if let Some(prior) = observed.get(path)
+            && prior != &before
+        {
+            return Err(rejected(
+                mismatch(prior, &before).unwrap_or(RevisionReason::MissingChangeToken),
             ));
         }
-        file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = vec![0; max];
-        let read = file.read(&mut bytes)?;
-        bytes.truncate(read);
-        if !check(&file.metadata()?) {
-            return Err(invalid());
+        if before.size < reference.offset {
+            return Err(rejected(RevisionReason::SizeShrank));
         }
+        let bytes = if let Some(reason) = reason {
+            if !matches!(self.mode, SessionSourceReadMode::LocalOrPinnedProvider) {
+                return Err(rejected(reason));
+            }
+            // Proof headers bind the original full ledger, including prefix,
+            // consumed boundary and physical witness. Only covering blocks are
+            // opened and hashed; no complete-prefix resume or parser replay.
+            let mut proofs = self.proofs.lock().map_err(|_| invalid())?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = proofs.entry(path.clone()) {
+                let proof = crate::events::store::chunk_proofs::Focused::open(
+                    &EventCache::path(&self.options.cache),
+                    path.to_str().ok_or_else(invalid)?,
+                    &ledger,
+                )
+                .map_err(|_| rejected(reason))?;
+                entry.insert(proof);
+            }
+            let proof = proofs.get(path).ok_or_else(invalid)?;
+            let end = offset + max as u64;
+            let first = offset / crate::source_chunks::SIZE as u64;
+            let last = (end - 1) / crate::source_chunks::SIZE as u64;
+            let mut bytes = Vec::with_capacity(max);
+            for index in first..=last {
+                let index_usize = usize::try_from(index).map_err(|_| invalid())?;
+                let mut cached = self.block.lock().map_err(|_| invalid())?;
+                let part = if let Some((_, _, bytes)) =
+                    cached.as_ref().filter(|(known, block, _)| {
+                        before.changed_ns.is_some() && known == path && *block == index_usize
+                    }) {
+                    bytes.clone()
+                } else {
+                    let start = index * crate::source_chunks::SIZE as u64;
+                    let charge =
+                        (reference.offset - start).min(crate::source_chunks::SIZE as u64) as usize;
+                    let mut remaining = self.bytes_left.lock().map_err(|_| invalid())?;
+                    *remaining = remaining.checked_sub(charge).ok_or_else(invalid)?;
+                    let bytes: Arc<[u8]> = proof
+                        .read(&mut file, index_usize)
+                        .map_err(|_| rejected(reason))?
+                        .into();
+                    *cached = Some((path.clone(), index_usize, bytes.clone()));
+                    bytes
+                };
+                let start = index * crate::source_chunks::SIZE as u64;
+                let lo = offset.saturating_sub(start) as usize;
+                let hi = (end - start).min(part.len() as u64) as usize;
+                bytes.extend_from_slice(&part[lo..hi]);
+            }
+            bytes
+        } else {
+            let mut remaining = self.bytes_left.lock().map_err(|_| invalid())?;
+            *remaining = remaining.checked_sub(max).ok_or_else(invalid)?;
+            file.seek(SeekFrom::Start(offset))?;
+            let mut bytes = vec![0; max];
+            file.read_exact(&mut bytes)?;
+            bytes
+        };
+        #[cfg(test)]
+        AFTER_LOCAL_READ.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::run(self.options, "local_source_after_read");
+        recheck(path, &file, &before).map_err(|_| {
+            let after = file
+                .metadata()
+                .ok()
+                .and_then(|metadata| Stat::from_metadata(&metadata).ok());
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                LocalRevisionChanged(
+                    after
+                        .as_ref()
+                        .and_then(|after| mismatch(&before, after))
+                        .unwrap_or(RevisionReason::Identity),
+                    false,
+                ),
+            )
+        })?;
+        observed.insert(path.clone(), before);
         Ok(crate::SessionSourceRange {
             generation,
-            length: source.size,
+            length: if matches!(self.mode, SessionSourceReadMode::LocalOrPinnedProvider) {
+                reference.offset
+            } else {
+                source.size
+            },
             offset,
             bytes: Arc::from(bytes),
             cached: true,
@@ -1030,6 +1122,12 @@ pub(crate) fn with_source_reader<T>(
         );
     }
     let local = Local {
+        options,
+        mode,
+        observed: std::sync::Mutex::default(),
+        proofs: std::sync::Mutex::default(),
+        block: std::sync::Mutex::default(),
+        bytes_left: std::sync::Mutex::new(64 * 1024 * 1024),
         sources: &sources,
         references: &references,
     };
@@ -1076,6 +1174,16 @@ fn render(
         })
         .collect();
     let local = Local {
+        options,
+        mode,
+        observed: std::sync::Mutex::default(),
+        proofs: std::sync::Mutex::default(),
+        block: std::sync::Mutex::default(),
+        bytes_left: std::sync::Mutex::new(if attachment.is_some() {
+            12 * 1024 * 1024
+        } else {
+            PAGE_SOURCE_BYTES
+        }),
         sources: &selection.sources,
         references: &references,
     };
@@ -1096,15 +1204,13 @@ fn render(
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
-            let reason = if result.as_ref().err().is_some_and(|error| {
-                error
-                    .get_ref()
-                    .is_some_and(|error| error.is::<LocalRevisionChanged>())
-            }) {
-                ProjectionFence::LocalSourceRevision
-            } else {
-                ProjectionFence::SourceGeneration
-            };
+            let reason = result
+                .as_ref()
+                .err()
+                .and_then(|error| error.get_ref())
+                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+                .map(|error| ProjectionFence::LocalSourceRevision(error.0))
+                .unwrap_or(ProjectionFence::SourceGeneration);
             source_changed.set(Some(reason));
         }
         result
@@ -1661,6 +1767,12 @@ fn render_field(
         })
         .collect();
     let local = Local {
+        options,
+        mode,
+        observed: std::sync::Mutex::default(),
+        proofs: std::sync::Mutex::default(),
+        block: std::sync::Mutex::default(),
+        bytes_left: std::sync::Mutex::new(PAGE_SOURCE_BYTES),
         sources: &selection.sources,
         references: &references,
     };
@@ -1755,6 +1867,17 @@ fn render_field(
             "field":{"name":field.kind.name(),"layers":field.layers,"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
             "text":text,"freshness":{"state":"cached"},"content_observation":content,"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
         ),
+        Err(error)
+            if error
+                .get_ref()
+                .is_some_and(|error| error.is::<LocalRevisionChanged>()) =>
+        {
+            let detail = error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+                .expect("checked local revision");
+            stale(ProjectionFence::LocalSourceRevision(detail.0))
+        }
         Err(_) => catalog::error(
             503,
             "field_unavailable",
