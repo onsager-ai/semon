@@ -10337,6 +10337,40 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .unwrap();
     assert_eq!(current_identity.source_refs.len(), 1);
     assert_eq!(current_identity.native_id.as_deref(), Some("root"));
+    let calls = archive.calls.load(Ordering::Relaxed);
+    let current = crate::session_transcript_range_with_mode(
+        &home.options,
+        "fixture",
+        "sid=root&scope=current&after=0&limit=100",
+        Some(&archive),
+        crate::SessionSourceReadMode::LocalThenProvider,
+    );
+    assert_eq!(current.status, 200);
+    let current: Value = serde_json::from_slice(&current.body).unwrap();
+    assert_eq!(
+        current["identity"]["source_refs"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(current["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(current["entries"][0]["text"], "original root prompt");
+    assert_ne!(
+        current["projection"]["generation"],
+        retained["projection"]["generation"]
+    );
+    assert_eq!(archive.calls.load(Ordering::Relaxed), calls);
+    let history_cursor = retained["projection"]["generation"].as_str().unwrap();
+    assert_eq!(
+        crate::session_transcript_range_with_mode(
+            &home.options,
+            "fixture",
+            &format!("sid=root&scope=current&after=1&limit=1&generation={history_cursor}"),
+            Some(&archive),
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .status,
+        409,
+        "History cursor must not select Current recipes"
+    );
     // Current work can advance while the original disappeared path stays part
     // of natural history after another complete observation and cold restart.
     let root_path = home

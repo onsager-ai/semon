@@ -45,6 +45,23 @@ consumed prefix `[0,offset)` plus its final up-to-4-KiB window. Neither marker
 binds bytes after the consumed offset. A host must independently authorize and
 verify an archived generation before supplying a requested source range.
 
+Selected transcript windows, turn anchors and annotation pages resolve their
+Catalog identity and load their recipe headers/rows in one read-only SQLite
+transaction. The global Catalog/slot publication marker must still agree inside
+that snapshot; a missing or mismatched marker is never repaired by a reader.
+Concurrent atomic publication therefore cannot pair an old selected identity
+with new recipes or spuriously reject a fresh first page merely because an
+unrelated owner changed. Current and retained-history still choose their own
+source cohorts and recipe tables. Explicit slot/error generations still reject
+stale continuation requests; native/provider generation checks retain their
+before/after I/O fences after the metadata transaction ends.
+
+Selected Home/Trace repair acknowledges an unchanged ready observation or a
+committed publication only. Losing its Catalog/source compare-and-swap returns
+a retryable observation error, rather than reporting `ready` after discarding
+the prepared metadata. This does not turn selected repair into a global Catalog
+rebuild or grant authority to read different source bytes.
+
 `source_projection_ready(options, root, path)` provides a bounded read-only
 pre-eviction guard. It never creates an index, reads bodies, opens the global
 EventCache or builds a model. It checks exact allowlisted path mappings, the

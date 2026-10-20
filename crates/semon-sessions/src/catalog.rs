@@ -336,6 +336,43 @@ pub(crate) fn catalog_selection(
     scope: CatalogReadScope,
     require_complete: bool,
 ) -> Result<Option<(CatalogSessionIdentity, Value)>, CatalogIdentityError> {
+    catalog_selection_read(
+        options,
+        source_key,
+        canonical_catalog_key,
+        scope,
+        require_complete,
+        None,
+    )
+}
+
+/// Bind selected metadata and its consumer's indexed recipes to one SQLite
+/// snapshot. The ordinary source-root and native-selection checks still apply.
+pub(crate) fn catalog_selection_in_snapshot(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+    scope: CatalogReadScope,
+    snapshot: &rusqlite::Transaction<'_>,
+) -> Result<Option<(CatalogSessionIdentity, Value)>, CatalogIdentityError> {
+    catalog_selection_read(
+        options,
+        source_key,
+        canonical_catalog_key,
+        scope,
+        false,
+        Some(snapshot),
+    )
+}
+
+fn catalog_selection_read(
+    options: &Options,
+    source_key: &str,
+    canonical_catalog_key: &str,
+    scope: CatalogReadScope,
+    require_complete: bool,
+    snapshot: Option<&rusqlite::Transaction<'_>>,
+) -> Result<Option<(CatalogSessionIdentity, Value)>, CatalogIdentityError> {
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     if source_key.is_empty()
         || source_key.len() > 4096
@@ -355,7 +392,11 @@ pub(crate) fn catalog_selection(
         q: None,
         cursor: None,
     };
-    let reply = read_page(options, source_key, &request).map_err(|_| Unavailable)?;
+    let reply = match snapshot {
+        Some(snapshot) => read_page_snapshot(options, source_key, &request, snapshot),
+        None => read_page(options, source_key, &request),
+    }
+    .map_err(|_| Unavailable)?;
     let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
     match reply.status {
         404 => return Ok(None),
@@ -919,6 +960,23 @@ fn read_page(
     machine: &str,
     request: &Request,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let mut connection = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(100))?;
+    let transaction = connection.transaction()?;
+    let reply = read_page_snapshot(options, machine, request, &transaction)?;
+    transaction.commit()?;
+    Ok(reply)
+}
+
+fn read_page_snapshot(
+    options: &Options,
+    machine: &str,
+    request: &Request,
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
             || cursor.machine != machine
@@ -934,12 +992,6 @@ fn read_page(
             false,
         ));
     }
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(100))?;
-    let transaction = connection.transaction()?;
     let runtime = crate::native_evidence::query_runtime_generation(options).ok();
     let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
     // Share the same custody capture with selected family status qualification.
@@ -1020,7 +1072,7 @@ fn read_page(
                 key: cursor.key.clone(),
             });
         let found = crate::catalog_search::read(
-            &transaction,
+            transaction,
             crate::catalog_search::Query {
                 scope: request.scope,
                 query,
@@ -1034,7 +1086,7 @@ fn read_page(
         )?;
         (found.rows, found.next, Some(found.report))
     } else {
-        (rows(&transaction, request)?, None, None)
+        (rows(transaction, request)?, None, None)
     };
     let has_history = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
@@ -1056,8 +1108,7 @@ fn read_page(
 
     if request.scope == CatalogReadScope::RetainedHistory {
         for current in &mut selected {
-            if let Some(metadata) = crate::history_projection::catalog(&transaction, &current.key)?
-            {
+            if let Some(metadata) = crate::history_projection::catalog(transaction, &current.key)? {
                 let history: CatalogRow = serde_json::from_str(&metadata)?;
                 if history.harness != current.harness {
                     // Only explicit History identity reads can select the
@@ -1066,7 +1117,7 @@ fn read_page(
                     if request.sid.as_deref() == Some(current.key.as_str())
                         && history.key == current.key
                     {
-                        if !crate::history_projection::qualified(&transaction, &history)? {
+                        if !crate::history_projection::qualified(transaction, &history)? {
                             return Ok(error(
                                 503,
                                 "catalog_unavailable",
@@ -1156,7 +1207,7 @@ fn read_page(
             .first()
             .map(|row| {
                 crate::causal_trace::selected_details(
-                    &transaction,
+                    transaction,
                     &row.key,
                     &row.sources,
                     &mut |relative| {
@@ -1174,7 +1225,7 @@ fn read_page(
             .first()
             .map(|row| {
                 crate::transcript_range::observation(
-                    &transaction,
+                    transaction,
                     &row.key,
                     &generation,
                     request.scope == CatalogReadScope::RetainedHistory,
@@ -1185,7 +1236,6 @@ fn read_page(
     } else {
         None
     };
-    transaction.commit()?;
     // The legacy model tolerates absent facts/old source selection. Focused
     // observations must retain that absence rather than invent current facts.
     let machine_label = match &options.facts {
@@ -4163,6 +4213,256 @@ mod tests {
                 .map(|entry| &entry["entry_id"])
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn selected_observation_does_not_report_ready_after_a_lost_publication_cas() {
+        let fixture = Fixture::new();
+        fixture.source("selected");
+        fixture.publish_existing();
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        db.execute(
+            "DELETE FROM session_overview WHERE session_key='selected'",
+            [],
+        )
+        .unwrap();
+        fixture.source("unrelated");
+        let options = fixture.options.clone();
+        crate::overview_repair::BEFORE_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let evidence = crate::native_evidence::NativeEvidence::new(options);
+                let mut work = crate::viewer::lock(&evidence.work);
+                while !evidence
+                    .refresh_catalog(&mut work, crate::model::now_ms())
+                    .unwrap()
+                {}
+                drop(work);
+                evidence.retire();
+            }));
+        });
+        let observed = crate::session_overview_observe(
+            &fixture.options,
+            "source",
+            "sid=selected&scope=retained_history",
+        );
+        assert_eq!(observed.status, 503);
+        let observed: Value = serde_json::from_slice(&observed.body).unwrap();
+        assert_eq!(observed["error"]["code"], "selected_observation");
+        assert_eq!(observed["error"]["retryable"], true);
+        assert!(observed.get("state").is_none());
+        // A later request can observe the committed producer revision and read
+        // it normally; the rejected repair did not publish partial metadata.
+        assert_eq!(
+            crate::session_overview_observe(
+                &fixture.options,
+                "source",
+                "sid=selected&scope=retained_history"
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                "sid=selected&scope=retained_history&limit=1",
+                None
+            )
+            .status,
+            200
+        );
+    }
+
+    #[test]
+    fn transcript_snapshot_survives_publication_after_selected_observation() {
+        use std::io::Write;
+        for scope in ["current", "retained_history"] {
+            let fixture = Fixture::new();
+            let path = fixture.source("selected");
+            writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"selected","uuid":"answer","parentUuid":"selected","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"selected answer"}]}})).unwrap();
+            fixture.publish_existing();
+            let observation = crate::session_overview_observe(
+                &fixture.options,
+                "source",
+                "sid=selected&scope=retained_history",
+            );
+            assert_eq!(observation.status, 200);
+            let before = session_catalog_identity(&fixture.options, "source", "selected")
+                .unwrap()
+                .unwrap();
+
+            // Force a real, atomic producer commit between selected identity
+            // and recipe loading. The former two-connection read returns 409
+            // here, even though neither publication is stale or incomplete.
+            fixture.source("unrelated");
+            let options = fixture.options.clone();
+            crate::transcript_range::AFTER_SELECTION.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let evidence = crate::native_evidence::NativeEvidence::new(options);
+                    let mut work = crate::viewer::lock(&evidence.work);
+                    while !evidence
+                        .refresh_catalog(&mut work, crate::model::now_ms())
+                        .unwrap()
+                    {}
+                    drop(work);
+                    evidence.retire();
+                }));
+            });
+            let query = format!("sid=selected&scope={scope}&after=0&limit=1");
+            let page = crate::session_transcript_range(&fixture.options, "source", &query, None);
+            assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
+            let page: Value = serde_json::from_slice(&page.body).unwrap();
+            assert_eq!(page["identity"]["generation"], before.generation);
+            assert_eq!(page["entries"][0]["text"], "synthetic prompt");
+            assert_eq!(page["range"]["next"], 1);
+            let after = session_catalog_identity(&fixture.options, "source", "selected")
+                .unwrap()
+                .unwrap();
+            assert_ne!(after.generation, before.generation);
+            let generation = page["projection"]["generation"].as_str().unwrap();
+            let continuation = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}"),
+                None,
+            );
+            assert_eq!(continuation.status, 200);
+            let continuation: Value = serde_json::from_slice(&continuation.body).unwrap();
+            assert_eq!(continuation["identity"]["generation"], after.generation);
+            assert_eq!(continuation["entries"][0]["text"], "selected answer");
+
+            // This is still a fence, not permission to serve an incoherent
+            // producer snapshot merely because the caller has no cursor.
+            let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+            db.execute("UPDATE meta SET value='unpublished' WHERE key='slot_projection_catalog_generation'", []).unwrap();
+            let rejected =
+                crate::session_transcript_range(&fixture.options, "source", &query, None);
+            assert_eq!(rejected.status, 409);
+            let rejected: Value = serde_json::from_slice(&rejected.body).unwrap();
+            assert_eq!(rejected["error"]["code"], "stale_projection");
+            assert!(rejected.get("entries").is_none());
+        }
+    }
+
+    #[test]
+    fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
+        use std::io::Write;
+        struct Original(Vec<u8>);
+        impl crate::SessionSourceReader for Original {
+            fn read_range(
+                &self,
+                source: &SessionSourceRef,
+                expected: Option<&str>,
+                offset: u64,
+                max: usize,
+            ) -> io::Result<crate::SessionSourceRange> {
+                let generation: String = source
+                    .prefix_sha256
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                assert!(expected.is_none_or(|expected| expected == generation));
+                assert!(source.offset <= self.0.len() as u64);
+                assert!(offset + max as u64 <= source.offset);
+                Ok(crate::SessionSourceRange {
+                    generation,
+                    length: source.offset,
+                    offset,
+                    bytes: self.0[offset as usize..offset as usize + max]
+                        .to_vec()
+                        .into(),
+                    cached: true,
+                })
+            }
+        }
+        for scope in ["current", "retained_history"] {
+            let fixture = Fixture::new();
+            let path = fixture.source("selected");
+            fixture.publish_existing();
+            assert_eq!(
+                crate::session_overview_observe(
+                    &fixture.options,
+                    "source",
+                    "sid=selected&scope=retained_history"
+                )
+                .status,
+                200
+            );
+            let original = Original(fs::read(&path).unwrap());
+            let before = session_catalog_identity(&fixture.options, "source", "selected")
+                .unwrap()
+                .unwrap();
+            let options = fixture.options.clone();
+            crate::transcript_range::AFTER_SELECTION.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"selected","uuid":"appended","parentUuid":"selected","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"new native answer"}]}})).unwrap();
+                    let evidence = crate::native_evidence::NativeEvidence::new(options);
+                    let mut work = crate::viewer::lock(&evidence.work);
+                    while !evidence
+                        .refresh_catalog(&mut work, crate::model::now_ms())
+                        .unwrap()
+                    {}
+                    drop(work);
+                    evidence.retire();
+                }));
+            });
+            let query = format!("sid=selected&scope={scope}&after=0&limit=100");
+            let page = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &query,
+                Some(&original),
+            );
+            assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
+            let page: Value = serde_json::from_slice(&page.body).unwrap();
+            assert_eq!(page["identity"]["generation"], before.generation);
+            assert_eq!(page["projection"]["total"], 1);
+            assert_eq!(page["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(page["entries"][0]["text"], "synthetic prompt");
+            assert_eq!(page["content_observation"]["state"], "cached");
+
+            assert_eq!(
+                crate::session_overview_observe(
+                    &fixture.options,
+                    "source",
+                    "sid=selected&scope=retained_history"
+                )
+                .status,
+                200
+            );
+            let fresh = crate::session_transcript_range(&fixture.options, "source", &query, None);
+            assert_eq!(fresh.status, 200);
+            let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
+            assert_ne!(fresh["identity"]["generation"], before.generation);
+            assert_eq!(fresh["projection"]["total"], 2);
+            assert_eq!(fresh["entries"][1]["text"], "new native answer");
+            let generation = fresh["projection"]["generation"].as_str().unwrap();
+            let continuation =
+                format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}");
+            assert_eq!(
+                crate::session_transcript_range(&fixture.options, "source", &continuation, None)
+                    .status,
+                200
+            );
+            let old = page["projection"]["generation"].as_str().unwrap();
+            let stale = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &continuation.replace(generation, old),
+                None,
+            );
+            assert_eq!(stale.status, 409);
+            let stale: Value = serde_json::from_slice(&stale.body).unwrap();
+            assert_eq!(stale["error"]["code"], "stale_projection");
+            assert!(stale.get("entries").is_none());
+            let stale_errors = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &format!("{continuation}&errors_generation=wrong"),
+                None,
+            );
+            assert_eq!(stale_errors.status, 409);
+        }
     }
 
     #[test]
