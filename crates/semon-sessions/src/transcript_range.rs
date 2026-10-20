@@ -915,6 +915,8 @@ impl SessionSourceReader for Composite<'_> {
     }
 }
 
+type LocalBlock = (PathBuf, usize, Arc<[u8]>);
+
 struct Local<'a> {
     options: &'a Options,
     sources: &'a BTreeMap<PathBuf, CatalogSource>,
@@ -922,7 +924,7 @@ struct Local<'a> {
     mode: SessionSourceReadMode,
     observed: std::sync::Mutex<BTreeMap<PathBuf, crate::events::Stat>>,
     proofs: std::sync::Mutex<BTreeMap<PathBuf, crate::events::store::chunk_proofs::Focused>>,
-    block: std::sync::Mutex<Option<(PathBuf, usize, Arc<[u8]>)>>,
+    block: std::sync::Mutex<Option<LocalBlock>>,
     bytes_left: std::sync::Mutex<usize>,
 }
 impl SessionSourceReader for Local<'_> {
