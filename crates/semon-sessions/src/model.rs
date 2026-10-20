@@ -34,8 +34,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use crate::{
     Marker, Options, attachments, events,
     events::{
-        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_UP, ANSWERED, ASYNC, DENIED, Event, EventCache,
-        FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
+        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASYNC, DENIED, Event,
+        EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, handoff,
@@ -3712,9 +3712,11 @@ impl<'a> Builder<'a> {
                     .chain(child_events.iter().copied())
                     .filter(|at| {
                         // Only what the child sent up is its result: not its
-                        // message to its own child or to a sibling.
+                        // message to its own child or to a sibling. One with
+                        // no recipient has no direction and counts, as
+                        // before.
                         let found = event(self.files, *at);
-                        found.k == Kind::Agm && found.script & AGM_UP != 0
+                        found.k == Kind::Agm && found.script & (AGM_DOWN | AGM_SIDE) == 0
                     })
                     .collect();
                 for at in candidates {
