@@ -5377,6 +5377,340 @@ mod tests {
         }
     }
 
+    fn local_only_codex_fixture() -> (Fixture, PathBuf) {
+        use std::io::Write;
+        let fixture = Fixture::new();
+        let relative = fixture.codex_source("local-proof", None, 1);
+        let path = fixture.options.codex_home.join(&relative);
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"response_item","timestamp":"2026-10-01T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"local original prompt"}]}})).unwrap();
+        for _ in 0..100 {
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"synthetic_padding","payload":"x".repeat(32 * 1024)})
+            )
+            .unwrap();
+        }
+        writeln!(file, "{}", json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"local original answer"}]}})).unwrap();
+        drop(file);
+        let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
+        crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let prepared = crate::model::prepare_sources(
+            &fixture.options,
+            &mut cache,
+            &[crate::inputs::Input {
+                root: crate::inputs::InputRoot::Codex,
+                path: relative,
+            }],
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.publish_partial_catalog(&prepared).unwrap(),
+            crate::events::Outcome::Written
+        );
+        drop(cache);
+        assert_eq!(
+            session_catalog_identity(&fixture.options, "source", "local-proof")
+                .unwrap()
+                .unwrap()
+                .owner_qualification,
+            CatalogOwnerQualification::Provisional
+        );
+        (fixture, path)
+    }
+
+    #[test]
+    fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
+        use std::io::Write;
+        for mutation in ["append", "copy", "touch", "legacy"] {
+            let (fixture, path) = local_only_codex_fixture();
+            let get = |query: &str, mode| {
+                crate::session_transcript_range_with_mode(
+                    &fixture.options,
+                    "source",
+                    query,
+                    None,
+                    mode,
+                )
+            };
+            let query = "sid=local-proof&scope=retained_history&after=0&limit=1";
+            let before = get(query, crate::SessionSourceReadMode::LocalThenProvider);
+            assert_eq!(before.status, 200);
+            let before: Value = serde_json::from_slice(&before.body).unwrap();
+            let original = fs::read(&path).unwrap();
+            assert!(original.len() > 3 * 1024 * 1024);
+            match mutation {
+                "append" => fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b"{\"synthetic_append\":true}\n")
+                    .unwrap(),
+                "copy" => {
+                    fs::rename(&path, path.with_extension("saved")).unwrap();
+                    fs::write(&path, &original).unwrap();
+                }
+                "touch" => fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2))
+                    .unwrap(),
+                "legacy" => {
+                    let mut db =
+                        Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+                    let text: String = db
+                        .query_row(
+                            "SELECT metadata FROM session_catalog WHERE session_key='local-proof'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    let mut row: CatalogRow = serde_json::from_str(&text).unwrap();
+                    crate::events::store::chunk_proofs::legacy_change_token_for_test(
+                        &EventCache::path(&fixture.options.cache),
+                        path.to_str().unwrap(),
+                        &crate::source_carrier::ledger(&row.sources[0]),
+                    );
+                    row.sources[0].changed_ns = None;
+                    let slots: Vec<String> = db.prepare("SELECT metadata FROM session_slots WHERE session_key='local-proof' ORDER BY slot").unwrap()
+                        .query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+                    let generation =
+                        crate::slot_projection::generation(&slots, &row.sources).unwrap();
+                    let source_generation =
+                        crate::retention::source_generation(&row.sources).unwrap();
+                    let tx = db.transaction().unwrap();
+                    tx.execute(
+                        "UPDATE session_catalog SET metadata=?1 WHERE session_key='local-proof'",
+                        [serde_json::to_string(&row).unwrap()],
+                    )
+                    .unwrap();
+                    tx.execute("UPDATE session_slot_projections SET generation=?1,source_generation=?2 WHERE session_key='local-proof'", rusqlite::params![generation, source_generation]).unwrap();
+                    tx.commit().unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let strict = get(query, crate::SessionSourceReadMode::LocalThenProvider);
+            assert_eq!(
+                strict.status, 409,
+                "regression must reject at deployed strict path: {mutation}"
+            );
+            let strict: Value = serde_json::from_slice(&strict.body).unwrap();
+            assert_eq!(strict["fence_reason"], "local_source_revision");
+            assert_eq!(
+                strict["local_revision_reason"],
+                match mutation {
+                    "append" => "size_grew",
+                    "copy" => "identity",
+                    "legacy" => "missing_change_token",
+                    _ => "change_time",
+                }
+            );
+            for scope in ["current", "retained_history"] {
+                crate::source_chunks::READ_BYTES.with(|n| n.set(0));
+                crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow_mut().clear());
+                crate::events::SOURCE_HASHED_BYTES.with(|n| n.set(0));
+                crate::events::HASHED_BYTES.with(|n| n.set(0));
+                let query = format!("sid=local-proof&scope={scope}&after=0&limit=1");
+                let page = get(&query, crate::SessionSourceReadMode::LocalOrPinnedProvider);
+                assert_eq!(
+                    page.status,
+                    200,
+                    "{mutation}/{scope}: {}",
+                    String::from_utf8_lossy(&page.body)
+                );
+                let page: Value = serde_json::from_slice(&page.body).unwrap();
+                assert_eq!(page["entries"][0]["text"], "local original prompt");
+                assert_eq!(
+                    page["entries"][0]["entry_id"],
+                    before["entries"][0]["entry_id"]
+                );
+                assert_eq!(
+                    page["entries"][0]["provenance"],
+                    before["entries"][0]["provenance"]
+                );
+                assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
+                assert!(
+                    crate::source_chunks::READ_BYTES.with(std::cell::Cell::get)
+                        <= 4 * crate::source_chunks::SIZE as u64
+                );
+                crate::source_chunks::READ_BLOCKS.with(|blocks| {
+                    assert_eq!(*blocks.borrow(), std::collections::BTreeSet::from([0]))
+                });
+                assert!(
+                    crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get)
+                        <= 4 * crate::source_chunks::SIZE as u64
+                );
+                let generation = page["projection"]["generation"].as_str().unwrap();
+                let next = format!(
+                    "sid=local-proof&scope={scope}&after=1&limit=1&generation={generation}"
+                );
+                let continuation = get(&next, crate::SessionSourceReadMode::LocalOrPinnedProvider);
+                assert_eq!(continuation.status, 200);
+                let continuation: Value = serde_json::from_slice(&continuation.body).unwrap();
+                assert_eq!(continuation["entries"][0]["text"], "local original answer");
+                let stale = get(
+                    &next.replace(generation, "stale"),
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                );
+                assert_eq!(stale.status, 409);
+            }
+            if mutation != "legacy" {
+                let observed = crate::session_overview_observe(
+                    &fixture.options,
+                    "source",
+                    "sid=local-proof&scope=retained_history",
+                );
+                assert_eq!(observed.status, 200);
+                // Observe acknowledges metadata; it does not relabel the carrier.
+                let identity = session_catalog_identity(&fixture.options, "source", "local-proof")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(identity.source_refs[0].state, "stale");
+                let mut query =
+                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                for tool in ["get_session", "read_transcript"] {
+                    let args = if tool == "get_session" {
+                        json!({"id":"local-proof"})
+                    } else {
+                        json!({"id":"local-proof","after":0,"limit":1})
+                    };
+                    crate::events::FILE_READS.with(|n| n.set(0));
+                    crate::events::HASHED_BYTES.with(|n| n.set(0));
+                    let data = query
+                        .call_selected(
+                            "source",
+                            "local-proof",
+                            tool,
+                            &args,
+                            None,
+                            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        crate::events::FILE_READS.with(std::cell::Cell::get),
+                        0,
+                        "focused {tool} must not decode the complete Event Index"
+                    );
+                    assert_eq!(
+                        crate::events::HASHED_BYTES.with(std::cell::Cell::get),
+                        0,
+                        "focused {tool} must not hash the complete prefix"
+                    );
+                    assert!(data.get("error").is_none(), "{tool}: {data}");
+                    assert!(
+                        data.to_string().contains("local original prompt"),
+                        "{tool}: {data}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_only_provisional_codex_refuses_corruption_truncation_races_and_missing_proofs() {
+        for mutation in ["rewrite", "truncate", "race", "missing_proofs"] {
+            let (fixture, path) = local_only_codex_fixture();
+            match mutation {
+                "rewrite" => {
+                    let mut bytes = fs::read(&path).unwrap();
+                    let at = bytes
+                        .windows(b"local original prompt".len())
+                        .position(|b| b == b"local original prompt")
+                        .unwrap();
+                    bytes[at] = b'X';
+                    fs::write(&path, bytes).unwrap();
+                }
+                "truncate" => fs::write(&path, b"{}\n").unwrap(),
+                "race" => {
+                    let raced = path.clone();
+                    crate::transcript_range::AFTER_LOCAL_READ.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || {
+                            use std::io::Write;
+                            fs::OpenOptions::new()
+                                .append(true)
+                                .open(raced)
+                                .unwrap()
+                                .write_all(b"race")
+                                .unwrap();
+                        }))
+                    });
+                }
+                "missing_proofs" => {
+                    fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2))
+                        .unwrap();
+                    Connection::open(EventCache::path(&fixture.options.cache))
+                        .unwrap()
+                        .execute(
+                            "DELETE FROM meta WHERE key LIKE 'native_source_chunks:%'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let page = crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "source",
+                "sid=local-proof&after=0&limit=2",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            assert_eq!(page.status, 409, "{mutation}");
+            let page: Value = serde_json::from_slice(&page.body).unwrap();
+            assert_eq!(page["fence_reason"], "local_source_revision");
+            assert!(
+                page.get("entries").is_none(),
+                "no partial success: {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_provider_never_hides_a_concurrent_local_read_mutation() {
+        use std::io::Write;
+        let (fixture, path) = local_only_codex_fixture();
+        let identity = session_catalog_identity(&fixture.options, "source", "local-proof")
+            .unwrap()
+            .unwrap();
+        let provider = PinnedOriginal {
+            source: identity.source_refs[0].source.clone(),
+            bytes: fs::read(&path).unwrap(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            change_at: None,
+        };
+        crate::transcript_range::AFTER_LOCAL_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .unwrap()
+                    .write_all(b"race")
+                    .unwrap();
+            }))
+        });
+        let page = crate::session_transcript_range_with_mode(
+            &fixture.options,
+            "source",
+            "sid=local-proof&after=0&limit=1",
+            Some(&provider),
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        );
+        assert_eq!(page.status, 409);
+        let page: Value = serde_json::from_slice(&page.body).unwrap();
+        assert_eq!(page["fence_reason"], "local_source_revision");
+        assert!(page.get("entries").is_none());
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
         use std::io::Write;
@@ -5517,7 +5851,7 @@ mod tests {
                     recovered["content_observation"]["sources"][0]["length"]
                         .as_u64()
                         .unwrap()
-                        > provider.source.offset
+                        >= provider.source.offset
                 );
                 assert_eq!(
                     recovered["entries"][0]["entry_id"],
@@ -5533,7 +5867,8 @@ mod tests {
                 assert!(recovered["observation"]["source_bytes"].as_u64().unwrap() <= 8192);
                 crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
                 crate::events::PARSED.with(|parsed| assert_eq!(parsed.get(), 0));
-                crate::events::SOURCE_HASHED_BYTES.with(|bytes| assert_eq!(bytes.get(), 0));
+                crate::events::SOURCE_HASHED_BYTES
+                    .with(|bytes| assert!(bytes.get() <= 2 * crate::source_chunks::SIZE as u64));
                 let generation = recovered["projection"]["generation"].as_str().unwrap();
                 let continuation =
                     format!("sid=pinned&scope={scope}&after=1&limit=1&generation={generation}");

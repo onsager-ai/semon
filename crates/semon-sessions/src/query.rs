@@ -1215,7 +1215,7 @@ impl Query {
             now,
             |data| {
                 let data = Arc::new(data);
-                let witness = data.sources.reader_with(rendering);
+                let witness = data.sources.reader_with_mode(provider, mode);
                 witness
                     .verify_all()
                     .map_err(|error| QueryError::io(&error))?;

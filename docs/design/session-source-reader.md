@@ -57,21 +57,34 @@ it neither authorizes a changed source cohort nor replaces host access checks
 before and after rendering. Byte generations and explicit page/field/error
 generations retain their independent fences.
 
-For hosts with independently verified originals, `LocalOrPinnedProvider` admits
-the exact selected callback when a local file is absent or its physical revision
-fails **before that source's first accepted bytes**. An append, replacement or
-legacy row without a change-time witness cannot authorize newer local bytes.
-The callback must still qualify the original consumed prefix and every range;
-no cache deletion, full-prefix hash or history replay is performed by this read.
-Each source's local/provider carrier is pinned for the request. A later local
-revision failure, including one between chunks, never switches carriers.
-`LocalThenProvider` keeps its stricter absent-file-only fallback behavior.
-The hosted paged transcript and field routes explicitly opt into the new mode;
-complete Query and selected Home preparation retain their existing mode.
+`LocalOrPinnedProvider` keeps exact stat equality as the local fast path.
+On a changed physical witness (append, copy/remount, touch or a missing legacy
+change token), a local carrier may instead supply only ranges whose covering
+64 KiB blocks verify against persisted native proofs for the exact original
+ledger, consumed boundary and prefix generation. One request-local verified
+block is retained, and physical block reads charge the existing page/field or
+attachment byte budget. The named file and descriptor
+must agree before/after I/O. The request pins the first physical observation;
+later physical changes fail closed. A small read never rehashes the full prefix
+or reparses history. Missing or incompatible proofs remain unavailable; readers
+do not manufacture proof for legacy/provisional rows.
+
+If local qualification fails before that source's first accepted bytes, a host
+with independently verified originals may use the exact selected callback.
+Each source's local/provider carrier is pinned for the request; a later failure
+never switches carriers. The hosted paged transcript/field and focused MCP
+Catalog/selected reads explicitly opt into this qualification, including when
+the host has no provider. Complete Query, selected Home and `LocalThenProvider`
+retain their existing semantics. Metadata-only observe acknowledges or repairs
+the selected metadata generation; it neither refreshes physical witnesses nor
+proves that a transcript body can be read.
 
 Native transcript 409 replies include a closed `fence_reason`: Catalog
 publication, projection/errors generation, local source revision, source
 generation or source range. These codes contain no path, body or provider error.
+Local revision failures add
+a closed `local_revision_reason`: identity, change_time, size_grew, size_shrank,
+modified or missing_change_token.
 
 Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
 

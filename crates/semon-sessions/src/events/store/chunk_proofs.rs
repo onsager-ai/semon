@@ -38,6 +38,25 @@ fn prefix(path: &str) -> String {
     )
 }
 
+#[cfg(test)]
+pub(crate) fn legacy_change_token_for_test(cache: &Path, path: &str, ledger: &Ledger) {
+    let db = Connection::open(cache).unwrap();
+    let key = format!("{}header", prefix(path));
+    let encoded: String = db
+        .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+        .unwrap();
+    let mut header: Header = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(header.ledger, header_ledger(ledger));
+    let mut legacy = ledger.clone();
+    legacy.stat.changed_ns = None;
+    header.ledger = header_ledger(&legacy);
+    db.execute(
+        "UPDATE meta SET value=?2 WHERE key=?1",
+        params![key, json(&header).unwrap()],
+    )
+    .unwrap();
+}
+
 pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let encoded: Option<Option<String>> = connection
         .query_row(
@@ -284,10 +303,8 @@ thread_local! {
 }
 
 impl Focused {
-    #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        let db = Connection::open_with_flags(cache, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(io::Error::other)?;
+        let db = super::focused_connection(cache)?;
         db.busy_timeout(Duration::from_millis(100))
             .map_err(io::Error::other)?;
         Self::with_db(Arc::new(std::sync::Mutex::new(db)), cache, path, ledger)
@@ -522,7 +539,12 @@ impl Focused {
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut bytes)?;
         #[cfg(test)]
-        crate::source_chunks::READ_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
+        {
+            crate::source_chunks::READ_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
+            crate::source_chunks::READ_BLOCKS.with(|blocks| {
+                blocks.borrow_mut().insert(index);
+            });
+        }
         self.verify(index, &bytes)?;
         Ok(bytes)
     }

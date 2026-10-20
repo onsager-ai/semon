@@ -474,9 +474,7 @@ impl Query {
                     .tx
                     .get(own)
                     .ok_or_else(|| unavailable("Selected search transcript unavailable"))?;
-                let records = data
-                    .sources
-                    .reader_with(reader.map(|reader| (reader, mode)));
+                let records = data.sources.reader_with_mode(reader, mode);
                 search.scan(&served, transcript, &data, &view.handoffs, &records)?;
                 records.finish().map_err(|error| QueryError::io(&error))
             })
