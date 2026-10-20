@@ -4055,6 +4055,63 @@ fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
     assert_staged_bidirectional_message_pages(360);
 }
 
+#[test]
+fn catalog_runtime_staged_parent_turn_survives_subagent_progress_receipts() {
+    let home = background_home(
+        vec![(
+            "worker",
+            "spawn-call",
+            send_to_main("progress-send", 2, "Progress update", queued_reply()),
+        )],
+        vec![
+            agm_line(3, &[("worker", "Progress update")]),
+            assistant(
+                "lead",
+                ts(20, 4),
+                vec![tool(
+                    "external-send",
+                    "SendMessage",
+                    json!({"to":"receiver","message":"After progress"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(20, 4),
+                "external-send",
+                "sent",
+                false,
+                json!({"success":true,"msg_id":"external-message"}),
+            ),
+        ],
+    );
+    home.top(
+        "receiver",
+        &[peer("receiver", ts(20, 5), "external-message", "Lead", 100, "After progress")],
+    );
+    for n in 0..70 {
+        let id = format!("independent-{n:03}");
+        home.top(&id, &[human(&id, ts(20, 0), "Independent history")]);
+    }
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let incoming = only(&oracle, "relay", "worker", "lead");
+    let outgoing = only(&oracle, "relay", "lead", "receiver");
+    let holding = turns_of(&oracle, "lead")
+        .into_iter()
+        .find(|turn| turn.sent.contains(&outgoing.id))
+        .unwrap();
+    assert_eq!(holding.start.as_deref(), Some(incoming.id.as_str()));
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for owner in ["lead", "receiver"] {
+        let actual: String = db.query_row(
+            "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+            rusqlite::params![owner, outgoing.id],
+            |row| row.get(0),
+        ).unwrap();
+        let actual: Value = serde_json::from_str(&actual).unwrap();
+        assert_eq!(actual["source_turn"], json!(holding.id));
+    }
+}
+
 fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let home = Home::new();
     let ts = |hour: i64, minute: i64| {
