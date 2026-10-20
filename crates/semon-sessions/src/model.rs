@@ -3117,6 +3117,21 @@ impl<'a> Builder<'a> {
                 self.sessions[*child].out.lane = true;
             }
         }
+        // In staged relation order (`relation_stage::Relation::order`): by
+        // the child's first event, then its first source, then id. A nested
+        // agent's log can sort before its spawner's.
+        spawns.sort_by_cached_key(|(child, ..)| {
+            let session = &self.sessions[*child];
+            (
+                session.first.unwrap_or(i64::MAX),
+                session
+                    .files
+                    .first()
+                    .map(|file| self.files[*file].path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                stable_id("s", &format!("spawn:claude:{}", session.key)),
+            )
+        });
         // Each spawner's sends delivered to one of its agents, read once.
         let mut deliveries = HashMap::new();
         for (child, spawner, call, tool_use_id) in spawns {
