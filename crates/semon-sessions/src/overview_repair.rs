@@ -20,6 +20,11 @@ type EvidenceRead<'a> =
     Box<dyn Fn(&Path, &crate::native_record::Record) -> io::Result<Vec<u8>> + 'a>;
 type NativeRead<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Value> + 'a>;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) struct NativeRecords<'a> {
     full: BTreeMap<PathBuf, Vec<u8>>,
     selected: Option<&'a EventCache>,
@@ -735,15 +740,17 @@ pub fn repair_session_overview_with_control(
         let tx = writable
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(failure)?;
-        if let Some(current) = catalog(&tx, key)?
-            && ready(&tx, &current)?
-        {
-            tx.execute(
-                "DELETE FROM meta WHERE key=?1",
-                [format!("overview_needed:{key}")],
-            )
-            .map_err(failure)?;
+        let Some(current) = catalog(&tx, key)? else {
+            return Err(publication_changed());
+        };
+        if !ready(&tx, &current)? {
+            return Err(publication_changed());
         }
+        tx.execute(
+            "DELETE FROM meta WHERE key=?1",
+            [format!("overview_needed:{key}")],
+        )
+        .map_err(failure)?;
         crate::selected_read::checkpoint("selected_publication")?;
         tx.commit().map_err(failure)?;
         return Ok(false);
@@ -818,6 +825,10 @@ pub fn repair_session_overview_with_control(
     // current/history membership; the publication below does not touch either.
     let _schema = EventCache::open_scoped(&options.cache).map_err(failure)?;
     crate::selected_read::check()?;
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
     crate::selected_read::install(&writable)?;
     writable.busy_timeout(Duration::ZERO).map_err(failure)?;
@@ -832,14 +843,14 @@ pub fn repair_session_overview_with_control(
         )
         .map_err(failure)?;
     if current != generation {
-        return Ok(false);
+        return Err(publication_changed());
     }
     for row in &repaired {
         let Some(current) = catalog(&tx, &row.key)? else {
-            return Ok(false);
+            return Err(publication_changed());
         };
         if current.sources != row.sources {
-            return Ok(false);
+            return Err(publication_changed());
         }
     }
     for row in &repaired {
@@ -871,6 +882,13 @@ pub fn repair_session_overview_with_control(
     crate::selected_read::checkpoint("selected_publication")?;
     tx.commit().map_err(failure)?;
     Ok(true)
+}
+
+fn publication_changed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "Selected native publication changed; retry observation",
+    )
 }
 
 fn with_records<T>(
