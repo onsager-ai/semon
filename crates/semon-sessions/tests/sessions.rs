@@ -809,8 +809,9 @@ fn said(blocks: Value) -> Value {
 }
 
 /// A home with one of each: your message, a subagent that returns, a relay
-/// between two lanes, an answered question, a Codex run, and a reply whose
-/// result can't be attributed exactly because other incoming events intervened.
+/// between two lanes, an answered question, a Codex run, and a reply that is
+/// a result to you: the subagent's agent-end notification before it is a
+/// status, not an incoming message, so it doesn't break the attribution.
 fn write_model_home(fixture: &Fixture, secrets: bool) {
     // A worktree path names its repo without touching the disk, and a fixed
     // path keeps the golden file's byte offsets independent of the temp dir.
