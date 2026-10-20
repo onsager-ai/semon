@@ -81,7 +81,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v23: native connector completions and tool search are tools, including
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
 /// v25: agent messages carry their direction; coordinator messages and unknown origin kinds are indexed; relay tags count only at the start of a prompt.
-const CACHE_VERSION: u32 = 25;
+/// v26: a subagent's non-final send (`senderTaskId`, no `handback`) is an up agent message flagged [`AGM_PROGRESS`], not a relay; relay tags nested in another relay block are not their own events.
+const CACHE_VERSION: u32 = 26;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3280,6 +3281,12 @@ pub(crate) const AGM_DOWN: u8 = 32;
 pub(crate) const AGM_SIDE: u8 = 64;
 /// The agent's final report for its run (`origin.handback == true`).
 pub(crate) const AGM_FINAL: u8 = 128;
+/// Agm only (`script` bits are per kind; [`STDIN`] shares the value on tool
+/// calls): a Claude subagent's send that isn't its hand-back (`senderTaskId`
+/// without `handback`), always with [`AGM_UP`]. An up message with neither
+/// this nor [`AGM_FINAL`] is a legacy `<agent-message>` tag: which it is, the
+/// log doesn't say.
+pub(crate) const AGM_PROGRESS: u8 = 1;
 
 /// Open yielded commands kept per file; past this the oldest is dropped.
 const YIELDS_MAX: usize = 64;
@@ -3324,11 +3331,14 @@ pub(crate) struct Event {
     pub(crate) b: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) t: Option<i64>,
-    /// tool: the tool_use / call id. xsm: `msg_id`. agm: the agent id.
-    /// tn: the tool-use id.
+    /// tool: the tool_use / call id. xsm: `msg_id`. agm: Claude, the sender's
+    /// `origin.senderTaskId` (the agent id or its spawning call's id), else
+    /// the tag's `from`; none for a coordinator message. Codex, the
+    /// `author` path. tn: the tool-use id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) id: Option<String>,
-    /// tool: the tool name. xsm: the sender's `origin.name`. tn: the status.
+    /// tool: the tool name. xsm: the sender's `origin.name`. agm (Claude):
+    /// `origin.from` when it differs from `id`. tn: the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) n: Option<String>,
     /// A Codex `custom_tool_call` named `exec`.
@@ -3344,7 +3354,8 @@ pub(crate) struct Event {
     /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), a Claude Bash
     /// call launched in the [`BACKGROUND`], a task notification with a
     /// [`BACKGROUND_FAILED`] outcome, or Agm direction/finality
-    /// ([`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`]).
+    /// ([`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`],
+    /// [`AGM_PROGRESS`]).
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
     /// Code-mode call: a command it started outlived its yield.
@@ -3651,13 +3662,22 @@ pub(crate) fn attributes(tag: &str) -> BTreeMap<String, String> {
     result
 }
 
-/// The opening-tag attribute strings of every `<name ...>` block in `text`.
-pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
+/// The block kinds a relay or notification prompt is made of.
+const RELAY_TAGS: [&str; 3] = [
+    "cross-session-message",
+    "agent-message",
+    "task-notification",
+];
+
+/// Every `<name ...>` opening tag in `text`: where its `<` is, its attribute
+/// string, and where the tag ends.
+fn opening_tags<'a>(text: &'a str, name: &str) -> Vec<(usize, &'a str, usize)> {
     let open = format!("<{name}");
     let mut result = Vec::new();
     let mut from = 0;
     while let Some(found) = text[from..].find(&open) {
-        let start = from + found + open.len();
+        let at = from + found;
+        let start = at + open.len();
         let next = text[start..].chars().next();
         if !matches!(next, Some(' ' | '>' | '\n' | '\t')) {
             from = start;
@@ -3666,10 +3686,46 @@ pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
         let Some(close) = text[start..].find('>') else {
             break;
         };
-        result.push((&text[start..start + close], start + close + 1));
+        result.push((at, &text[start..start + close], start + close + 1));
         from = start + close + 1;
     }
     result
+}
+
+/// The span of every relay block in `text`, from its `<` to the end of its
+/// closing tag; an unclosed block spans its opening tag only, so it hides
+/// nothing after it.
+fn relay_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for name in RELAY_TAGS {
+        let close = format!("</{name}>");
+        for (at, _, end) in opening_tags(text, name) {
+            let until = text[end..]
+                .find(&close)
+                .map_or(end, |length| end + length + close.len());
+            spans.push((at, until));
+        }
+    }
+    spans
+}
+
+/// Whether a block starting at `at` lies inside another block's span: quoted
+/// in its body, not a block of the prompt.
+fn nested(spans: &[(usize, usize)], at: usize) -> bool {
+    spans.iter().any(|(start, end)| *start < at && at < *end)
+}
+
+/// The opening-tag attribute strings of every top-level `<name ...>` block in
+/// `text`, each with where its tag ends. A block quoted inside another relay
+/// block (a notification's `<result>` quoting an `<agent-message>`, say)
+/// isn't one.
+pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
+    let spans = relay_spans(text);
+    opening_tags(text, name)
+        .into_iter()
+        .filter(|(at, _, _)| !nested(&spans, *at))
+        .map(|(_, attributes, end)| (attributes, end))
+        .collect()
 }
 
 fn starts_with_relay_tag(text: &str) -> bool {
@@ -3705,18 +3761,23 @@ pub(crate) fn notification_exit(summary: &str) -> Option<i64> {
         .ok()
 }
 
-/// Task-notification blocks: `(tool-use id, status, body)`.
+/// Top-level task-notification blocks: `(tool-use id, status, body)`. A
+/// block quoted inside another relay block isn't one.
 pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str)> {
+    let spans = relay_spans(text);
     let mut result = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<task-notification>") {
+    let mut from = 0;
+    while let Some(found) = text[from..].find("<task-notification>") {
+        let start = from + found;
         let body_start = start + "<task-notification>".len();
-        let Some(length) = rest[body_start..].find("</task-notification>") else {
+        let Some(length) = text[body_start..].find("</task-notification>") else {
             break;
         };
-        let body = &rest[body_start..body_start + length];
-        result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
-        rest = &rest[body_start + length..];
+        let body = &text[body_start..body_start + length];
+        if !nested(&spans, start) {
+            result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
+        }
+        from = body_start + length;
     }
     result
 }
@@ -3739,23 +3800,45 @@ fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
             ..Event::default()
         };
     }
+    let peer = Peer {
+        sock: field(origin, "from").map(str::to_owned),
+        pid: origin.get("verifiedPeerPid").and_then(Value::as_u64),
+        start: origin
+            .get("verifiedPeerProcStart")
+            .and_then(|value| match value {
+                Value::String(text) => Some(text.clone()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }),
+    };
+    if let Some(task) = field(origin, "senderTaskId")
+        && field(origin, "msg_id").is_none()
+    {
+        // A subagent's send that isn't its hand-back: to its parent (a
+        // progress receipt) or to another agent. Which one, the model
+        // decides from the tree. `peer.sock` keeps `from` (the agent id), as
+        // when this was a relay, so the sender resolves the same way. One
+        // with a `msg_id` went over the peer network and joins its send by
+        // that id: it stays a relay.
+        let from = field(origin, "from");
+        return Event {
+            k: Kind::Agm,
+            o: offset,
+            t: time,
+            id: Some(task.to_owned()),
+            n: from.filter(|from| *from != task).map(str::to_owned),
+            script: AGM_UP | AGM_PROGRESS,
+            peer: Some(peer),
+            ..Event::default()
+        };
+    }
     Event {
         k: Kind::Xsm,
         o: offset,
         t: time,
         id: field(origin, "msg_id").map(str::to_owned),
         n: field(origin, "name").map(str::to_owned),
-        peer: Some(Peer {
-            sock: field(origin, "from").map(str::to_owned),
-            pid: origin.get("verifiedPeerPid").and_then(Value::as_u64),
-            start: origin
-                .get("verifiedPeerProcStart")
-                .and_then(|value| match value {
-                    Value::String(text) => Some(text.clone()),
-                    Value::Number(number) => Some(number.to_string()),
-                    _ => None,
-                }),
-        }),
+        peer: Some(peer),
         ..Event::default()
     }
 }
@@ -6832,6 +6915,72 @@ mod tests {
         );
         assert_eq!(notifications.events.len(), 2);
         assert!(notifications.events.iter().all(|event| event.k == Kind::Tn));
+    }
+
+    #[test]
+    fn a_subagent_send_that_is_not_its_hand_back_is_up_progress() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","from":"agent-7","senderTaskId":"agent-7","name":"general-purpose"},"message":{"role":"user","content":"<agent-message from=\"agent-7\">halfway</agent-message>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        let event = &index.events[0];
+        assert_eq!(event.k, Kind::Agm);
+        assert_eq!(event.script, AGM_UP | AGM_PROGRESS);
+        assert_eq!(event.id.as_deref(), Some("agent-7"));
+        // `from` is kept only when it differs from `senderTaskId`.
+        assert_eq!(event.n, None);
+        assert_eq!(
+            event.peer.as_ref().and_then(|peer| peer.sock.as_deref()),
+            Some("agent-7")
+        );
+
+        let mut differs = FileIndex::default();
+        claude(
+            &mut differs,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","from":"agent-7","senderTaskId":"call-7"},"message":{"role":"user","content":"x"}}),
+            0,
+        );
+        assert_eq!(differs.events[0].k, Kind::Agm);
+        assert_eq!(differs.events[0].script, AGM_UP | AGM_PROGRESS);
+        assert_eq!(differs.events[0].id.as_deref(), Some("call-7"));
+        assert_eq!(differs.events[0].n.as_deref(), Some("agent-7"));
+
+        // A socket peer without `senderTaskId` is still a relay.
+        let mut relay = FileIndex::default();
+        claude(
+            &mut relay,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/5.sock","name":"peer","msg_id":"m5"},"message":{"role":"user","content":"x"}}),
+            0,
+        );
+        assert_eq!(relay.events[0].k, Kind::Xsm);
+        assert_eq!(relay.events[0].id.as_deref(), Some("m5"));
+        assert_eq!(relay.events[0].script, 0);
+    }
+
+    #[test]
+    fn a_relay_tag_quoted_inside_another_block_is_not_its_own_event() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>The log said <agent-message from=\"x\">quoted</agent-message> and <task-notification><tool-use-id>t9</tool-use-id><status>failed</status></task-notification></result></task-notification>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+        assert!(index.events.iter().all(|event| event.k != Kind::Agm));
+
+        // Top-level blocks side by side are each their own.
+        let text = "<agent-message from=\"a\">one</agent-message>\n<agent-message from=\"b\">two <cross-session-message from=\"s\">quoted</cross-session-message></agent-message>";
+        let found: Vec<_> = tags(text, "agent-message")
+            .into_iter()
+            .map(|(tag, _)| attributes(tag)["from"].clone())
+            .collect();
+        assert_eq!(found, ["a", "b"]);
+        assert!(tags(text, "cross-session-message").is_empty());
     }
 
     #[test]
