@@ -1071,8 +1071,14 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
                 .and_then(|peer| peer.sock.as_deref())
                 .or(own.event.id.as_deref())
         {
-            let source:Option<String>=c.query_row("SELECT source_path FROM session_catalog_sources WHERE harness='claude' AND native_id=?1 AND lifecycle='current' ORDER BY source_path LIMIT 1",[sender],|r|r.get(0)).optional()?;
-            if let Some(source) = source {
+            // The stage's own inputs, not the published catalog: a first
+            // build has no catalog yet when relations are matched.
+            let file = format!("/subagents/agent-{sender}.jsonl");
+            let mut senders=c.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND is_top=0 AND (native_id=?1 OR substr(source_path,-length(?2))=?2) ORDER BY source_path LIMIT 8")?;
+            let sources = senders
+                .query_map(params![sender, file], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for source in sources {
                 candidate.extend(owner_closure(c, &source)?);
             }
         }
