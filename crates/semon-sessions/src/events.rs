@@ -3693,8 +3693,8 @@ fn opening_tags<'a>(text: &'a str, name: &str) -> Vec<(usize, &'a str, usize)> {
 }
 
 /// The span of every relay block in `text`, from its `<` to the end of its
-/// closing tag; an unclosed block spans its opening tag only, so it hides
-/// nothing after it.
+/// closing tag; an opening tag with no later close spans only its opening tag,
+/// so it hides nothing after it.
 fn relay_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     for name in RELAY_TAGS {
@@ -3709,8 +3709,9 @@ fn relay_spans(text: &str) -> Vec<(usize, usize)> {
 
 /// Where each of `opens` (`<name ...>` tags in `text`) is closed: the start
 /// of the `</name>` that balances it, counting `<name>` blocks quoted inside
-/// it, so a quoted block's close doesn't end the one around it. `None` when
-/// it is never closed.
+/// it, so a quoted block's close doesn't end the one around it. If nested
+/// openings leave it unbalanced, fall back to the first close after its
+/// opening tag. `None` only when no close follows the opening tag.
 fn closes(text: &str, name: &str, opens: &[(usize, &str, usize)]) -> Vec<Option<usize>> {
     let close = format!("</{name}>");
     let mut marks: Vec<(usize, bool)> = opens.iter().map(|(at, _, _)| (*at, true)).collect();
@@ -3722,7 +3723,7 @@ fn closes(text: &str, name: &str, opens: &[(usize, &str, usize)]) -> Vec<Option<
     marks.sort_unstable();
     opens
         .iter()
-        .map(|(at, _, _)| {
+        .map(|(at, _, end)| {
             let first = marks.partition_point(|(position, _)| position < at);
             let mut depth = 0usize;
             for (position, open) in &marks[first..] {
@@ -3735,7 +3736,7 @@ fn closes(text: &str, name: &str, opens: &[(usize, &str, usize)]) -> Vec<Option<
                     }
                 }
             }
-            None
+            text[*end..].find(&close).map(|found| *end + found)
         })
         .collect()
 }
@@ -7031,6 +7032,35 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].0, found[0].1), (Some("t1"), Some("completed")));
         assert!(found[0].2.ends_with("</agent-message></result>"));
+    }
+
+    #[test]
+    fn an_unclosed_quoted_notification_keeps_the_outer_notification() {
+        let text = "<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>quoted <task-notification></result></task-notification>";
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":text}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+        assert_eq!(index.events[0].n.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn an_unclosed_quoted_agent_message_keeps_the_outer_sender() {
+        let text = "<agent-message from=\"a1\">quoted <agent-message from=\"x\">unfinished</agent-message>";
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":text}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Agm);
+        assert_eq!(index.events[0].id.as_deref(), Some("a1"));
     }
 
     #[test]

@@ -3337,7 +3337,10 @@ impl<'a> Builder<'a> {
     /// belongs to the run before when that one handed back without one, and
     /// such a receipt when the child handed that run back
     /// (`SubagentHandback`) and it has no receipt. A failed or killed
-    /// notification ends the open run.
+    /// notification ends the open run. One misattribution remains: if run k
+    /// hands back, the child resumes, then a late failed or killed notification
+    /// arrives, it ends run k+1 as `err`; run k+1's own completed notification
+    /// is then ignored.
     fn claude_runs(
         &self,
         child_events: &[Ref],
@@ -3972,6 +3975,16 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Use the relation key before merging down messages with sends. A
+        // session may span files, so use each source path and local event index
+        // to break ties without inheriting `self.files` position order.
+        sends.sort_by_cached_key(|((position, at), _)| {
+            (
+                self.relay_order(self.of_file[*position], Some((*position, *at))),
+                self.files[*position].path.to_string_lossy().into_owned(),
+                *at,
+            )
+        });
         // A send its result proves went to an agent in this process (pinned,
         // resuming it, or queued for its next tool round) is that agent's
         // message, drawn with its receipt by `down_messages`, never a relay
