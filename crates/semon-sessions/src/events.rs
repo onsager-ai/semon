@@ -80,7 +80,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
 /// v23: native connector completions and tool search are tools, including
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
-const CACHE_VERSION: u32 = 24;
+/// v25: agent messages carry their direction; coordinator messages and unknown origin kinds are indexed; relay tags count only at the start of a prompt.
+const CACHE_VERSION: u32 = 25;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3213,8 +3214,9 @@ pub(crate) enum Kind {
     /// A relay received (`origin.kind == "peer"`, or a
     /// `<cross-session-message>` block).
     Xsm,
-    /// A subagent handing back (`origin.handback`, an `<agent-message>`
-    /// block, or a Codex `agent_message`).
+    /// A message between a session and its own agent: a subagent's hand-back
+    /// or `<agent-message>` (up), a coordinator message (down), or a Codex
+    /// `agent_message`, its direction in `script`.
     Agm,
     /// A `<task-notification>` block.
     Tn,
@@ -3225,6 +3227,8 @@ pub(crate) enum Kind {
     /// Harness text added before a Codex prompt, `n` its tag (in `extras`
     /// only).
     Harness,
+    /// A user-side record whose `origin.kind` semon doesn't classify, `n` that kind (in `extras` only).
+    Other,
 }
 
 /// Result flags on a tool call.
@@ -3265,6 +3269,17 @@ pub(crate) const SENDS: u8 = 2;
 pub(crate) const BACKGROUND: u8 = 4;
 /// A task notification reports failure by status or a nonzero summary exit code.
 pub(crate) const BACKGROUND_FAILED: u8 = 8;
+/// An agent message sent by an agent to the session that receives it: a
+/// subagent's hand-back or send, or a Codex child's message to its parent.
+pub(crate) const AGM_UP: u8 = 16;
+/// An agent message sent down: a parent's message to its running or
+/// resumed subagent (`origin.kind == "coordinator"`), or a Codex parent's
+/// message to its child.
+pub(crate) const AGM_DOWN: u8 = 32;
+/// A Codex agent message between agents where neither is the other's ancestor.
+pub(crate) const AGM_SIDE: u8 = 64;
+/// The agent's final report for its run (`origin.handback == true`).
+pub(crate) const AGM_FINAL: u8 = 128;
 
 /// Open yielded commands kept per file; past this the oldest is dropped.
 const YIELDS_MAX: usize = 64;
@@ -3326,9 +3341,10 @@ pub(crate) struct Event {
     /// code-mode call, the only one open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
-    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), or a
-    /// Claude Bash call launched in the [`BACKGROUND`], or a task notification
-    /// with a [`BACKGROUND_FAILED`] outcome.
+    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), a Claude Bash
+    /// call launched in the [`BACKGROUND`], a task notification with a
+    /// [`BACKGROUND_FAILED`] outcome, or Agm direction/finality
+    /// ([`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`]).
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
     /// Code-mode call: a command it started outlived its yield.
@@ -3656,6 +3672,19 @@ pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
     result
 }
 
+fn starts_with_relay_tag(text: &str) -> bool {
+    let head = strip_reminders(text);
+    let head = match head.split_once('\n') {
+        Some((line, rest)) if line.trim() == "Another Claude session sent a message:" => rest,
+        _ if head.trim() == "Another Claude session sent a message:" => "",
+        _ => head.as_str(),
+    }
+    .trim_start();
+    head.starts_with("<cross-session-message")
+        || head.starts_with("<agent-message")
+        || head.starts_with("<task-notification>")
+}
+
 /// The text inside `<name>…</name>`, first occurrence.
 pub(crate) fn inner<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
@@ -3706,6 +3735,7 @@ fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
             n: from
                 .filter(|from| task.is_some_and(|task| task != *from))
                 .map(str::to_owned),
+            script: AGM_UP | AGM_FINAL,
             ..Event::default()
         };
     }
@@ -3765,63 +3795,93 @@ fn prompt_events(
             }
             return;
         }
+        Some("coordinator") => {
+            push(
+                summary,
+                Event {
+                    k: Kind::Agm,
+                    o: offset,
+                    t: time,
+                    script: AGM_DOWN,
+                    ..Event::default()
+                },
+            );
+            return;
+        }
+        Some("task-notification") => {}
+        Some(kind) => {
+            extra(
+                summary,
+                Event {
+                    k: Kind::Other,
+                    o: offset,
+                    t: time,
+                    n: Some(kind.to_owned()),
+                    ..Event::default()
+                },
+            );
+            return;
+        }
         _ => {}
     }
     let mut found = false;
-    for (tag, _) in tags(text, "cross-session-message") {
-        let attributes = attributes(tag);
-        push(
-            summary,
-            Event {
-                k: Kind::Xsm,
-                o: offset,
-                t: time,
-                n: attributes.get("from-name").cloned(),
-                peer: Some(Peer {
-                    sock: attributes.get("from").cloned(),
-                    ..Peer::default()
-                }),
-                ..Event::default()
-            },
-        );
-        found = true;
-    }
-    for (tag, _) in tags(text, "agent-message") {
-        push(
-            summary,
-            Event {
-                k: Kind::Agm,
-                o: offset,
-                t: time,
-                id: attributes(tag).get("from").cloned(),
-                ..Event::default()
-            },
-        );
-        found = true;
-    }
-    for (id, status, body) in notifications(text) {
-        push(
-            summary,
-            Event {
-                k: Kind::Tn,
-                o: offset,
-                t: time,
-                id: id.map(str::to_owned),
-                n: status.map(str::to_owned),
-                script: if !matches!(status, Some("killed" | "stopped"))
-                    && (status == Some("failed")
-                        || inner(body, "summary")
-                            .and_then(notification_exit)
-                            .is_some_and(|exit| exit != 0))
-                {
-                    BACKGROUND_FAILED
-                } else {
-                    0
+    if starts_with_relay_tag(text) {
+        for (tag, _) in tags(text, "cross-session-message") {
+            let attributes = attributes(tag);
+            push(
+                summary,
+                Event {
+                    k: Kind::Xsm,
+                    o: offset,
+                    t: time,
+                    n: attributes.get("from-name").cloned(),
+                    peer: Some(Peer {
+                        sock: attributes.get("from").cloned(),
+                        ..Peer::default()
+                    }),
+                    ..Event::default()
                 },
-                ..Event::default()
-            },
-        );
-        found = true;
+            );
+            found = true;
+        }
+        for (tag, _) in tags(text, "agent-message") {
+            push(
+                summary,
+                Event {
+                    k: Kind::Agm,
+                    o: offset,
+                    t: time,
+                    id: attributes(tag).get("from").cloned(),
+                    script: AGM_UP,
+                    ..Event::default()
+                },
+            );
+            found = true;
+        }
+        for (id, status, body) in notifications(text) {
+            push(
+                summary,
+                Event {
+                    k: Kind::Tn,
+                    o: offset,
+                    t: time,
+                    id: id.map(str::to_owned),
+                    n: status.map(str::to_owned),
+                    script: if !matches!(status, Some("killed" | "stopped"))
+                        && (status == Some("failed")
+                            || inner(body, "summary")
+                                .and_then(notification_exit)
+                                .is_some_and(|exit| exit != 0))
+                    {
+                        BACKGROUND_FAILED
+                    } else {
+                        0
+                    },
+                    ..Event::default()
+                },
+            );
+            found = true;
+        }
     }
     if found || meta {
         return;
@@ -5241,15 +5301,35 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     },
                 );
             }
-            Some("agent_message") => push(
-                summary,
-                Event {
-                    k: Kind::Agm,
-                    o: offset,
-                    t: time,
-                    ..Event::default()
-                },
-            ),
+            Some("agent_message") => {
+                let author = field(payload, "author");
+                let recipient = field(payload, "recipient");
+                let script = match (author, recipient) {
+                    (Some(author), Some(recipient)) => {
+                        let up_prefix = format!("{recipient}/");
+                        let down_prefix = format!("{author}/");
+                        if author.starts_with(up_prefix.as_str()) {
+                            AGM_UP
+                        } else if recipient.starts_with(down_prefix.as_str()) {
+                            AGM_DOWN
+                        } else {
+                            AGM_SIDE
+                        }
+                    }
+                    _ => 0,
+                };
+                push(
+                    summary,
+                    Event {
+                        k: Kind::Agm,
+                        o: offset,
+                        t: time,
+                        id: author.map(str::to_owned),
+                        script,
+                        ..Event::default()
+                    },
+                );
+            }
             _ => {}
         },
         _ => {}
@@ -6659,6 +6739,127 @@ mod tests {
         );
         assert_eq!(index.events[0].id.as_deref(), Some("a1"));
         assert_eq!(index.events[0].n.as_deref(), Some("lead"));
+    }
+
+    #[test]
+    fn a_hand_back_is_up_and_final() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","handback":true,"from":"lead","senderTaskId":"a1","body":"done"},"message":{"role":"user","content":"x"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        assert_eq!(index.events[0].script, AGM_UP | AGM_FINAL);
+    }
+
+    #[test]
+    fn a_coordinator_message_is_a_down_agent_message() {
+        for record in [
+            serde_json::json!({"type":"user","isMeta":true,"origin":{"kind":"coordinator"},"message":{"role":"user","content":"The coordinator sent a message while you were working:\nrebase and push"}}),
+            serde_json::json!({"type":"user","origin":{"kind":"coordinator"},"message":{"role":"user","content":"The coordinator sent a message while you were working:\nrebase and push"}}),
+        ] {
+            let mut index = FileIndex::default();
+            claude(&mut index, &record, 0);
+            assert_eq!(index.events.len(), 1);
+            assert_eq!(index.events[0].k, Kind::Agm);
+            assert_eq!(index.events[0].script, AGM_DOWN);
+        }
+    }
+
+    #[test]
+    fn an_unknown_origin_kind_is_kept_as_other() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","isMeta":true,"origin":{"kind":"future-thing"},"message":{"role":"user","content":"synthetic unknown-origin record"}}),
+            0,
+        );
+        assert!(index.events.is_empty());
+        assert_eq!(index.extras.len(), 1);
+        assert_eq!(index.extras[0].k, Kind::Other);
+        assert_eq!(index.extras[0].n.as_deref(), Some("future-thing"));
+    }
+
+    #[test]
+    fn a_task_notification_origin_still_parses_its_block() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn a_prompt_quoting_relay_tags_stays_a_prompt() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"Review this log:\n<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification>\n<agent-message from=\"a1\">x</agent-message>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        assert_eq!(index.events[0].k, Kind::U);
+        assert!(
+            !index
+                .events
+                .iter()
+                .any(|event| matches!(event.k, Kind::Tn | Kind::Agm))
+        );
+    }
+
+    #[test]
+    fn a_prompt_starting_with_tags_still_classifies() {
+        let mut agent = FileIndex::default();
+        claude(
+            &mut agent,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a1\">done</agent-message>"}}),
+            0,
+        );
+        assert_eq!(agent.events.len(), 1);
+        assert_eq!(agent.events[0].k, Kind::Agm);
+        assert_eq!(agent.events[0].script, AGM_UP);
+
+        let mut notifications = FileIndex::default();
+        claude(
+            &mut notifications,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification><task-notification><tool-use-id>t2</tool-use-id><status>failed</status></task-notification>"}}),
+            0,
+        );
+        assert_eq!(notifications.events.len(), 2);
+        assert!(notifications.events.iter().all(|event| event.k == Kind::Tn));
+    }
+
+    #[test]
+    fn a_codex_agent_message_has_a_direction() {
+        for (record, direction, author) in [
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"agent_message","author":"root/worker","recipient":"root","message":"done"}}),
+                AGM_UP,
+                "root/worker",
+            ),
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"agent_message","author":"root","recipient":"root/worker","message":"continue"}}),
+                AGM_DOWN,
+                "root",
+            ),
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"agent_message","author":"root/a","recipient":"root/b","message":"side note"}}),
+                AGM_SIDE,
+                "root/a",
+            ),
+        ] {
+            let mut index = FileIndex::default();
+            codex(&mut index, &record, 0);
+            assert_eq!(index.events.len(), 1);
+            assert_eq!(index.events[0].k, Kind::Agm);
+            assert_eq!(index.events[0].script, direction);
+            assert_eq!(index.events[0].id.as_deref(), Some(author));
+        }
     }
 
     #[test]
