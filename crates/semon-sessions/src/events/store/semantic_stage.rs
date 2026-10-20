@@ -2691,6 +2691,7 @@ mod tests {
                 order: (2, 0, String::new(), n, 0),
                 explicit_previews: false,
                 stubs: Vec::new(),
+                inline: false,
             };
             store.connection.execute("INSERT INTO catalog_semantic_relations(relation_id,from_key,metadata) VALUES(?1,'owner',?2)",params![relation.id,json(&relation).unwrap()]).unwrap();
         }
