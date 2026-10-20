@@ -5336,6 +5336,355 @@ mod tests {
         );
     }
 
+    struct PinnedOriginal {
+        source: SessionSourceRef,
+        bytes: Vec<u8>,
+        calls: std::sync::atomic::AtomicUsize,
+        change_at: Option<usize>,
+    }
+    impl crate::SessionSourceReader for PinnedOriginal {
+        fn read_range(
+            &self,
+            source: &SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> io::Result<crate::SessionSourceRange> {
+            use sha2::{Digest, Sha256};
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            let generation = format!("archive:{:x}", Sha256::digest(&self.bytes));
+            if source != &self.source
+                || expected.is_some_and(|expected| expected != generation)
+                || self.change_at.is_some_and(|at| call >= at)
+            {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            assert!(max <= crate::SESSION_SOURCE_CHUNK_MAX);
+            assert!(offset + max as u64 <= source.offset);
+            assert_eq!(
+                <[u8; 32]>::from(Sha256::digest(&self.bytes[..source.offset as usize])),
+                source.prefix_sha256
+            );
+            Ok(crate::SessionSourceRange {
+                generation,
+                length: self.bytes.len() as u64,
+                offset,
+                bytes: self.bytes[offset as usize..offset as usize + max]
+                    .to_vec()
+                    .into(),
+                cached: true,
+            })
+        }
+    }
+
+    #[test]
+    fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
+        use std::io::Write;
+        for scope in ["current", "retained_history"] {
+            for mutation in ["append", "replace", "legacy"] {
+                let fixture = Fixture::new();
+                let relative = fixture.codex_source("pinned", None, 1);
+                let path = fixture.options.codex_home.join(&relative);
+                let answer = |text: &str| json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}});
+                let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writeln!(file, "{}", json!({"type":"response_item","timestamp":"2026-10-01T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"original pinned prompt"}]}})).unwrap();
+                writeln!(file, "{}", answer("original pinned answer")).unwrap();
+                drop(file);
+                let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+                facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
+                crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+                // Match a provisional selected owner while complete discovery
+                // is still pending, with real source-qualified paged recipes.
+                {
+                    let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                    let prepared = crate::model::prepare_sources(
+                        &fixture.options,
+                        &mut cache,
+                        &[crate::inputs::Input {
+                            root: crate::inputs::InputRoot::Codex,
+                            path: relative,
+                        }],
+                        crate::model::now_ms(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        cache.publish_partial_catalog(&prepared).unwrap(),
+                        crate::events::Outcome::Written
+                    );
+                }
+                let before = session_catalog_identity(&fixture.options, "source", "pinned")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    before.owner_qualification,
+                    CatalogOwnerQualification::Provisional
+                );
+                let original = fs::read(&path).unwrap();
+                let provider = PinnedOriginal {
+                    source: before.source_refs[0].source.clone(),
+                    // An independently qualified archived object can extend
+                    // beyond the selected consumed prefix. Never read its tail.
+                    bytes: [original.as_slice(), b"{\"unconsumed\":true}"].concat(),
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    change_at: None,
+                };
+                let query = format!("sid=pinned&scope={scope}&after=0&limit=1");
+                let get = |query: &str, mode| {
+                    crate::session_transcript_range_with_mode(
+                        &fixture.options,
+                        "source",
+                        query,
+                        Some(&provider),
+                        mode,
+                    )
+                };
+                let initial = get(&query, crate::SessionSourceReadMode::LocalThenProvider);
+                assert_eq!(initial.status, 200);
+                let initial: Value = serde_json::from_slice(&initial.body).unwrap();
+                match mutation {
+                    "append" => {
+                        writeln!(
+                            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                            "{}",
+                            answer("natural appended answer")
+                        )
+                        .unwrap();
+                    }
+                    "replace" => {
+                        fs::rename(&path, path.with_extension("saved")).unwrap();
+                        fs::write(&path, "{}\n").unwrap();
+                    }
+                    "legacy" => {
+                        // A supported persisted recipe predating the physical
+                        // change-time witness has no local generation proof.
+                        let mut db =
+                            Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+                        let text: String = db
+                            .query_row(
+                                "SELECT metadata FROM session_catalog WHERE session_key='pinned'",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .unwrap();
+                        let mut row: CatalogRow = serde_json::from_str(&text).unwrap();
+                        row.sources[0].changed_ns = None;
+                        let slots: Vec<String> = db.prepare("SELECT metadata FROM session_slots WHERE session_key='pinned' ORDER BY slot").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+                        let generation =
+                            crate::slot_projection::generation(&slots, &row.sources).unwrap();
+                        let source_generation =
+                            crate::retention::source_generation(&row.sources).unwrap();
+                        let tx = db.transaction().unwrap();
+                        tx.execute(
+                            "UPDATE session_catalog SET metadata=?1 WHERE session_key='pinned'",
+                            [serde_json::to_string(&row).unwrap()],
+                        )
+                        .unwrap();
+                        tx.execute("UPDATE session_slot_projections SET generation=?1,source_generation=?2 WHERE session_key='pinned'", rusqlite::params![generation, source_generation]).unwrap();
+                        tx.commit().unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let stale = get(&query, crate::SessionSourceReadMode::LocalThenProvider);
+                assert_eq!(stale.status, 409, "{scope}/{mutation}");
+                let stale: Value = serde_json::from_slice(&stale.body).unwrap();
+                assert_eq!(stale["fence_reason"], "local_source_revision");
+                assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+                // Metadata-only observation succeeds in the same stale cache;
+                // it does not establish that the transcript body was readable.
+                assert_eq!(
+                    crate::session_annotations(
+                        &fixture.options,
+                        "source",
+                        "sid=pinned&scope=retained_history&kind=errors&limit=1"
+                    )
+                    .status,
+                    200
+                );
+                crate::events::CACHE_READS.with(|reads| reads.set(0));
+                crate::events::PARSED.with(|parsed| parsed.set(0));
+                crate::events::SOURCE_HASHED_BYTES.with(|bytes| bytes.set(0));
+                let recovered = get(&query, crate::SessionSourceReadMode::LocalOrPinnedProvider);
+                assert_eq!(
+                    recovered.status,
+                    200,
+                    "{scope}/{mutation}: {}",
+                    String::from_utf8_lossy(&recovered.body)
+                );
+                let recovered: Value = serde_json::from_slice(&recovered.body).unwrap();
+                assert_eq!(recovered["entries"][0]["text"], "original pinned prompt");
+                assert!(!recovered.to_string().contains("unconsumed"));
+                assert!(
+                    recovered["content_observation"]["sources"][0]["length"]
+                        .as_u64()
+                        .unwrap()
+                        > provider.source.offset
+                );
+                assert_eq!(
+                    recovered["entries"][0]["entry_id"],
+                    initial["entries"][0]["entry_id"]
+                );
+                assert_eq!(
+                    recovered["entries"][0]["provenance"],
+                    initial["entries"][0]["provenance"]
+                );
+                if mutation != "legacy" {
+                    assert_eq!(recovered["projection"], initial["projection"]);
+                }
+                assert!(recovered["observation"]["source_bytes"].as_u64().unwrap() <= 8192);
+                crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+                crate::events::PARSED.with(|parsed| assert_eq!(parsed.get(), 0));
+                crate::events::SOURCE_HASHED_BYTES.with(|bytes| assert_eq!(bytes.get(), 0));
+                let generation = recovered["projection"]["generation"].as_str().unwrap();
+                let continuation =
+                    format!("sid=pinned&scope={scope}&after=1&limit=1&generation={generation}");
+                let next = get(
+                    &continuation,
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                );
+                assert_eq!(next.status, 200);
+                let next: Value = serde_json::from_slice(&next.body).unwrap();
+                assert_eq!(next["entries"][0]["text"], "original pinned answer");
+                let calls = provider.calls.load(Ordering::Relaxed);
+                let stale = get(
+                    &continuation.replace(generation, "wrong"),
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                );
+                assert_eq!(stale.status, 409);
+                assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
+                if mutation == "append" {
+                    // Publishing the natural append admits its new recipes;
+                    // the old projection cursor still cannot select them.
+                    fixture.publish_existing();
+                    let fresh = get(
+                        &format!("sid=pinned&scope={scope}&after=0&limit=100"),
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    );
+                    assert_eq!(fresh.status, 200);
+                    let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
+                    assert!(
+                        fresh["entries"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|entry| entry["text"] == "natural appended answer")
+                    );
+                    assert_ne!(fresh["projection"]["generation"], generation);
+                    assert_eq!(
+                        get(
+                            &continuation,
+                            crate::SessionSourceReadMode::LocalOrPinnedProvider
+                        )
+                        .status,
+                        409
+                    );
+                    assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_provider_rejects_changed_original_without_publishing_a_partial_page() {
+        use std::io::Write;
+        let fixture = Fixture::new();
+        let path = fixture.source("pinned");
+        writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"pinned","uuid":"answer","parentUuid":"pinned","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"original answer"}]}})).unwrap();
+        fixture.publish_existing();
+        let source = session_catalog_identity(&fixture.options, "source", "pinned")
+            .unwrap()
+            .unwrap()
+            .source_refs[0]
+            .source
+            .clone();
+        let mut provider = PinnedOriginal {
+            source,
+            bytes: fs::read(&path).unwrap(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            change_at: Some(1),
+        };
+        fs::write(&path, "{}\n").unwrap();
+        for wrong_reference in [false, true] {
+            provider.calls.store(0, Ordering::Relaxed);
+            if wrong_reference {
+                provider.source.prefix_sha256[0] ^= 1;
+            }
+            let reply = crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "source",
+                "sid=pinned&after=0&limit=2",
+                Some(&provider),
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            assert_eq!(reply.status, 409);
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["fence_reason"], "source_generation");
+            assert!(body.get("entries").is_none());
+        }
+    }
+
+    #[test]
+    fn pinned_provider_keeps_each_carrier_fixed_after_its_first_bytes() {
+        let fixture = Fixture::new();
+        let archived = fixture.source("archived");
+        let live = fixture.source("live");
+        fixture.publish_existing();
+        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let mut sources = Vec::new();
+        for key in ["archived", "live"] {
+            let text: String = db
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            sources.extend(serde_json::from_str::<CatalogRow>(&text).unwrap().sources);
+        }
+        let source = session_catalog_identity(&fixture.options, "source", "archived")
+            .unwrap()
+            .unwrap()
+            .source_refs[0]
+            .source
+            .clone();
+        let provider = PinnedOriginal {
+            source,
+            bytes: fs::read(&archived).unwrap(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            change_at: None,
+        };
+        fs::write(&archived, "{}\n").unwrap();
+        crate::transcript_range::with_source_reader(
+            &fixture.options,
+            "claude",
+            &sources,
+            Some(&provider),
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            |reader, references| {
+                let archive_ref = &references[&archived];
+                let part = reader.read_range(archive_ref, None, 0, 8)?;
+                assert_eq!(&*part.bytes, &provider.bytes[..8]);
+                let live_ref = &references[&live];
+                let local = reader.read_range(live_ref, None, 0, 8)?;
+                assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+                // Even another before-read mismatch must not switch an
+                // already admitted local carrier over to an original.
+                fs::write(&live, "{}\n")?;
+                assert_eq!(
+                    reader
+                        .read_range(live_ref, Some(&local.generation), 8, 8)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+                assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+                let next = reader.read_range(archive_ref, Some(&part.generation), 8, 8)?;
+                assert_eq!(&*next.bytes, &provider.bytes[8..16]);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them() {
         let fixture = Fixture::new();

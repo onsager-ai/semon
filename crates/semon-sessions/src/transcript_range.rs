@@ -67,7 +67,8 @@ pub fn session_transcript_range(
 }
 
 /// Provider-only preserves the callback boundary for every requested range.
-/// LocalThenProvider is an explicit host opt-in for mixed live/archived sources.
+/// LocalThenProvider and LocalOrPinnedProvider are explicit host opt-ins for
+/// mixed live/archived sources.
 /// The host must authorize the complete read before and after this call, because
 /// its provider callback is not invoked for available qualified local bytes.
 #[derive(Clone, Copy, Debug, Default)]
@@ -75,6 +76,11 @@ pub enum SessionSourceReadMode {
     #[default]
     ProviderOnly,
     LocalThenProvider,
+    /// Also admit the exact selected provider when the local revision fails
+    /// before any bytes are read. The provider must independently qualify the
+    /// original consumed prefix; this never selects the newer local revision.
+    /// Changes during local I/O still fail closed without provider fallback.
+    LocalOrPinnedProvider,
 }
 
 pub fn session_transcript_range_with_mode(
@@ -173,7 +179,7 @@ pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> 
             )
             .optional()?;
         if generation.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(stale());
+            return Ok(stale(ProjectionFence::CatalogPublication));
         }
         let history = crate::history_projection::catalog(&tx, &key)?.is_some();
         let (table, header) = if history {
@@ -291,7 +297,7 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
             )
             .optional()?;
         if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(stale());
+            return Ok(stale(ProjectionFence::CatalogPublication));
         }
         let history = crate::history_projection::catalog(&tx, &key)?.is_some();
         let header = if history {
@@ -334,7 +340,11 @@ pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> 
             entry_generation(&stored)
         };
         if argument("generation").is_some_and(|expected| expected != generation) {
-            return Ok(stale());
+            return Ok(stale(if kind == "errors" {
+                ProjectionFence::ErrorsGeneration
+            } else {
+                ProjectionFence::ProjectionGeneration
+            }));
         }
         let total: i64 = tx.query_row(
             &format!("SELECT count(*) FROM {slots} WHERE session_key=?1 AND {predicate}"),
@@ -593,7 +603,7 @@ fn read(
         return Ok(unavailable());
     }
     if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
-        return Ok(stale());
+        return Ok(stale(ProjectionFence::CatalogPublication));
     }
     let history_projection =
         history && crate::history_projection::catalog(&transaction, &key)?.is_some();
@@ -631,12 +641,12 @@ fn read(
     // Fence pre-fix loaded ranges without rewriting retained source recipes.
     let generation = entry_generation(&stored_generation);
     if argument("generation").is_some_and(|expected| expected != generation) {
-        return Ok(stale());
+        return Ok(stale(ProjectionFence::ProjectionGeneration));
     }
     if argument("errors_generation")
         .is_some_and(|expected| expected != error_generation(&generation, &session))
     {
-        return Ok(stale());
+        return Ok(stale(ProjectionFence::ErrorsGeneration));
     }
     let first = after.unwrap_or_else(|| total.saturating_sub(limit));
     if first > total {
@@ -767,7 +777,20 @@ fn read(
     Ok(render(options, selection, provider, mode, part))
 }
 
-fn stale() -> ViewerReply {
+// Closed, body-free diagnostics let a host distinguish metadata/cursor races
+// from rejected native bytes without exposing paths or provider errors.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProjectionFence {
+    CatalogPublication,
+    ProjectionGeneration,
+    ErrorsGeneration,
+    LocalSourceRevision,
+    SourceGeneration,
+    SourceRange,
+}
+
+fn stale(reason: ProjectionFence) -> ViewerReply {
     let mut reply = catalog::error(
         409,
         "stale_projection",
@@ -776,6 +799,7 @@ fn stale() -> ViewerReply {
     );
     let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
     body["resynchronize"] = json!(true);
+    body["fence_reason"] = json!(reason);
     reply.body = body.to_string().into_bytes();
     reply
 }
@@ -789,10 +813,28 @@ impl std::fmt::Display for MissingLocalSource {
 }
 impl std::error::Error for MissingLocalSource {}
 
+#[derive(Debug)]
+struct LocalRevisionChanged;
+impl std::fmt::Display for LocalRevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("selected local revision changed before reading")
+    }
+}
+impl std::error::Error for LocalRevisionChanged {}
+
 struct Composite<'a> {
     local: &'a Local<'a>,
     provider: Option<&'a dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
+    // Request-local carrier choice. Once local bytes were accepted, a later
+    // revision failure cannot switch that source to another carrier.
+    routes: std::sync::Mutex<BTreeMap<(String, String), SourceCarrier>>,
+}
+
+#[derive(Clone, Copy)]
+enum SourceCarrier {
+    Local,
+    Provider,
 }
 impl SessionSourceReader for Composite<'_> {
     fn read_range(
@@ -807,6 +849,46 @@ impl SessionSourceReader for Composite<'_> {
                 .provider
                 .unwrap_or(self.local)
                 .read_range(source, expected, offset, max);
+        }
+        if matches!(self.mode, SessionSourceReadMode::LocalOrPinnedProvider) {
+            let mut routes = self.routes.lock().map_err(|_| invalid())?;
+            let key = (source.root.clone(), source.path.clone());
+            if let Some(carrier) = routes.get(&key).copied() {
+                drop(routes);
+                return match carrier {
+                    SourceCarrier::Provider => self
+                        .provider
+                        .ok_or_else(invalid)?
+                        .read_range(source, expected, offset, max),
+                    SourceCarrier::Local => self.local.read_range(source, expected, offset, max),
+                };
+            }
+            if routes.len() >= 64 {
+                return Err(invalid());
+            }
+            // Serialize only the first bounded local read. No guard crosses
+            // provider I/O, and each physical source chooses independently.
+            let result = self.local.read_range(source, expected, offset, max);
+            match result {
+                Ok(part) => {
+                    routes.insert(key, SourceCarrier::Local);
+                    return Ok(part);
+                }
+                Err(error)
+                    if self.provider.is_some()
+                        && error.get_ref().is_some_and(|error| {
+                            error.is::<MissingLocalSource>() || error.is::<LocalRevisionChanged>()
+                        }) =>
+                {
+                    routes.insert(key, SourceCarrier::Provider);
+                    drop(routes);
+                    return self
+                        .provider
+                        .ok_or(error)?
+                        .read_range(source, expected, offset, max);
+                }
+                Err(error) => return Err(error),
+            }
         }
         match self.local.read_range(source, expected, offset, max) {
             Err(error)
@@ -881,7 +963,10 @@ impl SessionSourceReader for Local<'_> {
                     == Some(source.modified_ns)
         };
         if !check(&file.metadata()?) {
-            return Err(invalid());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                LocalRevisionChanged,
+            ));
         }
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; max];
@@ -952,6 +1037,7 @@ pub(crate) fn with_source_reader<T>(
         local: &local,
         provider,
         mode,
+        routes: std::sync::Mutex::default(),
     };
     read(&composite, &references)
 }
@@ -997,19 +1083,29 @@ fn render(
         local: &local,
         provider,
         mode,
+        routes: std::sync::Mutex::default(),
     };
     let reader: &dyn SessionSourceReader = &composite;
     // Presentation deliberately tolerates malformed records and unavailable
     // archive bytes. A rejected source generation is different: never replace
     // accepted content with empty entries under the same projection proof.
-    let source_changed = std::cell::Cell::new(false);
+    let source_changed = std::cell::Cell::new(None);
     let source_read = |reference: &SessionSourceRef, expected: Option<&str>, offset, max| {
         let result = reader.read_range(reference, expected, offset, max);
         if result
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
-            source_changed.set(true);
+            let reason = if result.as_ref().err().is_some_and(|error| {
+                error
+                    .get_ref()
+                    .is_some_and(|error| error.is::<LocalRevisionChanged>())
+            }) {
+                ProjectionFence::LocalSourceRevision
+            } else {
+                ProjectionFence::SourceGeneration
+            };
+            source_changed.set(Some(reason));
         }
         result
     };
@@ -1081,7 +1177,7 @@ fn render(
                     || known
                         .is_some_and(|known| known.0 != part.generation || known.1 != part.length)
                 {
-                    source_changed.set(true);
+                    source_changed.set(Some(ProjectionFence::SourceRange));
                     return Err(invalid());
                 }
                 bytes_left -= part.bytes.len();
@@ -1174,7 +1270,7 @@ fn render(
                 || part.generation.len() > 4096
                 || known.is_some_and(|known| known.0 != part.generation || known.1 != part.length)
             {
-                source_changed.set(true);
+                source_changed.set(Some(ProjectionFence::SourceRange));
                 return Err(invalid());
             }
             generations
@@ -1282,8 +1378,8 @@ fn render(
             .unwrap_or_else(|| json!({"k":"end"}))
         };
 
-        if source_changed.get() {
-            return stale();
+        if let Some(reason) = source_changed.get() {
+            return stale(reason);
         }
         if matches!(slot.kind, crate::model::SlotKind::Think) && entry["text"] == "" {
             entry
@@ -1320,8 +1416,8 @@ fn render(
             };
             let Some((content_type, body)) = crate::tx::selected_image(&mut lines, slot, image)
             else {
-                if source_changed.get() {
-                    return stale();
+                if let Some(reason) = source_changed.get() {
+                    return stale(reason);
                 }
                 return catalog::error(
                     404,
@@ -1339,8 +1435,8 @@ fn render(
         }
         if matches!(part, SelectedPart::Script) {
             let Some((text, truncated)) = crate::tx::selected_script(&mut lines, slot) else {
-                if source_changed.get() {
-                    return stale();
+                if let Some(reason) = source_changed.get() {
+                    return stale(reason);
                 }
                 return catalog::error(
                     422,
@@ -1354,8 +1450,8 @@ fn render(
         }
         if matches!(part, SelectedPart::Output) {
             let Some(output) = crate::tx::selected_output(&mut lines, slot) else {
-                if source_changed.get() {
-                    return stale();
+                if let Some(reason) = source_changed.get() {
+                    return stale(reason);
                 }
                 return catalog::error(
                     422,
@@ -1446,8 +1542,8 @@ fn render(
     }
     let failures = lines.failures;
     drop(lines);
-    if source_changed.get() {
-        return stale();
+    if let Some(reason) = source_changed.get() {
+        return stale(reason);
     }
     let state = if failures > 0 || incomplete_entries > 0 || selection.history_incomplete {
         "incomplete"
@@ -1572,6 +1668,7 @@ fn render_field(
         local: &local,
         provider,
         mode,
+        routes: std::sync::Mutex::default(),
     };
     let reader: &dyn SessionSourceReader = &composite;
     let result = (|| -> io::Result<(String, bool, usize, Value)> {
