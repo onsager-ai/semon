@@ -80,11 +80,7 @@ impl Projection {
                 OriginTurn::Unknown => {}
                 OriginTurn::Unavailable => {
                     if edge.get("source_turn").is_some() {
-                        return Err(staged_turn_changed(
-                            "unavailable-has-local",
-                            edge,
-                            None,
-                        ));
+                        return Err(staged_turn_changed("unavailable-has-local", edge, None));
                     }
                 }
                 OriginTurn::Known(turn) => {
@@ -1206,19 +1202,33 @@ mod generation_tests {
             }
             projection
         };
-        let origins = |source_turn| BTreeMap::from([(
-            edge_id.to_owned(),
-            RelationOrigin {
-                from: "owner".into(),
-                kind: "spawn".into(),
-                to: Some("child".into()),
-                source_turn,
-            },
-        )]);
+        let origins = |source_turn| {
+            BTreeMap::from([(
+                edge_id.to_owned(),
+                RelationOrigin {
+                    from: "owner".into(),
+                    kind: "spawn".into(),
+                    to: Some("child".into()),
+                    source_turn,
+                },
+            )])
+        };
         for (source_turn, observed, reason) in [
-            (OriginTurn::Unavailable, Some(local), "unavailable-has-local"),
-            (OriginTurn::Known(recorded.into()), Some(local), "known-disagrees"),
-            (OriginTurn::Known(recorded.into()), None, "known-missing-for-physical-sender"),
+            (
+                OriginTurn::Unavailable,
+                Some(local),
+                "unavailable-has-local",
+            ),
+            (
+                OriginTurn::Known(recorded.into()),
+                Some(local),
+                "known-disagrees",
+            ),
+            (
+                OriginTurn::Known(recorded.into()),
+                None,
+                "known-missing-for-physical-sender",
+            ),
         ] {
             let error = projection(observed)
                 .with_staged_origin_turns(Some(&origins(source_turn)), |_| true)
