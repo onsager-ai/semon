@@ -3698,15 +3698,46 @@ fn opening_tags<'a>(text: &'a str, name: &str) -> Vec<(usize, &'a str, usize)> {
 fn relay_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     for name in RELAY_TAGS {
-        let close = format!("</{name}>");
-        for (at, _, end) in opening_tags(text, name) {
-            let until = text[end..]
-                .find(&close)
-                .map_or(end, |length| end + length + close.len());
-            spans.push((at, until));
+        let length = format!("</{name}>").len();
+        let opens = opening_tags(text, name);
+        for ((at, _, end), close) in opens.iter().zip(closes(text, name, &opens)) {
+            spans.push((*at, close.map_or(*end, |close| close + length)));
         }
     }
     spans
+}
+
+/// Where each of `opens` (`<name ...>` tags in `text`) is closed: the start
+/// of the `</name>` that balances it, counting `<name>` blocks quoted inside
+/// it, so a quoted block's close doesn't end the one around it. `None` when
+/// it is never closed.
+fn closes(text: &str, name: &str, opens: &[(usize, &str, usize)]) -> Vec<Option<usize>> {
+    let close = format!("</{name}>");
+    let mut marks: Vec<(usize, bool)> = opens.iter().map(|(at, _, _)| (*at, true)).collect();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(&close) {
+        marks.push((from + found, false));
+        from += found + close.len();
+    }
+    marks.sort_unstable();
+    opens
+        .iter()
+        .map(|(at, _, _)| {
+            let first = marks.partition_point(|(position, _)| position < at);
+            let mut depth = 0usize;
+            for (position, open) in &marks[first..] {
+                if *open {
+                    depth += 1;
+                } else {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(*position);
+                    }
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 /// Whether a block starting at `at` lies inside another block's span: quoted
@@ -3765,19 +3796,18 @@ pub(crate) fn notification_exit(summary: &str) -> Option<i64> {
 /// block quoted inside another relay block isn't one.
 pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str)> {
     let spans = relay_spans(text);
+    let opens = opening_tags(text, "task-notification");
+    let ends = closes(text, "task-notification", &opens);
     let mut result = Vec::new();
-    let mut from = 0;
-    while let Some(found) = text[from..].find("<task-notification>") {
-        let start = from + found;
-        let body_start = start + "<task-notification>".len();
-        let Some(length) = text[body_start..].find("</task-notification>") else {
-            break;
+    for ((at, _, start), close) in opens.iter().zip(ends) {
+        let Some(close) = close else {
+            continue;
         };
-        let body = &text[body_start..body_start + length];
-        if !nested(&spans, start) {
-            result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
+        if nested(&spans, *at) {
+            continue;
         }
-        from = body_start + length;
+        let body = &text[*start..close];
+        result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
     }
     result
 }
@@ -6981,6 +7011,26 @@ mod tests {
             .collect();
         assert_eq!(found, ["a", "b"]);
         assert!(tags(text, "cross-session-message").is_empty());
+    }
+
+    #[test]
+    fn a_block_quoted_after_a_same_name_block_inside_a_notification_stays_quoted() {
+        // The inner notification's close doesn't end the outer one, so the
+        // agent message quoted after it is still inside.
+        let text = "<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>quoted <task-notification><tool-use-id>t9</tool-use-id><status>failed</status></task-notification> then <agent-message from=\"x\">leak</agent-message></result></task-notification>";
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":text}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+        let found = notifications(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].0, found[0].1), (Some("t1"), Some("completed")));
+        assert!(found[0].2.ends_with("</agent-message></result>"));
     }
 
     #[test]
