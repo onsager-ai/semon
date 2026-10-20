@@ -4,7 +4,7 @@ use super::*;
 use crate::model::relation_stage::{
     Batch, Context, Endpoint, Phase, Relation, Selection, Selector, Withdrawal,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 // Earlier stages may contain parent turns derived from partial receipt sets.
 // Rebuild their witnesses using complete physical sender receipt boundaries.
@@ -1022,6 +1022,7 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
     let mut seen = BTreeSet::new();
     let mut used = 0usize;
     let mut end = after.clone();
+    let mut sender_sources = HashMap::<(String, String), Vec<String>>::new();
     while let Some(row) = rows.next()? {
         let key: String = row.get(0)?;
         let text: Option<String> = row.get(1)?;
@@ -1042,7 +1043,10 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
         let mut overflow = false;
         if let Some(id) = msg {
             for kind in ["xsm", "send"] {
-                let paired:Option<Option<String>>=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind=?2 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",params![id,kind],|r|r.get(0)).optional()?;
+                let paired: Option<Option<String>> = c
+                    .prepare_cached("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind=?2 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1")?
+                    .query_row(params![id, kind], |r| r.get(0))
+                    .optional()?;
                 if let Some(text) = paired {
                     match decode_event(c, text, &mut candidate_used) {
                         Ok(peer) => linked.push(peer),
@@ -1059,8 +1063,50 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
             break;
         }
         let mut candidate = paths.clone();
+        // A subagent's send that isn't its hand-back names no message id:
+        // the model pairs it with the sender's own `SendMessage`, so the
+        // sender's log joins the page.
+        if own.event.k == super::super::Kind::Agm
+            && own.event.script & super::super::AGM_PROGRESS != 0
+            && let Some(sender) = own
+                .event
+                .peer
+                .as_ref()
+                .and_then(|peer| peer.sock.as_deref())
+                .or(own.event.id.as_deref())
+        {
+            // The stage's own inputs, not the published catalog: a first
+            // build has no catalog yet when relations are matched.
+            let root = path
+                .find("/subagents/")
+                .map(|at| &path[..at])
+                .or_else(|| path.strip_suffix(".jsonl"))
+                .unwrap_or(path);
+            let key = (root.to_owned(), sender.to_owned());
+            let sources = if let Some(sources) = sender_sources.get(&key) {
+                sources.clone()
+            } else {
+                let expected = format!("{root}/subagents/agent-{sender}.jsonl");
+                let exact = c
+                    .prepare_cached("SELECT source_path FROM catalog_semantic_inputs WHERE source_path=?1 AND harness='claude' AND is_top=0")?
+                    .query_row([&expected], |r| r.get::<_, String>(0))
+                    .optional()?;
+                let sources = if let Some(source) = exact {
+                    vec![source]
+                } else {
+                    c.prepare_cached("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND native_id=?1 AND is_top=0 ORDER BY source_path LIMIT 8")?
+                        .query_map([sender], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                sender_sources.insert(key, sources.clone());
+                sources
+            };
+            for source in sources {
+                candidate.extend(owner_closure(c, &source)?);
+            }
+        }
         for peer in &linked {
-            let mut sources=c.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
+            let mut sources = c.prepare_cached("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
             for source in sources.query_map([&peer.owner], |r| r.get::<_, String>(0))? {
                 candidate.insert(source?);
             }
@@ -2097,9 +2143,28 @@ impl SqliteStore {
                     prior.source_turn = Default::default();
                     merged.source_turn = Default::default();
                     if json(&prior).map_err(failure)? != json(&merged).map_err(failure)? {
-                        return Err(StoreError::Data(
-                            "conflicting staged native relationship".into(),
-                        ));
+                        // Name the differing fields only: no identities or
+                        // content.
+                        let fields = |relation: &Relation| {
+                            serde_json::to_value(relation)
+                                .ok()
+                                .and_then(|value| value.as_object().cloned())
+                                .unwrap_or_default()
+                        };
+                        let (before, after) = (fields(&prior), fields(&merged));
+                        let differing: Vec<&str> = before
+                            .keys()
+                            .chain(after.keys())
+                            .filter(|key| before.get(*key) != after.get(*key))
+                            .map(String::as_str)
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
+                        return Err(StoreError::Data(format!(
+                            "conflicting staged native relationship: kind={} fields={}",
+                            merged.kind,
+                            differing.join(",")
+                        )));
                     }
                     merged.source_turn = witness;
                 }
@@ -2691,6 +2756,7 @@ mod tests {
                 order: (2, 0, String::new(), n, 0),
                 explicit_previews: false,
                 stubs: Vec::new(),
+                inline: false,
             };
             store.connection.execute("INSERT INTO catalog_semantic_relations(relation_id,from_key,metadata) VALUES(?1,'owner',?2)",params![relation.id,json(&relation).unwrap()]).unwrap();
         }
