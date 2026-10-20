@@ -245,12 +245,23 @@ impl Sources {
         &'a self,
         provider: Option<(&'a dyn SessionSourceReader, crate::SessionSourceReadMode)>,
     ) -> Records<'a> {
-        Records {
-            sources: self,
-            provider: provider.map(|value| value.0),
-            mode: provider.map_or(crate::SessionSourceReadMode::LocalThenProvider, |value| {
+        self.reader_with_mode(
+            provider.map(|value| value.0),
+            provider.map_or(crate::SessionSourceReadMode::LocalThenProvider, |value| {
                 value.1
             }),
+        )
+    }
+
+    pub(crate) fn reader_with_mode<'a>(
+        &'a self,
+        provider: Option<&'a dyn SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+    ) -> Records<'a> {
+        Records {
+            sources: self,
+            provider,
+            mode,
             remote: Mutex::default(),
             checked: Mutex::default(),
             checked_chunks: Mutex::default(),
@@ -288,6 +299,28 @@ struct PreparedBlock {
 }
 
 impl Records<'_> {
+    fn pinned_provider(&self, path: &Path) -> io::Result<bool> {
+        Ok(matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        ) && self
+            .remote
+            .lock()
+            .map_err(|_| unavailable())?
+            .contains_key(path))
+    }
+
+    fn may_fallback(&self, path: &Path) -> io::Result<bool> {
+        Ok(!matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        ) || !self
+            .checked
+            .lock()
+            .map_err(|_| unavailable())?
+            .contains_key(path))
+    }
+
     pub(crate) fn source_ref(&self, path: &Path) -> Option<&SessionSourceRef> {
         self.sources.proofs.get(path)?.source.as_ref()
     }
@@ -350,13 +383,23 @@ impl Records<'_> {
             self.verify(path, proof)?;
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
-            if before.dev != proof.ledger.stat.dev
-                || before.ino != proof.ledger.stat.ino
+            let qualified = matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            );
+            if (!qualified
+                && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
+                || before.size < proof.ledger.offset
                 || record.end().is_none_or(|end| end > before.size)
+                || (qualified
+                    && self.checked.lock().map_err(|_| unavailable())?.get(path) != Some(&before))
             {
                 return Err(unavailable());
             }
             let value = read(&mut file)?;
+            if qualified {
+                crate::source_carrier::recheck(path, &file, &before)?;
+            }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
             }
@@ -474,13 +517,18 @@ impl Records<'_> {
 
     fn verify(&self, path: &Path, proof: &Proof) -> io::Result<()> {
         if self.provider.is_some()
-            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+            && (matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+                || self.pinned_provider(path)?)
         {
             self.provider_block(path, proof, 0)?;
             return Ok(());
         }
         let mut file = match LogFile::open(path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && self.provider.is_some()
+                    && self.may_fallback(path)? =>
+            {
                 self.provider_block(path, proof, 0)?;
                 return Ok(());
             }
@@ -491,7 +539,26 @@ impl Records<'_> {
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
                 || checked.get(path) == Some(&before));
-        if (!unchanged && !proof.ledger.resumes(&before, &mut file))
+        if matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        ) {
+            if before.size < proof.ledger.offset
+                || checked.get(path).is_some_and(|prior| prior != &before)
+            {
+                return Err(unavailable());
+            }
+            if !unchanged && proof.ledger.offset != 0 {
+                proof.chunks.read(&mut file, 0)?;
+                self.checked_chunks
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .entry(path.to_owned())
+                    .or_default()
+                    .insert(0);
+            }
+            crate::source_carrier::recheck(path, &file, &before)?;
+        } else if (!unchanged && !proof.ledger.resumes(&before, &mut file))
             || Stat::from_metadata(&file.metadata()?)? != before
         {
             return Err(unavailable());
@@ -583,14 +650,23 @@ impl Records<'_> {
             }
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
-            if before.dev != proof.ledger.stat.dev
-                || before.ino != proof.ledger.stat.ino
-                || before.size < proof.ledger.offset
+            let qualified = matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            );
+            if before.size < proof.ledger.offset
+                || (!qualified
+                    && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
+                || (qualified
+                    && self.checked.lock().map_err(|_| unavailable())?.get(path) != Some(&before))
             {
                 return Err(unavailable());
             }
             for index in indices {
                 proof.chunks.read(&mut file, *index)?;
+            }
+            if qualified {
+                crate::source_carrier::recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -605,11 +681,22 @@ impl Records<'_> {
             let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
-            if before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino {
+            let qualified = matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            );
+            if (!qualified
+                && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
+                || (qualified
+                    && self.checked.lock().map_err(|_| unavailable())?.get(path) != Some(&before))
+            {
                 return Err(unavailable());
             }
             for record in records {
                 record.verify(&mut file)?;
+            }
+            if qualified {
+                crate::source_carrier::recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -656,7 +743,8 @@ impl Records<'_> {
             return Err(unavailable());
         }
         if self.provider.is_some()
-            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+            && (matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+                || self.pinned_provider(path)?)
         {
             return self.provider_range(path, proof, offset, max, prepare);
         }
@@ -668,7 +756,11 @@ impl Records<'_> {
             .and_then(|block| block.file.take());
         let reused = cached_file.is_some();
         let mut file = match cached_file.map(Ok).unwrap_or_else(|| LogFile::open(path)) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && self.provider.is_some()
+                    && self.may_fallback(path)? =>
+            {
                 drop(prepared);
                 return self.provider_range(path, proof, offset, max, prepare);
             }
@@ -678,7 +770,9 @@ impl Records<'_> {
         if reused {
             let named = match std::fs::symlink_metadata(path) {
                 Err(error)
-                    if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() =>
+                    if error.kind() == io::ErrorKind::NotFound
+                        && self.provider.is_some()
+                        && self.may_fallback(path)? =>
                 {
                     drop(prepared);
                     return self.provider_range(path, proof, offset, max, prepare);
@@ -689,17 +783,24 @@ impl Records<'_> {
                 return Err(unavailable());
             }
         }
-        if before.dev != proof.ledger.stat.dev
-            || before.ino != proof.ledger.stat.ino
-            || before.size < proof.ledger.offset
+        let qualified = matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        );
+        if before.size < proof.ledger.offset
+            || (!qualified
+                && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
         {
             return Err(unavailable());
         }
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
+        if qualified && checked.get(path).is_some_and(|prior| prior != &before) {
+            return Err(unavailable());
+        }
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
                 || checked.get(path) == Some(&before));
-        if !unchanged && !proof.ledger.resumes(&before, &mut file) {
+        if !qualified && !unchanged && !proof.ledger.resumes(&before, &mut file) {
             return Err(unavailable());
         }
         let first = usize::try_from(offset / crate::source_chunks::SIZE as u64)
@@ -733,9 +834,14 @@ impl Records<'_> {
             bytes.extend_from_slice(&part[lo..hi]);
         }
         if Stat::from_metadata(&file.metadata()?)? != before
-            || (before.changed_ns.is_none() && !proof.ledger.resumes(&before, &mut file))
+            || (!qualified
+                && before.changed_ns.is_none()
+                && !proof.ledger.resumes(&before, &mut file))
         {
             return Err(unavailable());
+        }
+        if qualified {
+            crate::source_carrier::recheck(path, &file, &before)?;
         }
         checked.insert(path.to_owned(), before);
         if let Some(block) = prepared.as_deref_mut().and_then(Option::as_mut) {
@@ -1014,6 +1120,85 @@ mod tests {
                 "every captured stamp field must match"
             );
             after
+        }
+    }
+
+    #[test]
+    fn local_only_proofs_qualify_changed_carriers_with_bounded_reads() {
+        use std::io::Write;
+        for mutation in ["append", "copy", "touch", "legacy", "rewrite", "truncate"] {
+            let fixture = Fixture::new(&format!("proof-carrier-{mutation}"));
+            let original = vec![b'x'; 3 * 1024 * 1024];
+            fs::write(&fixture.path, &original).unwrap();
+            let (mut sources, reference, generation) = fixture.sources();
+            match mutation {
+                "append" => fs::OpenOptions::new()
+                    .append(true)
+                    .open(&fixture.path)
+                    .unwrap()
+                    .write_all(b"tail")
+                    .unwrap(),
+                "copy" => {
+                    fs::rename(&fixture.path, fixture.path.with_extension("old")).unwrap();
+                    fs::write(&fixture.path, &original).unwrap();
+                }
+                "touch" => fs::File::options()
+                    .write(true)
+                    .open(&fixture.path)
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+                    .unwrap(),
+                "legacy" => {
+                    sources
+                        .proofs
+                        .get_mut(&fixture.path)
+                        .unwrap()
+                        .ledger
+                        .stat
+                        .changed_ns = None
+                }
+                "rewrite" => {
+                    let mut changed = original.clone();
+                    changed[17] = b'y';
+                    fs::write(&fixture.path, changed).unwrap();
+                }
+                "truncate" => fs::write(&fixture.path, b"short").unwrap(),
+                _ => unreachable!(),
+            }
+            let records =
+                sources.reader_with_mode(None, crate::SessionSourceReadMode::LocalOrPinnedProvider);
+            crate::source_chunks::READ_BYTES.with(|n| n.set(0));
+            crate::events::HASHED_BYTES.with(|n| n.set(0));
+            let result = records.read_range(&reference, Some(&generation), 17, 1);
+            if matches!(mutation, "rewrite" | "truncate") {
+                assert!(result.is_err(), "{mutation}");
+            } else {
+                assert_eq!(&*result.unwrap().bytes, b"x", "{mutation}");
+                records.finish().unwrap();
+                assert_eq!(
+                    crate::source_chunks::READ_BYTES.with(std::cell::Cell::get),
+                    2 * crate::source_chunks::SIZE as u64
+                );
+                // The first accepted carrier remains fixed across chunks.
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&fixture.path)
+                    .unwrap()
+                    .write_all(b"race")
+                    .unwrap();
+                assert!(
+                    records
+                        .read_range(&reference, Some(&generation), 18, 1)
+                        .is_err()
+                );
+                assert!(records.finish().is_err());
+            }
+            assert!(
+                records
+                    .read_range(&reference, Some("wrong"), 17, 1)
+                    .is_err()
+            );
+            assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
         }
     }
 

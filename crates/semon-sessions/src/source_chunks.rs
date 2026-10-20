@@ -10,6 +10,7 @@ pub(crate) const SIZE: usize = 64 * 1024;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static READ_BLOCKS: std::cell::RefCell<std::collections::BTreeSet<usize>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
     pub(crate) static READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 

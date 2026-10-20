@@ -388,7 +388,7 @@ fn virtual_read(
     )
     .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
     tx.commit().map_err(unavailable)?;
-    let records = sources.reader_with(provider.map(|reader| (reader, mode)));
+    let records = sources.reader_with_mode(provider, mode);
     let prefix = format!(
         "{}{}:{key}:",
         crate::query_projection::prefix("virtual-slot", &identity),
@@ -821,8 +821,7 @@ fn read_inner(
         return Ok(None);
     }
     tx.commit().map_err(unavailable)?;
-    let rendering = provider.map(|provider| (provider, mode));
-    let records = sources.reader_with(rendering);
+    let records = sources.reader_with_mode(provider, mode);
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     if session {
         let session_key =

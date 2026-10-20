@@ -104,6 +104,7 @@ pub mod test_hooks;
 pub use native_evidence::SessionSources;
 mod query_source;
 mod selected_read;
+mod source_carrier;
 mod source_chunks;
 mod source_reader;
 pub use selected_read::SelectedReadControl;
