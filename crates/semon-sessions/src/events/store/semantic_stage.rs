@@ -4,7 +4,7 @@ use super::*;
 use crate::model::relation_stage::{
     Batch, Context, Endpoint, Phase, Relation, Selection, Selector, Withdrawal,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 // Earlier stages may contain parent turns derived from partial receipt sets.
 // Rebuild their witnesses using complete physical sender receipt boundaries.
@@ -1022,6 +1022,7 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
     let mut seen = BTreeSet::new();
     let mut used = 0usize;
     let mut end = after.clone();
+    let mut sender_sources = HashMap::<(String, String), Vec<String>>::new();
     while let Some(row) = rows.next()? {
         let key: String = row.get(0)?;
         let text: Option<String> = row.get(1)?;
@@ -1042,7 +1043,10 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
         let mut overflow = false;
         if let Some(id) = msg {
             for kind in ["xsm", "send"] {
-                let paired:Option<Option<String>>=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind=?2 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",params![id,kind],|r|r.get(0)).optional()?;
+                let paired: Option<Option<String>> = c
+                    .prepare_cached("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind=?2 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1")?
+                    .query_row(params![id, kind], |r| r.get(0))
+                    .optional()?;
                 if let Some(text) = paired {
                     match decode_event(c, text, &mut candidate_used) {
                         Ok(peer) => linked.push(peer),
@@ -1073,17 +1077,36 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
         {
             // The stage's own inputs, not the published catalog: a first
             // build has no catalog yet when relations are matched.
-            let file = format!("/subagents/agent-{sender}.jsonl");
-            let mut senders=c.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND is_top=0 AND (native_id=?1 OR substr(source_path,-length(?2))=?2) ORDER BY source_path LIMIT 8")?;
-            let sources = senders
-                .query_map(params![sender, file], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let root = path
+                .find("/subagents/")
+                .map(|at| &path[..at])
+                .or_else(|| path.strip_suffix(".jsonl"))
+                .unwrap_or(path);
+            let key = (root.to_owned(), sender.to_owned());
+            let sources = if let Some(sources) = sender_sources.get(&key) {
+                sources.clone()
+            } else {
+                let expected = format!("{root}/subagents/agent-{sender}.jsonl");
+                let exact = c
+                    .prepare_cached("SELECT source_path FROM catalog_semantic_inputs WHERE source_path=?1 AND harness='claude' AND is_top=0")?
+                    .query_row([&expected], |r| r.get::<_, String>(0))
+                    .optional()?;
+                let sources = if let Some(source) = exact {
+                    vec![source]
+                } else {
+                    c.prepare_cached("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND native_id=?1 AND is_top=0 ORDER BY source_path LIMIT 8")?
+                        .query_map([sender], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                sender_sources.insert(key, sources.clone());
+                sources
+            };
             for source in sources {
                 candidate.extend(owner_closure(c, &source)?);
             }
         }
         for peer in &linked {
-            let mut sources=c.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
+            let mut sources = c.prepare_cached("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
             for source in sources.query_map([&peer.owner], |r| r.get::<_, String>(0))? {
                 candidate.insert(source?);
             }
