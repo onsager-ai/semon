@@ -1757,6 +1757,10 @@ struct H {
     inline: bool,
 }
 
+/// Each spawner's sends that can be to one of its agents: the call, the
+/// agent id its result pins or resumes, and its `to` (plain name).
+type Deliveries = HashMap<usize, Vec<(Ref, Option<String>, String)>>;
+
 /// One run of a Claude subagent ([`Builder::claude_runs`]): how it ended.
 #[derive(Default)]
 struct Run {
@@ -3406,7 +3410,7 @@ impl<'a> Builder<'a> {
         (spawner, child, call): (usize, usize, Option<Ref>),
         child_events: &[Ref],
         inline: &BTreeSet<Ref>,
-        deliveries: &mut HashMap<usize, Vec<(Ref, Option<String>, String)>>,
+        deliveries: &mut Deliveries,
     ) {
         if let std::collections::hash_map::Entry::Vacant(slot) = deliveries.entry(spawner) {
             let mut found = Vec::new();
