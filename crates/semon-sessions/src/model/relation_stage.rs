@@ -240,6 +240,10 @@ pub(crate) struct Relation {
     pub(crate) order: (u8, i64, String, u64, u32),
     pub(crate) explicit_previews: bool,
     pub(crate) stubs: Vec<Stub>,
+    /// A parent's message that reached its subagent mid-run: it doesn't
+    /// start the child's turn.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub(crate) inline: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -292,6 +296,7 @@ fn preview_kind(value: &str) -> io::Result<&'static str> {
         "notification" => Ok("notification"),
         "handback" => Ok("handback"),
         "received_cross" => Ok("received_cross"),
+        "received_down" => Ok("received_down"),
         _ => Err(io::Error::other("unsupported staged native preview kind")),
     }
 }
@@ -551,6 +556,7 @@ impl Context {
                         .collect(),
                     previews,
                     explicit_previews: h.previews.is_some(),
+                    inline: h.inline,
                     stubs: [h.from, h.to]
                         .into_iter()
                         .flatten()
@@ -808,6 +814,7 @@ impl Context {
                 }
             }
             builder.handoffs[index].previews = relation.explicit_previews.then_some(previews);
+            builder.handoffs[index].inline = relation.inline;
             for placement in &relation.placements {
                 if let Some(at) = placement.at.local(builder)? {
                     builder.place(

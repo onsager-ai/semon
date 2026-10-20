@@ -1313,8 +1313,13 @@ fn spawn_results_come_from_four_sources_in_order() {
         ("err", Some("five broke"))
     );
     assert_eq!(built.sessions["a5"].state, "err");
-    // A notification outranks a hand-back.
-    assert_eq!(spawn("a6").result.as_deref(), Some("six by notification"));
+    // A run's hand-back is its result; the notification that ends the same
+    // run gives only the status, and the run ended at whichever came first.
+    let six = spawn("a6");
+    assert_eq!(
+        (six.status, six.result.as_deref(), six.done),
+        ("done", Some("six by hand-back"), Some(at(1, 13)))
+    );
     // No result and the parent isn't running: done, with nothing returned.
     let seven = spawn("a7");
     assert_eq!((seven.status, seven.result.as_deref()), ("done", None));
@@ -7030,6 +7035,455 @@ fn a_stubs_transcript_names_only_served_handoffs() {
         .collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["id"], new.id.as_str());
+}
+
+/// A subagent's send that isn't its hand-back, as the receiving session gets
+/// it (Claude Code 2.1: `senderTaskId`, no `handback`, no `msg_id`).
+fn agent_send(sid: &str, time: String, from: &str, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,
+        "origin":{"kind":"peer","from":from,"senderTaskId":from,"name":"general-purpose"},
+        "message":{"role":"user","content":format!("Another Claude session sent a message:\n<agent-message from=\"{from}\">{body}</agent-message>")}})
+}
+
+/// A subagent's hand-back, as its parent gets it.
+fn hand_back(sid: &str, time: String, from: &str, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,
+        "origin":{"kind":"peer","from":from,"senderTaskId":from,"handback":true,"body":body},
+        "message":{"role":"user","content":format!("<agent-message from=\"{from}\">{body}</agent-message>")}})
+}
+
+/// A parent's message, as its running or resumed subagent gets it.
+fn coordinator(sid: &str, time: String, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,"isMeta":true,"origin":{"kind":"coordinator"},
+        "message":{"role":"user","content":format!("The coordinator sent a message while you were working:\n{body}")}})
+}
+
+/// The lead's `SendMessage` to agent `to` at 20:`minute`, with `outcome`.
+fn send_to_agent(id: &str, minute: i64, to: &str, message: &str, outcome: Value) -> [Value; 2] {
+    [
+        assistant(
+            "lead",
+            ts(20, minute),
+            vec![tool(id, "SendMessage", json!({"to":to,"message":message}))],
+        ),
+        result("lead", ts(20, minute), id, "sent", false, outcome),
+    ]
+}
+
+fn resumed(agent: &str) -> Value {
+    json!({"success":true,"message":format!("Resuming agent {agent} in the background"),"resumedAgentId":agent})
+}
+
+/// A subagent's progress send, its hand-back and its agent-end notification
+/// are one relay and one result, each drawn once: the notification is the
+/// run's status, not a message or an entry.
+#[test]
+fn a_progress_send_a_hand_back_and_an_agent_end_are_one_relay_and_one_result() {
+    let mut child = send_to_main("p1", 2, "halfway there", queued_reply());
+    child.push(child_says(4, "all done"));
+    let built = background_home(
+        vec![("aw", "tw", child)],
+        vec![
+            agent_send("lead", ts(20, 3), "aw", "halfway there"),
+            hand_back("lead", ts(20, 5), "aw", "the final answer"),
+            notification("lead", ts(20, 6), "tw", "completed", "the notified answer"),
+        ],
+    )
+    .build();
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("the final answer"), Some(at(20, 5)))
+    );
+    assert_eq!(built.sessions["aw"].state, "done");
+    let relay = only(&built, "relay", "aw", "lead");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched, relay.at),
+        ("halfway there", false, at(20, 2))
+    );
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    // Nothing else between them: no second relay, result or entry.
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == "aw" || handoff.to.as_deref() == Some("aw"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.result.is_some())
+            .count(),
+        1
+    );
+    let slots = &built.tx["lead"].slots;
+    assert_eq!(received_in(&built, "lead", &spawn.id), 1);
+    assert!(
+        slots
+            .iter()
+            .all(|slot| !matches!(slot.kind, SlotKind::BgEnd { .. }))
+    );
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A subagent's send to its sibling is a relay between them, not a receipt
+/// of either spawn; its send to `main` is still paired with its receipt in
+/// the parent.
+#[test]
+fn a_subagent_send_to_a_sibling_is_a_relay_not_a_receipt() {
+    let mut aa = vec![
+        assistant(
+            "lead",
+            ts(20, 2),
+            vec![tool(
+                "to-b",
+                "SendMessage",
+                json!({"to":"ab","message":"sibling note"}),
+            )],
+        ),
+        result(
+            "lead",
+            ts(20, 2),
+            "to-b",
+            "sent",
+            false,
+            json!({"success":true,"message":"sent","pin":{"id":"ab"}}),
+        ),
+    ];
+    aa.extend(send_to_main("to-lead", 3, "note for lead", queued_reply()));
+    aa.push(child_says(5, "aa done"));
+    let ab = vec![
+        agent_send("lead", ts(20, 4), "aa", "sibling note"),
+        child_says(6, "noted"),
+    ];
+    let built = background_home(
+        vec![("aa", "ta", aa), ("ab", "tb", ab)],
+        vec![
+            agent_send("lead", ts(20, 4), "aa", "note for lead"),
+            hand_back("lead", ts(20, 7), "aa", "aa done"),
+        ],
+    )
+    .build();
+    let sibling = only(&built, "relay", "aa", "ab");
+    assert_eq!(
+        (sibling.brief.as_str(), sibling.unmatched),
+        ("sibling note", false)
+    );
+    assert_eq!(received_in(&built, "ab", &sibling.id), 1);
+    assert_eq!(
+        turns_of(&built, "ab")[1].start.as_deref(),
+        Some(sibling.id.as_str())
+    );
+    let up = only(&built, "relay", "aa", "lead");
+    assert_eq!(up.brief, "note for lead");
+    assert_eq!(received_in(&built, "lead", &up.id), 1);
+    assert_eq!(
+        only(&built, "spawn", "lead", "aa").result.as_deref(),
+        Some("aa done")
+    );
+    assert_eq!(only(&built, "spawn", "lead", "ab").result.as_deref(), None);
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A parent's message that reaches its subagent mid-run is a relay from the
+/// parent, paired with the parent's send, and an entry of the child's
+/// current turn, not a turn of its own.
+#[test]
+fn a_parent_message_mid_run_is_inline_in_the_subagents_turn() {
+    let child = vec![
+        assistant(
+            "lead",
+            ts(20, 2),
+            vec![tool("ls", "Bash", json!({"command":"ls"}))],
+        ),
+        result("lead", ts(20, 2), "ls", "src", false, json!({})),
+        coordinator("lead", ts(20, 3), "also check the tests"),
+        child_says(4, "checked"),
+    ];
+    let mut receipts = Vec::from(send_to_agent(
+        "to-aw",
+        2,
+        "aw",
+        "also check the tests",
+        json!({"success":true,"message":"Message queued for delivery to aw at its next tool round."}),
+    ));
+    receipts.push(hand_back("lead", ts(20, 5), "aw", "checked"));
+    receipts.push(notification(
+        "lead",
+        ts(20, 6),
+        "tw",
+        "completed",
+        "checked",
+    ));
+    let built = background_home(vec![("aw", "tw", child)], receipts).build();
+    let relay = only(&built, "relay", "lead", "aw");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched, relay.at),
+        ("also check the tests", false, at(20, 2))
+    );
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    assert_eq!(received_in(&built, "aw", &relay.id), 1);
+    assert!(
+        turns_of(&built, "lead")
+            .iter()
+            .any(|turn| turn.sent.contains(&relay.id))
+    );
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 1);
+    let slot = built.tx["aw"]
+        .slots
+        .iter()
+        .find(|slot| matches!(&slot.kind, SlotKind::H(id) if id == &relay.id))
+        .unwrap();
+    assert_eq!(slot.turn.as_deref(), Some(turns[0].id.as_str()));
+    assert_eq!(built.sessions["aw"].state, "done");
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A subagent that handed back, then was resumed by its parent: the resume
+/// starts a new turn and the child works again until that run ends.
+fn resume_home(second_end: bool) -> Home {
+    let mut child = vec![
+        child_says(2, "first answer"),
+        coordinator("lead", ts(20, 5), "now fix it"),
+        child_says(6, "fixing"),
+    ];
+    let mut receipts = vec![
+        hand_back("lead", ts(20, 3), "aw", "first answer"),
+        notification("lead", ts(20, 4), "tw", "completed", "first answer"),
+    ];
+    receipts.extend(send_to_agent(
+        "resume",
+        5,
+        "aw",
+        "now fix it",
+        resumed("aw"),
+    ));
+    if second_end {
+        child.push(child_says(7, "fixed"));
+        receipts.push(hand_back("lead", ts(20, 8), "aw", "fixed"));
+        receipts.push(notification("lead", ts(20, 9), "tw", "completed", "fixed"));
+    }
+    let home = background_home(vec![("aw", "tw", child)], receipts);
+    home.live(51, "lead", "busy", json!({}));
+    home
+}
+
+#[test]
+fn a_resume_after_a_hand_back_starts_a_turn_and_works_until_its_run_ends() {
+    let built = resume_home(false).build();
+    let relay = only(&built, "relay", "lead", "aw");
+    assert_eq!(relay.brief, "now fix it");
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[1].start.as_deref(), Some(relay.id.as_str()));
+    assert_eq!(built.sessions["aw"].state, "work");
+    let spawn = only(&built, "spawn", "lead", "aw");
+    // Still the previous run's end until this one ends.
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref()),
+        ("work", Some("first answer"))
+    );
+
+    let built = resume_home(true).build();
+    assert_eq!(built.sessions["aw"].state, "done");
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("fixed"), Some(at(20, 8)))
+    );
+    assert_eq!(turns_of(&built, "aw").len(), 2);
+}
+
+/// Three runs of one subagent: the spawn's result is the latest run's
+/// hand-back. The second run's notification arrives after the parent
+/// already resumed the third, and still belongs to the second.
+#[test]
+fn a_subagent_resumed_twice_returns_its_latest_run() {
+    let child = vec![
+        child_says(2, "one"),
+        coordinator("lead", ts(20, 5), "second task"),
+        child_says(7, "two"),
+        coordinator("lead", ts(20, 9), "third task"),
+        child_says(11, "three"),
+    ];
+    let mut receipts = vec![
+        hand_back("lead", ts(20, 3), "aw", "one"),
+        notification("lead", ts(20, 4), "tw", "completed", "notified one"),
+    ];
+    receipts.extend(send_to_agent("r2", 5, "aw", "second task", resumed("aw")));
+    receipts.push(hand_back("lead", ts(20, 8), "aw", "two"));
+    receipts.extend(send_to_agent("r3", 9, "aw", "third task", resumed("aw")));
+    receipts.push(notification(
+        "lead",
+        ts(20, 10),
+        "tw",
+        "completed",
+        "notified two",
+    ));
+    receipts.push(hand_back("lead", ts(20, 12), "aw", "three"));
+    receipts.push(notification(
+        "lead",
+        ts(20, 13),
+        "tw",
+        "completed",
+        "notified three",
+    ));
+    let built = background_home(vec![("aw", "tw", child)], receipts).build();
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("three"), Some(at(20, 12)))
+    );
+    assert_eq!(built.sessions["aw"].state, "done");
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 3);
+    for (turn, brief) in [(1, "second task"), (2, "third task")] {
+        let relay = by_brief(&built, brief);
+        assert_eq!(
+            (relay.kind, relay.from.as_str(), relay.to.as_deref()),
+            ("relay", "lead", Some("aw"))
+        );
+        assert_eq!(turns[turn].start.as_deref(), Some(relay.id.as_str()));
+    }
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.result.is_some())
+            .count(),
+        1
+    );
+}
+
+/// A legacy `<agent-message>` tag with no `origin` keeps the old pairing: a
+/// send's receipt is its relay and the last unclaimed one is the hand-back.
+/// A tag quoted in a notification's result is not a receipt.
+#[test]
+fn legacy_tag_receipts_pair_as_before_and_quoted_tags_are_not_receipts() {
+    let mut child = send_to_main("n1", 2, "legacy note", queued_reply());
+    child.push(child_says(4, "legacy done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(3, &[("ap", "legacy note")]),
+            agm_line(5, &[("ap", "[Subagent hand-back] legacy done")]),
+            user(
+                "lead",
+                ts(20, 6),
+                "<task-notification><tool-use-id>bg</tool-use-id><status>completed</status><result>log: <agent-message from=\"ap\">quoted, not sent</agent-message></result></task-notification>",
+            ),
+        ],
+    )
+    .build();
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] legacy done")
+    );
+    let relay = only(&built, "relay", "ap", "lead");
+    assert_eq!(relay.brief, "legacy note");
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    assert!(
+        built
+            .handoffs
+            .iter()
+            .all(|handoff| handoff.result.as_deref() != Some("quoted, not sent"))
+    );
+}
+
+/// A notification that a subagent run this session started has ended is a
+/// status, not a message: a reply after it still answers your message.
+#[test]
+fn an_agent_end_notification_does_not_interrupt_a_reply() {
+    let home = Home::new();
+    home.top(
+        "notified-agent",
+        &[
+            human("notified-agent", ts(16, 0), "delegate it"),
+            assistant(
+                "notified-agent",
+                ts(16, 1),
+                vec![tool("ag", "Agent", json!({"prompt":"go"}))],
+            ),
+            result(
+                "notified-agent",
+                ts(16, 1),
+                "ag",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"ag1"}),
+            ),
+            notification(
+                "notified-agent",
+                ts(16, 3),
+                "ag",
+                "completed",
+                "agent result",
+            ),
+            assistant(
+                "notified-agent",
+                ts(16, 4),
+                vec![text("The agent finished.")],
+            ),
+        ],
+    );
+    home.agent(
+        "notified-agent",
+        "ag1",
+        "ag",
+        &[
+            user("notified-agent", ts(16, 1), "go"),
+            assistant("notified-agent", ts(16, 2), vec![text("working")]),
+        ],
+    );
+    home.live(41, "notified-agent", "idle", json!({}));
+    let built = home.build();
+    let result = by_brief(&built, "The agent finished.");
+    assert_eq!(
+        (result.kind, result.ask, result.from.as_str()),
+        ("toyou", Some("result"), "notified-agent")
+    );
+    assert_eq!(
+        only(&built, "spawn", "notified-agent", "ag1")
+            .result
+            .as_deref(),
+        Some("agent result")
+    );
+}
+
+/// A Codex child's result is only what it sent up to its parent, not its
+/// message to its own child or to a sibling.
+#[test]
+fn a_codex_childs_result_is_its_message_up() {
+    let home = Home::new();
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(4, 0), "Coordinate"),
+            codex_line(ts(4, 1), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"c1","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"})),
+            codex_line(ts(4, 1), "response_item", json!({"type":"function_call_output","call_id":"c1","output":"{\"task_name\":\"worker\"}"})),
+            codex_line(ts(4, 9), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root","content":[{"type":"input_text","text":"worker finished"}]})),
+        ],
+    );
+    home.codex(
+        "child",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"worker","agent_path":"root/worker"}),
+        &[
+            codex_user(ts(4, 1), "go"),
+            codex_line(ts(4, 10), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root/worker/helper","content":[{"type":"input_text","text":"down to my helper"}]})),
+            codex_line(ts(4, 11), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root/other","content":[{"type":"input_text","text":"side note"}]})),
+            codex_reply(ts(4, 12), "done"),
+        ],
+    );
+    let built = home.build();
+    assert_eq!(
+        only(&built, "spawn", "root", "child").result.as_deref(),
+        Some("worker finished")
+    );
 }
 
 /// A lead that starts background subagents at 20:01, each (agent id,
