@@ -3159,21 +3159,18 @@ impl<'a> Builder<'a> {
                 .collect();
             let (runs, inline) = self.claude_runs(&child_events, first_prompt, &finals, &ends);
             let mut result = None;
-            // The latest run that ended in the parent: its hand-back's text,
-            // else its notification's. The notification gives the status;
-            // the run ended at whichever came first.
-            if let Some(run) = runs
-                .iter()
-                .rev()
-                .find(|run| run.fin.is_some() || run.tn.is_some())
-            {
+            // The latest run that ended: its hand-back receipt's text, else
+            // its notification's, else the child's `SubagentHandback`. The
+            // notification gives the status; the run ended at whichever came
+            // first.
+            if let Some(run) = runs.iter().rev().find(|run| run.ended()) {
                 let failed = run.tn.is_some_and(|found| {
                     !matches!(
                         event(self.files, found).n.as_deref(),
                         Some("completed" | "success" | "done")
                     )
                 });
-                let done = [run.fin, run.tn]
+                let done = [run.fin, run.tn, run.handback]
                     .into_iter()
                     .flatten()
                     .filter_map(|at| event(self.files, at).t)
@@ -3194,6 +3191,13 @@ impl<'a> Builder<'a> {
                     let mut preview = PreviewRef::new(found, "notification");
                     preview.arg = Some(id);
                     previews.insert("result", preview);
+                } else if let Some(found) = run.handback {
+                    // Ended only in the child's log.
+                    let text = self.text(found, "handback", |record, block| {
+                        input_string(record, block, &["message"])
+                    });
+                    result = Some((text, done, false));
+                    previews.insert("result", PreviewRef::new(found, "handback"));
                 }
             }
             // A legacy receipt (an `<agent-message>` tag, which doesn't say
@@ -3272,7 +3276,12 @@ impl<'a> Builder<'a> {
                     self.head.insert(child, handoff);
                 }
             }
-            self.down_messages(spawner, child, &child_events, &inline, &mut deliveries);
+            self.down_messages(
+                (spawner, child, call),
+                &child_events,
+                &inline,
+                &mut deliveries,
+            );
         }
         Ok(())
     }
@@ -3286,9 +3295,12 @@ impl<'a> Builder<'a> {
     /// its turn, not a resume.
     ///
     /// The parent writes a run's notification seconds after its hand-back,
-    /// so a resume sent in between already opened the next run: such a
-    /// notification belongs to the run before, when that one handed back
-    /// without one.
+    /// and its hand-back receipt at its next turn, so a resume sent in
+    /// between already opened the next run. Such a completed notification
+    /// belongs to the run before when that one handed back without one, and
+    /// such a receipt when the child handed that run back
+    /// (`SubagentHandback`) and it has no receipt. A failed or killed
+    /// notification ends the open run.
     fn claude_runs(
         &self,
         child_events: &[Ref],
@@ -3335,10 +3347,33 @@ impl<'a> Builder<'a> {
                         inline.insert(at);
                     }
                 }
-                Step::Final => runs[last].fin = Some(at),
-                Step::Handback => runs[last].handback = Some(at),
-                Step::End => {
+                // The parent records a hand-back at its next turn, so it can
+                // land after the message that resumed the child: it belongs
+                // to the run the child handed back, when that one has none.
+                Step::Final => {
                     let target = if last > 0
+                        && !runs[last].ended()
+                        && runs[last - 1].handback.is_some()
+                        && runs[last - 1].fin.is_none()
+                    {
+                        last - 1
+                    } else {
+                        last
+                    };
+                    runs[target].fin = Some(at);
+                }
+                Step::Handback => runs[last].handback = Some(at),
+                // A completed notification after a resume ends the run that
+                // handed back before it, when that one has none. A failed or
+                // killed one is about the run still open: the one before had
+                // handed back, so it didn't fail.
+                Step::End => {
+                    let completed = matches!(
+                        event(self.files, at).n.as_deref(),
+                        Some("completed" | "success" | "done")
+                    );
+                    let target = if last > 0
+                        && completed
                         && !runs[last].ended()
                         && runs[last - 1].handed_back()
                         && runs[last - 1].tn.is_none()
@@ -3358,31 +3393,21 @@ impl<'a> Builder<'a> {
 
     /// Draws each message `child`'s parent sent it while it ran or to resume
     /// it (`AGM_DOWN` in the child) as a relay from the spawner. Each pairs
-    /// with the spawner's `SendMessage` that delivered it to this agent (a
-    /// pinned or resuming result, or one queued for its next tool round),
-    /// first by body, then by order, as [`Self::pair_sends`] does: the send
-    /// is the relay's outgoing side. An unpaired message is still drawn, from
-    /// its own text. One that reached an open run is inline: it doesn't
-    /// start a turn.
+    /// with one of the spawner's `SendMessage` calls to this agent, first by
+    /// body, then by order, as [`Self::pair_sends`] does: the send is the
+    /// relay's outgoing side. A send is to this agent when its result pins or
+    /// resumes it by id, or its `to` is the agent's id, its label, or the
+    /// `name` its spawning call gave it. Every such send, paired or not, is
+    /// this agent's and never a relay to a name ([`Self::relays`]). An
+    /// unpaired message is still drawn, from its own text. One that reached
+    /// an open run is inline: it doesn't start a turn.
     fn down_messages(
         &mut self,
-        spawner: usize,
-        child: usize,
+        (spawner, child, call): (usize, usize, Option<Ref>),
         child_events: &[Ref],
         inline: &BTreeSet<Ref>,
-        deliveries: &mut HashMap<usize, Vec<(Ref, String)>>,
+        deliveries: &mut HashMap<usize, Vec<(Ref, Option<String>, String)>>,
     ) {
-        let downs: Vec<Ref> = child_events
-            .iter()
-            .copied()
-            .filter(|at| {
-                let found = event(self.files, *at);
-                found.k == Kind::Agm && found.script & AGM_DOWN != 0
-            })
-            .collect();
-        if downs.is_empty() {
-            return;
-        }
         if let std::collections::hash_map::Entry::Vacant(slot) = deliveries.entry(spawner) {
             let mut found = Vec::new();
             for at in self.events_of(spawner) {
@@ -3396,27 +3421,49 @@ impl<'a> Builder<'a> {
                 if reply.e || reply.f & (DENIED | SEND_FAILED) != 0 || reply.m.is_some() {
                     continue;
                 }
-                if let Some(target) = self.result_text(at, "down-target", down_target) {
-                    let target = if target.is_empty() {
-                        plain_name(&self.send_target(at))
-                    } else {
-                        target
-                    };
-                    found.push((at, target));
-                }
+                let id = self
+                    .result_text(at, "down-target", down_target)
+                    .filter(|id| !id.is_empty());
+                let to = plain_name(&self.send_target(at));
+                found.push((at, id, to));
             }
             slot.insert(found);
         }
         let key = self.sessions[child].key.clone();
-        let name = self.sessions[child].out.name.clone();
+        let mut names = vec![key.clone()];
+        names.extend(Some(self.sessions[child].out.name.clone()).filter(|name| !name.is_empty()));
+        names.extend(
+            call.and_then(|at| {
+                self.text(at, "name", |record, block| {
+                    input_string(record, block, &["name"])
+                })
+            })
+            .map(|name| plain_name(&name))
+            .filter(|name| !name.is_empty()),
+        );
         let sends: Vec<Ref> = deliveries[&spawner]
             .iter()
-            .filter(|(at, target)| {
+            .filter(|(at, id, to)| {
                 !self.down_sends.contains(at)
-                    && (*target == key || (!name.is_empty() && *target == name))
+                    && match id {
+                        Some(id) => *id == key,
+                        None => names.contains(to),
+                    }
             })
-            .map(|(at, _)| *at)
+            .map(|(at, _, _)| *at)
             .collect();
+        self.down_sends.extend(sends.iter().copied());
+        let downs: Vec<Ref> = child_events
+            .iter()
+            .copied()
+            .filter(|at| {
+                let found = event(self.files, *at);
+                found.k == Kind::Agm && found.script & AGM_DOWN != 0
+            })
+            .collect();
+        if downs.is_empty() {
+            return;
+        }
         let bodies: Vec<Option<String>> = downs
             .iter()
             .map(|at| self.text(*at, "down", |record, _| coordinator_body(record)))
@@ -3507,7 +3554,6 @@ impl<'a> Builder<'a> {
                 },
             )]));
             if let Some(send) = send {
-                self.down_sends.insert(send);
                 self.place(send, handoff, Place::Out);
             }
             self.place(*down, handoff, Place::In);
@@ -3839,6 +3885,18 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // A send its result proves went to an agent in this process (pinned,
+        // resuming it, or queued for its next tool round) is that agent's
+        // message, drawn with its receipt by `down_messages`, never a relay
+        // to a name.
+        let mut peer_sends = Vec::with_capacity(sends.len());
+        for (at, reply) in sends {
+            if reply.m.is_none() && self.result_text(at, "down-target", down_target).is_some() {
+                continue;
+            }
+            peer_sends.push((at, reply));
+        }
+        let sends = peer_sends;
         // D3's fallback: names learned only from exact joins and records.
         let mut names = HashMap::<String, BTreeSet<usize>>::new();
         for (index, session) in self.sessions.iter().enumerate() {
@@ -4765,9 +4823,10 @@ impl<'a> Builder<'a> {
     }
 
     /// An incoming event that doesn't interrupt the turn it falls in: a
-    /// parent's message that reached its subagent's open run (inline), or a
-    /// notification that a subagent run, which this session's own `Agent`
-    /// or `Task` call started, ended (a status, not a message).
+    /// parent's message that reached its subagent's open run (inline), or
+    /// the end of a subagent run this session spawned, as its agent-end
+    /// notification or its hand-back (a result and a status, not a message).
+    /// A progress send from that subagent is a message and still interrupts.
     fn continues_turn(&self, at: Ref) -> bool {
         let found = event(self.files, at);
         match found.k {
@@ -4783,13 +4842,29 @@ impl<'a> Builder<'a> {
                     && found
                         .id
                         .as_deref()
-                        .and_then(|id| self.find_in(self.of_file[at.0], id))
-                        .is_some_and(|call| {
-                            matches!(event(self.files, call).n.as_deref(), Some("Agent" | "Task"))
-                        })
+                        .is_some_and(|id| self.spawned_here(at, id))
             }
+            // A hand-back from this session's own subagent is that spawn's
+            // result, as its agent-end notification is: neither is a message
+            // that starts other work.
+            Kind::Agm if found.script & AGM_FINAL != 0 => [found.id.as_deref(), found.n.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|id| self.spawned_here(at, id)),
             _ => false,
         }
+    }
+
+    /// Whether `id` names a subagent that the session holding `at` spawned:
+    /// its own `Agent`/`Task` call's id, or the agent's id.
+    fn spawned_here(&self, at: Ref, id: &str) -> bool {
+        let session = self.of_file[at.0];
+        self.find_in(session, id).is_some_and(|call| {
+            matches!(event(self.files, call).n.as_deref(), Some("Agent" | "Task"))
+        }) || self
+            .by_native
+            .get(&("claude", id.to_owned()))
+            .is_some_and(|child| *child != session && self.sessions[*child].parent == Some(session))
     }
 
     fn activity(&mut self, index: usize) {
