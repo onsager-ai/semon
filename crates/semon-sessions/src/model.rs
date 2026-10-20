@@ -4032,7 +4032,7 @@ impl<'a> Builder<'a> {
             });
             let mut unmatched = false;
             let failed = reply.e || reply.f & (DENIED | SEND_FAILED) != 0;
-            let source = match &reply.m {
+            let mut source = match &reply.m {
                 Some(id) => format!("relay:{id}"),
                 None => format!("relay:tool:{tool_id}"),
             };
@@ -4052,8 +4052,21 @@ impl<'a> Builder<'a> {
                 (None, None)
             } else if let Some(parent) = self.parent_addressed(from, at) {
                 // Received as the parent's `<agent-message>` that answers
-                // this send (paired when the spawn was read).
-                (Some(parent), self.progress.get(&at).copied())
+                // this send (paired when the spawn was read). A progress
+                // receipt names the relay, as it does when no send claims
+                // it: the parent's turn it starts is then known from the
+                // parent's log alone.
+                let receipt = self.progress.get(&at).copied();
+                if let Some(receipt) = receipt
+                    && event(self.files, receipt).script & AGM_PROGRESS != 0
+                {
+                    source = format!(
+                        "relay:recv:{}:{}",
+                        self.files[receipt.0].id,
+                        event(self.files, receipt).o
+                    );
+                }
+                (Some(parent), receipt)
             } else if reply.m.is_some() {
                 let name = plain_name(&self.send_target(at));
                 unmatched = true;
@@ -5567,27 +5580,12 @@ impl<'a> Builder<'a> {
                 boundaries.push(at);
             }
         }
-        // A subagent's send to `main` and its receipt: the relay is keyed by
-        // the send, so the receipt's turn takes the same id here.
-        let sent_by: HashMap<Ref, Ref> = self
-            .progress
-            .iter()
-            .map(|(send, receipt)| (*receipt, *send))
-            .collect();
         let original = self.handoffs.len();
         for at in &boundaries {
             let found = event(self.files, *at);
             let receiver = self.of_file[at.0];
             let source = relay_msg_id(found)
                 .map(|id| format!("relay:{id}"))
-                .or_else(|| {
-                    sent_by.get(at).map(|send| {
-                        format!(
-                            "relay:tool:{}",
-                            event(self.files, *send).id.as_deref().unwrap_or_default()
-                        )
-                    })
-                })
                 .unwrap_or_else(|| format!("relay:recv:{}:{}", self.files[at.0].id, found.o));
             let index = self.handoffs.len();
             self.handoffs.push(H {
