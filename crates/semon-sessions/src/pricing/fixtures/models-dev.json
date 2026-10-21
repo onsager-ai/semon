@@ -1,0 +1,205 @@
+{
+  "anthropic": {
+    "id": "anthropic",
+    "models": {
+      "claude-opus-5-5": {
+        "id": "claude-opus-5-5",
+        "experimental": {
+          "modes": {
+            "fast": {
+              "cost": {
+                "input": 8,
+                "output": 40,
+                "cache_read": 0.4,
+                "cache_write": 10
+              },
+              "provider": {
+                "body": {
+                  "speed": "fast"
+                },
+                "headers": {
+                  "anthropic-beta": "fast-mode-2026-02-01"
+                }
+              }
+            }
+          }
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
+        }
+      },
+      "claude-sonnet-4-5": {
+        "id": "claude-sonnet-4-5",
+        "cost": {
+          "input": 3,
+          "output": 15,
+          "cache_read": 0.3,
+          "cache_write": 3.75
+        }
+      }
+    }
+  },
+  "openai": {
+    "id": "openai",
+    "models": {
+      "gpt-6.1-sol": {
+        "id": "gpt-6.1-sol",
+        "experimental": {
+          "modes": {
+            "fast": {
+              "cost": {
+                "input": 4,
+                "output": 20,
+                "cache_read": 0.2,
+                "cache_write": 5
+              },
+              "provider": {
+                "body": {
+                  "service_tier": "priority"
+                }
+              }
+            },
+            "pro": {
+              "provider": {
+                "body": {
+                  "reasoning": {
+                    "mode": "pro"
+                  }
+                }
+              }
+            },
+            "ultrafast": {
+              "cost": {
+                "input": 12,
+                "output": 60,
+                "cache_read": 0.6,
+                "cache_write": 15
+              },
+              "provider": {
+                "body": {
+                  "service_tier": "ultrafast"
+                }
+              }
+            }
+          }
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.1,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.2,
+              "cache_write": 5,
+              "tier": {
+                "type": "context",
+                "size": 272000
+              }
+            }
+          ],
+          "context_over_200k": {
+            "input": 4,
+            "output": 15,
+            "cache_read": 0.2,
+            "cache_write": 5
+          }
+        }
+      },
+      "gpt-6-luna": {
+        "id": "gpt-6-luna",
+        "experimental": {
+          "modes": {
+            "fast": {
+              "cost": {
+                "input": 0.2,
+                "output": 1,
+                "cache_read": 0.02,
+                "cache_write": 0.25
+              },
+              "provider": {
+                "body": {
+                  "service_tier": "priority"
+                }
+              }
+            },
+            "pro": {
+              "provider": {
+                "body": {
+                  "reasoning": {
+                    "mode": "pro"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25,
+              "tier": {
+                "type": "context",
+                "size": 272000
+              }
+            }
+          ],
+          "context_over_200k": {
+            "input": 0.2,
+            "output": 0.75,
+            "cache_read": 0.02,
+            "cache_write": 0.25
+          }
+        }
+      },
+      "gpt-5": {
+        "id": "gpt-5",
+        "experimental": {
+          "modes": {
+            "fast": {
+              "cost": {
+                "input": 2.5,
+                "output": 20,
+                "cache_read": 0.25
+              },
+              "provider": {
+                "body": {
+                  "service_tier": "priority"
+                }
+              }
+            },
+            "flex": {
+              "cost": {
+                "input": 0.625,
+                "output": 5,
+                "cache_read": 0.0625
+              },
+              "provider": {
+                "body": {
+                  "service_tier": "flex"
+                }
+              }
+            }
+          }
+        },
+        "cost": {
+          "input": 1.25,
+          "output": 10,
+          "cache_read": 0.125
+        }
+      }
+    }
+  }
+}

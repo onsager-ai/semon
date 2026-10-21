@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+# Fixture processes use deterministic bundled reference prices.
+env:
+  SEMON_PRICING_REFRESH: "off"
+
 # A newer PR revision supersedes only that PR's earlier Rust run.
 concurrency:
   group: rust-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
