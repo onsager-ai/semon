@@ -125,6 +125,8 @@ pub struct QueryError {
     pub window_start: Option<i64>,
     /// Closed physical-source diagnostic; contains no native path or content.
     pub local_revision_reason: Option<&'static str>,
+    /// Closed proof/read failure phase, never an original provider error.
+    pub stage: Option<&'static str>,
 }
 
 impl QueryError {
@@ -134,6 +136,7 @@ impl QueryError {
             message: message.into(),
             window_start: None,
             local_revision_reason: None,
+            stage: None,
         }
     }
 
@@ -148,7 +151,10 @@ impl QueryError {
         )
     }
 
-    fn io(error: &io::Error) -> Self {
+    pub(crate) fn io(error: &io::Error) -> Self {
+        if let Some(stage) = crate::source_carrier::FailureStage::of(error) {
+            return Self::source_failure(stage);
+        }
         if let Some(revision) = error
             .get_ref()
             .and_then(|error| error.downcast_ref::<crate::source_carrier::RevisionChanged>())
@@ -156,6 +162,15 @@ impl QueryError {
             return Self::local_revision(revision.0);
         }
         Self::new("io", error.to_string())
+    }
+
+    pub(crate) fn source_failure(stage: crate::source_carrier::FailureStage) -> Self {
+        let mut error = Self::new(
+            "stale_projection",
+            "The selected native source proof is unavailable; resynchronize.",
+        );
+        error.stage = Some(stage.name());
+        error
     }
 
     pub(crate) fn local_revision(reason: crate::source_carrier::RevisionReason) -> Self {
@@ -176,6 +191,12 @@ impl QueryError {
             error["window_start"] = json!(start);
         }
         let mut value = json!({ "error": error });
+        if let Some(stage) = self.stage {
+            value["status"] = json!(409);
+            value["resynchronize"] = json!(true);
+            value["fence_reason"] = json!("local_source_revision");
+            value["stage"] = json!(stage);
+        }
         if let Some(reason) = self.local_revision_reason {
             value["status"] = json!(409);
             value["resynchronize"] = json!(true);
