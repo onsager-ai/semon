@@ -561,10 +561,60 @@ mod tests {
     }
 
     #[test]
-    fn dotted_gpt_version_does_not_borrow_another_models_price() {
+    fn dotted_gpt_version_uses_its_own_price_and_unknown_versions_stay_unpriced() {
         assert_eq!(normalize_model_id("gpt-6.1-sol"), "gpt-6.1-sol");
-        assert!(super::price_for("gpt-6.1-sol").is_none());
+        assert_eq!(
+            super::price_for("gpt-6.1-sol").unwrap().cache_read,
+            Some(0.1)
+        );
         assert!(super::price_for("gpt-6-sol").is_some());
+        assert!(super::price_for("gpt-6.999-sol").is_none());
+    }
+
+    #[test]
+    fn haiku_five_five_uses_the_standard_rate_at_100k_and_long_rate_above_it() {
+        // The prompt threshold includes cached input tokens.
+        let at_threshold = usage("claude-haiku-5-5", 90_000, 1_000, 10_000, 0, 0);
+        let above_threshold = usage("claude-haiku-5-5", 90_000, 1_000, 10_001, 0, 0);
+        assert_eq!(at_threshold.billing.prompt_size, 100_000);
+        assert_eq!(above_threshold.billing.prompt_size, 100_001);
+
+        let standard = calculate_cost(&[at_threshold], &[]);
+        let long = calculate_cost(&[above_threshold], &[]);
+        assert!((standard.usd.unwrap() - 0.0096).abs() < 1e-12);
+        assert!((long.usd.unwrap() - 0.04800005).abs() < 1e-12);
+    }
+
+    #[test]
+    fn haiku_five_five_cache_write_durations_use_their_own_rates() {
+        let writes = usage("claude-haiku-5-5", 0, 0, 0, 1_000, 1_000);
+        let cost = calculate_cost(&[writes], &[]);
+        assert!((cost.usd.unwrap() - 0.000325).abs() < 1e-12);
+        assert!(
+            (cost.by_model["claude-haiku-5-5"].usd_by_kind["cache_write_5m"] - 0.000125).abs()
+                < 1e-12
+        );
+        assert!(
+            (cost.by_model["claude-haiku-5-5"].usd_by_kind["cache_write_1h"] - 0.0002).abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn gpt_six_one_sol_prices_codex_cached_tokens_at_its_catalog_rate() {
+        let event = CodexUsageEvent {
+            model: "gpt-6.1-sol".into(),
+            tokens: ModelTokens {
+                input: 100_000,
+                output: 100_000,
+                cache_write: 0,
+                cache_read: 100_000,
+            },
+            timestamp: Some(0),
+        };
+        let cost = calculate_cost(&[], &[event]);
+        assert!((cost.usd.unwrap() - 1.21).abs() < 1e-12);
+        assert_eq!(cost.unpriced_models, Vec::<String>::new());
     }
 
     #[test]
