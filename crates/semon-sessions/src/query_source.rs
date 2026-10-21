@@ -1332,6 +1332,10 @@ mod tests {
         let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
         crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         let selected = cache.source(&fixture.path, "lead").unwrap();
+        let selected_digest =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&selected));
+        let selected_offset = selected.offset;
+        let publish_scope = crate::events::EventCache::path(&options.cache);
         drop(cache);
 
         crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
@@ -1346,14 +1350,27 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
             crate::source_carrier::FailureStage::of(&error),
-            Some(crate::source_carrier::FailureStage::HeaderStore)
+            Some(crate::source_carrier::FailureStage::ProofOpenDb)
         );
         let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
             .with(|lines| lines.borrow().clone());
-        assert_eq!(logs.len(), 1);
-        assert!(logs[0].contains("stage=header_store"));
-        assert!(logs[0].contains("raw=not_collected"));
-        assert!(!logs[0].contains(fixture.path.to_string_lossy().as_ref()));
+        assert!(logs.is_empty(), "the proof header was never opened");
+        assert!(
+            !error
+                .to_string()
+                .contains(fixture.path.to_string_lossy().as_ref())
+        );
+        let interests = crate::source_carrier::diagnostic_publish_interests(&publish_scope);
+        let interest = interests
+            .iter()
+            .find(|interest| interest.path.as_str() == fixture.path.to_string_lossy().as_ref())
+            .expect("a database-open failure must retain the selected source interest");
+        assert_eq!(
+            interest.scope.as_str(),
+            publish_scope.to_string_lossy().as_ref()
+        );
+        assert_eq!(interest.catalog_ledger_digest, selected_digest);
+        assert_eq!(interest.catalog_offset, selected_offset);
     }
 
     #[test]
