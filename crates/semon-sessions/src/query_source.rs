@@ -40,10 +40,10 @@ impl ProofChunks {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Sources {
     proofs: BTreeMap<PathBuf, Proof>,
     paths: BTreeMap<(String, String), PathBuf>,
+    diagnostic_scope: PathBuf,
     #[cfg(feature = "test-hooks")]
     cache: PathBuf,
 }
@@ -53,6 +53,14 @@ fn unavailable() -> io::Error {
         io::ErrorKind::InvalidData,
         "native query source generation unavailable",
     )
+}
+
+fn note_focused_source_interest(scope: &Path, source: &CatalogSource) {
+    crate::source_carrier::note_diagnostic_interest(
+        scope,
+        &source.path.to_string_lossy(),
+        &crate::source_carrier::ledger(source),
+    );
 }
 
 // Cold checkpoints describe a complete prefix of a larger, unchanged physical
@@ -70,6 +78,16 @@ fn same_physical_generation(ledger: &Ledger, physical: &Stat) -> bool {
 }
 
 impl Sources {
+    pub(crate) fn new(options: &Options) -> Self {
+        Self {
+            proofs: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            diagnostic_scope: crate::events::EventCache::path(&options.cache),
+            #[cfg(feature = "test-hooks")]
+            cache: options.cache.clone(),
+        }
+    }
+
     pub(crate) fn capture(
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
@@ -130,11 +148,7 @@ impl Sources {
         sources: impl Iterator<Item = (CatalogSource, Option<ProofChunks>)>,
         require_references: bool,
     ) -> io::Result<Self> {
-        let mut captured = Self {
-            #[cfg(feature = "test-hooks")]
-            cache: options.cache.clone(),
-            ..Self::default()
-        };
+        let mut captured = Self::new(options);
         for (source, chunks) in sources {
             let chunks = chunks
                 .filter(|chunks| match chunks {
@@ -212,8 +226,12 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let db = crate::events::store::focused_connection(&cache_path)
-            .map_err(|error| crate::source_carrier::FailureStage::ProofOpenDb.wrap(error))?;
+        let db = crate::events::store::focused_connection(&cache_path).map_err(|error| {
+            for source in sources.iter().take(16) {
+                note_focused_source_interest(&cache_path, source);
+            }
+            crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
+        })?;
         db.busy_timeout(std::time::Duration::from_millis(100))
             .map_err(|error| {
                 crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
@@ -239,7 +257,13 @@ impl Sources {
                     &cache_path,
                     source.path.to_str().ok_or_else(unavailable)?,
                     &ledger,
-                )?;
+                )
+                .map_err(|error| {
+                    if crate::source_carrier::FailureStage::of(&error).is_some() {
+                        note_focused_source_interest(&cache_path, source);
+                    }
+                    error
+                })?;
                 Ok((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))))
             })
             .collect::<io::Result<Vec<_>>>()?;
@@ -338,7 +362,13 @@ impl Records<'_> {
             if let Ok(mut first) = self.failure_stage.lock() {
                 first.get_or_insert(stage);
             }
-            crate::source_carrier::note_diagnostic_interest(&path.to_string_lossy());
+            if let Some(proof) = self.sources.proofs.get(path) {
+                crate::source_carrier::note_diagnostic_interest(
+                    &self.sources.diagnostic_scope,
+                    &path.to_string_lossy(),
+                    &proof.ledger,
+                );
+            }
         }
         error
     }
@@ -1184,7 +1214,10 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
-            let mut sources = Sources::default();
+            let mut sources = Sources::new(&Options {
+                cache: self.root.join("index.json"),
+                ..Options::default()
+            });
             sources.paths.insert(
                 (reference.root.clone(), reference.path.clone()),
                 self.path.clone(),
@@ -1241,7 +1274,12 @@ mod tests {
         let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
         crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         let selected = cache.source(&fixture.path, "lead").unwrap();
-        assert!(Sources::capture_focused(&options, std::slice::from_ref(&selected)).is_ok());
+        let l1_offset = selected.offset;
+        let captured = Sources::capture_focused(&options, std::slice::from_ref(&selected)).unwrap();
+        let publish_scope = crate::events::EventCache::path(&options.cache);
+        assert_eq!(captured.diagnostic_scope, publish_scope);
+        let selected_digest =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&selected));
         fs::OpenOptions::new()
             .append(true)
             .open(&fixture.path)
@@ -1249,6 +1287,8 @@ mod tests {
             .write_all(b"{\"type\":\"user\",\"message\":{\"content\":\"append\"}}\n")
             .unwrap();
         crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let l2_offset = cache.source(&fixture.path, "lead").unwrap().offset;
+        assert!(l2_offset > l1_offset);
         let before = Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap();
         let error = match Sources::capture_focused(&options, &[selected]) {
             Ok(_) => panic!("L2 must expose the pre-repair proof lifetime gap"),
@@ -1260,6 +1300,17 @@ mod tests {
         );
         let reply = crate::QueryError::io(&error).to_json();
         assert_eq!(reply["stage"], "header_ledger");
+        let interests = crate::source_carrier::diagnostic_publish_interests(&publish_scope);
+        let interest = interests
+            .iter()
+            .find(|interest| interest.path.as_str() == fixture.path.to_string_lossy().as_ref())
+            .expect("focused failure must register an interest for the publish scope");
+        assert_eq!(
+            interest.scope.as_str(),
+            publish_scope.to_string_lossy().as_ref()
+        );
+        assert_eq!(interest.catalog_ledger_digest, selected_digest);
+        assert_eq!(interest.catalog_offset, l1_offset);
         assert_eq!(
             before,
             Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap()
@@ -1391,7 +1442,7 @@ mod tests {
 
     #[test]
     fn records_query_error_keeps_unstaged_messages_and_sanitizes_staged_failures() {
-        let sources = Sources::default();
+        let sources = Sources::new(&Options::default());
         let records = sources.reader();
         assert_eq!(
             records.query_error("original caller message").to_json(),
@@ -1406,7 +1457,7 @@ mod tests {
         );
         assert_eq!(
             records.query_error("private caller message").to_json(),
-            serde_json::json!({"error":{"code":"io","message":"proofs are unavailable"},
+            serde_json::json!({"error":{"code":"io","message":"Original native transcript proofs are unavailable"},
                 "stage":"page_hash"})
         );
     }

@@ -61,34 +61,62 @@ std::thread_local! {
 #[cfg(test)]
 std::thread_local! {
     static CATALOG_PUBLISH_DIAGNOSTICS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CATALOG_PUBLISH_DIAGNOSTIC_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+const CATALOG_PUBLISH_LOG_BURST: u8 = 8;
+const CATALOG_PUBLISH_LOGS_PER_ATTEMPT: usize = 8;
+const CATALOG_PUBLISH_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const CATALOG_PUBLISH_LOG_REFILL: Duration = Duration::from_millis(1250);
 
 #[derive(Default)]
 struct CatalogPublishLogLimiter {
-    last: BTreeMap<String, (String, Instant, u64)>,
+    last: BTreeMap<(String, String, String), (Instant, u64)>,
     next_order: u64,
+    tokens: u8,
+    last_refill: Option<Instant>,
 }
 
 impl CatalogPublishLogLimiter {
-    fn allow(&mut self, source: &str, state: &str, now: Instant) -> bool {
-        if self.last.get(source).is_some_and(|(prior, at, _)| {
-            prior == state && now.saturating_duration_since(*at) < Duration::from_secs(10)
-        }) {
+    fn refill(&mut self, now: Instant) {
+        let Some(last_refill) = self.last_refill else {
+            self.tokens = CATALOG_PUBLISH_LOG_BURST;
+            self.last_refill = Some(now);
+            return;
+        };
+        let intervals = now.saturating_duration_since(last_refill).as_nanos()
+            / CATALOG_PUBLISH_LOG_REFILL.as_nanos();
+        if intervals > 0 {
+            self.tokens = self
+                .tokens
+                .saturating_add(intervals.min(u128::from(CATALOG_PUBLISH_LOG_BURST)) as u8)
+                .min(CATALOG_PUBLISH_LOG_BURST);
+            self.last_refill = Some(now);
+        }
+    }
+
+    fn allow(&mut self, source: &str, reason: &str, stage: &str, now: Instant) -> bool {
+        self.refill(now);
+        let key = (source.to_owned(), reason.to_owned(), stage.to_owned());
+        if self.last.get(&key).is_some_and(|(at, _)| {
+            now.saturating_duration_since(*at) < CATALOG_PUBLISH_LOG_INTERVAL
+        }) || self.tokens == 0
+        {
             return false;
         }
-        if self.last.len() >= 256 && !self.last.contains_key(source) {
+        if self.last.len() >= 256 && !self.last.contains_key(&key) {
             let oldest = self
                 .last
                 .iter()
-                .min_by_key(|(_, (_, _, order))| *order)
+                .min_by_key(|(_, (_, order))| *order)
                 .map(|(key, _)| key.clone());
             if let Some(oldest) = oldest {
                 self.last.remove(&oldest);
             }
         }
+        self.tokens -= 1;
         self.next_order = self.next_order.wrapping_add(1);
-        self.last
-            .insert(source.to_owned(), (state.to_owned(), now, self.next_order));
+        self.last.insert(key, (now, self.next_order));
         true
     }
 }
@@ -129,92 +157,87 @@ fn catalog_publish_conflict_reason(reason: Option<&str>) -> &'static str {
 
 fn log_catalog_publish_attempt(
     connection: &Connection,
+    scope: &Path,
     rows: &[crate::model::summary::CatalogRow],
-    claims: Option<&[(String, Option<i64>)]>,
     result: &Result<Outcome, StoreError>,
     rejection: Option<&str>,
 ) {
     static LAST: OnceLock<Mutex<CatalogPublishLogLimiter>> = OnceLock::new();
+    let interests = crate::source_carrier::diagnostic_publish_interests(scope);
+    let mut allow = |source: &str, reason: &str, stage: &str, now: Instant| {
+        LAST.get_or_init(|| Mutex::new(CatalogPublishLogLimiter::default()))
+            .lock()
+            .is_ok_and(|mut limiter| limiter.allow(source, reason, stage, now))
+    };
+    let _ = emit_catalog_publish_attempt(
+        connection,
+        &interests,
+        rows,
+        result,
+        rejection,
+        &mut allow,
+        Instant::now(),
+    );
+}
+
+fn emit_catalog_publish_attempt(
+    connection: &Connection,
+    interests: &[crate::source_carrier::CatalogPublishInterest],
+    rows: &[crate::model::summary::CatalogRow],
+    result: &Result<Outcome, StoreError>,
+    rejection: Option<&str>,
+    allow: &mut impl FnMut(&str, &str, &str, Instant) -> bool,
+    now: Instant,
+) -> usize {
     let (outcome, reason) = match result {
         Ok(Outcome::Written) => ("published", "none"),
         Ok(Outcome::Conflict) => ("conflict", catalog_publish_conflict_reason(rejection)),
         _ => ("other", "other"),
     };
-    let batch_claims = claims.map_or(0, |claims| claims.len());
-    let invalidations_total = connection
-        .query_row(
-            "SELECT count(*) FROM session_catalog_invalidations",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count.max(0).to_string())
-        .unwrap_or_else(|_| "unavailable".to_owned());
-    let claimed: std::collections::BTreeSet<&str> = claims
-        .into_iter()
-        .flatten()
-        .map(|(path, _)| path.as_str())
-        .collect();
-    let mut sources = BTreeMap::new();
-    for source in rows.iter().flat_map(|row| &row.sources) {
-        let path = source.path.to_string_lossy().into_owned();
-        if claims.is_none() || claimed.contains(path.as_str()) {
-            sources.entry(path).or_insert(source);
-        }
-    }
-    // Hash every candidate path once, including when matching the interest set.
-    let sources = sources
-        .into_iter()
-        .map(|(path, source)| {
-            let hash = crate::source_carrier::source_hash(&path);
-            (path, (source, hash))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let interests = crate::source_carrier::diagnostic_interest_hashes();
-    let mut prioritized = Vec::with_capacity(64);
-    for source_hash in interests {
-        if let Some((path, (source, hash))) =
-            sources.iter().find(|(_, (_, hash))| *hash == source_hash)
-        {
-            prioritized.push((path.clone(), *source, hash.clone()));
-        }
-    }
-    for (path, (source, hash)) in &sources {
-        if prioritized.len() >= 64 {
+    let mut emitted = 0;
+    for interest in interests {
+        if emitted >= CATALOG_PUBLISH_LOGS_PER_ATTEMPT {
             break;
         }
-        if !prioritized.iter().any(|(known, _, _)| known == path) {
-            prioritized.push((path.clone(), *source, hash.clone()));
+        let stage = "catalog_publish";
+        if !allow(&interest.source_hash, reason, stage, now) {
+            continue;
         }
-    }
-    for (path, source, source_hash) in prioritized {
-        let candidate_ledger = crate::source_carrier::ledger(source);
-        let candidate_hash = crate::source_carrier::ledger_digest(&candidate_ledger);
-        let index = ledger_row(connection, &path)
+        // Both the query and candidate traversal are gated. No batch path
+        // hashing or database work is done for a suppressed interest.
+        #[cfg(test)]
+        CATALOG_PUBLISH_DIAGNOSTIC_WORK.with(|work| work.set(work.get() + 1));
+        let index = ledger_row(connection, &interest.path)
             .ok()
             .flatten()
             .map(|(_, ledger)| ledger);
         let index_hash = index.as_ref().map(crate::source_carrier::ledger_digest);
-        let state = format!(
-            "{outcome}|{reason}|{candidate_hash}:{}|{}:{:?}|{batch_claims}|{invalidations_total}",
-            candidate_ledger.offset,
-            index_hash.as_deref().unwrap_or("missing"),
-            index.as_ref().map(|ledger| ledger.offset)
+        let candidate = rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path.as_path() == Path::new(&interest.path))
+            .map(crate::source_carrier::ledger);
+        let candidate = candidate.map_or_else(
+            || "candidate=absent".to_owned(),
+            |ledger| {
+                format!(
+                    "candidate_catalog_ledger_digest={} candidate_offset={}",
+                    &crate::source_carrier::ledger_digest(&ledger)[..12],
+                    ledger.offset
+                )
+            },
         );
-        let allowed = LAST
-            .get_or_init(|| Mutex::new(CatalogPublishLogLimiter::default()))
-            .lock()
-            .is_ok_and(|mut limiter| limiter.allow(&source_hash, &state, Instant::now()));
-        if allowed {
-            emit_catalog_publish_diagnostic(format!(
-                "semon native catalog: outcome={outcome} reason={reason} source_hash={} ledger_digest_domain=ledger-v1 candidate_catalog_ledger_digest={} candidate_offset={} index_ledger_digest={} index_offset={:?} batch_claims={batch_claims} invalidations_total={invalidations_total} sample=independent_statements",
-                &source_hash[..12],
-                &candidate_hash[..12],
-                candidate_ledger.offset,
-                index_hash.as_deref().map_or("missing", |hash| &hash[..12]),
-                index.as_ref().map(|ledger| ledger.offset)
-            ));
-        }
+        emit_catalog_publish_diagnostic(format!(
+            "semon native catalog: outcome={outcome} reason={reason} stage={stage} source_hash={} ledger_digest_domain=ledger-v1 selected_catalog_ledger_digest={} selected_catalog_offset={} {candidate} index_ledger_digest={} index_offset={:?} sample=independent_statements",
+            &interest.source_hash[..12],
+            &interest.catalog_ledger_digest[..12],
+            interest.catalog_offset,
+            index_hash.as_deref().map_or("missing", |hash| &hash[..12]),
+            index.as_ref().map(|ledger| ledger.offset)
+        ));
+        emitted += 1;
     }
+    emitted
 }
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
@@ -4120,8 +4143,8 @@ impl SqliteStore {
         }
         log_catalog_publish_attempt(
             &self.connection,
+            &self.path,
             rows,
-            claims,
             &result,
             self.semantic_rejection,
         );
@@ -7055,6 +7078,12 @@ mod tests {
         let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
         let path = rows[0].sources[0].path.clone();
         let catalog_offset = rows[0].sources[0].offset;
+        let selected_ledger = crate::source_carrier::ledger(&rows[0].sources[0]);
+        crate::source_carrier::note_diagnostic_interest(
+            &EventCache::path(&options.cache),
+            &path.to_string_lossy(),
+            &selected_ledger,
+        );
         let pause = crate::test_hooks::pause_catalog(&options.cache);
         let appended = serde_json::json!({
             "type":"assistant",
@@ -7089,6 +7118,7 @@ mod tests {
         let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         assert_eq!(logs.len(), 1);
         assert!(logs[0].contains("outcome=conflict reason=source_ledger"));
+        assert!(logs[0].contains(&format!("selected_catalog_offset={catalog_offset}")));
         assert!(logs[0].contains(&format!("candidate_offset={catalog_offset}")));
         assert!(logs[0].contains(&format!("index_offset=Some({index_offset})")));
         assert!(!logs[0].contains(path.to_string_lossy().as_ref()));
@@ -7102,12 +7132,175 @@ mod tests {
         let now = Instant::now();
         for index in 0..256 {
             let source = format!("source-{index:03}");
-            assert!(limiter.allow(&source, "state", now + Duration::from_millis(index as u64)));
+            assert!(limiter.allow(
+                &source,
+                "source_ledger",
+                "catalog_publish",
+                now + Duration::from_millis(index as u64 * 1250)
+            ));
         }
-        assert!(limiter.allow("source-new", "state", now + Duration::from_secs(1)));
-        assert!(!limiter.last.contains_key("source-000"));
-        assert!(limiter.last.contains_key("source-255"));
-        assert!(limiter.last.contains_key("source-new"));
+        let source = (
+            "source-new".to_owned(),
+            "source_ledger".to_owned(),
+            "catalog_publish".to_owned(),
+        );
+        assert!(limiter.allow(
+            &source.0,
+            &source.1,
+            &source.2,
+            now + Duration::from_millis(256 * 1250)
+        ));
+        assert!(!limiter.last.contains_key(&(
+            "source-000".to_owned(),
+            "source_ledger".to_owned(),
+            "catalog_publish".to_owned()
+        )));
+        assert!(limiter.last.contains_key(&(
+            "source-255".to_owned(),
+            "source_ledger".to_owned(),
+            "catalog_publish".to_owned()
+        )));
+        assert!(limiter.last.contains_key(&source));
+    }
+
+    #[test]
+    fn catalog_publish_limiter_keys_by_reason_and_stage_and_bounds_global_rate() {
+        let now = Instant::now();
+        let mut limiter = CatalogPublishLogLimiter::default();
+        assert!(limiter.allow("source-a", "source_ledger", "catalog_publish", now));
+        assert!(!limiter.allow(
+            "source-a",
+            "source_ledger",
+            "catalog_publish",
+            now + Duration::from_secs(9)
+        ));
+        assert!(limiter.allow(
+            "source-a",
+            "claim",
+            "catalog_publish",
+            now + Duration::from_secs(9)
+        ));
+        assert!(limiter.allow(
+            "source-a",
+            "source_ledger",
+            "catalog_page",
+            now + Duration::from_secs(9)
+        ));
+
+        let mut burst = CatalogPublishLogLimiter::default();
+        for index in 0..CATALOG_PUBLISH_LOG_BURST {
+            assert!(burst.allow(
+                &format!("source-{index}"),
+                "source_ledger",
+                "catalog_publish",
+                now
+            ));
+        }
+        assert!(!burst.allow("source-overflow", "source_ledger", "catalog_publish", now));
+        assert!(burst.allow(
+            "source-refilled",
+            "source_ledger",
+            "catalog_publish",
+            now + CATALOG_PUBLISH_LOG_REFILL
+        ));
+    }
+
+    #[test]
+    fn catalog_publish_diagnostic_caps_lines_per_attempt_without_logging_paths() {
+        let now = Instant::now();
+        let interests = (0..16)
+            .map(|index| crate::source_carrier::CatalogPublishInterest {
+                source_hash: format!("{index:064x}"),
+                scope: "synthetic-cache".to_owned(),
+                path: format!("/private/session-{index}.jsonl"),
+                catalog_ledger_digest: format!("{index:064x}"),
+                catalog_offset: index,
+            })
+            .collect::<Vec<_>>();
+        let connection = Connection::open_in_memory().unwrap();
+        let result = Ok(Outcome::Conflict);
+        let mut limiter = CatalogPublishLogLimiter::default();
+        let mut allow = |source: &str, reason: &str, stage: &str, at: Instant| {
+            limiter.allow(source, reason, stage, at)
+        };
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
+        let emitted = emit_catalog_publish_attempt(
+            &connection,
+            &interests,
+            &[],
+            &result,
+            Some("source_identity"),
+            &mut allow,
+            now,
+        );
+        let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
+        assert_eq!(emitted, CATALOG_PUBLISH_LOGS_PER_ATTEMPT);
+        assert_eq!(logs.len(), CATALOG_PUBLISH_LOGS_PER_ATTEMPT);
+        assert!(
+            logs.iter()
+                .all(|line| line.contains("reason=source_ledger"))
+        );
+        assert!(logs.iter().all(|line| !line.contains("/private/session-")));
+        assert!(
+            logs.iter()
+                .all(|line| line.contains("index_ledger_digest=missing"))
+        );
+        assert!(logs.iter().all(|line| line.contains("candidate=absent")));
+    }
+
+    #[test]
+    fn catalog_publish_diagnostic_skips_all_post_allow_work_when_suppressed() {
+        let connection = Connection::open_in_memory().unwrap();
+        let interests = [crate::source_carrier::CatalogPublishInterest {
+            source_hash: "a".repeat(64),
+            scope: "synthetic-cache".to_owned(),
+            path: "/private/gated-source.jsonl".to_owned(),
+            catalog_ledger_digest: "b".repeat(64),
+            catalog_offset: 42,
+        }];
+        let now = Instant::now();
+        let result = Ok(Outcome::Written);
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
+        CATALOG_PUBLISH_DIAGNOSTIC_WORK.with(|work| work.set(0));
+        let emitted = emit_catalog_publish_attempt(
+            &connection,
+            &interests,
+            &[],
+            &result,
+            None,
+            &mut |_, _, _, _| false,
+            now,
+        );
+        assert_eq!(emitted, 0);
+        CATALOG_PUBLISH_DIAGNOSTIC_WORK.with(|work| assert_eq!(work.get(), 0));
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| assert!(lines.borrow().is_empty()));
+        let emitted = emit_catalog_publish_attempt(
+            &connection,
+            &interests,
+            &[],
+            &result,
+            None,
+            &mut |_, _, _, _| true,
+            now,
+        );
+        assert_eq!(emitted, interests.len());
+        CATALOG_PUBLISH_DIAGNOSTIC_WORK.with(|work| assert_eq!(work.get(), emitted));
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| assert_eq!(lines.borrow().len(), emitted));
+        // An ordinary successful attempt without interests performs no work.
+        CATALOG_PUBLISH_DIAGNOSTIC_WORK.with(|work| work.set(0));
+        assert_eq!(
+            emit_catalog_publish_attempt(
+                &connection,
+                &[],
+                &[],
+                &result,
+                None,
+                &mut |_, _, _, _| true,
+                now,
+            ),
+            0
+        );
+        CATALOG_PUBLISH_DIAGNOSTIC_WORK.with(|work| assert_eq!(work.get(), 0));
     }
 
     #[test]
@@ -7117,6 +7310,11 @@ mod tests {
         let source = &rows[0].sources[0];
         let ledger = crate::source_carrier::ledger(source);
         let digest = crate::source_carrier::ledger_digest(&ledger);
+        crate::source_carrier::note_diagnostic_interest(
+            &EventCache::path(&options.cache),
+            &source.path.to_string_lossy(),
+            &ledger,
+        );
         let diagnostic = chunk_proofs::HeaderOpenDiagnostic {
             proof_ledger_digest: Some(crate::source_carrier::ledger_digest_value(&header_ledger(
                 &ledger,
@@ -7147,30 +7345,47 @@ mod tests {
         let publish_lines = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         let publish_line = publish_lines.first().expect("publish diagnostic");
         assert!(publish_line.contains("ledger_digest_domain=ledger-v1"));
+        assert!(
+            publish_line.contains(&format!("selected_catalog_ledger_digest={}", &digest[..12]))
+        );
+        assert!(publish_line.contains("selected_catalog_offset="));
         assert!(publish_line.contains(&format!(
             "candidate_catalog_ledger_digest={}",
             &digest[..12]
         )));
-        assert!(publish_line.contains("candidate_offset="));
-        assert!(publish_line.contains("batch_claims="));
-        assert!(publish_line.contains("invalidations_total="));
-        assert!(!publish_line.contains("pending_claim_count="));
+        assert!(publish_line.contains(&format!("candidate_offset={}", ledger.offset)));
+        assert!(publish_line.contains("index_ledger_digest="));
+        assert!(publish_line.contains("reason=none"));
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn catalog_publish_diagnostic_reports_failed_count_as_unavailable() {
-        let root = scratch("catalog-diagnostic-count-unavailable");
-        let (_, rows, _) = catalog_native_fixture(&root, 1, false);
-        // A separate database intentionally lacks the invalidation table.
+    fn catalog_publish_diagnostic_reports_missing_index_without_exposing_path() {
+        let root = scratch("catalog-diagnostic-missing-index");
+        let (options, rows, _) = catalog_native_fixture(&root, 1, false);
+        let source = &rows[0].sources[0];
+        let ledger = crate::source_carrier::ledger(source);
+        crate::source_carrier::note_diagnostic_interest(
+            &EventCache::path(&options.cache),
+            &source.path.to_string_lossy(),
+            &ledger,
+        );
+        // A separate database intentionally lacks the Index ledger table.
         let connection = Connection::open_in_memory().unwrap();
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        log_catalog_publish_attempt(&connection, &rows, None, &Ok(Outcome::Conflict), None);
+        log_catalog_publish_attempt(
+            &connection,
+            &EventCache::path(&options.cache),
+            &rows,
+            &Ok(Outcome::Conflict),
+            Some("source_identity"),
+        );
         let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         assert_eq!(logs.len(), 1);
-        assert!(logs[0].contains("invalidations_total=unavailable"));
-        assert!(!logs[0].contains("invalidations_total=0"));
+        assert!(logs[0].contains("index_ledger_digest=missing"));
+        assert!(logs[0].contains("index_offset=None"));
+        assert!(!logs[0].contains(source.path.to_string_lossy().as_ref()));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7191,7 +7406,17 @@ mod tests {
         assert!(paths.len() > 64);
         let target = paths.last().unwrap();
         let target_hash = crate::source_carrier::source_hash(target);
-        crate::source_carrier::note_diagnostic_interest(target);
+        let selected = rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path.to_string_lossy() == target.as_str())
+            .unwrap();
+        let ledger = crate::source_carrier::ledger(selected);
+        crate::source_carrier::note_diagnostic_interest(
+            &EventCache::path(&options.cache),
+            target,
+            &ledger,
+        );
 
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
         let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
@@ -7201,7 +7426,7 @@ mod tests {
             logs.iter()
                 .any(|line| { line.contains(&format!("source_hash={}", &target_hash[..12])) })
         );
-        assert!(logs.len() <= 64);
+        assert!(logs.len() <= CATALOG_PUBLISH_LOGS_PER_ATTEMPT);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

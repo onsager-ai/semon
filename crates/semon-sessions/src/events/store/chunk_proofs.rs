@@ -117,7 +117,7 @@ impl HeaderMismatchLimiter {
 }
 
 #[derive(Default)]
-pub(super) struct HeaderOpenDiagnostic {
+pub(crate) struct HeaderOpenDiagnostic {
     pub(super) proof_ledger_digest: Option<String>,
     pub(super) index_ledger_digest: Option<String>,
     pub(super) proof_offset: Option<u64>,
@@ -129,7 +129,7 @@ fn fresh_raw_size(path: &str) -> Option<u64> {
     std::fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
-pub(super) fn log_header_rejection(
+pub(crate) fn log_header_rejection(
     path: &str,
     stage: FailureStage,
     ledger: &Ledger,
@@ -183,7 +183,6 @@ pub(super) fn log_header_rejection(
         #[cfg(test)]
         HEADER_DIAGNOSTICS.with(|lines| lines.borrow_mut().push(line));
     }
-    crate::source_carrier::note_diagnostic_interest_hash(&source_hash);
 }
 
 #[cfg(test)]
@@ -439,7 +438,7 @@ pub(crate) struct Focused {
     prefix: String,
     header: String,
     ledger: Ledger,
-    source_hash: String,
+    path: String,
     count: usize,
     pages_root: Option<[u8; 32]>,
     cached: std::sync::Mutex<Option<(usize, Page)>>,
@@ -490,6 +489,7 @@ impl Focused {
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
         {
+            crate::source_carrier::note_diagnostic_interest(cache, path, ledger);
             let raw_after = raw_before.and_then(|_| fresh_raw_size(path));
             log_header_rejection(path, stage, ledger, &diagnostic, raw_before, raw_after);
         }
@@ -507,6 +507,7 @@ impl Focused {
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
         {
+            crate::source_carrier::note_diagnostic_interest(cache, path, ledger);
             log_header_rejection(path, stage, ledger, &diagnostic, None, None);
         }
         result
@@ -577,7 +578,7 @@ impl Focused {
             prefix,
             header: encoded,
             ledger: ledger.clone(),
-            source_hash: crate::source_carrier::source_hash(path),
+            path: path.to_owned(),
             count: header.count,
             pages_root: header.pages_root,
             cached: std::sync::Mutex::new(None),
@@ -590,7 +591,11 @@ impl Focused {
             .as_ref()
             .is_err_and(|error| FailureStage::of(error).is_some())
         {
-            crate::source_carrier::note_diagnostic_interest_hash(&self.source_hash);
+            crate::source_carrier::note_diagnostic_interest(
+                &self.cache_path,
+                &self.path,
+                &self.ledger,
+            );
         }
         result
     }

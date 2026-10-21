@@ -165,7 +165,7 @@ impl QueryError {
     }
 
     pub(crate) fn source_failure(stage: crate::source_carrier::FailureStage) -> Self {
-        let mut error = Self::new("io", "proofs are unavailable");
+        let mut error = Self::new("io", "Original native transcript proofs are unavailable");
         error.stage = Some(stage.name());
         error
     }

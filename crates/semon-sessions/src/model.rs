@@ -429,7 +429,7 @@ impl QueryData {
             window_start: (!options.all).then(|| {
                 now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
             }),
-            sources: crate::query_source::Sources::default(),
+            sources: crate::query_source::Sources::new(options),
         }
     }
 }

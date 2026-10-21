@@ -22,13 +22,14 @@ fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
     let error = crate::source_carrier::FailureStage::HeaderLedger
         .wrap(std::io::Error::other("private original cause"));
     let staged = QueryError::io(&error).to_json();
-    let mut expected = QueryError::new("io", "proofs are unavailable").to_json();
+    let mut expected =
+        QueryError::new("io", "Original native transcript proofs are unavailable").to_json();
     expected["stage"] = json!("header_ledger");
     assert_eq!(staged, expected);
     assert_eq!(
         staged,
         json!({
-            "error":{"code":"io","message":"proofs are unavailable"},
+            "error":{"code":"io","message":"Original native transcript proofs are unavailable"},
             "stage":"header_ledger",
         })
     );
@@ -3377,7 +3378,10 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
         if damaged == "proofs" {
             assert_eq!(error.code, "io");
             assert_eq!(error.stage, Some("header_missing"));
-            assert_eq!(error.message, "proofs are unavailable");
+            assert_eq!(
+                error.message,
+                "Original native transcript proofs are unavailable"
+            );
             let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
                 .with(|lines| lines.borrow().clone());
             assert_eq!(logs.len(), 1);
@@ -3428,7 +3432,10 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
         assert_eq!(error.code, "io");
         assert_eq!(error.stage, expected_stage, "fault={fault}");
         if expected_stage.is_some() {
-            assert_eq!(error.message, "proofs are unavailable", "fault={fault}");
+            assert_eq!(
+                error.message, "Original native transcript proofs are unavailable",
+                "fault={fault}"
+            );
             assert!(!error.message.contains("revoked"));
             assert!(!error.message.contains("Permission denied"));
         } else {
@@ -3608,7 +3615,10 @@ fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publi
             let error = result.unwrap_err();
             assert_eq!(error.code, "io");
             assert_eq!(error.stage, Some("proof_changed"));
-            assert_eq!(error.message, "proofs are unavailable");
+            assert_eq!(
+                error.message,
+                "Original native transcript proofs are unavailable"
+            );
         } else {
             assert_eq!(result.unwrap(), before);
         }
