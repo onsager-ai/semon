@@ -787,7 +787,10 @@ enum ProjectionFence {
     CatalogPublication,
     ProjectionGeneration,
     ErrorsGeneration,
-    LocalSourceRevision(crate::source_carrier::RevisionReason),
+    LocalSourceRevision(
+        crate::source_carrier::RevisionReason,
+        crate::source_carrier::FailureStage,
+    ),
     SourceGeneration,
     SourceRange,
 }
@@ -801,9 +804,10 @@ fn stale(reason: ProjectionFence) -> ViewerReply {
     );
     let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
     body["resynchronize"] = json!(true);
-    if let ProjectionFence::LocalSourceRevision(detail) = reason {
+    if let ProjectionFence::LocalSourceRevision(detail, stage) = reason {
         body["fence_reason"] = json!("local_source_revision");
         body["local_revision_reason"] = json!(detail);
+        body["stage"] = json!(stage);
     } else {
         body["fence_reason"] = json!(reason);
     }
@@ -821,13 +825,48 @@ impl std::fmt::Display for MissingLocalSource {
 impl std::error::Error for MissingLocalSource {}
 
 #[derive(Debug)]
-struct LocalRevisionChanged(crate::source_carrier::RevisionReason, bool);
+struct LocalRevisionChanged(
+    crate::source_carrier::RevisionReason,
+    bool,
+    crate::source_carrier::FailureStage,
+    Option<io::Error>,
+);
 impl std::fmt::Display for LocalRevisionChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("selected local revision changed before reading")
     }
 }
-impl std::error::Error for LocalRevisionChanged {}
+impl std::error::Error for LocalRevisionChanged {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.3.as_ref().map(|error| error as _)
+    }
+}
+
+fn source_read_fence(error: &io::Error) -> ProjectionFence {
+    error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+        .filter(|detail| detail.2 != crate::source_carrier::FailureStage::Budget)
+        .map(|detail| ProjectionFence::LocalSourceRevision(detail.0, detail.2))
+        .unwrap_or(ProjectionFence::SourceGeneration)
+}
+
+fn field_failure_reply(error: &io::Error) -> ViewerReply {
+    if let Some(detail) = error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+        .filter(|detail| detail.2 != crate::source_carrier::FailureStage::Budget)
+    {
+        stale(ProjectionFence::LocalSourceRevision(detail.0, detail.2))
+    } else {
+        catalog::error(
+            503,
+            "field_unavailable",
+            "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
+            true,
+        )
+    }
+}
 
 struct Composite<'a> {
     local: &'a Local<'a>,
@@ -936,7 +975,7 @@ impl SessionSourceReader for Local<'_> {
         max: usize,
     ) -> io::Result<crate::SessionSourceRange> {
         use crate::events::Stat;
-        use crate::source_carrier::{RevisionReason, ledger, mismatch, recheck};
+        use crate::source_carrier::{FailureStage, RevisionReason, ledger, mismatch, recheck};
         let path = self
             .references
             .iter()
@@ -966,10 +1005,48 @@ impl SessionSourceReader for Local<'_> {
         }
         let before = Stat::from_metadata(&file.metadata()?)?;
         let reason = mismatch(&ledger.stat, &before);
-        let rejected = |reason| {
+        let rejected = |reason, stage, cause| {
+            if matches!(
+                stage,
+                FailureStage::ProofOpenDb
+                    | FailureStage::HeaderStore
+                    | FailureStage::HeaderMissing
+                    | FailureStage::HeaderVersion
+                    | FailureStage::HeaderParser
+                    | FailureStage::HeaderLedger
+                    | FailureStage::HeaderCount
+                    | FailureStage::PageMissing
+                    | FailureStage::PageHash
+                    | FailureStage::ProofChanged
+            ) {
+                crate::source_carrier::note_diagnostic_interest(
+                    &EventCache::path(&self.options.cache),
+                    &path.to_string_lossy(),
+                    &ledger,
+                );
+            }
+            if !matches!(
+                stage,
+                FailureStage::ProofOpenDb
+                    | FailureStage::HeaderStore
+                    | FailureStage::HeaderMissing
+                    | FailureStage::HeaderVersion
+                    | FailureStage::HeaderParser
+                    | FailureStage::HeaderLedger
+                    | FailureStage::HeaderCount
+            ) {
+                crate::events::store::chunk_proofs::log_header_rejection(
+                    &path.to_string_lossy(),
+                    stage,
+                    &ledger,
+                    &crate::events::store::chunk_proofs::HeaderOpenDiagnostic::default(),
+                    Some(before.size),
+                    std::fs::metadata(path).ok().map(|metadata| metadata.len()),
+                );
+            }
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                LocalRevisionChanged(reason, true),
+                LocalRevisionChanged(reason, true, stage, cause),
             )
         };
         let mut observed = self.observed.lock().map_err(|_| invalid())?;
@@ -978,26 +1055,44 @@ impl SessionSourceReader for Local<'_> {
         {
             return Err(rejected(
                 mismatch(prior, &before).unwrap_or(RevisionReason::MissingChangeToken),
+                FailureStage::Observed,
+                None,
             ));
         }
         if before.size < reference.offset {
-            return Err(rejected(RevisionReason::SizeShrank));
+            return Err(rejected(
+                RevisionReason::SizeShrank,
+                FailureStage::StatShrank,
+                None,
+            ));
         }
         let bytes = if let Some(reason) = reason {
             if !matches!(self.mode, SessionSourceReadMode::LocalOrPinnedProvider) {
-                return Err(rejected(reason));
+                let stage = if matches!(reason, RevisionReason::SizeGrew) {
+                    FailureStage::StatGrew
+                } else {
+                    FailureStage::Mode
+                };
+                return Err(rejected(reason, stage, None));
             }
             // Proof headers bind the original full ledger, including prefix,
             // consumed boundary and physical witness. Only covering blocks are
             // opened and hashed; no complete-prefix resume or parser replay.
             let mut proofs = self.proofs.lock().map_err(|_| invalid())?;
             if let std::collections::btree_map::Entry::Vacant(entry) = proofs.entry(path.clone()) {
-                let proof = crate::events::store::chunk_proofs::Focused::open(
+                let proof = crate::events::store::chunk_proofs::Focused::open_with_raw(
                     &EventCache::path(&self.options.cache),
                     path.to_str().ok_or_else(invalid)?,
                     &ledger,
+                    Some(before.size),
                 )
-                .map_err(|_| rejected(reason))?;
+                .map_err(|error| {
+                    rejected(
+                        reason,
+                        FailureStage::of(&error).unwrap_or(FailureStage::ProofOpenDb),
+                        Some(error),
+                    )
+                })?;
                 entry.insert(proof);
             }
             let proof = proofs.get(path).ok_or_else(invalid)?;
@@ -1018,10 +1113,21 @@ impl SessionSourceReader for Local<'_> {
                     let charge =
                         (reference.offset - start).min(crate::source_chunks::SIZE as u64) as usize;
                     let mut remaining = self.bytes_left.lock().map_err(|_| invalid())?;
-                    *remaining = remaining.checked_sub(charge).ok_or_else(invalid)?;
+                    *remaining = remaining.checked_sub(charge).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            LocalRevisionChanged(reason, false, FailureStage::Budget, None),
+                        )
+                    })?;
                     let bytes: Arc<[u8]> = proof
                         .read(&mut file, index_usize)
-                        .map_err(|_| rejected(reason))?
+                        .map_err(|error| {
+                            rejected(
+                                reason,
+                                FailureStage::of(&error).unwrap_or(FailureStage::ProofOpenDb),
+                                Some(error),
+                            )
+                        })?
                         .into();
                     *cached = Some((path.clone(), index_usize, bytes.clone()));
                     bytes
@@ -1034,7 +1140,17 @@ impl SessionSourceReader for Local<'_> {
             bytes
         } else {
             let mut remaining = self.bytes_left.lock().map_err(|_| invalid())?;
-            *remaining = remaining.checked_sub(max).ok_or_else(invalid)?;
+            *remaining = remaining.checked_sub(max).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    LocalRevisionChanged(
+                        RevisionReason::MissingChangeToken,
+                        false,
+                        FailureStage::Budget,
+                        None,
+                    ),
+                )
+            })?;
             file.seek(SeekFrom::Start(offset))?;
             let mut bytes = vec![0; max];
             file.read_exact(&mut bytes)?;
@@ -1048,11 +1164,19 @@ impl SessionSourceReader for Local<'_> {
         });
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::run(self.options, "local_source_after_read");
-        recheck(path, &file, &before).map_err(|_| {
+        recheck(path, &file, &before).map_err(|cause| {
             let after = file
                 .metadata()
                 .ok()
                 .and_then(|metadata| Stat::from_metadata(&metadata).ok());
+            crate::events::store::chunk_proofs::log_header_rejection(
+                &path.to_string_lossy(),
+                FailureStage::Recheck,
+                &ledger,
+                &crate::events::store::chunk_proofs::HeaderOpenDiagnostic::default(),
+                Some(before.size),
+                after.as_ref().map(|stat| stat.size),
+            );
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 LocalRevisionChanged(
@@ -1061,6 +1185,8 @@ impl SessionSourceReader for Local<'_> {
                         .and_then(|after| mismatch(&before, after))
                         .unwrap_or(RevisionReason::Identity),
                     false,
+                    FailureStage::Recheck,
+                    Some(cause),
                 ),
             )
         })?;
@@ -1206,14 +1332,8 @@ fn render(
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
-            let reason = result
-                .as_ref()
-                .err()
-                .and_then(|error| error.get_ref())
-                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .map(|error| ProjectionFence::LocalSourceRevision(error.0))
-                .unwrap_or(ProjectionFence::SourceGeneration);
-            source_changed.set(Some(reason));
+            let error = result.as_ref().expect_err("checked source failure");
+            source_changed.set(Some(source_read_fence(error)));
         }
         result
     };
@@ -1869,22 +1989,38 @@ fn render_field(
             "field":{"name":field.kind.name(),"layers":field.layers,"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
             "text":text,"freshness":{"state":"cached"},"content_observation":content,"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
         ),
-        Err(error)
-            if error
-                .get_ref()
-                .is_some_and(|error| error.is::<LocalRevisionChanged>()) =>
-        {
-            let detail = error
-                .get_ref()
-                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .expect("checked local revision");
-            stale(ProjectionFence::LocalSourceRevision(detail.0))
-        }
-        Err(_) => catalog::error(
-            503,
-            "field_unavailable",
-            "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
-            true,
-        ),
+        Err(error) => field_failure_reply(&error),
+    }
+}
+
+#[cfg(test)]
+mod budget_contract_tests {
+    use super::*;
+
+    #[test]
+    fn budget_keeps_source_generation_and_field_unavailable_contracts() {
+        let error = io::Error::new(
+            io::ErrorKind::InvalidData,
+            LocalRevisionChanged(
+                crate::source_carrier::RevisionReason::SizeGrew,
+                false,
+                crate::source_carrier::FailureStage::Budget,
+                None,
+            ),
+        );
+        assert!(matches!(
+            source_read_fence(&error),
+            ProjectionFence::SourceGeneration
+        ));
+        let source_reply = stale(source_read_fence(&error));
+        let source_body: Value = serde_json::from_slice(&source_reply.body).unwrap();
+        assert_eq!(source_reply.status, 409);
+        assert_eq!(source_body["fence_reason"], "source_generation");
+        assert!(source_body.get("local_revision_reason").is_none());
+
+        let field_reply = field_failure_reply(&error);
+        let field_body: Value = serde_json::from_slice(&field_reply.body).unwrap();
+        assert_eq!(field_reply.status, 503);
+        assert_eq!(field_body["error"]["code"], "field_unavailable");
     }
 }
