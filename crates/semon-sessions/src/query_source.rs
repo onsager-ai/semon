@@ -343,13 +343,13 @@ impl Records<'_> {
         error
     }
 
-    pub(crate) fn query_error(&self, _error: impl std::fmt::Display) -> crate::QueryError {
+    pub(crate) fn query_error(&self, error: impl std::fmt::Display) -> crate::QueryError {
         if let Some(stage) = self.failure_stage.lock().ok().and_then(|stage| *stage) {
             return crate::QueryError::source_failure(stage);
         }
         match self.revision.lock().ok().and_then(|revision| *revision) {
             Some(reason) => crate::QueryError::local_revision(reason),
-            None => crate::QueryError::new("io", "proofs are unavailable"),
+            None => crate::QueryError::new("io", error.to_string()),
         }
     }
 
@@ -1260,7 +1260,6 @@ mod tests {
         );
         let reply = crate::QueryError::io(&error).to_json();
         assert_eq!(reply["stage"], "header_ledger");
-        assert_eq!(reply["status"], 409);
         assert_eq!(
             before,
             Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap()
@@ -1336,6 +1335,16 @@ mod tests {
         drop(db);
         crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
             .with(|lines| lines.borrow_mut().clear());
+        // MCP opens without touching Raw; Web later opens the same selected
+        // ledger/cache with Raw observations. That upgrade must not be deduped.
+        let mcp_error = match Sources::capture_focused(&options, std::slice::from_ref(&selected)) {
+            Ok(_) => panic!("a malformed proof header must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&mcp_error),
+            Some(crate::source_carrier::FailureStage::HeaderVersion)
+        );
         let result = crate::events::store::chunk_proofs::Focused::open_with_raw(
             &crate::events::EventCache::path(&options.cache),
             fixture.path.to_str().unwrap(),
@@ -1352,12 +1361,54 @@ mod tests {
         );
         let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
             .with(|lines| lines.borrow().clone());
-        assert_eq!(logs.len(), 1);
-        assert!(logs[0].contains("stage=header_version"));
-        assert!(logs[0].contains(&format!("raw_before={before}")));
-        assert!(logs[0].contains(&format!("raw_after=Some({before})")));
-        assert!(logs[0].contains("sample=independent_statements"));
-        assert!(!logs[0].contains(fixture.path.to_string_lossy().as_ref()));
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].contains("raw=not_collected"));
+        assert!(logs[1].contains("stage=header_version"));
+        assert!(logs[1].contains(&format!("raw_before={before}")));
+        assert!(logs[1].contains(&format!("raw_after=Some({before})")));
+        assert!(logs[1].contains("sample=independent_statements"));
+        for line in &logs {
+            assert!(!line.contains(fixture.path.to_string_lossy().as_ref()));
+        }
+        // Neither another MCP open nor another Web open emits a downgrade or
+        // a second upgrade for the same failure transition.
+        assert!(Sources::capture_focused(&options, std::slice::from_ref(&selected)).is_err());
+        assert!(
+            crate::events::store::chunk_proofs::Focused::open_with_raw(
+                &crate::events::EventCache::path(&options.cache),
+                fixture.path.to_str().unwrap(),
+                &ledger,
+                Some(before),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+                .with(|lines| lines.borrow().len()),
+            2
+        );
+    }
+
+    #[test]
+    fn records_query_error_keeps_unstaged_messages_and_sanitizes_staged_failures() {
+        let sources = Sources::default();
+        let records = sources.reader();
+        assert_eq!(
+            records.query_error("original caller message").to_json(),
+            serde_json::json!({"error":{"code":"io","message":"original caller message"}})
+        );
+        let original = crate::source_carrier::FailureStage::PageHash
+            .wrap(io::Error::other("private provider cause"));
+        let error = records.proof_failure(Path::new("synthetic-source"), original);
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::PageHash)
+        );
+        assert_eq!(
+            records.query_error("private caller message").to_json(),
+            serde_json::json!({"error":{"code":"io","message":"proofs are unavailable"},
+                "stage":"page_hash"})
+        );
     }
 
     #[test]

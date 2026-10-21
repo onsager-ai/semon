@@ -5,7 +5,6 @@ use crate::source_chunks::Chunks;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, OnceLock},
-    time::Instant,
 };
 
 const PAGE: usize = 1024;
@@ -47,8 +46,30 @@ fn prefix(path: &str) -> String {
 
 #[derive(Default)]
 struct HeaderMismatchLimiter {
-    last: BTreeMap<String, ((String, String, &'static str), Instant, u64)>,
+    last: BTreeMap<String, HeaderMismatchEntry>,
     next_order: u64,
+}
+
+#[derive(PartialEq, Eq)]
+struct HeaderMismatchEvent {
+    catalog: String,
+    proof: String,
+    stage: &'static str,
+    raw_collected: bool,
+}
+
+impl HeaderMismatchEvent {
+    fn covers(&self, next: &Self) -> bool {
+        self.catalog == next.catalog
+            && self.proof == next.proof
+            && self.stage == next.stage
+            && (self.raw_collected || !next.raw_collected)
+    }
+}
+
+struct HeaderMismatchEntry {
+    event: HeaderMismatchEvent,
+    order: u64,
 }
 
 impl HeaderMismatchLimiter {
@@ -58,13 +79,18 @@ impl HeaderMismatchLimiter {
         catalog: &str,
         proof: &str,
         stage: &'static str,
-        now: Instant,
+        raw_collected: bool,
     ) -> bool {
-        let event = (catalog.to_owned(), proof.to_owned(), stage);
+        let event = HeaderMismatchEvent {
+            catalog: catalog.to_owned(),
+            proof: proof.to_owned(),
+            stage,
+            raw_collected,
+        };
         if self
             .last
             .get(source)
-            .is_some_and(|(prior, _, _)| prior == &event)
+            .is_some_and(|prior| prior.event.covers(&event))
         {
             return false;
         }
@@ -72,15 +98,20 @@ impl HeaderMismatchLimiter {
             let oldest = self
                 .last
                 .iter()
-                .min_by_key(|(_, (_, _, order))| *order)
+                .min_by_key(|(_, entry)| entry.order)
                 .map(|(key, _)| key.clone());
             if let Some(oldest) = oldest {
                 self.last.remove(&oldest);
             }
         }
         self.next_order = self.next_order.wrapping_add(1);
-        self.last
-            .insert(source.to_owned(), (event, now, self.next_order));
+        self.last.insert(
+            source.to_owned(),
+            HeaderMismatchEntry {
+                event,
+                order: self.next_order,
+            },
+        );
         true
     }
 }
@@ -98,7 +129,6 @@ fn fresh_raw_size(path: &str) -> Option<u64> {
     std::fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn log_header_rejection(
     path: &str,
     stage: FailureStage,
@@ -123,7 +153,7 @@ pub(super) fn log_header_rejection(
                 &catalog_hash,
                 proof_hash,
                 stage.name(),
-                Instant::now(),
+                raw_before.is_some(),
             )
         });
     if allowed {
@@ -432,6 +462,7 @@ fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
 }
 
 impl Focused {
+    #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
         Self::open_with_raw(cache, path, ledger, None)
     }
@@ -766,9 +797,9 @@ impl Focused {
         let mut bytes =
             vec![0; (self.ledger.offset - start).min(crate::source_chunks::SIZE as u64) as usize];
         file.seek(SeekFrom::Start(start))
-            .map_err(|error| FailureStage::PageHash.wrap(error))?;
+            .map_err(|error| FailureStage::PageHash.wrap_preserving_kind(error))?;
         file.read_exact(&mut bytes)
-            .map_err(|error| FailureStage::PageHash.wrap(error))?;
+            .map_err(|error| FailureStage::PageHash.wrap_preserving_kind(error))?;
         #[cfg(test)]
         {
             crate::source_chunks::READ_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
@@ -947,44 +978,80 @@ mod tests {
     #[test]
     fn header_mismatch_logging_is_limited_to_source_transitions() {
         let mut limiter = HeaderMismatchLimiter::default();
-        let now = Instant::now();
-        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", now));
-        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", now));
-        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_ledger", now));
-        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_parser", now));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", false));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", false));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", true));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", false));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", true));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_ledger", false));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_parser", false));
         assert!(limiter.allow(
             "other-source",
             "catalog-l1",
             "proof-l3",
             "header_parser",
-            now
+            false
         ));
     }
 
     #[test]
     fn header_mismatch_limiter_evicts_oldest_insertion_not_smallest_hash() {
         let mut limiter = HeaderMismatchLimiter::default();
-        let now = Instant::now();
         for index in 0..256 {
             let source = format!("source-{index:03}");
-            assert!(limiter.allow(
-                &source,
-                "catalog",
-                "proof",
-                "header_ledger",
-                now + Duration::from_millis(index as u64)
-            ));
+            assert!(limiter.allow(&source, "catalog", "proof", "header_ledger", false));
         }
-        assert!(limiter.allow(
-            "source-new",
-            "catalog",
-            "proof",
-            "header_ledger",
-            now + Duration::from_secs(1)
-        ));
+        assert!(limiter.allow("source-new", "catalog", "proof", "header_ledger", false));
         assert!(!limiter.last.contains_key("source-000"));
         assert!(limiter.last.contains_key("source-255"));
         assert!(limiter.last.contains_key("source-new"));
+    }
+
+    #[test]
+    fn focused_byte_io_failures_preserve_original_kind_and_add_safe_stage() {
+        struct FailingIo {
+            seek: bool,
+        }
+        impl io::Read for FailingIo {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "private read cause",
+                ))
+            }
+        }
+        impl io::Seek for FailingIo {
+            fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
+                if self.seek {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private seek cause",
+                    ))
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+        let root = cleanup_root();
+        let cache = root.join("index.sqlite3");
+        let mut store = cleanup_store(&root, "index.sqlite3");
+        let (ledger, index) = cleanup_proof(1, 0);
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "synthetic", &ledger, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        let focused = Focused::open(&cache, "synthetic", &ledger).unwrap();
+        for (seek, expected) in [
+            (true, io::ErrorKind::PermissionDenied),
+            (false, io::ErrorKind::UnexpectedEof),
+        ] {
+            let error = focused.read(&mut FailingIo { seek }, 0).unwrap_err();
+            assert_eq!(error.kind(), expected);
+            assert_eq!(FailureStage::of(&error), Some(FailureStage::PageHash));
+            assert!(!error.to_string().contains("private"));
+        }
+        drop(focused);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

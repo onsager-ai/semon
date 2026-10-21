@@ -64,6 +64,12 @@ impl FailureStage {
         })
     }
 
+    // Byte reads already expose meaningful I/O kinds (for example EOF).
+    // Add the closed stage without changing callers' kind-based decisions.
+    pub(crate) fn wrap_preserving_kind(self, cause: io::Error) -> io::Error {
+        io::Error::new(cause.kind(), SourceFailure { stage: self, cause })
+    }
+
     pub(crate) fn of(error: &io::Error) -> Option<Self> {
         error
             .get_ref()?
