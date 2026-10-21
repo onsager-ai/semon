@@ -118,7 +118,7 @@ fn edge(
                 recipe["kind"].as_str().unwrap_or(""),
                 &mut bytes_left.borrow_mut(),
             )
-            .map_err(unavailable)?;
+            .map_err(|error| records.query_error(error))?;
             return crate::native_field::preview_record(
                 &field,
                 &text,
@@ -129,7 +129,7 @@ fn edge(
         let remaining = *bytes_left.borrow();
         let bytes = records
             .record_bytes(path, offset, remaining as u64)
-            .map_err(unavailable)?
+            .map_err(|error| records.query_error(error))?
             .ok_or_else(|| unavailable("Native handoff record unavailable"))?;
         *bytes_left.borrow_mut() = remaining
             .checked_sub(bytes.len())
@@ -389,6 +389,8 @@ fn virtual_read(
     .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
     tx.commit().map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "query_transcript_before_read");
     let prefix = format!(
         "{}{}:{key}:",
         crate::query_projection::prefix("virtual-slot", &identity),
@@ -531,9 +533,11 @@ fn virtual_read(
             limit,
             &mut tx::Lines::provider(&mut read),
         )
-        .map_err(unavailable)?
+        .map_err(|error| records.query_error(error))?
     };
-    records.finish().map_err(unavailable)?;
+    records
+        .finish()
+        .map_err(|error| records.query_error(error))?;
     let snapshot = db.transaction().map_err(unavailable)?;
     if generation(&snapshot)? != catalog_generation
         || serde_json::to_value(
@@ -822,6 +826,8 @@ fn read_inner(
     }
     tx.commit().map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "query_transcript_before_read");
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     if session {
         let session_key =
@@ -931,7 +937,7 @@ fn read_inner(
                         .ok_or_else(|| unavailable("Turn prompt source unavailable"))?;
                     let (record, read_bytes) = records
                         .prompt(file, slot.offset)
-                        .ok_or_else(|| unavailable("Turn prompt unavailable"))?;
+                        .ok_or_else(|| records.query_error("Turn prompt unavailable"))?;
                     let remaining = *bytes_left.borrow();
                     *bytes_left.borrow_mut() =
                         remaining.checked_sub(read_bytes as usize).ok_or_else(|| {
@@ -1027,7 +1033,9 @@ fn read_inner(
             }
             *children = kept;
         }
-        records.finish().map_err(unavailable)?;
+        records
+            .finish()
+            .map_err(|error| records.query_error(error))?;
         let snapshot = db.transaction().map_err(unavailable)?;
         unchanged(
             &snapshot,
@@ -1140,7 +1148,9 @@ fn read_inner(
             }
             high = low;
         }
-        records.finish().map_err(unavailable)?;
+        records
+            .finish()
+            .map_err(|error| records.query_error(error))?;
         let snapshot = db.transaction().map_err(unavailable)?;
         unchanged(
             &snapshot,
@@ -1271,10 +1281,12 @@ fn read_inner(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && count < MAX_SLOTS => {
                 count = (count * 2).min(MAX_SLOTS)
             }
-            Err(error) => return Err(unavailable(error)),
+            Err(error) => return Err(records.query_error(error)),
         }
     };
-    records.finish().map_err(unavailable)?;
+    records
+        .finish()
+        .map_err(|error| records.query_error(error))?;
     let snapshot = db.transaction().map_err(unavailable)?;
     unchanged(
         &snapshot,
