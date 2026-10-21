@@ -93,6 +93,12 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- --no-deps -D warnings
 
+      - name: Runtime pricing regressions
+        run: |
+          cargo test -p semon-sessions --lib --locked pricing::runtime::tests::
+          cargo test -p semon-sessions --lib --locked events::store::reprice::tests::
+          cargo test -p semon-sessions --lib --locked catalog_statement_journal_batch_probe_preserves_catalog_feed_and_transaction_rollback
+
       - name: Collection pause boundaries before broad regressions
         run: |
           python3 -m unittest discover -s tests/spikes -p test_collection_pause.py -v
