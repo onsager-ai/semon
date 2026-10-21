@@ -16,7 +16,7 @@ struct Header {
     parser_version: u32,
     ledger: String,
     count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     consumed_offset: Option<u64>,
     fingerprint: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -979,6 +979,46 @@ pub(super) fn write_measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_header_writes_remain_readable_by_legacy_readers() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyHeader {
+            version: u32,
+            parser_version: u32,
+            ledger: String,
+            count: usize,
+            fingerprint: [u8; 32],
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pages_root: Option<[u8; 32]>,
+            #[serde(default)]
+            resume: Option<crate::source_chunks::PrefixState>,
+        }
+
+        let header = Header {
+            version: 1,
+            parser_version: CACHE_VERSION,
+            ledger: "synthetic-ledger".into(),
+            count: 1,
+            consumed_offset: Some(128),
+            fingerprint: [7; 32],
+            pages_root: Some([8; 32]),
+            resume: None,
+        };
+        let encoded = json(&header).unwrap();
+        let legacy: LegacyHeader = serde_json::from_str(&encoded).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert!(value.get("consumed_offset").is_none());
+        assert_eq!(serde_json::to_value(legacy).unwrap(), value);
+        let current: Header = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(current.consumed_offset, None);
+
+        value["consumed_offset"] = serde_json::json!(128);
+        assert!(serde_json::from_value::<LegacyHeader>(value.clone()).is_err());
+        let current: Header = serde_json::from_value(value).unwrap();
+        assert_eq!(current.consumed_offset, Some(128));
+    }
 
     #[test]
     fn header_mismatch_logging_is_limited_to_source_transitions() {

@@ -2014,13 +2014,13 @@ mod budget_contract_tests {
         ));
         let source_reply = stale(source_read_fence(&error));
         let source_body: Value = serde_json::from_slice(&source_reply.body).unwrap();
-        assert_eq!(source_body["status"], 409);
+        assert_eq!(source_reply.status, 409);
         assert_eq!(source_body["fence_reason"], "source_generation");
         assert!(source_body.get("local_revision_reason").is_none());
 
         let field_reply = field_failure_reply(&error);
         let field_body: Value = serde_json::from_slice(&field_reply.body).unwrap();
-        assert_eq!(field_body["status"], 503);
+        assert_eq!(field_reply.status, 503);
         assert_eq!(field_body["error"]["code"], "field_unavailable");
     }
 }

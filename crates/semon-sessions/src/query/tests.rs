@@ -3439,15 +3439,14 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
             assert!(!error.message.contains("revoked"));
             assert!(!error.message.contains("Permission denied"));
         } else {
-            // Non-staged provider errors retain the pre-R5 caller message.
+            // Prompt parsing tolerates the provider read error, but its sticky
+            // failure makes finish() retain the pre-R5 generic refusal.
             assert_eq!(
-                error.message,
-                if fault == 2 {
-                    "generation changed"
-                } else {
-                    "revoked"
-                }
+                error.message, "native query source generation unavailable",
+                "fault={fault}"
             );
+            assert!(!error.message.contains("revoked"));
+            assert!(!error.message.contains("Permission denied"));
         }
         assert_eq!(
             catalog_generation(&home),
