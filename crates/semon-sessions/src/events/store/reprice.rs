@@ -4,24 +4,100 @@ use super::*;
 use crate::pricing::{Cost, CostBuild, EffectiveTable};
 use std::sync::Arc;
 
-const WORK: &str = "pricing_recompute_v1";
+const WORK: &str = "pricing_recompute_v2";
 const BATCH: usize = 128;
 const MAX_FACTS: usize = 4096;
 const MAX_JSON: usize = 1024 * 1024;
+const TARGET: &str = "pricing_recompute_target";
+const COMPLETED: &str = "pricing_recompute_completed";
+
+#[cfg(test)]
+std::thread_local! {
+    static REPRICE_PAYLOAD_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(version: u32, value: &str) -> rusqlite::Result<T> {
+    #[cfg(test)]
+    REPRICE_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
+    from_json(version, value)
+}
+
+pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('source','session','family')),
+    owner_key TEXT NOT NULL,
+    PRIMARY KEY(owner_kind,owner_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
+    ON files(file_id,codex_pricing_fingerprint)
+    WHERE codex_native_usage IS NOT NULL;
+CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
+    ON session_catalog(session_key,pricing_fingerprint);
+CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
+AFTER INSERT ON files
+WHEN NEW.codex_native_usage IS NOT NULL
+BEGIN
+    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE file_id=NEW.file_id;
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'source',NEW.path FROM files f,meta m WHERE f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
+      AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_file_update
+AFTER UPDATE OF codex_native_usage ON files
+BEGIN
+    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE file_id=NEW.file_id;
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
+      AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_native_usage_ready
+AFTER UPDATE OF usage_ready ON native_usage_sources
+WHEN NEW.usage_ready=1
+BEGIN
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.path=NEW.source_path AND m.key='pricing_recompute_target'
+      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+AFTER INSERT ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+AFTER UPDATE OF metadata ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+";
 
 #[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Work {
-    fingerprint: String,
+    #[serde(alias = "fingerprint")]
+    target_fingerprint: String,
+    completed_fingerprint: String,
     fetched_at: u64,
     phase: u8,
-    source_after: i64,
+    file_after: i64,
     session_after: String,
     job: Option<SourceJob>,
-    finished_at: i64,
+    pending_owner: Option<PendingOwner>,
+}
+#[derive(Serialize, Deserialize)]
+struct PendingOwner {
+    kind: String,
+    key: String,
 }
 #[derive(Serialize, Deserialize)]
 struct SourceJob {
     id: i64,
+    file_id: i64,
     receipt: String,
     offset: i64,
     cost: CostBuild,
@@ -33,12 +109,33 @@ pub(crate) fn step(path: &Path, table: Arc<EffectiveTable>) -> rusqlite::Result<
     step_inner(path, table, true)
 }
 
+fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let (target, completed, pending): (Option<String>, Option<String>, bool) = connection
+        .query_row(
+            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+            params![TARGET, COMPLETED],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    Ok(target.as_deref() == Some(fingerprint)
+        && completed.as_deref() == Some(fingerprint)
+        && !pending)
+}
+
 fn step_inner(
     path: &Path,
     table: Arc<EffectiveTable>,
     check_current: bool,
 ) -> rusqlite::Result<bool> {
     if !path.is_file() {
+        return Ok(false);
+    }
+    // The completed check is a single read-only metadata query. It never opens
+    // an IMMEDIATE transaction or decodes the work cursor or owner payloads.
+    if idle(path, &table.fingerprint)? {
         return Ok(false);
     }
     let mut connection = Connection::open_with_flags(
@@ -51,10 +148,22 @@ fn step_inner(
         return Ok(false);
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (current_target, current_completed, has_pending): (Option<String>, Option<String>, bool) =
+        tx.query_row(
+            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+            params![TARGET, COMPLETED],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    if current_target.as_deref() == Some(table.fingerprint.as_str())
+        && current_completed.as_deref() == Some(table.fingerprint.as_str())
+        && !has_pending
+    {
+        return Ok(false);
+    }
     let encoded: Option<String>=tx.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1",[WORK],|r|r.get(0)).optional()?;
     let mut work: Work = encoded
         .as_deref()
-        .map(|s| from_json(0, s))
+        .map(|s| decode_json(0, s))
         .transpose()?
         .unwrap_or_default();
     // A second process using an older last-known-good table may not roll a
@@ -62,29 +171,57 @@ fn step_inner(
     if work.fetched_at > table.fetched_at {
         return Ok(false);
     }
-    if work.fingerprint != table.fingerprint {
+    if work.target_fingerprint.is_empty() && work.phase == 3 {
+        // Migrate the old completed Work encoding without repeating its pass.
+        work.target_fingerprint = current_target
+            .clone()
+            .unwrap_or_else(|| table.fingerprint.clone());
+    }
+    if work.phase == 3 && work.completed_fingerprint.is_empty() {
+        work.completed_fingerprint = work.target_fingerprint.clone();
+    }
+    if work.target_fingerprint != table.fingerprint {
         work = Work {
-            fingerprint: table.fingerprint.clone(),
+            target_fingerprint: table.fingerprint.clone(),
             fetched_at: table.fetched_at,
             ..Work::default()
         };
     }
-    if work.phase == 3 {
-        if crate::model::now_ms().saturating_sub(work.finished_at) < 30_000 {
-            return Ok(false);
-        }
-        work.phase = 0;
-        work.source_after = 0;
-        work.session_after.clear();
+    if current_target.as_deref() != Some(table.fingerprint.as_str()) {
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![TARGET, table.fingerprint],
+        )?;
+    }
+    if work.phase == 3
+        && work.completed_fingerprint == table.fingerprint
+        && current_completed.as_deref() != Some(table.fingerprint.as_str())
+    {
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![COMPLETED, table.fingerprint],
+        )?;
     }
     tx.execute_batch("SAVEPOINT pricing_owner")?;
-    let result = match work.phase {
-        0 => source_step(&tx, &mut work, &table),
-        1 => catalog_step(&tx, &mut work, &table),
-        _ => family_step(&tx, &mut work),
+    let full_pass = work.completed_fingerprint != table.fingerprint;
+    let migrated_completion = !full_pass
+        && work.phase == 3
+        && current_completed.as_deref() != Some(table.fingerprint.as_str());
+    let result = if full_pass {
+        match work.phase {
+            0 => source_step(&tx, &mut work, &table, None).map(|_| true),
+            1 => catalog_step(&tx, &mut work, &table, None).map(|_| true),
+            _ => family_step(&tx, &mut work).map(|_| true),
+        }
+    } else {
+        pending_step(&tx, &mut work, &table)
     };
+    let mut made_progress = migrated_completion;
     match result {
-        Ok(()) => tx.execute_batch("RELEASE pricing_owner")?,
+        Ok(progress) => {
+            made_progress |= progress;
+            tx.execute_batch("RELEASE pricing_owner")?;
+        }
         Err(
             rusqlite::Error::InvalidQuery
             | rusqlite::Error::InvalidColumnType(..)
@@ -96,6 +233,13 @@ fn step_inner(
             // Roll back this owner's partial writes and retain its old stamp.
             tx.execute_batch("ROLLBACK TO pricing_owner; RELEASE pricing_owner")?;
             work.job = None;
+            made_progress = true;
+            if let Some(owner) = work.pending_owner.take() {
+                tx.execute(
+                    "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2",
+                    params![owner.kind, owner.key],
+                )?;
+            }
         }
         Err(error) => return Err(error),
     }
@@ -103,11 +247,27 @@ fn step_inner(
     if check_current && crate::pricing::snapshot().fingerprint != table.fingerprint {
         return Ok(false);
     }
+    if !full_pass && !made_progress {
+        return Ok(false);
+    }
+    if full_pass && work.phase == 3 {
+        work.completed_fingerprint = table.fingerprint.clone();
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![COMPLETED, table.fingerprint],
+        )?;
+    }
     let mut value = json(&work)?;
     if value.len() > MAX_JSON {
         // Keep the old source cost for an over-budget accumulator, then
         // advance to unrelated sources on the next attempt.
         work.job = None;
+        if let Some(owner) = work.pending_owner.take() {
+            tx.execute(
+                "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2",
+                params![owner.kind, owner.key],
+            )?;
+        }
         value = json(&work)?;
     }
     tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![WORK,value])?;
@@ -119,26 +279,39 @@ fn source_step(
     tx: &Transaction<'_>,
     work: &mut Work,
     table: &Arc<EffectiveTable>,
-) -> rusqlite::Result<()> {
+    pending_id: Option<i64>,
+) -> rusqlite::Result<bool> {
     if work.job.is_none() {
-        let next: Option<(i64,String,Option<String>)>=tx.query_row("SELECT s.source_id,s.receipt,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id>?1 AND s.parser_version=?2 AND s.usage_ready=1 ORDER BY s.source_id LIMIT 1",params![work.source_after,CACHE_VERSION],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        let Some((id, receipt, encoded)) = next else {
-            work.phase = 1;
-            work.session_after.clear();
-            return Ok(());
+        let next: Option<(i64, String, i64, Option<String>)> = if let Some(id) = pending_id {
+            tx.query_row("SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id=?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3",params![id,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
+        } else {
+            tx.query_row("SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM files f INDEXED BY files_codex_pricing_fingerprint JOIN native_usage_current n ON n.source_path=f.path JOIN native_usage_sources s USING(source_id) WHERE f.codex_native_usage IS NOT NULL AND f.file_id>?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3 ORDER BY f.file_id LIMIT 1",params![work.file_after,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
         };
-        work.source_after = id;
+        let Some((id, receipt, file_id, encoded)) = next else {
+            if pending_id.is_none() {
+                work.phase = 1;
+                work.session_after.clear();
+            }
+            return Ok(true);
+        };
+        if pending_id.is_none() {
+            work.file_after = file_id;
+        }
         let Some(encoded) = encoded else {
-            return Ok(());
+            return Ok(true);
         };
-        let root: Value = from_json(0, &encoded)?;
-        if root["projection_version"] != 1
-            || root["cost"]["pricing_fingerprint"] == table.fingerprint
-        {
-            return Ok(());
+        let root: Value = decode_json(0, &encoded)?;
+        let fingerprint = root["cost"]["pricing_fingerprint"].as_str();
+        tx.execute(
+            "UPDATE files SET codex_pricing_fingerprint=?2 WHERE path=(SELECT source_path FROM native_usage_current WHERE source_id=?1)",
+            params![id, fingerprint],
+        )?;
+        if root["projection_version"] != 1 {
+            return Ok(true);
         }
         work.job = Some(SourceJob {
             id,
+            file_id,
             receipt,
             offset: -1,
             cost: CostBuild::with_table(Arc::clone(table)),
@@ -149,12 +322,14 @@ fn source_step(
     let current: Option<(String,String)>=tx.query_row("SELECT s.receipt,f.codex_native_usage FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id=?1 AND octet_length(f.codex_native_usage)<=1048576",[job.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((receipt, encoded)) = current else {
         work.job = None;
-        return Ok(());
+        return Ok(true);
     };
     if receipt != job.receipt {
-        work.source_after = job.id - 1;
+        if pending_id.is_none() {
+            work.file_after = job.file_id.saturating_sub(1);
+        }
         work.job = None;
-        return Ok(());
+        return Ok(true);
     }
     let mut statement=tx.prepare("SELECT native_offset,CASE WHEN octet_length(payload)<=8192 THEN payload ELSE NULL END FROM native_usage_facts WHERE source_id=?1 AND native_offset>?2 AND model_outcome='accepted' ORDER BY native_offset LIMIT ?3")?;
     let rows = statement.query_map(params![job.id, job.offset, BATCH as i64], |r| {
@@ -163,7 +338,7 @@ fn source_step(
     let mut count = 0;
     for row in rows {
         let (offset, payload) = row?;
-        let payload: native_usage::Payload = from_json(1, &payload)?;
+        let payload: native_usage::Payload = decode_json(1, &payload)?;
         if let Some(model) = payload.model {
             job.cost.codex(&CodexUsageEvent {
                 model,
@@ -175,17 +350,17 @@ fn source_step(
         count += 1;
     }
     if count == BATCH {
-        return Ok(());
+        return Ok(false);
     }
-    let mut root: Value = from_json(0, &encoded)?;
+    let mut root: Value = decode_json(0, &encoded)?;
     if root["projection_version"] != 1 {
         work.job = None;
-        return Ok(());
+        return Ok(true);
     }
     // A source with no complete model facts must not become a free source.
     if job.cost.models.is_empty() && root["tokens"]["total"].as_u64().is_some_and(|n| n > 0) {
         work.job = None;
-        return Ok(());
+        return Ok(true);
     }
     let mut expected = BTreeMap::new();
     let mut models=tx.prepare("SELECT dimension,CASE WHEN octet_length(value)<=8192 THEN value ELSE NULL END FROM native_usage_dimensions WHERE source_id=?1 AND kind='model' ORDER BY dimension LIMIT 4097")?;
@@ -193,7 +368,7 @@ fn source_step(
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })? {
         let (name, value) = row?;
-        let tokens: ModelTokens = from_json(1, &value)?;
+        let tokens: ModelTokens = decode_json(1, &value)?;
         expected.insert(name, tokens);
     }
     let computed = job.cost.clone().finish();
@@ -208,7 +383,7 @@ fn source_step(
         })
     {
         work.job = None;
-        return Ok(());
+        return Ok(true);
     }
     // Replace all derived dimensions together. The native totals/receipts and
     // every original fact remain byte-for-byte unchanged.
@@ -226,7 +401,7 @@ fn source_step(
     root["cost"] = serde_json::to_value(cost).map_err(sql_json)?;
     tx.execute("UPDATE files SET codex_native_usage=?2 WHERE path=(SELECT source_path FROM native_usage_current WHERE source_id=?1)",params![job.id,json(&root)?])?;
     work.job = None;
-    Ok(())
+    Ok(true)
 }
 
 fn put_dimension<T: Serialize>(
@@ -375,23 +550,36 @@ fn catalog_step(
     tx: &Transaction<'_>,
     work: &mut Work,
     table: &Arc<EffectiveTable>,
-) -> rusqlite::Result<()> {
-    let next:Option<(String,Option<String>)>=tx.query_row("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key>?1 ORDER BY session_key LIMIT 1",[&work.session_after],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    pending_key: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let next: Option<(String, Option<String>)> = if let Some(key) = pending_key {
+        tx.query_row("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1 AND pricing_fingerprint IS NOT ?2",params![key,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+    } else {
+        tx.query_row("SELECT session_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog INDEXED BY session_catalog_pricing_fingerprint WHERE pricing_fingerprint IS NOT ?1 AND session_key>?2 ORDER BY session_key LIMIT 1",params![table.fingerprint,work.session_after],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+    };
     let Some((key, encoded)) = next else {
-        work.phase = 2;
-        work.session_after.clear();
-        return Ok(());
+        if pending_key.is_none() {
+            work.phase = 2;
+            work.session_after.clear();
+        }
+        return Ok(false);
     };
-    work.session_after = key.clone();
+    if pending_key.is_none() {
+        work.session_after = key.clone();
+    }
     let Some(encoded) = encoded else {
-        return Ok(());
+        return Ok(false);
     };
-    let mut row: crate::model::summary::CatalogRow = from_json(0, &encoded)?;
+    let mut row: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
+    tx.execute(
+        "UPDATE session_catalog SET pricing_fingerprint=?2 WHERE session_key=?1",
+        params![key, row.cost.pricing_fingerprint],
+    )?;
     if row.cost.pricing_fingerprint == table.fingerprint {
-        return Ok(());
+        return Ok(false);
     }
     let Some(cost) = retained_cost(tx, &row, table)? else {
-        return Ok(());
+        return Ok(false);
     };
     let old = row.cost.clone();
     row.cost = cost.clone();
@@ -405,7 +593,7 @@ fn catalog_step(
     // Same-generation history publications can share the recomputation. An
     // older/different history cohort remains at its original price fingerprint.
     if let Some(encoded) = crate::history_projection::catalog(tx, &key)? {
-        let mut history: crate::model::summary::CatalogRow = from_json(0, &encoded)?;
+        let mut history: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
         if history.sources == row.sources {
             history.cost = cost.clone();
             if let Some(query) = &mut history.query {
@@ -419,7 +607,7 @@ fn catalog_step(
     }
     let description:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(description)<=1048576 THEN description ELSE NULL END FROM session_descriptions WHERE session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
     if let Some(encoded) = description {
-        let mut value: Value = from_json(0, &encoded)?;
+        let mut value: Value = decode_json(0, &encoded)?;
         // Only replace a summary with the same exact retained source cohort.
         // Otherwise its next normal description build resolves the new table.
         if serde_json::from_value::<Cost>(value["cost"].clone())
@@ -445,7 +633,7 @@ fn catalog_step(
     let overview:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(summary)<=1048576 THEN summary ELSE NULL END FROM session_overview WHERE session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
     let mut content_generation = None;
     if let Some(encoded) = overview {
-        let mut value: Value = from_json(0, &encoded)?;
+        let mut value: Value = decode_json(0, &encoded)?;
         if value["source_generation"]
             == crate::retention::source_generation(&row.sources)
                 .map_err(|_| rusqlite::Error::InvalidQuery)?
@@ -459,13 +647,13 @@ fn catalog_step(
                 // manufacture days outside the captured Analytics cohort.
                 for day in days {
                     if let Some(time) = day[0].as_i64() {
-                        day[1] = serde_json::to_value(
-                            cost.by_day
-                                .get(&crate::pricing::utc_day(time))
-                                .copied()
-                                .unwrap_or(0.0),
-                        )
-                        .map_err(sql_json)?;
+                        // The base Activity series stores numeric partial
+                        // amounts and carries unknown status separately. If a
+                        // retained day has no recomputed fact, keep its prior
+                        // value rather than manufacturing a free zero.
+                        if let Some(amount) = cost.by_day.get(&crate::pricing::utc_day(time)) {
+                            day[1] = serde_json::to_value(amount).map_err(sql_json)?;
+                        }
                     }
                 }
             }
@@ -485,7 +673,7 @@ fn catalog_step(
     }
     let trace:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2",params![key,crate::retention::source_generation(&row.sources).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((encoded, generation)) = trace {
-        let mut value: Value = from_json(0, &encoded)?;
+        let mut value: Value = decode_json(0, &encoded)?;
         replace_costs(&mut value, &old, &cost)?;
         clear_cost_checks(&mut value);
         if let Some(generation) = content_generation {
@@ -503,7 +691,7 @@ fn catalog_step(
             params![key, json(&value)?, generation],
         )?;
     }
-    Ok(())
+    Ok(true)
 }
 
 fn replace_costs(value: &mut Value, old: &Cost, cost: &Cost) -> rusqlite::Result<()> {
@@ -548,19 +736,119 @@ fn clear_cost_checks(value: &mut Value) {
     }
 }
 
+fn pending_step(
+    tx: &Transaction<'_>,
+    work: &mut Work,
+    table: &Arc<EffectiveTable>,
+) -> rusqlite::Result<bool> {
+    if let Some(owner) = work.pending_owner.as_ref() {
+        let still_pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2)",
+            params![owner.kind, owner.key],
+            |row| row.get(0),
+        )?;
+        if !still_pending {
+            work.pending_owner = None;
+            work.job = None;
+        }
+    }
+    if work.pending_owner.is_none() {
+        work.pending_owner = tx
+            .query_row(
+                "SELECT owner_kind,owner_key FROM pricing_recompute_pending ORDER BY owner_kind,owner_key LIMIT 1",
+                [],
+                |row| Ok(PendingOwner { kind: row.get(0)?, key: row.get(1)? }),
+            )
+            .optional()?;
+    }
+    let Some(owner) = work.pending_owner.as_ref() else {
+        return Ok(false);
+    };
+    let kind = owner.kind.clone();
+    let key = owner.key.clone();
+    match kind.as_str() {
+        "source" => {
+            let id: Option<i64> = tx
+                .query_row(
+                    "SELECT s.source_id FROM native_usage_current c JOIN native_usage_sources s USING(source_id) WHERE c.source_path=?1 AND s.parser_version=?2 AND s.usage_ready=1",
+                    params![key, CACHE_VERSION],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let done = if let Some(id) = id {
+                source_step(tx, work, table, Some(id))?
+            } else {
+                true
+            };
+            if done {
+                tx.execute(
+                    "DELETE FROM pricing_recompute_pending WHERE owner_kind='source' AND owner_key=?1",
+                    [&key],
+                )?;
+                work.pending_owner = None;
+            }
+            // A non-final fact batch still made bounded progress and must
+            // persist its offset while retaining the queue row.
+            Ok(true)
+        }
+        "session" => {
+            let changed = catalog_step(tx, work, table, Some(&key))?;
+            if changed {
+                tx.execute(
+                    "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1",
+                    [&key],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1",
+                [&key],
+            )?;
+            work.pending_owner = None;
+            Ok(true)
+        }
+        "family" => {
+            family_owner(tx, &key, &table.fingerprint)?;
+            let parent: Option<String> = tx
+                .query_row(
+                    "SELECT parent_key FROM session_catalog WHERE session_key=?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(parent) = parent {
+                tx.execute(
+                    "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1 WHERE EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1)",
+                    [&parent],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM pricing_recompute_pending WHERE owner_kind='family' AND owner_key=?1",
+                [&key],
+            )?;
+            work.pending_owner = None;
+            Ok(true)
+        }
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
     let key:Option<String>=tx.query_row("SELECT session_key FROM session_trace_headers WHERE session_key>?1 ORDER BY session_key LIMIT 1",[&work.session_after],|r|r.get(0)).optional()?;
     let Some(key) = key else {
         work.phase = 3;
-        work.finished_at = crate::model::now_ms();
         return Ok(());
     };
     work.session_after = key.clone();
+    family_owner(tx, &key, &work.target_fingerprint)
+}
+
+fn family_owner(tx: &Transaction<'_>, key: &str, fingerprint: &str) -> rusqlite::Result<()> {
     let witness:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,t.source_generation FROM session_catalog c JOIN session_trace_headers t USING(session_key) WHERE session_key=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((encoded, generation)) = witness else {
         return Ok(());
     };
-    let owner: crate::model::summary::CatalogRow = from_json(0, &encoded)?;
+    let owner: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
     if crate::retention::source_generation(&owner.sources)
         .map_err(|_| rusqlite::Error::InvalidQuery)?
         != generation
@@ -574,10 +862,10 @@ fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
     while let Some(row) = rows.next()? {
         count += 1;
         let amount: Option<f64> = row.get(0)?;
-        let fingerprint: Option<String> = row.get(1)?;
+        let owner_fingerprint: Option<String> = row.get(1)?;
         usd = usd
             .zip(amount)
-            .filter(|_| fingerprint.as_deref() == Some(work.fingerprint.as_str()))
+            .filter(|_| owner_fingerprint.as_deref() == Some(fingerprint))
             .map(|(a, b)| a + b);
     }
     if count > 256 {
@@ -585,7 +873,7 @@ fn family_step(tx: &Transaction<'_>, work: &mut Work) -> rusqlite::Result<()> {
     }
     let prior:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE session_key=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((encoded, version)) = prior {
-        let mut metadata: Value = from_json(0, &encoded)?;
+        let mut metadata: Value = decode_json(0, &encoded)?;
         let amount = serde_json::to_value(usd).map_err(sql_json)?;
         if metadata["family_usd"] != amount {
             metadata["family_usd"] = amount;
@@ -717,6 +1005,148 @@ mod tests {
             }
         }
         panic!("bounded fixture did not finish")
+    }
+
+    #[test]
+    fn completed_fingerprint_stays_idle_without_writes_or_payload_decodes() {
+        let root = root();
+        let path = root.join("index.sqlite3");
+        let (_store, _) = SqliteStore::attempt(&path, None).unwrap_or_else(|e| panic!("{e}"));
+        let table = table("anthropic", "claude-opus-5-5", 8.0, 1);
+        drain(&path, &table);
+        let before: (i64, String) = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT rowid,value FROM meta WHERE key=?1", [WORK], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        let decoded = REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get);
+        crate::pricing::runtime::register_index(path.clone());
+        crate::pricing::runtime::register_index(path.clone());
+        for _ in 0..8 {
+            assert!(!step_inner(&path, Arc::clone(&table), false).unwrap());
+        }
+        let after: (i64, String) = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT rowid,value FROM meta WHERE key=?1", [WORK], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get), decoded);
+        assert_eq!(
+            Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM pricing_recompute_pending",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        drop(_store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_stale_retained_owner_is_enqueued_and_repriced_without_rescanning_others() {
+        let root = root();
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = SqliteStore::attempt(&path, None).unwrap_or_else(|e| panic!("{e}"));
+        let ledger = ledger();
+        let native = "/not-present/new-retained-claude.jsonl";
+        let usage = MessageUsage {
+            model: Some("claude-opus-5-5".into()),
+            billing: BillingUsage {
+                input: 1_000_000,
+                prompt_size: 1_000_000,
+                timestamp: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut index = FileIndex::default();
+        index.usage_by_id.insert("message".into(), usage.clone());
+        store
+            .write_one(native, None, None, &ledger, &index)
+            .unwrap();
+
+        let old = table("anthropic", "claude-opus-5-5", 4.0, 0);
+        let current = table("anthropic", "claude-opus-5-5", 8.0, 1);
+        let mut old_cost = CostBuild::with_table(Arc::clone(&old));
+        old_cost.message(&usage);
+        let stale_row = row(native, &ledger, old_cost.finish(), "claude");
+        drain(&path, &current);
+        let current_work: String = store
+            .connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [WORK], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let mut unrelated_cost = CostBuild::with_table(Arc::clone(&current));
+        unrelated_cost.message(&usage);
+        let mut unrelated = row(
+            "/not-present/unrelated.jsonl",
+            &ledger,
+            unrelated_cost.finish(),
+            "claude",
+        );
+        unrelated.key = "unrelated".into();
+        publish(&store, &unrelated);
+        publish(&store, &stale_row);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pricing_recompute_pending",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            1
+        );
+        drop(store);
+
+        drain(&path, &current);
+        let connection = Connection::open(&path).unwrap();
+        let updated: f64 = connection
+            .query_row(
+                "SELECT json_extract(metadata,'$.cost.usd') FROM session_catalog WHERE session_key='owner'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let untouched: f64 = connection
+            .query_row(
+                "SELECT json_extract(metadata,'$.cost.usd') FROM session_catalog WHERE session_key='unrelated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated, 8.0);
+        assert_eq!(untouched, 8.0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pricing_recompute_pending",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        let after_work: String = connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [WORK], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let before_work: Work = from_json(0, &current_work).unwrap();
+        let after_work: Work = from_json(0, &after_work).unwrap();
+        assert_eq!(after_work.session_after, before_work.session_after);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

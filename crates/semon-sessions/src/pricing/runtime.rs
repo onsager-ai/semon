@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Condvar, Mutex, OnceLock, RwLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_BODY: u64 = 16 * 1024 * 1024;
@@ -17,11 +17,16 @@ const INTERVAL: u64 = 6 * 60 * 60;
 const RETRY: u64 = 30 * 60;
 const CACHE_VERSION: u32 = 1;
 const PROVIDERS: [&str; 2] = ["anthropic", "openai"];
+const MAX_INDEXES: usize = 64;
+const INDEX_RETIRE_AFTER: Duration = Duration::from_secs(30 * 60);
+const WORKER_FALLBACK_WAKE: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Row {
     price: Price,
     provenance: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    v2_fetched_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,8 +54,18 @@ impl EffectiveTable {
 
     fn seal(&mut self) -> io::Result<()> {
         // BTreeMap ordering makes the digest independent of upstream object order
-        // and fetch time. Include provenance as well as all effective rates.
-        self.fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&self.providers)?));
+        // and fetch time. Include provenance as well as all effective rates,
+        // but not the last successful supplement fetch timestamp.
+        let mut fingerprint_rows = self.providers.clone();
+        for rows in fingerprint_rows.values_mut() {
+            for row in rows.values_mut() {
+                row.v2_fetched_at = None;
+            }
+        }
+        self.fingerprint = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&fingerprint_rows)?)
+        );
         Ok(())
     }
 
@@ -78,6 +93,16 @@ impl EffectiveTable {
                 if id.is_empty() || id.len() > 512 {
                     return Err(invalid("invalid model identity"));
                 }
+                if row
+                    .provenance
+                    .values()
+                    .any(|source| source == "models_dev_v2")
+                    && row.v2_fetched_at.is_none()
+                {
+                    return Err(invalid(format!(
+                        "provider {provider} model {id} field v2_fetched_at: missing"
+                    )));
+                }
                 validate_price(&row.price)?;
             }
         }
@@ -85,8 +110,11 @@ impl EffectiveTable {
     }
 }
 
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+fn model_error(provider: &str, model: &str, error: io::Error) -> io::Error {
+    invalid(format!("provider {provider} model {model}: {error}"))
 }
 
 fn bundled() -> EffectiveTable {
@@ -119,6 +147,7 @@ fn bundled() -> EffectiveTable {
                 Row {
                     price: row.price,
                     provenance,
+                    v2_fetched_at: None,
                 },
             );
     }
@@ -161,7 +190,15 @@ pub(crate) fn snapshot() -> Arc<EffectiveTable> {
 }
 
 fn install(table: EffectiveTable) {
-    *store().write().unwrap_or_else(|e| e.into_inner()) = Arc::new(table);
+    let changed = {
+        let mut current = store().write().unwrap_or_else(|e| e.into_inner());
+        let changed = current.fingerprint != table.fingerprint;
+        *current = Arc::new(table);
+        changed
+    };
+    if changed {
+        notify_reprice();
+    }
 }
 
 fn validate_rate(value: f64) -> io::Result<()> {
@@ -236,8 +273,10 @@ fn rate(cost: &Value, key: &str) -> io::Result<Option<f64>> {
     match cost.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
-            let value = value.as_f64().ok_or_else(|| invalid("nonnumeric rate"))?;
-            validate_rate(value)?;
+            let value = value
+                .as_f64()
+                .ok_or_else(|| invalid(format!("field {key}: nonnumeric rate")))?;
+            validate_rate(value).map_err(|_| invalid(format!("field {key}: invalid rate")))?;
             Ok(Some(value))
         }
     }
@@ -245,14 +284,7 @@ fn rate(cost: &Value, key: &str) -> io::Result<Option<f64>> {
 
 fn rates(cost: &Value, provider: &str) -> io::Result<FastRates> {
     if !cost.is_object() {
-        return Err(invalid("invalid cost object"));
-    }
-    // Validate even fields whose billing semantics we deliberately do not map.
-    for (key, value) in cost.as_object().expect("object checked") {
-        if key != "tiers" && key != "context_over_200k" && !value.is_null() {
-            let value = value.as_f64().ok_or_else(|| invalid("nonnumeric rate"))?;
-            validate_rate(value)?;
-        }
+        return Err(invalid("field cost: invalid object"));
     }
     let write_5m = if provider == "anthropic" {
         // Generic cache_write has no TTL in the API contract. Explicit aliases
@@ -279,29 +311,34 @@ fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPr
     let explicit = match cost.get("tiers") {
         None | Some(Value::Null) => None,
         Some(value) => {
-            let tiers = value.as_array().ok_or_else(|| invalid("invalid tiers"))?;
-            // The native consumer supports one context boundary. Reject a new
-            // shape atomically rather than flatten multiple tiers incorrectly.
-            if tiers.len() > 1 {
-                return Err(invalid("multiple context tiers unsupported"));
+            let tiers = value
+                .as_array()
+                .ok_or_else(|| invalid("field cost.tiers: invalid array"))?;
+            // Unknown non-context tiers do not affect the native context
+            // calculator. More than one context boundary cannot be represented.
+            let mut context = None;
+            for tier in tiers {
+                if tier.pointer("/tier/type").and_then(Value::as_str) != Some("context") {
+                    continue;
+                }
+                if context.is_some() {
+                    return Err(invalid(
+                        "field cost.tiers: multiple context tiers unsupported",
+                    ));
+                }
+                let size = tier
+                    .pointer("/tier/size")
+                    .and_then(Value::as_u64)
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| invalid("field cost.tiers[].tier.size: invalid boundary"))?;
+                context = Some((size, tier));
             }
-            tiers
-                .first()
-                .map(|tier| {
-                    if tier["tier"]["type"] != "context" {
-                        return Err(invalid("unsupported tier type"));
-                    }
-                    let size = tier["tier"]["size"]
-                        .as_u64()
-                        .filter(|v| *v > 0)
-                        .ok_or_else(|| invalid("invalid context boundary"))?;
-                    Ok((size, tier))
-                })
-                .transpose()?
+            context
         }
     };
     if let Some(compatibility) = cost.get("context_over_200k").filter(|v| !v.is_null()) {
-        rates(compatibility, provider)?;
+        rates(compatibility, provider)
+            .map_err(|error| invalid(format!("field cost.context_over_200k: {error}")))?;
     }
     let Some((threshold_tokens, value)) = explicit.or_else(|| {
         cost.get("context_over_200k")
@@ -315,7 +352,8 @@ fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPr
     if let Some(object) = value.as_object_mut() {
         object.remove("tier");
     }
-    let r = rates(&value, provider)?;
+    let r = rates(&value, provider)
+        .map_err(|error| invalid(format!("field cost.tiers[].cost: {error}")))?;
     Ok(Some(LongContextPrice {
         threshold_tokens,
         input: r.input,
@@ -374,22 +412,26 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
     for provider in PROVIDERS {
         let entry = api
             .get(provider)
-            .ok_or_else(|| invalid("missing provider"))?;
+            .ok_or_else(|| invalid(format!("provider {provider} field provider: missing")))?;
         if entry["id"] != provider {
-            return Err(invalid("provider identity mismatch"));
+            return Err(invalid(format!(
+                "provider {provider} field id: identity mismatch"
+            )));
         }
         let models = entry["models"]
             .as_object()
-            .ok_or_else(|| invalid("missing models"))?;
+            .ok_or_else(|| invalid(format!("provider {provider} field models: missing")))?;
         let mut priced = 0;
         for (id, model) in models {
             if model["id"] != *id {
-                return Err(invalid("model identity mismatch"));
+                return Err(invalid(format!(
+                    "provider {provider} model {id} field id: identity mismatch"
+                )));
             }
             let Some(cost) = model.get("cost").filter(|v| !v.is_null()) else {
                 continue;
             };
-            let raw = rates(cost, provider)?;
+            let raw = rates(cost, provider).map_err(|error| model_error(provider, id, error))?;
             if raw.input.is_some() && raw.output.is_some() {
                 priced += 1;
             }
@@ -397,7 +439,8 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
             // within the same provider only for bundled fallback.
             let base = bootstrap.price_for(provider, id).unwrap_or_default();
             let r = overlay_rates(raw, base_rates(base));
-            let explicit_tier = long_context(cost, provider)?;
+            let explicit_tier =
+                long_context(cost, provider).map_err(|error| model_error(provider, id, error))?;
             let tier = match (explicit_tier, base.long_context) {
                 // A compatibility 200k field may not erase an authored exact
                 // hotfix tier. Explicit tiers are authoritative.
@@ -446,8 +489,16 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
                 &mut provenance,
             );
             if let Some(fast) = model.pointer("/experimental/modes/fast/cost") {
-                let mut r = rates(fast, provider)?;
-                r.long_context = long_context(fast, provider)?;
+                let mut r = rates(fast, provider).map_err(|error| {
+                    invalid(format!(
+                        "provider {provider} model {id} field experimental.fast: {error}"
+                    ))
+                })?;
+                r.long_context = long_context(fast, provider).map_err(|error| {
+                    invalid(format!(
+                        "provider {provider} model {id} field experimental.fast: {error}"
+                    ))
+                })?;
                 // Fill only categories with an actual same-model fast fallback,
                 // never multiply newly updated ordinary rates implicitly.
                 let fallback = match base.fast {
@@ -490,15 +541,365 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
                 .providers
                 .get_mut(provider)
                 .expect("provider exists")
-                .insert(id.clone(), Row { price, provenance });
+                .insert(
+                    id.clone(),
+                    Row {
+                        price,
+                        provenance,
+                        v2_fetched_at: None,
+                    },
+                );
         }
         if priced < 2 {
-            return Err(invalid("insufficient upstream priced models"));
+            return Err(invalid(format!(
+                "provider {provider} field cost: insufficient upstream priced models"
+            )));
         }
     }
     table.validate()?;
     table.seal()?;
     Ok(table)
+}
+
+#[derive(Clone, Copy, Default)]
+struct TtlRates {
+    five_minutes: Option<f64>,
+    one_hour: Option<f64>,
+}
+
+fn v2_ttl_rates(value: &Value, field: &str) -> io::Result<TtlRates> {
+    if !value.is_object() {
+        return Err(invalid(format!("field {field}: invalid cost object")));
+    }
+    let Some(write) = value.pointer("/text/input/cache/write") else {
+        return Ok(TtlRates::default());
+    };
+    let object = write.as_object().ok_or_else(|| {
+        invalid(format!(
+            "field {field}.text.input.cache.write: invalid object"
+        ))
+    })?;
+    let mut rates = TtlRates::default();
+    for (key, target) in [("5m", &mut rates.five_minutes), ("1h", &mut rates.one_hour)] {
+        if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
+            let rate = value.as_f64().ok_or_else(|| {
+                invalid(format!(
+                    "field {field}.text.input.cache.write.{key}: nonnumeric rate"
+                ))
+            })?;
+            validate_rate(rate).map_err(|_| {
+                invalid(format!(
+                    "field {field}.text.input.cache.write.{key}: invalid rate"
+                ))
+            })?;
+            *target = Some(rate);
+        }
+    }
+    Ok(rates)
+}
+
+fn cache_write_path(one_hour: bool) -> &'static str {
+    if one_hour {
+        "cache_write_1h"
+    } else {
+        "cache_write_5m"
+    }
+}
+
+fn copy_v2_category(target: &mut Row, previous: &Row, path: &str) {
+    if previous.provenance.get(path).map(String::as_str) != Some("models_dev_v2")
+        || target.provenance.get(path).map(String::as_str) == Some("models_dev")
+    {
+        return;
+    }
+    match path {
+        "cache_write_5m" => {
+            let Some(value) = previous.price.cache_write_5m else {
+                return;
+            };
+            target.price.cache_write_5m = Some(value);
+        }
+        "cache_write_1h" => {
+            let Some(value) = previous.price.cache_write_1h else {
+                return;
+            };
+            target.price.cache_write_1h = Some(value);
+        }
+        "long_context.cache_write_5m" => {
+            let (Some(new), Some(old)) =
+                (&mut target.price.long_context, previous.price.long_context)
+            else {
+                return;
+            };
+            if new.threshold_tokens != old.threshold_tokens {
+                return;
+            }
+            let Some(value) = old.cache_write_5m else {
+                return;
+            };
+            new.cache_write_5m = Some(value);
+        }
+        "long_context.cache_write_1h" => {
+            let (Some(new), Some(old)) =
+                (&mut target.price.long_context, previous.price.long_context)
+            else {
+                return;
+            };
+            if new.threshold_tokens != old.threshold_tokens {
+                return;
+            }
+            let Some(value) = old.cache_write_1h else {
+                return;
+            };
+            new.cache_write_1h = Some(value);
+        }
+        _ => return,
+    }
+    target
+        .provenance
+        .insert(path.into(), "models_dev_v2".into());
+    target.v2_fetched_at = previous.v2_fetched_at;
+}
+
+fn preserve_v2_supplement(table: &mut EffectiveTable, previous: Option<&EffectiveTable>) {
+    let Some(previous) = previous else { return };
+    let (Some(current_rows), Some(previous_rows)) = (
+        table.providers.get_mut("anthropic"),
+        previous.providers.get("anthropic"),
+    ) else {
+        return;
+    };
+    for (id, prior) in previous_rows {
+        let Some(current) = current_rows.get_mut(id) else {
+            continue;
+        };
+        for path in [
+            "cache_write_5m",
+            "cache_write_1h",
+            "long_context.cache_write_5m",
+            "long_context.cache_write_1h",
+        ] {
+            copy_v2_category(current, prior, path);
+        }
+    }
+}
+
+/// Apply only explicit Anthropic cache TTLs from the optional schema-2
+/// supplement. The required v1 catalog remains independently usable.
+fn supplement_v2(
+    table: &mut EffectiveTable,
+    v1_body: &[u8],
+    v2_body: &[u8],
+    fetched_at: u64,
+    previous: Option<&EffectiveTable>,
+) -> io::Result<()> {
+    if v2_body.len() as u64 > MAX_BODY {
+        return Err(invalid("models.dev v2 field response: too large"));
+    }
+    let api_v2: Value = serde_json::from_slice(v2_body)
+        .map_err(|error| invalid(format!("models.dev v2 field JSON: {error}")))?;
+    let provider = api_v2
+        .get("anthropic")
+        .ok_or_else(|| invalid("provider anthropic field provider: missing in v2"))?;
+    if provider.get("id").and_then(Value::as_str) != Some("anthropic") {
+        return Err(invalid(
+            "provider anthropic field id: identity mismatch in v2",
+        ));
+    }
+    let models = provider
+        .get("models")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("provider anthropic field models: missing in v2"))?;
+    let api_v1: Value = serde_json::from_slice(v1_body)
+        .map_err(|error| invalid(format!("models.dev v1 field JSON: {error}")))?;
+    let v1_models = api_v1
+        .pointer("/anthropic/models")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("provider anthropic field models: missing in v1"))?;
+    let rows = table
+        .providers
+        .get_mut("anthropic")
+        .ok_or_else(|| invalid("provider anthropic field cache: missing"))?;
+
+    for (id, model) in models {
+        // Key/model mismatches and v2 aliases are ignored. Only exact IDs in
+        // the merged v1/bootstrap table can receive this supplement.
+        if model.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+            eprintln!(
+                "semon: ignored models.dev v2 provider anthropic model {id} field id: mismatch"
+            );
+            if let (Some(current), Some(prior)) = (
+                rows.get_mut(id),
+                previous
+                    .and_then(|table| table.providers.get("anthropic"))
+                    .and_then(|rows| rows.get(id)),
+            ) {
+                for path in [
+                    "cache_write_5m",
+                    "cache_write_1h",
+                    "long_context.cache_write_5m",
+                    "long_context.cache_write_1h",
+                ] {
+                    copy_v2_category(current, prior, path);
+                }
+            }
+            continue;
+        }
+        let Some(current) = rows.get_mut(id) else {
+            continue;
+        };
+        let Some(cost) = model.get("cost") else {
+            eprintln!(
+                "semon: ignored models.dev v2 provider anthropic model {id} field cost: missing"
+            );
+            if let Some(prior) = previous
+                .and_then(|table| table.providers.get("anthropic"))
+                .and_then(|rows| rows.get(id))
+            {
+                for path in [
+                    "cache_write_5m",
+                    "cache_write_1h",
+                    "long_context.cache_write_5m",
+                    "long_context.cache_write_1h",
+                ] {
+                    copy_v2_category(current, prior, path);
+                }
+            }
+            continue;
+        };
+        let base = match v2_ttl_rates(cost, "cost") {
+            Ok(rates) => rates,
+            Err(error) => {
+                eprintln!("semon: ignored models.dev v2 provider anthropic model {id} {error}");
+                if let Some(prior) = previous
+                    .and_then(|table| table.providers.get("anthropic"))
+                    .and_then(|rows| rows.get(id))
+                {
+                    for path in [
+                        "cache_write_5m",
+                        "cache_write_1h",
+                        "long_context.cache_write_5m",
+                        "long_context.cache_write_1h",
+                    ] {
+                        copy_v2_category(current, prior, path);
+                    }
+                }
+                continue;
+            }
+        };
+
+        for (one_hour, value) in [(false, base.five_minutes), (true, base.one_hour)] {
+            let path = cache_write_path(one_hour);
+            if let Some(value) = value
+                && current.provenance.get(path).map(String::as_str) != Some("models_dev")
+            {
+                if one_hour {
+                    current.price.cache_write_1h = Some(value);
+                } else {
+                    current.price.cache_write_5m = Some(value);
+                }
+                current
+                    .provenance
+                    .insert(path.into(), "models_dev_v2".into());
+                current.v2_fetched_at = Some(fetched_at);
+            }
+        }
+
+        // Context cache-write tiers are useful only at the exact v1 boundary.
+        let v1_cost = v1_models.get(id).and_then(|model| model.get("cost"));
+        let v1_threshold = v1_cost
+            .and_then(|cost| long_context(cost, "anthropic").ok().flatten())
+            .map(|tier| tier.threshold_tokens);
+        let Some(threshold) = v1_threshold else {
+            continue;
+        };
+        let tier_entries = match cost.get("tiers") {
+            None | Some(Value::Null) => continue,
+            Some(Value::Array(entries)) => entries,
+            Some(_) => {
+                eprintln!(
+                    "semon: ignored models.dev v2 provider anthropic model {id} field cost.tiers: invalid array"
+                );
+                if let Some(prior) = previous
+                    .and_then(|table| table.providers.get("anthropic"))
+                    .and_then(|rows| rows.get(id))
+                {
+                    for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
+                        copy_v2_category(current, prior, path);
+                    }
+                }
+                continue;
+            }
+        };
+        let mut matching = tier_entries.iter().filter(|tier| {
+            tier.pointer("/tier/type").and_then(Value::as_str) == Some("context")
+                && tier.pointer("/tier/size").and_then(Value::as_u64) == Some(threshold)
+        });
+        let Some(entry) = matching.next() else {
+            continue;
+        };
+        if matching.next().is_some() {
+            eprintln!(
+                "semon: ignored models.dev v2 provider anthropic model {id} field cost.tiers: duplicate context boundary"
+            );
+            if let Some(prior) = previous
+                .and_then(|table| table.providers.get("anthropic"))
+                .and_then(|rows| rows.get(id))
+            {
+                for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
+                    copy_v2_category(current, prior, path);
+                }
+            }
+            continue;
+        }
+        let tier_cost = entry.get("cost").unwrap_or(entry);
+        let tier = match v2_ttl_rates(tier_cost, "cost.tiers[].cost") {
+            Ok(rates) => rates,
+            Err(error) => {
+                eprintln!("semon: ignored models.dev v2 provider anthropic model {id} {error}");
+                if let Some(prior) = previous
+                    .and_then(|table| table.providers.get("anthropic"))
+                    .and_then(|rows| rows.get(id))
+                {
+                    for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
+                        copy_v2_category(current, prior, path);
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(price_tier) = current
+            .price
+            .long_context
+            .as_mut()
+            .filter(|tier| tier.threshold_tokens == threshold)
+        else {
+            continue;
+        };
+        for (one_hour, value) in [(false, tier.five_minutes), (true, tier.one_hour)] {
+            let path = if one_hour {
+                "long_context.cache_write_1h"
+            } else {
+                "long_context.cache_write_5m"
+            };
+            if let Some(value) = value
+                && current.provenance.get(path).map(String::as_str) != Some("models_dev")
+            {
+                if one_hour {
+                    price_tier.cache_write_1h = Some(value);
+                } else {
+                    price_tier.cache_write_5m = Some(value);
+                }
+                current
+                    .provenance
+                    .insert(path.into(), "models_dev_v2".into());
+                current.v2_fetched_at = Some(fetched_at);
+            }
+        }
+    }
+    table.validate()?;
+    table.seal()?;
+    Ok(())
 }
 
 fn read_cache(path: &Path) -> io::Result<EffectiveTable> {
@@ -550,42 +951,72 @@ fn persist(path: &Path, table: &EffectiveTable) -> io::Result<()> {
 
 trait Fetcher {
     fn fetch(&self) -> io::Result<Vec<u8>>;
+    fn fetch_v2(&self) -> io::Result<Vec<u8>> {
+        Err(invalid("optional models.dev v2 endpoint unavailable"))
+    }
 }
 struct HttpFetcher;
+fn fetch_url(url: &str) -> io::Result<Vec<u8>> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| invalid("pricing HTTP client unavailable"))?;
+    let response = client
+        .get(url)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|_| invalid(format!("pricing request failed for {url}")))?;
+    if response.content_length().is_some_and(|n| n > MAX_BODY) {
+        return Err(invalid(format!("pricing response too large for {url}")));
+    }
+    let mut body = Vec::new();
+    response.take(MAX_BODY + 1).read_to_end(&mut body)?;
+    if body.len() as u64 > MAX_BODY {
+        return Err(invalid(format!("pricing response too large for {url}")));
+    }
+    Ok(body)
+}
 impl Fetcher for HttpFetcher {
     fn fetch(&self) -> io::Result<Vec<u8>> {
-        let client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| invalid("pricing HTTP client unavailable"))?;
-        let response = client
-            .get("https://models.dev/api.json")
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|_| invalid("pricing request failed"))?;
-        if response.content_length().is_some_and(|n| n > MAX_BODY) {
-            return Err(invalid("pricing response too large"));
-        }
-        let mut body = Vec::new();
-        response.take(MAX_BODY + 1).read_to_end(&mut body)?;
-        if body.len() as u64 > MAX_BODY {
-            return Err(invalid("pricing response too large"));
-        }
-        Ok(body)
+        fetch_url("https://models.dev/api.json")
+    }
+    fn fetch_v2(&self) -> io::Result<Vec<u8>> {
+        fetch_url("https://models.dev/experimental/v2.0/api.json")
     }
 }
 
 fn refresh(path: &Path, fetcher: &impl Fetcher) -> io::Result<EffectiveTable> {
     let body = fetcher.fetch()?;
-    let table = adapt(
-        &body,
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    )?;
+    let previous = read_cache(path).ok();
+    let fetched_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut table = adapt(&body, fetched_at)?;
+    match fetcher.fetch_v2() {
+        Ok(v2) => {
+            let mut candidate = table.clone();
+            match supplement_v2(&mut candidate, &body, &v2, fetched_at, previous.as_ref()) {
+                Ok(()) => table = candidate,
+                Err(error) => {
+                    eprintln!(
+                        "semon: optional models.dev v2 refresh failed ({error}); retaining prior TTL supplement"
+                    );
+                    preserve_v2_supplement(&mut table, previous.as_ref());
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "semon: optional models.dev v2 refresh failed ({error}); retaining prior TTL supplement"
+            );
+            preserve_v2_supplement(&mut table, previous.as_ref());
+        }
+    }
+    table.validate()?;
+    table.seal()?;
     // A disk failure is an unsuccessful update. The old table remains active.
     persist(path, &table)?;
     Ok(table)
@@ -616,13 +1047,104 @@ pub fn start_default_refresh() {
 }
 
 static STARTED: OnceLock<()> = OnceLock::new();
-static INDEXES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+#[derive(Default)]
+struct IndexRegistry {
+    entries: BTreeMap<PathBuf, Instant>,
+    wake_epoch: u64,
+}
+impl IndexRegistry {
+    fn prune(&mut self, now: Instant) {
+        self.entries.retain(|path, touched| {
+            let age = now.saturating_duration_since(*touched);
+            age < INDEX_RETIRE_AFTER && path.is_file()
+        });
+    }
+
+    fn register(&mut self, path: PathBuf, now: Instant) {
+        self.prune(now);
+        self.entries.insert(path, now);
+        if self.entries.len() > MAX_INDEXES
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, touched)| **touched)
+                .map(|(path, _)| path.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+        self.wake_epoch = self.wake_epoch.wrapping_add(1);
+    }
+}
+
+static INDEXES: OnceLock<(Mutex<IndexRegistry>, Condvar)> = OnceLock::new();
+fn registry() -> &'static (Mutex<IndexRegistry>, Condvar) {
+    INDEXES.get_or_init(|| (Mutex::new(IndexRegistry::default()), Condvar::new()))
+}
+
+/// Registering an index refreshes its LRU age and wakes the worker. The
+/// process-local set is capped; persistent SQLite cursors remain authoritative.
 pub(crate) fn register_index(path: PathBuf) {
-    INDEXES
-        .get_or_init(Mutex::default)
+    let (state, wake) = registry();
+    state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(path);
+        .register(path, Instant::now());
+    wake.notify_one();
+}
+
+/// Wake a parked projection worker after a writer may have enqueued an owner.
+pub(crate) fn notify_reprice() {
+    let (state, wake) = registry();
+    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+    state.wake_epoch = state.wake_epoch.wrapping_add(1);
+    wake.notify_one();
+}
+
+fn reprice_worker() {
+    loop {
+        let (state_lock, wake) = registry();
+        let mut state = state_lock.lock().unwrap_or_else(|e| e.into_inner());
+        state.prune(Instant::now());
+        let mut observed_epoch = state.wake_epoch;
+        if state.entries.is_empty() {
+            let epoch = state.wake_epoch;
+            let (next, _) = wake
+                .wait_timeout_while(state, WORKER_FALLBACK_WAKE, |state| {
+                    state.entries.is_empty() && state.wake_epoch == epoch
+                })
+                .unwrap_or_else(|error| error.into_inner());
+            state = next;
+            state.prune(Instant::now());
+            observed_epoch = state.wake_epoch;
+        }
+        let paths: Vec<_> = state.entries.keys().cloned().collect();
+        drop(state);
+
+        let table = snapshot();
+        let mut progress = false;
+        for path in paths {
+            match crate::events::store::reprice::step(&path, Arc::clone(&table)) {
+                Ok(changed) => progress |= changed,
+                Err(error) => {
+                    // Failure is retried; it must never discard native facts.
+                    eprintln!("semon: derived cost refresh deferred: {error}");
+                }
+            }
+        }
+        if !progress {
+            let (state_lock, wake) = registry();
+            let state = state_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if state.wake_epoch != observed_epoch {
+                continue;
+            }
+            let epoch = observed_epoch;
+            let _ = wake
+                .wait_timeout_while(state, WORKER_FALLBACK_WAKE, |state| {
+                    state.wake_epoch == epoch
+                })
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
 }
 
 /// Start exactly one process-wide background refresh and repricing worker.
@@ -637,25 +1159,18 @@ pub fn start_refresh(data_dir: &Path) {
             if std::thread::Builder::new().name("semon-prices".into()).spawn(move || loop {
                 let delay=match refresh(&path,&HttpFetcher) {
                     Ok(table)=>{install(table);interval},
-                    Err(_)=>{eprintln!("semon: pricing refresh failed; retaining last-known-good prices");RETRY},
+                    Err(error)=>{eprintln!("semon: pricing refresh failed ({error}); retaining last-known-good prices");RETRY},
                 };
                 std::thread::sleep(Duration::from_secs(delay));
             }).is_err() { eprintln!("semon: pricing refresh worker unavailable"); }
         }
-        if std::thread::Builder::new().name("semon-reprice".into()).spawn(|| loop {
-            let paths: Vec<_>=INDEXES.get_or_init(Mutex::default).lock().unwrap_or_else(|e|e.into_inner()).iter().cloned().collect();
-            let mut progress=false;
-            for path in paths {
-                match crate::events::store::reprice::step(&path,snapshot()) {
-                    Ok(changed)=>progress |= changed,
-                    Err(_error)=>{
-                    // Failure is retried; it must never discard native facts.
-                    eprintln!("semon: derived cost refresh deferred");
-                    }
-                }
-            }
-            std::thread::sleep(if progress { Duration::from_millis(100) } else { Duration::from_secs(2) });
-        }).is_err() { eprintln!("semon: pricing projection worker unavailable"); }
+        if std::thread::Builder::new()
+            .name("semon-reprice".into())
+            .spawn(reprice_worker)
+            .is_err()
+        {
+            eprintln!("semon: pricing projection worker unavailable");
+        }
     });
 }
 
@@ -668,6 +1183,7 @@ mod tests {
     };
     use std::sync::atomic::{AtomicU64, Ordering};
     const FIXTURE: &[u8] = include_bytes!("fixtures/models-dev.json");
+    const V2_FIXTURE: &[u8] = include_bytes!("fixtures/models-dev-v2.json");
     static NEXT: AtomicU64 = AtomicU64::new(0);
     fn path() -> PathBuf {
         std::env::temp_dir()
@@ -683,6 +1199,202 @@ mod tests {
     }
     fn table(value: Value) -> EffectiveTable {
         adapt(&serde_json::to_vec(&value).unwrap(), 10).unwrap()
+    }
+
+    #[test]
+    fn v2_ttl_supplement_prices_new_exact_anthropic_ids_and_matching_context_tiers() {
+        let mut v1 = fixture();
+        v1["anthropic"]["models"]["claude-new"] = serde_json::json!({
+            "id":"claude-new",
+            "cost":{
+                "input":7,"output":11,"cache_write":9,
+                "tiers":[
+                    {"tier":{"type":"image","size":1},"input":"ignored"},
+                    {"tier":{"type":"context","size":272000},"input":10,"output":15}
+                ],
+                "future_metric":{"not_a_rate":"ignored"}
+            }
+        });
+        v1["anthropic"]["models"]["claude-opus-5-5"]["cost"]["cache_write_5m"] = Value::from(2.0);
+        let v1_body = serde_json::to_vec(&v1).unwrap();
+        let mut v2: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+        v2["anthropic"]["models"]["claude-opus-5-5"] = serde_json::json!({
+            "id":"claude-opus-5-5",
+            "cost":{"text":{"input":{"cache":{"write":{"5m":9.0,"1h":10.0}}}}}
+        });
+        let mut effective = adapt(&v1_body, 100).unwrap();
+        supplement_v2(
+            &mut effective,
+            &v1_body,
+            &serde_json::to_vec(&v2).unwrap(),
+            200,
+            None,
+        )
+        .unwrap();
+
+        let new = effective.price_for("anthropic", "claude-new").unwrap();
+        assert_eq!(new.cache_write_5m, Some(3.75));
+        assert_eq!(new.cache_write_1h, Some(6.0));
+        let long = new.long_context.unwrap();
+        assert_eq!(long.threshold_tokens, 272_000);
+        assert_eq!(long.cache_write_5m, Some(5.5));
+        assert_eq!(long.cache_write_1h, Some(8.0));
+        let row = &effective.providers["anthropic"]["claude-new"];
+        assert_eq!(row.provenance["cache_write_5m"], "models_dev_v2");
+        assert_eq!(row.v2_fetched_at, Some(200));
+
+        // Explicit v1 category data outranks the optional v2 field.
+        let opus = &effective.providers["anthropic"]["claude-opus-5-5"];
+        assert_eq!(opus.price.cache_write_5m, Some(2.0));
+        assert_eq!(opus.provenance["cache_write_5m"], "models_dev");
+        // The same model ID in OpenAI, and an Anthropic alias absent from v1,
+        // are not mapped from the supplement.
+        assert_eq!(
+            effective
+                .price_for("openai", "claude-new")
+                .unwrap()
+                .cache_write_5m,
+            None
+        );
+        assert!(
+            effective
+                .providers
+                .get("anthropic")
+                .is_none_or(|rows| !rows.contains_key("claude-new-alias"))
+        );
+
+        let used = MessageUsage {
+            model: Some("claude-new".into()),
+            billing: BillingUsage {
+                cache_write_5m: 1_000_000,
+                prompt_size: 1_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut cost = CostBuild::with_table(Arc::new(effective));
+        cost.message(&used);
+        assert_eq!(cost.finish().usd, Some(3.75));
+    }
+
+    #[test]
+    fn optional_v2_failure_and_invalid_entries_keep_prior_ttl_while_v1_advances() {
+        let mut v1 = fixture();
+        v1["anthropic"]["models"]["claude-new"] = serde_json::json!({
+            "id":"claude-new","cost":{"input":7,"output":11,"cache_write":9}
+        });
+        let v1_body = serde_json::to_vec(&v1).unwrap();
+        let mut prior = adapt(&v1_body, 100).unwrap();
+        supplement_v2(&mut prior, &v1_body, V2_FIXTURE, 200, None).unwrap();
+
+        let mut changed_v1 = v1.clone();
+        changed_v1["anthropic"]["models"]["claude-new"]["cost"]["input"] = Value::from(9.0);
+        let changed_body = serde_json::to_vec(&changed_v1).unwrap();
+        let mut updated = adapt(&changed_body, 300).unwrap();
+        preserve_v2_supplement(&mut updated, Some(&prior));
+        assert_eq!(
+            updated.price_for("anthropic", "claude-new").unwrap().input,
+            Some(9.0)
+        );
+        let cached = &updated.providers["anthropic"]["claude-new"];
+        assert_eq!(cached.price.cache_write_5m, Some(3.75));
+        assert_eq!(cached.v2_fetched_at, Some(200));
+
+        let mut invalid_v2: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+        invalid_v2["anthropic"]["models"]["claude-new"]["cost"]["text"]["input"]["cache"]["write"]
+            ["5m"] = Value::from("bad");
+        let mut candidate = adapt(&changed_body, 400).unwrap();
+        supplement_v2(
+            &mut candidate,
+            &changed_body,
+            &serde_json::to_vec(&invalid_v2).unwrap(),
+            500,
+            Some(&prior),
+        )
+        .unwrap();
+        let row = &candidate.providers["anthropic"]["claude-new"];
+        assert_eq!(row.price.input, Some(9.0));
+        assert_eq!(row.price.cache_write_5m, Some(3.75));
+        assert_eq!(row.v2_fetched_at, Some(200));
+    }
+
+    struct Responses {
+        primary: Vec<u8>,
+        supplement: Option<Vec<u8>>,
+    }
+    impl Fetcher for Responses {
+        fn fetch(&self) -> io::Result<Vec<u8>> {
+            Ok(self.primary.clone())
+        }
+        fn fetch_v2(&self) -> io::Result<Vec<u8>> {
+            self.supplement
+                .clone()
+                .ok_or_else(|| invalid("optional v2 fixture failure"))
+        }
+    }
+
+    #[test]
+    fn refresh_commits_valid_v1_when_optional_v2_fetch_fails() {
+        let path = path();
+        let mut v1 = fixture();
+        v1["anthropic"]["models"]["claude-new"] = serde_json::json!({
+            "id":"claude-new","cost":{"input":7,"output":11,"cache_write":9}
+        });
+        let first_body = serde_json::to_vec(&v1).unwrap();
+        let first = refresh(
+            &path,
+            &Responses {
+                primary: first_body,
+                supplement: Some(V2_FIXTURE.to_vec()),
+            },
+        )
+        .unwrap();
+        let mut changed_v1 = v1;
+        changed_v1["anthropic"]["models"]["claude-new"]["cost"]["input"] = Value::from(9.0);
+        let second = refresh(
+            &path,
+            &Responses {
+                primary: serde_json::to_vec(&changed_v1).unwrap(),
+                supplement: None,
+            },
+        )
+        .unwrap();
+        let row = &second.providers["anthropic"]["claude-new"];
+        assert_eq!(row.price.input, Some(9.0));
+        assert_eq!(row.price.cache_write_5m, Some(3.75));
+        assert_eq!(
+            row.v2_fetched_at,
+            first.providers["anthropic"]["claude-new"].v2_fetched_at
+        );
+        assert_eq!(read_cache(&path).unwrap().fingerprint, second.fingerprint);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn index_registry_caps_entries_and_evicts_the_least_recently_used() {
+        let root = path().parent().unwrap().join("registry");
+        fs::create_dir_all(&root).unwrap();
+        let start = Instant::now();
+        let mut registry = IndexRegistry::default();
+        for index in 0..MAX_INDEXES {
+            let path = root.join(format!("index-{index}"));
+            fs::write(&path, b"").unwrap();
+            registry.register(path, start + Duration::from_secs(index as u64));
+        }
+        let recently_used = root.join("index-0");
+        registry.register(recently_used.clone(), start + Duration::from_secs(70));
+        let over_cap = root.join("index-over-cap");
+        fs::write(&over_cap, b"").unwrap();
+        registry.register(over_cap, start + Duration::from_secs(71));
+        assert_eq!(registry.entries.len(), MAX_INDEXES);
+        assert!(registry.entries.contains_key(&recently_used));
+        assert!(!registry.entries.contains_key(&root.join("index-1")));
+        fs::remove_file(&recently_used).unwrap();
+        registry.prune(start + Duration::from_secs(72));
+        assert!(!registry.entries.contains_key(&recently_used));
+        registry.prune(start + INDEX_RETIRE_AFTER + Duration::from_secs(72));
+        assert!(registry.entries.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
