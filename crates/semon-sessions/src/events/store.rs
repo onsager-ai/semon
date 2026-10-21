@@ -24,6 +24,7 @@ pub(crate) mod chunk_proofs;
 mod launch_calls;
 pub(crate) mod native_usage;
 mod relocation;
+pub(crate) mod reprice;
 mod semantic_stage;
 pub(crate) mod tree_state;
 

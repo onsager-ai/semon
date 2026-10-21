@@ -1417,7 +1417,9 @@ impl EventCache {
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
-        v1_cache.with_extension("sqlite3")
+        let path = v1_cache.with_extension("sqlite3");
+        crate::pricing::runtime::register_index(path.clone());
+        path
     }
 
     /// The retired JSON event cache, `sessions-index.events.json`: its
@@ -2437,6 +2439,13 @@ impl EventCache {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
             && let Some(index) = &entry.index
+            && index
+                .codex_native_usage
+                .as_ref()
+                .and_then(|native| native.cost.as_ref())
+                .is_none_or(|cost| {
+                    cost.pricing_fingerprint == crate::pricing::snapshot().fingerprint
+                })
         {
             return Base::Found(Arc::clone(index));
         }
