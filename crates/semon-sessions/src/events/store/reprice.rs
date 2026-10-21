@@ -296,10 +296,10 @@ fn retained_cost(
             for result in rows {
                 let (id, message) = result?;
                 loaded += 1;
-                if let Some(prior) = messages.get(&id) {
-                    if prior.model != message.model || prior.billing != message.billing {
-                        return Ok(None);
-                    }
+                if let Some(prior) = messages.get(&id)
+                    && (prior.model != message.model || prior.billing != message.billing)
+                {
+                    return Ok(None);
                 }
                 messages.insert(id, message);
             }

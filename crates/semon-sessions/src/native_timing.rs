@@ -1175,6 +1175,7 @@ mod tests {
                     last: Some(version),
                     tokens: [0.0; 3],
                     cost: crate::pricing::Cost {
+                        pricing_fingerprint: String::new(),
                         usd: Some(0.0),
                         unpriced_models: Vec::new(),
                         split_unknown_messages: 0,
