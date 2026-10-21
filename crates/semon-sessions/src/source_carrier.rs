@@ -15,6 +15,7 @@ pub(crate) enum FailureStage {
     Observed,
     Mode,
     ProofOpenDb,
+    HeaderStore,
     HeaderMissing,
     HeaderVersion,
     HeaderParser,
@@ -35,6 +36,7 @@ impl FailureStage {
             Self::Observed => "observed",
             Self::Mode => "mode",
             Self::ProofOpenDb => "proof_open_db",
+            Self::HeaderStore => "header_store",
             Self::HeaderMissing => "header_missing",
             Self::HeaderVersion => "header_version",
             Self::HeaderParser => "header_parser",
@@ -50,7 +52,7 @@ impl FailureStage {
 
     pub(crate) fn wrap(self, cause: impl Into<io::Error>) -> io::Error {
         io::Error::new(
-            io::ErrorKind::InvalidData,
+            io::ErrorKind::Other,
             SourceFailure {
                 stage: self,
                 cause: cause.into(),

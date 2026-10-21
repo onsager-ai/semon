@@ -342,13 +342,13 @@ impl Records<'_> {
         error
     }
 
-    pub(crate) fn query_error(&self, error: impl std::fmt::Display) -> crate::QueryError {
+    pub(crate) fn query_error(&self, _error: impl std::fmt::Display) -> crate::QueryError {
         if let Some(stage) = self.failure_stage.lock().ok().and_then(|stage| *stage) {
             return crate::QueryError::source_failure(stage);
         }
         match self.revision.lock().ok().and_then(|revision| *revision) {
             Some(reason) => crate::QueryError::local_revision(reason),
-            None => crate::QueryError::new("io", error.to_string()),
+            None => crate::QueryError::new("io", "proofs are unavailable"),
         }
     }
 
@@ -1260,6 +1260,38 @@ mod tests {
         assert_eq!(
             before,
             Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn focused_proof_store_schema_mismatch_has_its_own_stage() {
+        let fixture = Fixture::new("proof-store-schema-stage");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        drop(cache);
+
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.pragma_update(None, "user_version", 0).unwrap();
+        drop(db);
+        let error = match Sources::capture_focused(&options, &[selected]) {
+            Ok(_) => panic!("a schema-mismatched proof store must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::HeaderStore)
         );
     }
 

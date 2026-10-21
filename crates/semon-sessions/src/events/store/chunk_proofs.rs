@@ -2,7 +2,10 @@
 use super::*;
 use crate::source_carrier::FailureStage;
 use crate::source_chunks::Chunks;
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 const PAGE: usize = 1024;
 
@@ -39,6 +42,64 @@ fn prefix(path: &str) -> String {
         "native_source_chunks:{:x}:",
         Sha256::digest(path.as_bytes())
     )
+}
+
+#[derive(Default)]
+struct HeaderMismatchLimiter {
+    last: BTreeMap<String, (String, String, &'static str)>,
+}
+
+impl HeaderMismatchLimiter {
+    fn allow(&mut self, source: &str, catalog: &str, proof: &str, stage: &'static str) -> bool {
+        let event = (catalog.to_owned(), proof.to_owned(), stage);
+        if self.last.get(source) == Some(&event) {
+            return false;
+        }
+        if self.last.len() >= 256
+            && !self.last.contains_key(source)
+            && let Some(oldest) = self.last.keys().next().cloned()
+        {
+            self.last.remove(&oldest);
+        }
+        self.last.insert(source.to_owned(), event);
+        true
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_header_mismatch(
+    path: &str,
+    stage: FailureStage,
+    catalog_hash: &str,
+    proof_hash: &str,
+    index_hash: Option<&str>,
+    catalog_offset: u64,
+    proof_offset: Option<u64>,
+    index_offset: Option<u64>,
+    parser_version: Option<u32>,
+) {
+    static LAST: OnceLock<Mutex<HeaderMismatchLimiter>> = OnceLock::new();
+    let source_hash = format!("{:x}", Sha256::digest(path.as_bytes()));
+    let allowed = LAST
+        .get_or_init(|| Mutex::new(HeaderMismatchLimiter::default()))
+        .lock()
+        .is_ok_and(|mut limiter| {
+            limiter.allow(&source_hash, catalog_hash, proof_hash, stage.name())
+        });
+    if allowed {
+        eprintln!(
+            "semon native proof: source_hash={} stage={} catalog_ledger_hash={} proof_ledger_hash={} index_ledger_hash={} catalog_offset={} proof_offset={:?} index_offset={:?} proof_parser={:?} sample=independent_statements",
+            &source_hash[..12],
+            stage.name(),
+            &catalog_hash[..12],
+            &proof_hash[..12],
+            index_hash.map_or("missing", |hash| &hash[..12]),
+            catalog_offset,
+            proof_offset,
+            index_offset,
+            parser_version
+        );
+    }
 }
 
 #[cfg(test)]
@@ -336,7 +397,7 @@ impl Focused {
             .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
         {
             return Err(
-                FailureStage::HeaderParser.wrap(io::Error::other("Native proof store changed"))
+                FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
             );
         }
         let prefix = prefix(path);
@@ -378,16 +439,16 @@ impl Focused {
             let index_digest = index.as_ref().map(|(_, ledger)| {
                 format!("{:x}", Sha256::digest(header_ledger(ledger).as_bytes()))
             });
-            eprintln!(
-                "semon native proof: stage={} catalog_ledger_hash={} proof_ledger_hash={} index_ledger_hash={:?} catalog_offset={} proof_offset={:?} index_offset={:?} proof_parser={} sample=independent_statements",
-                stage.name(),
-                &expected[..12],
-                &actual[..12],
-                index_digest.as_ref().map(|digest| &digest[..12]),
+            log_header_mismatch(
+                path,
+                stage,
+                &expected,
+                &actual,
+                index_digest.as_deref(),
                 ledger.offset,
                 header.consumed_offset,
                 index.as_ref().map(|(_, ledger)| ledger.offset),
-                header.parser_version
+                Some(header.parser_version),
             );
             return Err(stage.wrap(io::Error::other("Native proof header changed")));
         }
@@ -785,6 +846,16 @@ pub(super) fn write_measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_mismatch_logging_is_limited_to_source_transitions() {
+        let mut limiter = HeaderMismatchLimiter::default();
+        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger"));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger"));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_ledger"));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_parser"));
+        assert!(limiter.allow("other-source", "catalog-l1", "proof-l3", "header_parser"));
+    }
 
     #[test]
     fn focused_proof_work_is_independent_of_the_complete_vector_and_rechecks_pages() {

@@ -842,6 +842,32 @@ impl std::error::Error for LocalRevisionChanged {
     }
 }
 
+fn source_read_fence(error: &io::Error) -> ProjectionFence {
+    error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+        .filter(|detail| detail.2 != crate::source_carrier::FailureStage::Budget)
+        .map(|detail| ProjectionFence::LocalSourceRevision(detail.0, detail.2))
+        .unwrap_or(ProjectionFence::SourceGeneration)
+}
+
+fn field_failure_reply(error: &io::Error) -> ViewerReply {
+    if let Some(detail) = error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+        .filter(|detail| detail.2 != crate::source_carrier::FailureStage::Budget)
+    {
+        stale(ProjectionFence::LocalSourceRevision(detail.0, detail.2))
+    } else {
+        catalog::error(
+            503,
+            "field_unavailable",
+            "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
+            true,
+        )
+    }
+}
+
 struct Composite<'a> {
     local: &'a Local<'a>,
     provider: Option<&'a dyn SessionSourceReader>,
@@ -980,10 +1006,20 @@ impl SessionSourceReader for Local<'_> {
         let before = Stat::from_metadata(&file.metadata()?)?;
         let reason = mismatch(&ledger.stat, &before);
         let rejected = |reason, stage, cause| {
-            eprintln!(
-                "semon native source: stage={stage:?} catalog_offset={} raw_before={}",
-                reference.offset, before.size
-            );
+            if !matches!(
+                stage,
+                FailureStage::HeaderStore
+                    | FailureStage::HeaderMissing
+                    | FailureStage::HeaderVersion
+                    | FailureStage::HeaderParser
+                    | FailureStage::HeaderLedger
+                    | FailureStage::HeaderCount
+            ) {
+                eprintln!(
+                    "semon native source: stage={stage:?} catalog_offset={} raw_before={}",
+                    reference.offset, before.size
+                );
+            }
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 LocalRevisionChanged(reason, true, stage, cause),
@@ -1269,14 +1305,8 @@ fn render(
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
-            let reason = result
-                .as_ref()
-                .err()
-                .and_then(|error| error.get_ref())
-                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .map(|error| ProjectionFence::LocalSourceRevision(error.0, error.2))
-                .unwrap_or(ProjectionFence::SourceGeneration);
-            source_changed.set(Some(reason));
+            let error = result.as_ref().err().expect("checked source failure");
+            source_changed.set(Some(source_read_fence(error)));
         }
         result
     };
@@ -1932,22 +1962,38 @@ fn render_field(
             "field":{"name":field.kind.name(),"layers":field.layers,"chunk":chunk,"next":(!complete).then_some(chunk+1),"complete":complete},
             "text":text,"freshness":{"state":"cached"},"content_observation":content,"provenance":{"source":references.get(&file.path),"offset":field.record_offset,"block":field.block,"native_event_id":field.native_event_id},"observation":{"source_bytes":bytes}}),
         ),
-        Err(error)
-            if error
-                .get_ref()
-                .is_some_and(|error| error.is::<LocalRevisionChanged>()) =>
-        {
-            let detail = error
-                .get_ref()
-                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .expect("checked local revision");
-            stale(ProjectionFence::LocalSourceRevision(detail.0, detail.2))
-        }
-        Err(_) => catalog::error(
-            503,
-            "field_unavailable",
-            "The selected immutable field range is unavailable. Resynchronize the session before retrying.",
-            true,
-        ),
+        Err(error) => field_failure_reply(&error),
+    }
+}
+
+#[cfg(test)]
+mod budget_contract_tests {
+    use super::*;
+
+    #[test]
+    fn budget_keeps_source_generation_and_field_unavailable_contracts() {
+        let error = io::Error::new(
+            io::ErrorKind::InvalidData,
+            LocalRevisionChanged(
+                crate::source_carrier::RevisionReason::SizeGrew,
+                false,
+                crate::source_carrier::FailureStage::Budget,
+                None,
+            ),
+        );
+        assert!(matches!(
+            source_read_fence(&error),
+            ProjectionFence::SourceGeneration
+        ));
+        let source_reply = stale(source_read_fence(&error));
+        let source_body: Value = serde_json::from_slice(&source_reply.body).unwrap();
+        assert_eq!(source_body["status"], 409);
+        assert_eq!(source_body["fence_reason"], "source_generation");
+        assert!(source_body.get("local_revision_reason").is_none());
+
+        let field_reply = field_failure_reply(&error);
+        let field_body: Value = serde_json::from_slice(&field_reply.body).unwrap();
+        assert_eq!(field_body["status"], 503);
+        assert_eq!(field_body["error"]["code"], "field_unavailable");
     }
 }
