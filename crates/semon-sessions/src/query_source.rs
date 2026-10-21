@@ -258,11 +258,10 @@ impl Sources {
                     source.path.to_str().ok_or_else(unavailable)?,
                     &ledger,
                 )
-                .map_err(|error| {
-                    if crate::source_carrier::FailureStage::of(&error).is_some() {
+                .inspect_err(|error| {
+                    if crate::source_carrier::FailureStage::of(error).is_some() {
                         note_focused_source_interest(&cache_path, source);
                     }
-                    error
                 })?;
                 Ok((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))))
             })
