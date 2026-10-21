@@ -1019,7 +1019,11 @@ impl SessionSourceReader for Local<'_> {
                     | FailureStage::PageHash
                     | FailureStage::ProofChanged
             ) {
-                crate::source_carrier::note_diagnostic_interest(&path.to_string_lossy());
+                crate::source_carrier::note_diagnostic_interest(
+                    &EventCache::path(&self.options.cache),
+                    &path.to_string_lossy(),
+                    &ledger,
+                );
             }
             if !matches!(
                 stage,

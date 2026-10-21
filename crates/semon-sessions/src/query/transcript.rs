@@ -27,7 +27,7 @@ fn proof_unavailable(error: &io::Error) -> QueryError {
     {
         QueryError::io(error)
     } else {
-        QueryError::new("io", "proofs are unavailable")
+        QueryError::new("io", "Original native transcript proofs are unavailable")
     }
 }
 
@@ -398,7 +398,7 @@ fn virtual_read(
         options,
         &sources.into_values().collect::<Vec<_>>(),
     )
-    .map_err(|error| QueryError::io(&error))?;
+    .map_err(|error| proof_unavailable(&error))?;
     tx.commit().map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
     #[cfg(feature = "test-hooks")]
@@ -1325,7 +1325,10 @@ mod proof_error_tests {
     fn unstaged_proof_errors_are_generic_and_staged_errors_keep_the_stage() {
         let untyped = proof_unavailable(&io::Error::other("private sqlite detail"));
         assert_eq!(untyped.code, "io");
-        assert_eq!(untyped.message, "proofs are unavailable");
+        assert_eq!(
+            untyped.message,
+            "Original native transcript proofs are unavailable"
+        );
         assert!(!untyped.message.contains("private sqlite detail"));
 
         let staged_error = crate::source_carrier::FailureStage::HeaderLedger
@@ -1334,6 +1337,18 @@ mod proof_error_tests {
         let staged = proof_unavailable(&staged_error);
         assert_eq!(staged.code, "io");
         assert_eq!(staged.stage, Some("header_ledger"));
-        assert_eq!(staged.message, "proofs are unavailable");
+        assert_eq!(
+            staged.message,
+            "Original native transcript proofs are unavailable"
+        );
+    }
+
+    #[test]
+    fn unstaged_revision_error_preserves_the_typed_source_fence() {
+        let error = crate::source_carrier::RevisionReason::SizeGrew.error();
+        let mapped = proof_unavailable(&error);
+        assert_eq!(mapped.code, "stale_projection");
+        assert_eq!(mapped.local_revision_reason, Some("size_grew"));
+        assert_eq!(mapped.stage, None);
     }
 }
