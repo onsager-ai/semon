@@ -281,6 +281,12 @@ fn source_step(
     table: &Arc<EffectiveTable>,
     pending_id: Option<i64>,
 ) -> rusqlite::Result<bool> {
+    if pending_id.is_some_and(|id| work.job.as_ref().is_some_and(|job| job.id != id)) {
+        // The pending owner now resolves to another retained source generation.
+        // Discard the partial accumulator but keep the queue row for a fresh job.
+        work.job = None;
+        return Ok(false);
+    }
     if work.job.is_none() {
         let next: Option<(i64, String, i64, Option<String>)> = if let Some(id) = pending_id {
             tx.query_row("SELECT s.source_id,s.receipt,f.file_id,CASE WHEN octet_length(f.codex_native_usage)<=1048576 THEN f.codex_native_usage ELSE NULL END FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id=?1 AND s.parser_version=?2 AND s.usage_ready=1 AND f.codex_pricing_fingerprint IS NOT ?3",params![id,CACHE_VERSION,table.fingerprint],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?
@@ -322,14 +328,14 @@ fn source_step(
     let current: Option<(String,String)>=tx.query_row("SELECT s.receipt,f.codex_native_usage FROM native_usage_sources s JOIN native_usage_current n USING(source_id) JOIN files f ON f.path=n.source_path WHERE s.source_id=?1 AND octet_length(f.codex_native_usage)<=1048576",[job.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((receipt, encoded)) = current else {
         work.job = None;
-        return Ok(true);
+        return Ok(pending_id.is_none());
     };
     if receipt != job.receipt {
         if pending_id.is_none() {
             work.file_after = job.file_id.saturating_sub(1);
         }
         work.job = None;
-        return Ok(true);
+        return Ok(pending_id.is_none());
     }
     let mut statement=tx.prepare("SELECT native_offset,CASE WHEN octet_length(payload)<=8192 THEN payload ELSE NULL END FROM native_usage_facts WHERE source_id=?1 AND native_offset>?2 AND model_outcome='accepted' ORDER BY native_offset LIMIT ?3")?;
     let rows = statement.query_map(params![job.id, job.offset, BATCH as i64], |r| {
@@ -778,6 +784,8 @@ fn pending_step(
             let done = if let Some(id) = id {
                 source_step(tx, work, table, Some(id))?
             } else {
+                // The source is not ready/current yet; pricing_pending_native_usage_ready
+                // re-enqueues it when retained usage becomes ready.
                 true
             };
             if done {
@@ -1007,6 +1015,87 @@ mod tests {
         panic!("bounded fixture did not finish")
     }
 
+    fn codex_index(model: &str, facts: u64) -> FileIndex {
+        let mut index = FileIndex {
+            native_usage_observations: Some(Vec::new()),
+            ..Default::default()
+        };
+        for seq in 0..facts {
+            let record = serde_json::json!({"type":"token_usage_record","timestamp":"1970-01-01T00:00:00Z","payload":{"thread_id":"thread","session_id":"session","turn_id":format!("turn-{seq}"),"response_id":format!("response-{seq}"),"usage":{"input_tokens":100,"output_tokens":0,"total_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
+            CodexNativeUsage::observe(
+                &mut index.codex_native_usage,
+                &record["payload"],
+                model.to_owned(),
+                Some(0),
+            );
+            let bytes = serde_json::to_vec(&record).unwrap();
+            index.native_usage_observations.as_mut().unwrap().push(
+                native_usage::Observation::capture(&record, &bytes, seq, Some(model)).unwrap(),
+            );
+        }
+        index
+    }
+
+    fn mark_file_stale(
+        connection: &Connection,
+        path: &str,
+        fingerprint: &str,
+        total_tokens: Option<u64>,
+    ) {
+        let encoded: String = connection
+            .query_row(
+                "SELECT codex_native_usage FROM files WHERE path=?1",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut root: Value = serde_json::from_str(&encoded).unwrap();
+        root["cost"]["pricing_fingerprint"] = Value::String(fingerprint.to_owned());
+        if let Some(total) = total_tokens {
+            root["tokens"]["total"] = Value::from(total);
+        }
+        connection
+            .execute(
+                "UPDATE files SET codex_native_usage=?2 WHERE path=?1",
+                params![path, json(&root).unwrap()],
+            )
+            .unwrap();
+    }
+
+    fn source_facts(
+        connection: &Connection,
+        id: i64,
+    ) -> Vec<(i64, String, String, String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT native_offset,identity,payload,record,outcome||':'||model_outcome FROM native_usage_facts WHERE source_id=?1 ORDER BY native_offset",
+            )
+            .unwrap();
+        statement
+            .query_map([id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn pending_source_count(connection: &Connection, path: &str) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pricing_recompute_pending WHERE owner_kind='source' AND owner_key=?1",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn completed_fingerprint_stays_idle_without_writes_or_payload_decodes() {
         let root = root();
@@ -1046,6 +1135,409 @@ mod tests {
             0
         );
         drop(_store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_source_append_restarts_partial_batch_and_prices_all_retained_facts() {
+        let root = root();
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = SqliteStore::attempt(&path, None).unwrap_or_else(|e| panic!("{e}"));
+        let p = "/not-present/pending-append.jsonl";
+        let unrelated = "/not-present/already-current.jsonl";
+        let p_ledger = ledger();
+        let unrelated_ledger = ledger();
+        store
+            .write_one(p, None, None, &p_ledger, &codex_index("gpt-6.1-sol", 129))
+            .unwrap();
+        store
+            .write_one(
+                unrelated,
+                None,
+                None,
+                &unrelated_ledger,
+                &codex_index("gpt-6.1-sol", 1),
+            )
+            .unwrap();
+        let current = table("openai", "gpt-6.1-sol", 7.0, 1);
+        let old = table("openai", "gpt-6.1-sol", 4.0, 0);
+        drain(&path, &current);
+        let p_id: i64 = store
+            .connection
+            .query_row(
+                "SELECT source_id FROM native_usage_current WHERE source_path=?1",
+                [p],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let q_id: i64 = store
+            .connection
+            .query_row(
+                "SELECT source_id FROM native_usage_current WHERE source_path=?1",
+                [unrelated],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unrelated_usage: String = store
+            .connection
+            .query_row(
+                "SELECT codex_native_usage FROM files WHERE path=?1",
+                [unrelated],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unrelated_stamp: String = store
+            .connection
+            .query_row(
+                "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
+                [unrelated],
+                |row| row.get(0),
+            )
+            .unwrap();
+        mark_file_stale(&store.connection, p, &old.fingerprint, None);
+        assert_eq!(pending_source_count(&store.connection, p), 1);
+        REPRICE_PAYLOAD_DECODES.with(|count| count.set(0));
+
+        assert!(step_inner(&path, Arc::clone(&current), false).unwrap());
+        assert_eq!(pending_source_count(&store.connection, p), 1);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT json_extract(value,'$.job.offset') FROM meta WHERE key=?1",
+                    [WORK],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            127
+        );
+
+        let mut appended_ledger = p_ledger.clone();
+        appended_ledger.stat.size += 100;
+        appended_ledger.offset += 100;
+        appended_ledger.prefix = [3; 32];
+        appended_ledger.tail = [4; 32];
+        let original_receipt: String = store
+            .connection
+            .query_row(
+                "SELECT receipt FROM native_usage_sources WHERE source_id=?1",
+                [p_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tx = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(
+            native_usage::begin_source(&tx, p, Some(&p_ledger), &appended_ledger, true).unwrap(),
+            p_id
+        );
+        let appended_payload = serde_json::json!({
+            "model":"gpt-6.1-sol",
+            "timestamp":0,
+            "tokens":{"input":100,"cached_input":0,"output":0,"reasoning_output":0,"total":100},
+            "model_tokens":{"input":100,"output":0,"cache_write":0,"cache_read":0}
+        });
+        let appended_record =
+            serde_json::json!({"type":"token_usage_record","payload":{"response_id":"append-129"}});
+        tx.execute(
+            "INSERT INTO native_usage_identities VALUES(?1,'tree','append-129',129)",
+            [p_id],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_usage_identities VALUES(?1,'model','append-129',129)",
+            [p_id],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_usage_facts VALUES(?1,129,'append-129',?2,?3,'accepted','accepted')",
+            params![p_id, appended_payload.to_string(), appended_record.to_string()],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE native_usage_dimensions SET value=json_set(value,'$.input',json_extract(value,'$.input')+100) WHERE source_id=?1 AND kind='model' AND dimension='gpt-6.1-sol'",
+            [p_id],
+        )
+        .unwrap();
+        mark_file_stale(&tx, p, &old.fingerprint, Some(13_000));
+        tx.commit().unwrap();
+        let writer_facts = source_facts(&store.connection, p_id);
+        let writer_receipt: String = store
+            .connection
+            .query_row(
+                "SELECT receipt FROM native_usage_sources WHERE source_id=?1",
+                [p_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(writer_facts.len(), 130);
+        assert_ne!(writer_receipt, original_receipt);
+        assert_eq!(pending_source_count(&store.connection, p), 1);
+
+        let mut completed = false;
+        for _ in 0..30 {
+            let progressed = step_inner(&path, Arc::clone(&current), false).unwrap();
+            if pending_source_count(&store.connection, p) == 0 {
+                let stamp: String = store
+                    .connection
+                    .query_row(
+                        "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
+                        [p],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(stamp, current.fingerprint);
+                completed = true;
+                break;
+            }
+            assert!(progressed);
+        }
+        assert!(
+            completed,
+            "pending append was not completed within 30 steps"
+        );
+        let amount: f64 = store
+            .connection
+            .query_row(
+                "SELECT json_extract(value,'$.usd') FROM native_usage_dimensions WHERE source_id=?1 AND kind='cost_model' AND dimension='gpt-6.1-sol'",
+                [p_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((amount - 0.091).abs() < 1e-12);
+        let day_amount: f64 = store
+            .connection
+            .query_row(
+                "SELECT CAST(value AS REAL) FROM native_usage_dimensions WHERE source_id=?1 AND kind='cost_day'",
+                [p_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((day_amount - 0.091).abs() < 1e-12);
+        assert_eq!(source_facts(&store.connection, p_id), writer_facts);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT receipt FROM native_usage_sources WHERE source_id=?1",
+                    [p_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            writer_receipt
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT codex_native_usage FROM files WHERE path=?1",
+                    [unrelated],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            unrelated_usage
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
+                    [unrelated],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            unrelated_stamp
+        );
+        assert_eq!(
+            REPRICE_PAYLOAD_DECODES.with(std::cell::Cell::get),
+            266,
+            "pending repricing must not decode the unrelated current owner"
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM native_usage_facts WHERE source_id=?1",
+                    [q_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_source_current_id_replacement_discards_old_partial_job() {
+        let root = root();
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = SqliteStore::attempt(&path, None).unwrap_or_else(|e| panic!("{e}"));
+        let native = "/not-present/pending-replacement.jsonl";
+        let original_ledger = ledger();
+        store
+            .write_one(
+                native,
+                None,
+                None,
+                &original_ledger,
+                &codex_index("gpt-6.1-sol", 129),
+            )
+            .unwrap();
+        let current = table("openai", "gpt-6.1-sol", 7.0, 1);
+        let old = table("openai", "gpt-6.1-sol", 4.0, 0);
+        drain(&path, &current);
+        let old_id: i64 = store
+            .connection
+            .query_row(
+                "SELECT source_id FROM native_usage_current WHERE source_path=?1",
+                [native],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let old_facts = source_facts(&store.connection, old_id);
+        mark_file_stale(&store.connection, native, &old.fingerprint, None);
+        assert_eq!(pending_source_count(&store.connection, native), 1);
+        assert!(step_inner(&path, Arc::clone(&current), false).unwrap());
+        assert_eq!(pending_source_count(&store.connection, native), 1);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT json_extract(value,'$.job.offset') FROM meta WHERE key=?1",
+                    [WORK],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            127
+        );
+
+        let mut replacement_ledger = original_ledger.clone();
+        replacement_ledger.stat.size += 200;
+        replacement_ledger.offset += 200;
+        replacement_ledger.prefix = [5; 32];
+        replacement_ledger.tail = [6; 32];
+        let tx = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let replacement_id =
+            native_usage::begin_source(&tx, native, None, &replacement_ledger, false).unwrap();
+        assert_ne!(replacement_id, old_id);
+        let replacement_payload = serde_json::json!({
+            "model":"gpt-6.1-sol",
+            "timestamp":0,
+            "tokens":{"input":300,"cached_input":0,"output":0,"reasoning_output":0,"total":300},
+            "model_tokens":{"input":300,"output":0,"cache_write":0,"cache_read":0}
+        });
+        let replacement_record = serde_json::json!({"type":"token_usage_record","payload":{"response_id":"replacement-0"}});
+        tx.execute(
+            "INSERT INTO native_usage_identities VALUES(?1,'tree','replacement-0',0)",
+            [replacement_id],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_usage_identities VALUES(?1,'model','replacement-0',0)",
+            [replacement_id],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_usage_facts VALUES(?1,0,'replacement-0',?2,?3,'accepted','accepted')",
+            params![replacement_id, replacement_payload.to_string(), replacement_record.to_string()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO native_usage_dimensions VALUES(?1,'model','gpt-6.1-sol',?2)",
+            params![
+                replacement_id,
+                json(&serde_json::json!({"input":300,"output":0,"cache_write":0,"cache_read":0}))
+                    .unwrap()
+            ],
+        )
+        .unwrap();
+        mark_file_stale(&tx, native, &old.fingerprint, Some(300));
+        tx.execute(
+            "UPDATE native_usage_sources SET usage_ready=1,checkpoint=?2 WHERE source_id=?1",
+            params![replacement_id, replacement_ledger.offset as i64],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(pending_source_count(&store.connection, native), 1);
+        let replacement_facts = source_facts(&store.connection, replacement_id);
+
+        assert!(step_inner(&path, Arc::clone(&current), false).unwrap());
+        assert_eq!(pending_source_count(&store.connection, native), 1);
+        assert!(
+            store
+                .connection
+                .query_row(
+                    "SELECT json_extract(value,'$.job') IS NULL FROM meta WHERE key=?1",
+                    [WORK],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap(),
+            "a replacement ID must discard the old partial accumulator"
+        );
+        let stale_stamp: String = store
+            .connection
+            .query_row(
+                "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
+                [native],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_stamp, old.fingerprint);
+
+        let mut completed = false;
+        for _ in 0..30 {
+            let progressed = step_inner(&path, Arc::clone(&current), false).unwrap();
+            if pending_source_count(&store.connection, native) == 0 {
+                let stamp: String = store
+                    .connection
+                    .query_row(
+                        "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
+                        [native],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(stamp, current.fingerprint);
+                completed = true;
+                break;
+            }
+            assert!(progressed);
+        }
+        assert!(
+            completed,
+            "replacement source was not completed within 30 steps"
+        );
+        let amount: f64 = store
+            .connection
+            .query_row(
+                "SELECT json_extract(value,'$.usd') FROM native_usage_dimensions WHERE source_id=?1 AND kind='cost_model' AND dimension='gpt-6.1-sol'",
+                [replacement_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((amount - 0.0021).abs() < 1e-12);
+        assert_eq!(source_facts(&store.connection, old_id), old_facts);
+        assert_eq!(
+            source_facts(&store.connection, replacement_id),
+            replacement_facts
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT source_id FROM native_usage_current WHERE source_path=?1",
+                    [native],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            replacement_id
+        );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
