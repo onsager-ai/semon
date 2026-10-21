@@ -7080,7 +7080,7 @@ mod tests {
         let catalog_offset = rows[0].sources[0].offset;
         let selected_ledger = crate::source_carrier::ledger(&rows[0].sources[0]);
         crate::source_carrier::note_diagnostic_interest(
-            &EventCache::path(&options.cache),
+            &crate::events::EventCache::path(&options.cache),
             &path.to_string_lossy(),
             &selected_ledger,
         );
@@ -7311,7 +7311,7 @@ mod tests {
         let ledger = crate::source_carrier::ledger(source);
         let digest = crate::source_carrier::ledger_digest(&ledger);
         crate::source_carrier::note_diagnostic_interest(
-            &EventCache::path(&options.cache),
+            &crate::events::EventCache::path(&options.cache),
             &source.path.to_string_lossy(),
             &ledger,
         );
@@ -7367,7 +7367,7 @@ mod tests {
         let source = &rows[0].sources[0];
         let ledger = crate::source_carrier::ledger(source);
         crate::source_carrier::note_diagnostic_interest(
-            &EventCache::path(&options.cache),
+            &crate::events::EventCache::path(&options.cache),
             &source.path.to_string_lossy(),
             &ledger,
         );
@@ -7376,7 +7376,7 @@ mod tests {
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
         log_catalog_publish_attempt(
             &connection,
-            &EventCache::path(&options.cache),
+            &crate::events::EventCache::path(&options.cache),
             &rows,
             &Ok(Outcome::Conflict),
             Some("source_identity"),
@@ -7413,7 +7413,7 @@ mod tests {
             .unwrap();
         let ledger = crate::source_carrier::ledger(selected);
         crate::source_carrier::note_diagnostic_interest(
-            &EventCache::path(&options.cache),
+            &crate::events::EventCache::path(&options.cache),
             target,
             &ledger,
         );
