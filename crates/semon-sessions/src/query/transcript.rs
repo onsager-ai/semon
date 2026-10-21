@@ -386,7 +386,7 @@ fn virtual_read(
         options,
         &sources.into_values().collect::<Vec<_>>(),
     )
-    .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
+    .map_err(|error| QueryError::io(&error))?;
     tx.commit().map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
     #[cfg(feature = "test-hooks")]
@@ -810,7 +810,7 @@ fn read_inner(
     }
     let selected_sources: Vec<_> = selected_sources.into_values().collect();
     let sources = crate::query_source::Sources::capture_focused(options, &selected_sources)
-        .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
+        .map_err(|error| QueryError::io(&error))?;
     let incomplete: bool = if history.is_some() {
         tx.query_row(
             "SELECT incomplete FROM session_history_projections WHERE session_key=?1",

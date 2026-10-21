@@ -787,7 +787,10 @@ enum ProjectionFence {
     CatalogPublication,
     ProjectionGeneration,
     ErrorsGeneration,
-    LocalSourceRevision(crate::source_carrier::RevisionReason),
+    LocalSourceRevision(
+        crate::source_carrier::RevisionReason,
+        crate::source_carrier::FailureStage,
+    ),
     SourceGeneration,
     SourceRange,
 }
@@ -801,9 +804,10 @@ fn stale(reason: ProjectionFence) -> ViewerReply {
     );
     let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
     body["resynchronize"] = json!(true);
-    if let ProjectionFence::LocalSourceRevision(detail) = reason {
+    if let ProjectionFence::LocalSourceRevision(detail, stage) = reason {
         body["fence_reason"] = json!("local_source_revision");
         body["local_revision_reason"] = json!(detail);
+        body["stage"] = json!(stage);
     } else {
         body["fence_reason"] = json!(reason);
     }
@@ -821,13 +825,22 @@ impl std::fmt::Display for MissingLocalSource {
 impl std::error::Error for MissingLocalSource {}
 
 #[derive(Debug)]
-struct LocalRevisionChanged(crate::source_carrier::RevisionReason, bool);
+struct LocalRevisionChanged(
+    crate::source_carrier::RevisionReason,
+    bool,
+    crate::source_carrier::FailureStage,
+    Option<io::Error>,
+);
 impl std::fmt::Display for LocalRevisionChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("selected local revision changed before reading")
     }
 }
-impl std::error::Error for LocalRevisionChanged {}
+impl std::error::Error for LocalRevisionChanged {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.3.as_ref().map(|error| error as _)
+    }
+}
 
 struct Composite<'a> {
     local: &'a Local<'a>,
@@ -936,7 +949,7 @@ impl SessionSourceReader for Local<'_> {
         max: usize,
     ) -> io::Result<crate::SessionSourceRange> {
         use crate::events::Stat;
-        use crate::source_carrier::{RevisionReason, ledger, mismatch, recheck};
+        use crate::source_carrier::{FailureStage, RevisionReason, ledger, mismatch, recheck};
         let path = self
             .references
             .iter()
@@ -966,10 +979,14 @@ impl SessionSourceReader for Local<'_> {
         }
         let before = Stat::from_metadata(&file.metadata()?)?;
         let reason = mismatch(&ledger.stat, &before);
-        let rejected = |reason| {
+        let rejected = |reason, stage, cause| {
+            eprintln!(
+                "semon native source: stage={stage:?} catalog_offset={} raw_before={}",
+                reference.offset, before.size
+            );
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                LocalRevisionChanged(reason, true),
+                LocalRevisionChanged(reason, true, stage, cause),
             )
         };
         let mut observed = self.observed.lock().map_err(|_| invalid())?;
@@ -978,14 +995,25 @@ impl SessionSourceReader for Local<'_> {
         {
             return Err(rejected(
                 mismatch(prior, &before).unwrap_or(RevisionReason::MissingChangeToken),
+                FailureStage::Observed,
+                None,
             ));
         }
         if before.size < reference.offset {
-            return Err(rejected(RevisionReason::SizeShrank));
+            return Err(rejected(
+                RevisionReason::SizeShrank,
+                FailureStage::StatShrank,
+                None,
+            ));
         }
         let bytes = if let Some(reason) = reason {
             if !matches!(self.mode, SessionSourceReadMode::LocalOrPinnedProvider) {
-                return Err(rejected(reason));
+                let stage = if matches!(reason, RevisionReason::SizeGrew) {
+                    FailureStage::StatGrew
+                } else {
+                    FailureStage::Mode
+                };
+                return Err(rejected(reason, stage, None));
             }
             // Proof headers bind the original full ledger, including prefix,
             // consumed boundary and physical witness. Only covering blocks are
@@ -997,7 +1025,13 @@ impl SessionSourceReader for Local<'_> {
                     path.to_str().ok_or_else(invalid)?,
                     &ledger,
                 )
-                .map_err(|_| rejected(reason))?;
+                .map_err(|error| {
+                    rejected(
+                        reason,
+                        FailureStage::of(&error).unwrap_or(FailureStage::ProofOpenDb),
+                        Some(error),
+                    )
+                })?;
                 entry.insert(proof);
             }
             let proof = proofs.get(path).ok_or_else(invalid)?;
@@ -1018,10 +1052,21 @@ impl SessionSourceReader for Local<'_> {
                     let charge =
                         (reference.offset - start).min(crate::source_chunks::SIZE as u64) as usize;
                     let mut remaining = self.bytes_left.lock().map_err(|_| invalid())?;
-                    *remaining = remaining.checked_sub(charge).ok_or_else(invalid)?;
+                    *remaining = remaining.checked_sub(charge).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            LocalRevisionChanged(reason, false, FailureStage::Budget, None),
+                        )
+                    })?;
                     let bytes: Arc<[u8]> = proof
                         .read(&mut file, index_usize)
-                        .map_err(|_| rejected(reason))?
+                        .map_err(|error| {
+                            rejected(
+                                reason,
+                                FailureStage::of(&error).unwrap_or(FailureStage::ProofOpenDb),
+                                Some(error),
+                            )
+                        })?
                         .into();
                     *cached = Some((path.clone(), index_usize, bytes.clone()));
                     bytes
@@ -1034,7 +1079,17 @@ impl SessionSourceReader for Local<'_> {
             bytes
         } else {
             let mut remaining = self.bytes_left.lock().map_err(|_| invalid())?;
-            *remaining = remaining.checked_sub(max).ok_or_else(invalid)?;
+            *remaining = remaining.checked_sub(max).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    LocalRevisionChanged(
+                        RevisionReason::MissingChangeToken,
+                        false,
+                        FailureStage::Budget,
+                        None,
+                    ),
+                )
+            })?;
             file.seek(SeekFrom::Start(offset))?;
             let mut bytes = vec![0; max];
             file.read_exact(&mut bytes)?;
@@ -1048,11 +1103,17 @@ impl SessionSourceReader for Local<'_> {
         });
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::run(self.options, "local_source_after_read");
-        recheck(path, &file, &before).map_err(|_| {
+        recheck(path, &file, &before).map_err(|cause| {
             let after = file
                 .metadata()
                 .ok()
                 .and_then(|metadata| Stat::from_metadata(&metadata).ok());
+            eprintln!(
+                "semon native source: stage=recheck catalog_offset={} raw_before={} raw_after={:?}",
+                reference.offset,
+                before.size,
+                after.as_ref().map(|stat| stat.size)
+            );
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 LocalRevisionChanged(
@@ -1061,6 +1122,8 @@ impl SessionSourceReader for Local<'_> {
                         .and_then(|after| mismatch(&before, after))
                         .unwrap_or(RevisionReason::Identity),
                     false,
+                    FailureStage::Recheck,
+                    Some(cause),
                 ),
             )
         })?;
@@ -1211,7 +1274,7 @@ fn render(
                 .err()
                 .and_then(|error| error.get_ref())
                 .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .map(|error| ProjectionFence::LocalSourceRevision(error.0))
+                .map(|error| ProjectionFence::LocalSourceRevision(error.0, error.2))
                 .unwrap_or(ProjectionFence::SourceGeneration);
             source_changed.set(Some(reason));
         }
@@ -1878,7 +1941,7 @@ fn render_field(
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
                 .expect("checked local revision");
-            stale(ProjectionFence::LocalSourceRevision(detail.0))
+            stale(ProjectionFence::LocalSourceRevision(detail.0, detail.2))
         }
         Err(_) => catalog::error(
             503,

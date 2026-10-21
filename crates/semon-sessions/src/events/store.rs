@@ -3213,6 +3213,10 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        #[cfg(feature = "test-hooks")]
+        if crate::test_hooks::catalog_paused(&self.path) {
+            return Ok((Outcome::Conflict, None));
+        }
         self.semantic_rejection = None;
         let rows = publication.rows;
         #[cfg(test)]
