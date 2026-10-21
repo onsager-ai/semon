@@ -85,6 +85,12 @@ generation or source range. These codes contain no path, body or provider error.
 Local revision failures add
 a closed `local_revision_reason`: identity, change_time, size_grew, size_shrank,
 modified or missing_change_token.
+Focused MCP `read_transcript` and `get_session` failures preserve the same
+closed local-revision diagnostic in their tool error (`stale_projection`,
+`status: 409`, no entries or session). The MCP transport retains its normal
+JSON-RPC tool-result envelope. A host may retry an unanchored first page for a
+Catalog publication conflict, but must return a byte-read fence without
+rebinding it to a newly stable local carrier.
 
 Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
 

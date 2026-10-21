@@ -117,19 +117,23 @@ const CONTEXT: usize = 80;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryError {
     /// `unknown_tool`, `invalid_arguments`, `unknown_session`,
-    /// `unknown_turn`, `outside_window`, `id_conflict`, `capability_unavailable` or `io`.
+    /// `unknown_turn`, `outside_window`, `id_conflict`, `capability_unavailable`,
+    /// `stale_projection` or `io`.
     pub code: &'static str,
     pub message: String,
     /// With `outside_window`: where the window starts (epoch ms).
     pub window_start: Option<i64>,
+    /// Closed physical-source diagnostic; contains no native path or content.
+    pub local_revision_reason: Option<&'static str>,
 }
 
 impl QueryError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
             window_start: None,
+            local_revision_reason: None,
         }
     }
 
@@ -145,17 +149,40 @@ impl QueryError {
     }
 
     fn io(error: &io::Error) -> Self {
+        if let Some(revision) = error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<crate::source_carrier::RevisionChanged>())
+        {
+            return Self::local_revision(revision.0);
+        }
         Self::new("io", error.to_string())
     }
 
+    pub(crate) fn local_revision(reason: crate::source_carrier::RevisionReason) -> Self {
+        let mut error = Self::new(
+            "stale_projection",
+            "The selected local source changed during this read; resynchronize.",
+        );
+        error.local_revision_reason = Some(reason.name());
+        error
+    }
+
     /// `{"error": {"code": …, "message": …}}`, and the `window_start` of
-    /// an `outside_window`.
+    /// an `outside_window`. A local-revision failure also carries the closed
+    /// 409 source-fence diagnostics, without any partial tool result.
     pub fn to_json(&self) -> Value {
         let mut error = json!({"code": self.code, "message": self.message});
         if let Some(start) = self.window_start {
             error["window_start"] = json!(start);
         }
-        json!({ "error": error })
+        let mut value = json!({ "error": error });
+        if let Some(reason) = self.local_revision_reason {
+            value["status"] = json!(409);
+            value["resynchronize"] = json!(true);
+            value["fence_reason"] = json!("local_source_revision");
+            value["local_revision_reason"] = json!(reason);
+        }
+        value
     }
 }
 

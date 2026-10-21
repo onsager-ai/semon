@@ -31,7 +31,11 @@ pub fn register(cache: &Path, hook: impl Fn(&'static str) + Send + Sync + 'stati
 }
 
 pub(crate) fn run(options: &crate::Options, point: &'static str) {
-    let hook = hooks().lock().unwrap().get(&options.cache).cloned();
+    run_cache(&options.cache, point);
+}
+
+pub(crate) fn run_cache(cache: &Path, point: &'static str) {
+    let hook = hooks().lock().unwrap().get(cache).cloned();
     if let Some(hook) = hook {
         hook(point);
     }
