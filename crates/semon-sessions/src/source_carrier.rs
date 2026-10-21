@@ -17,6 +17,32 @@ pub(crate) enum RevisionReason {
     MissingChangeToken,
 }
 
+impl RevisionReason {
+    pub(crate) fn error(self) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, RevisionChanged(self))
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::ChangeTime => "change_time",
+            Self::SizeGrew => "size_grew",
+            Self::SizeShrank => "size_shrank",
+            Self::Modified => "modified",
+            Self::MissingChangeToken => "missing_change_token",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RevisionChanged(pub(crate) RevisionReason);
+impl std::fmt::Display for RevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("selected local source changed during read")
+    }
+}
+impl std::error::Error for RevisionChanged {}
+
 pub(crate) fn ledger(source: &CatalogSource) -> Ledger {
     Ledger {
         stat: Stat {
