@@ -17,6 +17,23 @@ use serde_json::{Value, json};
 use super::*;
 use crate::ViewerCore;
 
+#[test]
+fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
+    let error = crate::source_carrier::FailureStage::HeaderLedger
+        .wrap(std::io::Error::other("private original cause"));
+    let staged = QueryError::io(&error).to_json();
+    let mut expected = QueryError::new("io", "proofs are unavailable").to_json();
+    expected["stage"] = json!("header_ledger");
+    assert_eq!(staged, expected);
+    assert_eq!(
+        staged,
+        json!({
+            "error":{"code":"io","message":"proofs are unavailable"},
+            "stage":"header_ledger",
+        })
+    );
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn admitted(options: Options) -> Arc<SessionSources> {
@@ -3410,9 +3427,21 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
             .unwrap_err();
         assert_eq!(error.code, "io");
         assert_eq!(error.stage, expected_stage, "fault={fault}");
-        assert_eq!(error.message, "proofs are unavailable", "fault={fault}");
-        assert!(!error.message.contains("revoked"));
-        assert!(!error.message.contains("Permission denied"));
+        if expected_stage.is_some() {
+            assert_eq!(error.message, "proofs are unavailable", "fault={fault}");
+            assert!(!error.message.contains("revoked"));
+            assert!(!error.message.contains("Permission denied"));
+        } else {
+            // Non-staged provider errors retain the pre-R5 caller message.
+            assert_eq!(
+                error.message,
+                if fault == 2 {
+                    "generation changed"
+                } else {
+                    "revoked"
+                }
+            );
+        }
         assert_eq!(
             catalog_generation(&home),
             generation,

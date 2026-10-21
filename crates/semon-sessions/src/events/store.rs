@@ -147,8 +147,8 @@ fn log_catalog_publish_attempt(
             [],
             |row| row.get::<_, i64>(0),
         )
-        .unwrap_or_default()
-        .max(0) as usize;
+        .map(|count| count.max(0).to_string())
+        .unwrap_or_else(|_| "unavailable".to_owned());
     let claimed: std::collections::BTreeSet<&str> = claims
         .into_iter()
         .flatten()
@@ -161,26 +161,32 @@ fn log_catalog_publish_attempt(
             sources.entry(path).or_insert(source);
         }
     }
+    // Hash every candidate path once, including when matching the interest set.
+    let sources = sources
+        .into_iter()
+        .map(|(path, source)| {
+            let hash = crate::source_carrier::source_hash(&path);
+            (path, (source, hash))
+        })
+        .collect::<BTreeMap<_, _>>();
     let interests = crate::source_carrier::diagnostic_interest_hashes();
     let mut prioritized = Vec::with_capacity(64);
     for source_hash in interests {
-        if let Some((path, source)) = sources
-            .iter()
-            .find(|(path, _)| crate::source_carrier::source_hash(path) == source_hash)
+        if let Some((path, (source, hash))) =
+            sources.iter().find(|(_, (_, hash))| *hash == source_hash)
         {
-            prioritized.push(((**path).clone(), *source));
+            prioritized.push((path.clone(), *source, hash.clone()));
         }
     }
-    for (path, source) in &sources {
+    for (path, (source, hash)) in &sources {
         if prioritized.len() >= 64 {
             break;
         }
-        if !prioritized.iter().any(|(known, _)| known == path) {
-            prioritized.push((path.clone(), *source));
+        if !prioritized.iter().any(|(known, _, _)| known == path) {
+            prioritized.push((path.clone(), *source, hash.clone()));
         }
     }
-    for (path, source) in prioritized {
-        let source_hash = crate::source_carrier::source_hash(&path);
+    for (path, source, source_hash) in prioritized {
         let candidate_ledger = crate::source_carrier::ledger(source);
         let candidate_hash = crate::source_carrier::ledger_digest(&candidate_ledger);
         let index = ledger_row(connection, &path)
@@ -7136,7 +7142,7 @@ mod tests {
         assert!(header_lines[0].contains(&format!("proof_ledger_digest={}", &digest[..12])));
 
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        let mut store = opened(&EventCache::path(&options.cache)).0;
+        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
         let _ = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
         let publish_lines = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         let publish_line = publish_lines.first().expect("publish diagnostic");
@@ -7150,6 +7156,21 @@ mod tests {
         assert!(publish_line.contains("invalidations_total="));
         assert!(!publish_line.contains("pending_claim_count="));
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_publish_diagnostic_reports_failed_count_as_unavailable() {
+        let root = scratch("catalog-diagnostic-count-unavailable");
+        let (_, rows, _) = catalog_native_fixture(&root, 1, false);
+        // A separate database intentionally lacks the invalidation table.
+        let connection = Connection::open_in_memory().unwrap();
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
+        log_catalog_publish_attempt(&connection, &rows, None, &Ok(Outcome::Conflict), None);
+        let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("invalidations_total=unavailable"));
+        assert!(!logs[0].contains("invalidations_total=0"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7173,7 +7194,7 @@ mod tests {
         crate::source_carrier::note_diagnostic_interest(target);
 
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        let mut store = opened(&EventCache::path(&options.cache)).0;
+        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
         let _ = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
         let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         assert!(

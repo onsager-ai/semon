@@ -1031,9 +1031,13 @@ impl SessionSourceReader for Local<'_> {
                     | FailureStage::HeaderLedger
                     | FailureStage::HeaderCount
             ) {
-                eprintln!(
-                    "semon native source: stage={stage:?} catalog_offset={} raw_before={}",
-                    reference.offset, before.size
+                crate::events::store::chunk_proofs::log_header_rejection(
+                    &path.to_string_lossy(),
+                    stage,
+                    &ledger,
+                    &crate::events::store::chunk_proofs::HeaderOpenDiagnostic::default(),
+                    Some(before.size),
+                    std::fs::metadata(path).ok().map(|metadata| metadata.len()),
                 );
             }
             io::Error::new(
@@ -1161,11 +1165,13 @@ impl SessionSourceReader for Local<'_> {
                 .metadata()
                 .ok()
                 .and_then(|metadata| Stat::from_metadata(&metadata).ok());
-            eprintln!(
-                "semon native source: stage=recheck catalog_offset={} raw_before={} raw_after={:?}",
-                reference.offset,
-                before.size,
-                after.as_ref().map(|stat| stat.size)
+            crate::events::store::chunk_proofs::log_header_rejection(
+                &path.to_string_lossy(),
+                FailureStage::Recheck,
+                &ledger,
+                &crate::events::store::chunk_proofs::HeaderOpenDiagnostic::default(),
+                Some(before.size),
+                after.as_ref().map(|stat| stat.size),
             );
             io::Error::new(
                 io::ErrorKind::InvalidData,

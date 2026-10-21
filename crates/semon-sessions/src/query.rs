@@ -189,9 +189,6 @@ impl QueryError {
         }
         let mut value = json!({ "error": error });
         if let Some(stage) = self.stage {
-            value["status"] = json!(409);
-            value["resynchronize"] = json!(true);
-            value["fence_reason"] = json!("local_source_revision");
             value["stage"] = json!(stage);
         }
         if let Some(reason) = self.local_revision_reason {
