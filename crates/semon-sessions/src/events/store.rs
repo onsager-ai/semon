@@ -31,7 +31,8 @@ use std::{
     collections::BTreeMap,
     fmt, fs, io,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -55,6 +56,160 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CATALOG_PUBLISH_DIAGNOSTICS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Default)]
+struct CatalogPublishLogLimiter {
+    last: BTreeMap<String, (String, Instant)>,
+}
+
+impl CatalogPublishLogLimiter {
+    fn allow(&mut self, source: &str, state: &str, now: Instant) -> bool {
+        if self.last.get(source).is_some_and(|(prior, at)| {
+            prior == state && now.saturating_duration_since(*at) < Duration::from_secs(10)
+        }) {
+            return false;
+        }
+        if self.last.len() >= 256
+            && !self.last.contains_key(source)
+            && let Some(oldest) = self.last.keys().next().cloned()
+        {
+            self.last.remove(&oldest);
+        }
+        self.last.insert(source.to_owned(), (state.to_owned(), now));
+        true
+    }
+}
+
+fn emit_catalog_publish_diagnostic(line: String) {
+    eprintln!("{line}");
+    #[cfg(test)]
+    CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().push(line));
+}
+
+fn catalog_publish_conflict_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some(
+            "publication_generation"
+            | "prepared_generation"
+            | "catalog_generation"
+            | "completion_generation"
+            | "stage_epoch",
+        ) => "collection_generation",
+        Some(
+            "source_identity" | "source_ledger_missing" | "completion_ledger" | "withdrawal_proof",
+        ) => "source_ledger",
+        Some("publication_claim" | "prepared_claim" | "witness_claim" | "completion_claim") => {
+            "claim"
+        }
+        Some(
+            "closed_scope"
+            | "source_membership"
+            | "unclaimed_source"
+            | "source_missing_without_removal"
+            | "owner_budget"
+            | "owner_scope"
+            | "stage_owned",
+        ) => "closure",
+        _ => "other",
+    }
+}
+
+fn diagnostic_catalog_ledger(source: &crate::model::summary::CatalogSource) -> Ledger {
+    Ledger {
+        stat: Stat {
+            dev: source.dev,
+            ino: source.ino,
+            size: source.size,
+            modified_ns: source.modified_ns,
+            changed_ns: source.changed_ns,
+        },
+        offset: source.offset,
+        prefix: source.prefix_sha256,
+        tail: source.tail_sha256,
+    }
+}
+
+fn diagnostic_ledger_hash(ledger: &Ledger) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(ledger).unwrap_or_default())
+    )
+}
+
+fn log_catalog_publish_attempt(
+    connection: &Connection,
+    rows: &[crate::model::summary::CatalogRow],
+    claims: Option<&[(String, Option<i64>)]>,
+    result: &Result<Outcome, StoreError>,
+    rejection: Option<&str>,
+) {
+    static LAST: OnceLock<Mutex<CatalogPublishLogLimiter>> = OnceLock::new();
+    let (outcome, reason) = match result {
+        Ok(Outcome::Written) => ("published", "none"),
+        Ok(Outcome::Conflict) => ("conflict", catalog_publish_conflict_reason(rejection)),
+        _ => ("other", "other"),
+    };
+    let pending_claim_count = claims.map_or_else(
+        || {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM session_catalog_invalidations",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or_default()
+                .max(0) as usize
+        },
+        |claims| claims.len(),
+    );
+    let claimed: std::collections::BTreeSet<&str> = claims
+        .into_iter()
+        .flatten()
+        .map(|(path, _)| path.as_str())
+        .collect();
+    let mut sources = BTreeMap::new();
+    for source in rows.iter().flat_map(|row| &row.sources) {
+        let path = source.path.to_string_lossy().into_owned();
+        if claims.is_none() || claimed.contains(path.as_str()) {
+            sources.entry(path).or_insert(source);
+        }
+    }
+    for (path, source) in sources.into_iter().take(64) {
+        let source_hash = format!("{:x}", Sha256::digest(path.as_bytes()));
+        let catalog_ledger = diagnostic_catalog_ledger(source);
+        let catalog_hash = diagnostic_ledger_hash(&catalog_ledger);
+        let index = ledger_row(connection, &path)
+            .ok()
+            .flatten()
+            .map(|(_, ledger)| ledger);
+        let index_hash = index.as_ref().map(diagnostic_ledger_hash);
+        let state = format!(
+            "{outcome}|{reason}|{catalog_hash}:{}|{}:{:?}|{pending_claim_count}",
+            catalog_ledger.offset,
+            index_hash.as_deref().unwrap_or("missing"),
+            index.as_ref().map(|ledger| ledger.offset)
+        );
+        let allowed = LAST
+            .get_or_init(|| Mutex::new(CatalogPublishLogLimiter::default()))
+            .lock()
+            .is_ok_and(|mut limiter| limiter.allow(&source_hash, &state, Instant::now()));
+        if allowed {
+            emit_catalog_publish_diagnostic(format!(
+                "semon native catalog: outcome={outcome} reason={reason} source_hash={} catalog_ledger_hash={} catalog_offset={} index_ledger_hash={} index_offset={:?} pending_claim_count={pending_claim_count} sample=independent_statements",
+                &source_hash[..12],
+                &catalog_hash[..12],
+                catalog_ledger.offset,
+                index_hash.as_deref().map_or("missing", |hash| &hash[..12]),
+                index.as_ref().map(|ledger| ledger.offset)
+            ));
+        }
+    }
 }
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
@@ -3213,7 +3368,7 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(test, feature = "test-hooks"))]
         if crate::test_hooks::catalog_paused(&self.path) {
             return Ok((Outcome::Conflict, None));
         }
@@ -3958,6 +4113,13 @@ impl SqliteStore {
             commit_boundary.capture(&self.connection);
             commit_boundary.committed();
         }
+        log_catalog_publish_attempt(
+            &self.connection,
+            rows,
+            claims,
+            &result,
+            self.semantic_rejection,
+        );
         result.map(|outcome| (outcome, published))
     }
 
@@ -6878,6 +7040,55 @@ mod tests {
             catalog_comparable_state(&batch.connection),
             catalog_comparable_state(&legacy.connection)
         );
+    }
+
+    #[test]
+    fn catalog_publish_diagnostic_reports_index_leading_the_captured_catalog_ledger() {
+        use std::io::Write;
+
+        let root = scratch("catalog-index-ledger-diagnostic");
+        let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+        let path = rows[0].sources[0].path.clone();
+        let catalog_offset = rows[0].sources[0].offset;
+        let pause = crate::test_hooks::pause_catalog(&options.cache);
+        let appended = serde_json::json!({
+            "type":"assistant",
+            "uuid":"assistant-diagnostic-advance",
+            "sessionId":"native-cl-00",
+            "timestamp":"2026-09-24T00:02:00Z",
+            "message":{"id":"message-diagnostic-advance","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"synthetic index advance"}]}
+        });
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("{}\n", appended).as_bytes())
+            .unwrap();
+        crate::test_hooks::advance_index_only(&options, &path, "claude").unwrap();
+        drop(pause);
+
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
+        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let outcome =
+            catalog_write(&mut store, &rows, &projections, true, CatalogWriter::Auto).unwrap();
+        assert_eq!(outcome.0, Outcome::Conflict);
+        let index_offset = ledger_row(&store.connection, path.to_string_lossy().as_ref())
+            .unwrap()
+            .unwrap()
+            .1
+            .offset;
+        assert!(
+            index_offset > catalog_offset,
+            "the Index advanced beyond L1"
+        );
+        let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("outcome=conflict reason=source_ledger"));
+        assert!(logs[0].contains(&format!("catalog_offset={catalog_offset}")));
+        assert!(logs[0].contains(&format!("index_offset=Some({index_offset})")));
+        assert!(!logs[0].contains(path.to_string_lossy().as_ref()));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn catalog_commit_success_state(

@@ -3342,21 +3342,27 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
             );
         }
         let mut query = Query::from_sources(admitted(home.options.clone()));
-        assert_eq!(
-            query
-                .call_selected_at(
-                    "local",
-                    "lead",
-                    "read_transcript",
-                    &json!({"id":"lead"}),
-                    Some(&archive),
-                    crate::SessionSourceReadMode::ProviderOnly,
-                    NOW
-                )
-                .unwrap_err()
-                .code,
-            "io"
-        );
+        let error = query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &json!({"id":"lead"}),
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            )
+            .unwrap_err();
+        if damaged == "proofs" {
+            assert_eq!(error.code, "stale_projection");
+            assert_eq!(error.stage, Some("header_missing"));
+            assert_eq!(
+                error.message,
+                "The selected native source proof is unavailable; resynchronize."
+            );
+        } else {
+            assert_eq!(error.code, "io");
+        }
         assert_eq!(archive.calls.load(Ordering::Relaxed), 0);
         assert!(query.native.is_none());
         assert_eq!(
@@ -3385,21 +3391,25 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
         fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
         let generation = catalog_generation(&home);
         let mut query = Query::from_sources(admitted(home.options.clone()));
-        assert_eq!(
-            query
-                .call_selected_at(
-                    "local",
-                    "lead",
-                    "read_transcript",
-                    &json!({"id":"lead"}),
-                    Some(&archive),
-                    crate::SessionSourceReadMode::ProviderOnly,
-                    NOW
-                )
-                .unwrap_err()
-                .code,
-            "io"
-        );
+        let error = query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &json!({"id":"lead"}),
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            )
+            .unwrap_err();
+        if error.stage.is_some() {
+            assert_eq!(error.code, "stale_projection");
+        } else {
+            assert_eq!(error.code, "io");
+            assert_eq!(error.message, "proofs are unavailable");
+        }
+        assert!(!error.message.contains("revoked"));
+        assert!(!error.message.contains("Permission denied"));
         assert_eq!(
             catalog_generation(&home),
             generation,
@@ -3563,7 +3573,13 @@ fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publi
             "actual native publication must run during the read"
         );
         if selected_changes {
-            assert_eq!(result.unwrap_err().code, "io");
+            let error = result.unwrap_err();
+            if error.stage.is_some() {
+                assert_eq!(error.code, "stale_projection");
+            } else {
+                assert_eq!(error.code, "io");
+                assert_eq!(error.message, "proofs are unavailable");
+            }
         } else {
             assert_eq!(result.unwrap(), before);
         }
