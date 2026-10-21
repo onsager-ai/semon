@@ -1255,13 +1255,7 @@ mod tests {
         assert_eq!(opus.provenance["cache_write_5m"], "models_dev");
         // The same model ID in OpenAI, and an Anthropic alias absent from v1,
         // are not mapped from the supplement.
-        assert_eq!(
-            effective
-                .price_for("openai", "claude-new")
-                .unwrap()
-                .cache_write_5m,
-            None
-        );
+        assert!(effective.price_for("openai", "claude-new").is_none());
         assert!(
             effective
                 .providers
@@ -1272,15 +1266,22 @@ mod tests {
         let used = MessageUsage {
             model: Some("claude-new".into()),
             billing: BillingUsage {
-                cache_write_5m: 1_000_000,
-                prompt_size: 1_000_000,
+                cache_write_5m: 100_000,
+                prompt_size: 100_000,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let mut cost = CostBuild::with_table(Arc::new(effective));
+        let effective = Arc::new(effective);
+        let mut cost = CostBuild::with_table(Arc::clone(&effective));
         cost.message(&used);
-        assert_eq!(cost.finish().usd, Some(3.75));
+        assert_eq!(cost.finish().usd, Some(0.375));
+        let mut long = used;
+        long.billing.cache_write_5m = 1_000_000;
+        long.billing.prompt_size = 1_000_000;
+        let mut cost = CostBuild::with_table(effective);
+        cost.message(&long);
+        assert_eq!(cost.finish().usd, Some(5.5));
     }
 
     #[test]
