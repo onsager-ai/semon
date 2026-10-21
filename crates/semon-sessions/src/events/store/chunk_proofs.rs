@@ -5,6 +5,7 @@ use crate::source_chunks::Chunks;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, OnceLock},
+    time::Instant,
 };
 
 const PAGE: usize = 1024;
@@ -46,60 +47,113 @@ fn prefix(path: &str) -> String {
 
 #[derive(Default)]
 struct HeaderMismatchLimiter {
-    last: BTreeMap<String, (String, String, &'static str)>,
+    last: BTreeMap<String, ((String, String, &'static str), Instant, u64)>,
+    next_order: u64,
 }
 
 impl HeaderMismatchLimiter {
-    fn allow(&mut self, source: &str, catalog: &str, proof: &str, stage: &'static str) -> bool {
+    fn allow(
+        &mut self,
+        source: &str,
+        catalog: &str,
+        proof: &str,
+        stage: &'static str,
+        now: Instant,
+    ) -> bool {
         let event = (catalog.to_owned(), proof.to_owned(), stage);
-        if self.last.get(source) == Some(&event) {
+        if self
+            .last
+            .get(source)
+            .is_some_and(|(prior, _, _)| prior == &event)
+        {
             return false;
         }
-        if self.last.len() >= 256
-            && !self.last.contains_key(source)
-            && let Some(oldest) = self.last.keys().next().cloned()
-        {
-            self.last.remove(&oldest);
+        if self.last.len() >= 256 && !self.last.contains_key(source) {
+            let oldest = self
+                .last
+                .iter()
+                .min_by_key(|(_, (_, _, order))| *order)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.last.remove(&oldest);
+            }
         }
-        self.last.insert(source.to_owned(), event);
+        self.next_order = self.next_order.wrapping_add(1);
+        self.last
+            .insert(source.to_owned(), (event, now, self.next_order));
         true
     }
 }
 
+#[derive(Default)]
+pub(super) struct HeaderOpenDiagnostic {
+    pub(super) proof_ledger_digest: Option<String>,
+    pub(super) index_ledger_digest: Option<String>,
+    pub(super) proof_offset: Option<u64>,
+    pub(super) index_offset: Option<u64>,
+    pub(super) parser_version: Option<u32>,
+}
+
+fn fresh_raw_size(path: &str) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
 #[allow(clippy::too_many_arguments)]
-fn log_header_mismatch(
+pub(super) fn log_header_rejection(
     path: &str,
     stage: FailureStage,
-    catalog_hash: &str,
-    proof_hash: &str,
-    index_hash: Option<&str>,
-    catalog_offset: u64,
-    proof_offset: Option<u64>,
-    index_offset: Option<u64>,
-    parser_version: Option<u32>,
+    ledger: &Ledger,
+    diagnostic: &HeaderOpenDiagnostic,
+    raw_before: Option<u64>,
+    raw_after: Option<u64>,
 ) {
     static LAST: OnceLock<Mutex<HeaderMismatchLimiter>> = OnceLock::new();
-    let source_hash = format!("{:x}", Sha256::digest(path.as_bytes()));
+    let source_hash = crate::source_carrier::source_hash(path);
+    let catalog_hash = crate::source_carrier::ledger_digest(ledger);
+    let proof_hash = diagnostic
+        .proof_ledger_digest
+        .as_deref()
+        .unwrap_or("missing");
     let allowed = LAST
         .get_or_init(|| Mutex::new(HeaderMismatchLimiter::default()))
         .lock()
         .is_ok_and(|mut limiter| {
-            limiter.allow(&source_hash, catalog_hash, proof_hash, stage.name())
+            limiter.allow(
+                &source_hash,
+                &catalog_hash,
+                proof_hash,
+                stage.name(),
+                Instant::now(),
+            )
         });
     if allowed {
-        eprintln!(
-            "semon native proof: source_hash={} stage={} catalog_ledger_hash={} proof_ledger_hash={} index_ledger_hash={} catalog_offset={} proof_offset={:?} index_offset={:?} proof_parser={:?} sample=independent_statements",
+        let raw = match raw_before {
+            Some(before) => format!("raw_before={before} raw_after={raw_after:?}"),
+            None => "raw=not_collected".to_owned(),
+        };
+        let line = format!(
+            "semon native proof: source_hash={} stage={} ledger_digest_domain=ledger-v1 catalog_ledger_digest={} proof_ledger_digest={} index_ledger_digest={} catalog_offset={} proof_offset={:?} index_offset={:?} proof_parser={:?} {raw} sample=independent_statements",
             &source_hash[..12],
             stage.name(),
             &catalog_hash[..12],
-            &proof_hash[..12],
-            index_hash.map_or("missing", |hash| &hash[..12]),
-            catalog_offset,
-            proof_offset,
-            index_offset,
-            parser_version
+            diagnostic
+                .proof_ledger_digest
+                .as_deref()
+                .map_or("missing", |hash| &hash[..12]),
+            diagnostic
+                .index_ledger_digest
+                .as_deref()
+                .map_or("missing", |hash| &hash[..12]),
+            ledger.offset,
+            diagnostic.proof_offset,
+            diagnostic.index_offset,
+            diagnostic.parser_version
         );
+        eprintln!("{line}");
+        #[cfg(test)]
+        HEADER_DIAGNOSTICS.with(|lines| lines.borrow_mut().push(line));
     }
+    crate::source_carrier::note_diagnostic_interest_hash(&source_hash);
 }
 
 #[cfg(test)]
@@ -355,6 +409,7 @@ pub(crate) struct Focused {
     prefix: String,
     header: String,
     ledger: Ledger,
+    source_hash: String,
     count: usize,
     pages_root: Option<[u8; 32]>,
     cached: std::sync::Mutex<Option<(usize, Page)>>,
@@ -364,6 +419,7 @@ pub(crate) struct Focused {
 thread_local! {
     pub(crate) static FOCUSED_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static FOCUSED_METADATA_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static HEADER_DIAGNOSTICS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
@@ -377,11 +433,36 @@ fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
 
 impl Focused {
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        let db = super::focused_connection(cache)
-            .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
-        db.busy_timeout(Duration::from_millis(100))
-            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
-        Self::with_db(Arc::new(std::sync::Mutex::new(db)), cache, path, ledger)
+        Self::open_with_raw(cache, path, ledger, None)
+    }
+
+    pub(crate) fn open_with_raw(
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        raw_before: Option<u64>,
+    ) -> io::Result<Self> {
+        let mut diagnostic = HeaderOpenDiagnostic::default();
+        let result = (|| {
+            let db = super::focused_connection(cache)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
+            db.busy_timeout(Duration::from_millis(100))
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
+            Self::with_db_inner(
+                Arc::new(std::sync::Mutex::new(db)),
+                cache,
+                path,
+                ledger,
+                &mut diagnostic,
+            )
+        })();
+        if let Err(error) = &result
+            && let Some(stage) = FailureStage::of(error)
+        {
+            let raw_after = raw_before.and_then(|_| fresh_raw_size(path));
+            log_header_rejection(path, stage, ledger, &diagnostic, raw_before, raw_after);
+        }
+        result
     }
 
     pub(crate) fn with_db(
@@ -389,6 +470,23 @@ impl Focused {
         cache: &Path,
         path: &str,
         ledger: &Ledger,
+    ) -> io::Result<Self> {
+        let mut diagnostic = HeaderOpenDiagnostic::default();
+        let result = Self::with_db_inner(db, cache, path, ledger, &mut diagnostic);
+        if let Err(error) = &result
+            && let Some(stage) = FailureStage::of(error)
+        {
+            log_header_rejection(path, stage, ledger, &diagnostic, None, None);
+        }
+        result
+    }
+
+    fn with_db_inner(
+        db: Arc<std::sync::Mutex<Connection>>,
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        diagnostic: &mut HeaderOpenDiagnostic,
     ) -> io::Result<Self> {
         let connection = db.lock().map_err(|_| {
             FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof reader unavailable"))
@@ -399,6 +497,10 @@ impl Focused {
             return Err(
                 FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
             );
+        }
+        if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
+            diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
+            diagnostic.index_offset = Some(index.offset);
         }
         let prefix = prefix(path);
         let encoded: String = connection
@@ -415,6 +517,10 @@ impl Focused {
             })?;
         let header: Header = serde_json::from_str(&encoded)
             .map_err(|error| FailureStage::HeaderVersion.wrap(io::Error::other(error)))?;
+        diagnostic.proof_ledger_digest =
+            Some(crate::source_carrier::ledger_digest_value(&header.ledger));
+        diagnostic.proof_offset = header.consumed_offset;
+        diagnostic.parser_version = Some(header.parser_version);
         let stage = if header.version != 1 {
             Some(FailureStage::HeaderVersion)
         } else if header.parser_version != CACHE_VERSION {
@@ -429,27 +535,6 @@ impl Focused {
             None
         };
         if let Some(stage) = stage {
-            let expected = format!("{:x}", Sha256::digest(header_ledger(ledger).as_bytes()));
-            // Hash the stored string before logging: even damaged metadata is
-            // not permitted to inject arbitrary text into diagnostics.
-            let actual = format!("{:x}", Sha256::digest(header.ledger.as_bytes()));
-            // This optional Index sample is a separate statement, not a claim
-            // of a shared Catalog/proof/Raw transaction snapshot.
-            let index = super::ledger_row(&connection, path).ok().flatten();
-            let index_digest = index.as_ref().map(|(_, ledger)| {
-                format!("{:x}", Sha256::digest(header_ledger(ledger).as_bytes()))
-            });
-            log_header_mismatch(
-                path,
-                stage,
-                &expected,
-                &actual,
-                index_digest.as_deref(),
-                ledger.offset,
-                header.consumed_offset,
-                index.as_ref().map(|(_, ledger)| ledger.offset),
-                Some(header.parser_version),
-            );
             return Err(stage.wrap(io::Error::other("Native proof header changed")));
         }
         #[cfg(test)]
@@ -461,6 +546,7 @@ impl Focused {
             prefix,
             header: encoded,
             ledger: ledger.clone(),
+            source_hash: crate::source_carrier::source_hash(path),
             count: header.count,
             pages_root: header.pages_root,
             cached: std::sync::Mutex::new(None),
@@ -468,6 +554,17 @@ impl Focused {
     }
 
     fn hash(&self, index: usize) -> io::Result<[u8; 32]> {
+        let result = self.hash_inner(index);
+        if result
+            .as_ref()
+            .is_err_and(|error| FailureStage::of(error).is_some())
+        {
+            crate::source_carrier::note_diagnostic_interest_hash(&self.source_hash);
+        }
+        result
+    }
+
+    fn hash_inner(&self, index: usize) -> io::Result<[u8; 32]> {
         if index >= self.count {
             return Err(
                 FailureStage::PageMissing.wrap(io::Error::other("Native proof block unavailable"))
@@ -850,11 +947,44 @@ mod tests {
     #[test]
     fn header_mismatch_logging_is_limited_to_source_transitions() {
         let mut limiter = HeaderMismatchLimiter::default();
-        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger"));
-        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger"));
-        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_ledger"));
-        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_parser"));
-        assert!(limiter.allow("other-source", "catalog-l1", "proof-l3", "header_parser"));
+        let now = Instant::now();
+        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", now));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", now));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_ledger", now));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_parser", now));
+        assert!(limiter.allow(
+            "other-source",
+            "catalog-l1",
+            "proof-l3",
+            "header_parser",
+            now
+        ));
+    }
+
+    #[test]
+    fn header_mismatch_limiter_evicts_oldest_insertion_not_smallest_hash() {
+        let mut limiter = HeaderMismatchLimiter::default();
+        let now = Instant::now();
+        for index in 0..256 {
+            let source = format!("source-{index:03}");
+            assert!(limiter.allow(
+                &source,
+                "catalog",
+                "proof",
+                "header_ledger",
+                now + Duration::from_millis(index as u64)
+            ));
+        }
+        assert!(limiter.allow(
+            "source-new",
+            "catalog",
+            "proof",
+            "header_ledger",
+            now + Duration::from_secs(1)
+        ));
+        assert!(!limiter.last.contains_key("source-000"));
+        assert!(limiter.last.contains_key("source-255"));
+        assert!(limiter.last.contains_key("source-new"));
     }
 
     #[test]

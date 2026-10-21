@@ -165,10 +165,7 @@ impl QueryError {
     }
 
     pub(crate) fn source_failure(stage: crate::source_carrier::FailureStage) -> Self {
-        let mut error = Self::new(
-            "stale_projection",
-            "The selected native source proof is unavailable; resynchronize.",
-        );
+        let mut error = Self::new("io", "proofs are unavailable");
         error.stage = Some(stage.name());
         error
     }

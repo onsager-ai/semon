@@ -1332,11 +1332,8 @@ mod proof_error_tests {
             .wrap(io::Error::other("private ledger detail"));
         assert_eq!(staged_error.kind(), io::ErrorKind::Other);
         let staged = proof_unavailable(&staged_error);
-        assert_eq!(staged.code, "stale_projection");
+        assert_eq!(staged.code, "io");
         assert_eq!(staged.stage, Some("header_ledger"));
-        assert_eq!(
-            staged.message,
-            "The selected native source proof is unavailable; resynchronize."
-        );
+        assert_eq!(staged.message, "proofs are unavailable");
     }
 }

@@ -333,11 +333,12 @@ impl Records<'_> {
         })
     }
 
-    fn proof_failure(&self, error: io::Error) -> io::Error {
-        if let Some(stage) = crate::source_carrier::FailureStage::of(&error)
-            && let Ok(mut first) = self.failure_stage.lock()
-        {
-            first.get_or_insert(stage);
+    fn proof_failure(&self, path: &Path, error: io::Error) -> io::Error {
+        if let Some(stage) = crate::source_carrier::FailureStage::of(&error) {
+            if let Ok(mut first) = self.failure_stage.lock() {
+                first.get_or_insert(stage);
+            }
+            crate::source_carrier::note_diagnostic_interest(&path.to_string_lossy());
         }
         error
     }
@@ -615,7 +616,7 @@ impl Records<'_> {
                 proof
                     .chunks
                     .read(&mut file, 0)
-                    .map_err(|error| self.proof_failure(error))?;
+                    .map_err(|error| self.proof_failure(path, error))?;
                 self.checked_chunks
                     .lock()
                     .map_err(|_| unavailable())?
@@ -682,9 +683,11 @@ impl Records<'_> {
         if *self.failed.lock().map_err(|_| unavailable())? {
             return Err(unavailable());
         }
-        for proof in self.sources.proofs.values() {
+        for (path, proof) in &self.sources.proofs {
             if let ProofChunks::Focused(chunks) = &proof.chunks {
-                chunks.clear_cache()?;
+                chunks
+                    .clear_cache()
+                    .map_err(|error| self.proof_failure(path, error))?;
             }
         }
         let paths: Vec<_> = self
@@ -735,7 +738,7 @@ impl Records<'_> {
                 proof
                     .chunks
                     .read(&mut file, *index)
-                    .map_err(|error| self.proof_failure(error))?;
+                    .map_err(|error| self.proof_failure(path, error))?;
             }
             if qualified {
                 self.recheck(path, &file, &before)?;
@@ -902,7 +905,7 @@ impl Records<'_> {
                     proof
                         .chunks
                         .read(&mut file, index)
-                        .map_err(|error| self.proof_failure(error))?,
+                        .map_err(|error| self.proof_failure(path, error))?,
                 );
                 if let Some(prepared) = prepared.as_deref_mut() {
                     *prepared = Some(PreparedBlock {
@@ -1003,7 +1006,7 @@ impl Records<'_> {
         proof
             .chunks
             .verify(index, &bytes)
-            .map_err(|error| self.proof_failure(error))?;
+            .map_err(|error| self.proof_failure(path, error))?;
         self.checked_chunks
             .lock()
             .map_err(|_| unavailable())?
@@ -1143,6 +1146,7 @@ impl Seek for RangeFile<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::fs;
 
     struct Fixture {
@@ -1281,6 +1285,8 @@ mod tests {
         let selected = cache.source(&fixture.path, "lead").unwrap();
         drop(cache);
 
+        crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow_mut().clear());
         let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
         db.pragma_update(None, "user_version", 0).unwrap();
         drop(db);
@@ -1293,6 +1299,65 @@ mod tests {
             crate::source_carrier::FailureStage::of(&error),
             Some(crate::source_carrier::FailureStage::HeaderStore)
         );
+        let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow().clone());
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("stage=header_store"));
+        assert!(logs[0].contains("raw=not_collected"));
+        assert!(!logs[0].contains(fixture.path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn focused_header_parse_rejection_logs_independent_raw_stats() {
+        let fixture = Fixture::new("proof-header-parse-diagnostic");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let ledger = crate::source_carrier::ledger(&selected);
+        let before = fs::metadata(&fixture.path).unwrap().len();
+        drop(cache);
+
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.execute(
+            "UPDATE meta SET value='{' WHERE key GLOB 'native_source_chunks:*:header'",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow_mut().clear());
+        let result = crate::events::store::chunk_proofs::Focused::open_with_raw(
+            &crate::events::EventCache::path(&options.cache),
+            fixture.path.to_str().unwrap(),
+            &ledger,
+            Some(before),
+        );
+        let error = match result {
+            Ok(_) => panic!("a malformed proof header must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::HeaderVersion)
+        );
+        let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow().clone());
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("stage=header_version"));
+        assert!(logs[0].contains(&format!("raw_before={before}")));
+        assert!(logs[0].contains(&format!("raw_after=Some({before})")));
+        assert!(logs[0].contains("sample=independent_statements"));
+        assert!(!logs[0].contains(fixture.path.to_string_lossy().as_ref()));
     }
 
     #[test]

@@ -4,7 +4,14 @@ use crate::{
     model::summary::CatalogSource,
     sealed::LogFile,
 };
-use std::{io, path::Path};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::VecDeque,
+    io,
+    path::Path,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 /// Closed diagnostics shared by Web and focused Query. Never serialize causes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -51,13 +58,10 @@ impl FailureStage {
     }
 
     pub(crate) fn wrap(self, cause: impl Into<io::Error>) -> io::Error {
-        io::Error::new(
-            io::ErrorKind::Other,
-            SourceFailure {
-                stage: self,
-                cause: cause.into(),
-            },
-        )
+        io::Error::other(SourceFailure {
+            stage: self,
+            cause: cause.into(),
+        })
     }
 
     pub(crate) fn of(error: &io::Error) -> Option<Self> {
@@ -65,6 +69,125 @@ impl FailureStage {
             .get_ref()?
             .downcast_ref::<SourceFailure>()
             .map(|failure| failure.stage)
+    }
+}
+
+const LEDGER_DIGEST_DOMAIN: &[u8] = b"semon-ledger-v1\0";
+const INTEREST_LIMIT: usize = 16;
+const INTEREST_TTL: Duration = Duration::from_secs(30 * 60);
+
+pub(crate) fn ledger_digest(ledger: &Ledger) -> String {
+    ledger_digest_value(&crate::events::store::header_ledger(ledger))
+}
+
+pub(crate) fn ledger_digest_value(encoded_ledger: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(LEDGER_DIGEST_DOMAIN);
+    digest.update(encoded_ledger.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+pub(crate) fn source_hash(path: &str) -> String {
+    format!("{:x}", Sha256::digest(path.as_bytes()))
+}
+
+#[derive(Default)]
+struct DiagnosticInterestSet(VecDeque<(String, Instant)>);
+
+impl DiagnosticInterestSet {
+    fn note_at(&mut self, source_hash: String, now: Instant) {
+        self.expire_at(now);
+        self.0.retain(|(known, _)| known != &source_hash);
+        while self.0.len() >= INTEREST_LIMIT {
+            self.0.pop_front();
+        }
+        self.0.push_back((source_hash, now));
+    }
+
+    fn expire_at(&mut self, now: Instant) {
+        while self
+            .0
+            .front()
+            .is_some_and(|(_, inserted)| now.saturating_duration_since(*inserted) >= INTEREST_TTL)
+        {
+            self.0.pop_front();
+        }
+    }
+
+    fn active_at(&mut self, now: Instant) -> Vec<String> {
+        self.expire_at(now);
+        self.0.iter().map(|(hash, _)| hash.clone()).collect()
+    }
+}
+
+fn diagnostic_interest_set() -> &'static Mutex<DiagnosticInterestSet> {
+    static INTEREST: OnceLock<Mutex<DiagnosticInterestSet>> = OnceLock::new();
+    INTEREST.get_or_init(|| Mutex::new(DiagnosticInterestSet::default()))
+}
+
+pub(crate) fn note_diagnostic_interest(path: &str) {
+    note_diagnostic_interest_hash(&source_hash(path));
+}
+
+pub(crate) fn note_diagnostic_interest_hash(source_hash: &str) {
+    if let Ok(mut interests) = diagnostic_interest_set().lock() {
+        interests.note_at(source_hash.to_owned(), Instant::now());
+    }
+}
+
+pub(crate) fn diagnostic_interest_hashes() -> Vec<String> {
+    diagnostic_interest_set()
+        .lock()
+        .map(|mut interests| interests.active_at(Instant::now()))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn ledger_digest_uses_the_header_encoding_and_a_domain_tag() {
+        let ledger = Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 3,
+                modified_ns: 4,
+                changed_ns: Some(5),
+            },
+            offset: 3,
+            prefix: [6; 32],
+            tail: [7; 32],
+        };
+        let encoded = crate::events::store::header_ledger(&ledger);
+        assert_eq!(ledger_digest(&ledger), ledger_digest_value(&encoded));
+        assert_ne!(
+            ledger_digest(&ledger),
+            format!("{:x}", Sha256::digest(encoded))
+        );
+    }
+
+    #[test]
+    fn diagnostic_interest_is_bounded_ttl_limited_and_oldest_evicted() {
+        let now = Instant::now();
+        let mut interests = DiagnosticInterestSet::default();
+        for index in 0..INTEREST_LIMIT {
+            interests.note_at(
+                format!("source-{index}"),
+                now + Duration::from_secs(index as u64),
+            );
+        }
+        interests.note_at("source-new".into(), now + Duration::from_secs(16));
+        let active = interests.active_at(now + Duration::from_secs(16));
+        assert_eq!(active.len(), INTEREST_LIMIT);
+        assert!(!active.contains(&"source-0".to_owned()));
+        assert!(active.contains(&"source-new".to_owned()));
+        assert!(
+            interests
+                .active_at(now + INTEREST_TTL + Duration::from_secs(20))
+                .is_empty()
+        );
     }
 }
 
