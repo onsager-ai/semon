@@ -1006,9 +1006,25 @@ impl SessionSourceReader for Local<'_> {
         let before = Stat::from_metadata(&file.metadata()?)?;
         let reason = mismatch(&ledger.stat, &before);
         let rejected = |reason, stage, cause| {
+            if matches!(
+                stage,
+                FailureStage::ProofOpenDb
+                    | FailureStage::HeaderStore
+                    | FailureStage::HeaderMissing
+                    | FailureStage::HeaderVersion
+                    | FailureStage::HeaderParser
+                    | FailureStage::HeaderLedger
+                    | FailureStage::HeaderCount
+                    | FailureStage::PageMissing
+                    | FailureStage::PageHash
+                    | FailureStage::ProofChanged
+            ) {
+                crate::source_carrier::note_diagnostic_interest(&path.to_string_lossy());
+            }
             if !matches!(
                 stage,
-                FailureStage::HeaderStore
+                FailureStage::ProofOpenDb
+                    | FailureStage::HeaderStore
                     | FailureStage::HeaderMissing
                     | FailureStage::HeaderVersion
                     | FailureStage::HeaderParser
@@ -1056,10 +1072,11 @@ impl SessionSourceReader for Local<'_> {
             // opened and hashed; no complete-prefix resume or parser replay.
             let mut proofs = self.proofs.lock().map_err(|_| invalid())?;
             if let std::collections::btree_map::Entry::Vacant(entry) = proofs.entry(path.clone()) {
-                let proof = crate::events::store::chunk_proofs::Focused::open(
+                let proof = crate::events::store::chunk_proofs::Focused::open_with_raw(
                     &EventCache::path(&self.options.cache),
                     path.to_str().ok_or_else(invalid)?,
                     &ledger,
+                    Some(before.size),
                 )
                 .map_err(|error| {
                     rejected(
@@ -1305,7 +1322,7 @@ fn render(
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
-            let error = result.as_ref().err().expect("checked source failure");
+            let error = result.as_ref().expect_err("checked source failure");
             source_changed.set(Some(source_read_fence(error)));
         }
         result
