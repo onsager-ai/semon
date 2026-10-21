@@ -1437,6 +1437,7 @@ impl EventCache {
         let path = Self::path(v1_cache);
         let mut cache = match store::open(&path, &Self::legacy_path(v1_cache)) {
             Ok((store, loaded)) => {
+                crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
                 cache
@@ -2449,6 +2450,10 @@ impl EventCache {
         {
             return Base::Found(Arc::clone(index));
         }
+        // A pricing-only fingerprint mismatch falls through to the committed
+        // SQLite index below. `load_file` restores retained facts/dimensions;
+        // it does not open the native log body. Ordinary ledger movement still
+        // follows the existing bounded append/rebuild path.
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
         match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),

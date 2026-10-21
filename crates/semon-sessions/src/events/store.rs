@@ -60,7 +60,7 @@ std::thread_local! {
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-pub(crate) const SCHEMA_VERSION: i64 = 30;
+pub(crate) const SCHEMA_VERSION: i64 = 31;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -3922,6 +3922,7 @@ impl SqliteStore {
             // production publisher has no traversal probes.
             commit_boundary.capture(&transaction);
             transaction.commit().map_err(failure)?;
+            crate::pricing::runtime::notify_reprice();
             commit_boundary.capture(&self.connection);
             #[cfg(test)]
             if let Some(before) = commit_before {
@@ -4178,6 +4179,7 @@ impl SqliteStore {
         }
         write_index_changes(&transaction, path, ledger, index, changes, expected)?;
         transaction.commit()?;
+        crate::pricing::runtime::notify_reprice();
         Ok(Outcome::Written)
     }
 
@@ -4506,6 +4508,20 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_usage_sources') WHERE name='usage_ready')",[],|r|r.get::<_,bool>(0))? {
             transaction.execute_batch("ALTER TABLE native_usage_sources ADD COLUMN usage_ready INTEGER NOT NULL DEFAULT 1")?;
         }
+        if !transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='codex_pricing_fingerprint')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? {
+            transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_pricing_fingerprint TEXT")?;
+        }
+        if !transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='pricing_fingerprint')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? {
+            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN pricing_fingerprint TEXT")?;
+        }
         transaction.execute_batch(tree_state::SCHEMA)?;
         // New usage identities are maintained by the installed copy triggers.
         // Only files already present at the additive upgrade need bootstrap.
@@ -4580,6 +4596,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if schema < 21 {
             transaction.execute_batch("INSERT OR IGNORE INTO meta(key,value) SELECT 'overview_needed:'||c.session_key,'1' FROM session_catalog c LEFT JOIN session_overview o USING(session_key) LEFT JOIN session_trace_headers t USING(session_key) WHERE o.session_key IS NULL OR t.session_key IS NULL;")?;
         }
+        // Pricing indexes reference legacy columns installed above, including
+        // codex_native_usage on schema-1 stores.
+        transaction.execute_batch(reprice::SCHEMA)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
@@ -4591,6 +4610,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         )?;
     }
     transaction.commit()?;
+    crate::pricing::runtime::notify_reprice();
     if wiped {
         // Not fatal: the automatic checkpoint and the size limit follow.
         checkpoint(connection).ok();
