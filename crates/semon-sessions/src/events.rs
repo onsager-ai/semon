@@ -82,7 +82,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
 /// v25: agent messages carry their direction; coordinator messages and unknown origin kinds are indexed; relay tags count only at the start of a prompt.
 /// v26: a subagent's non-final send (`senderTaskId`, no `handback`) is an up agent message flagged [`AGM_PROGRESS`], not a relay; relay tags nested in another relay block are not their own events.
-const CACHE_VERSION: u32 = 26;
+/// v27: rebuild derived billing usage after a pricing-table restoration.
+const CACHE_VERSION: u32 = 27;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
