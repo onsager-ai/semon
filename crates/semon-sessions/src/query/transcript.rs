@@ -19,6 +19,18 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("io", error.to_string())
 }
 
+fn proof_unavailable(error: &io::Error) -> QueryError {
+    if crate::source_carrier::FailureStage::of(error).is_some()
+        || error
+            .get_ref()
+            .is_some_and(|error| error.is::<crate::source_carrier::RevisionChanged>())
+    {
+        QueryError::io(error)
+    } else {
+        QueryError::new("io", "Original native transcript proofs are unavailable")
+    }
+}
+
 fn unchanged(
     db: &Connection,
     key: &str,
@@ -386,7 +398,7 @@ fn virtual_read(
         options,
         &sources.into_values().collect::<Vec<_>>(),
     )
-    .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
+    .map_err(|error| proof_unavailable(&error))?;
     tx.commit().map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
     #[cfg(feature = "test-hooks")]
@@ -810,7 +822,7 @@ fn read_inner(
     }
     let selected_sources: Vec<_> = selected_sources.into_values().collect();
     let sources = crate::query_source::Sources::capture_focused(options, &selected_sources)
-        .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
+        .map_err(|error| proof_unavailable(&error))?;
     let incomplete: bool = if history.is_some() {
         tx.query_row(
             "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
@@ -1303,4 +1315,40 @@ fn read_inner(
         ));
     }
     Ok(Some(answer))
+}
+
+#[cfg(test)]
+mod proof_error_tests {
+    use super::*;
+
+    #[test]
+    fn unstaged_proof_errors_are_generic_and_staged_errors_keep_the_stage() {
+        let untyped = proof_unavailable(&io::Error::other("private sqlite detail"));
+        assert_eq!(untyped.code, "io");
+        assert_eq!(
+            untyped.message,
+            "Original native transcript proofs are unavailable"
+        );
+        assert!(!untyped.message.contains("private sqlite detail"));
+
+        let staged_error = crate::source_carrier::FailureStage::HeaderLedger
+            .wrap(io::Error::other("private ledger detail"));
+        assert_eq!(staged_error.kind(), io::ErrorKind::Other);
+        let staged = proof_unavailable(&staged_error);
+        assert_eq!(staged.code, "io");
+        assert_eq!(staged.stage, Some("header_ledger"));
+        assert_eq!(
+            staged.message,
+            "Original native transcript proofs are unavailable"
+        );
+    }
+
+    #[test]
+    fn unstaged_revision_error_preserves_the_typed_source_fence() {
+        let error = crate::source_carrier::RevisionReason::SizeGrew.error();
+        let mapped = proof_unavailable(&error);
+        assert_eq!(mapped.code, "stale_projection");
+        assert_eq!(mapped.local_revision_reason, Some("size_grew"));
+        assert_eq!(mapped.stage, None);
+    }
 }
