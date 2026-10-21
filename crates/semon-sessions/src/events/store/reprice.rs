@@ -16,10 +16,10 @@ std::thread_local! {
     static REPRICE_PAYLOAD_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn decode_json<T: serde::de::DeserializeOwned>(version: u32, value: &str) -> rusqlite::Result<T> {
+fn decode_json<T: serde::de::DeserializeOwned>(column: usize, value: &str) -> rusqlite::Result<T> {
     #[cfg(test)]
     REPRICE_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
-    from_json(version, value)
+    from_json(column, value)
 }
 
 pub(super) const SCHEMA: &str = "
