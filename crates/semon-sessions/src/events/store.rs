@@ -9490,7 +9490,17 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE usage DROP COLUMN record_ids;
+                "DROP TRIGGER pricing_pending_file_insert;
+             DROP TRIGGER pricing_pending_file_update;
+             DROP TRIGGER pricing_pending_native_usage_ready;
+             DROP TRIGGER pricing_pending_catalog_insert;
+             DROP TRIGGER pricing_pending_catalog_update;
+             DROP INDEX files_codex_pricing_fingerprint;
+             DROP INDEX session_catalog_pricing_fingerprint;
+             DROP TABLE pricing_recompute_pending;
+             ALTER TABLE files DROP COLUMN codex_pricing_fingerprint;
+             ALTER TABLE session_catalog DROP COLUMN pricing_fingerprint;
+             ALTER TABLE usage DROP COLUMN record_ids;
              ALTER TABLE files DROP COLUMN copilot;
              ALTER TABLE files DROP COLUMN codex_native_usage;
              PRAGMA user_version = 1;

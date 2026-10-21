@@ -829,7 +829,7 @@ fn pending_step(
             work.pending_owner = None;
             Ok(true)
         }
-        _ => return Err(rusqlite::Error::InvalidQuery),
+        _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
 
