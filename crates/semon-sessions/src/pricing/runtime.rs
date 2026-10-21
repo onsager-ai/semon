@@ -1060,8 +1060,9 @@ impl IndexRegistry {
         });
     }
 
-    fn register(&mut self, path: PathBuf, now: Instant) {
+    fn register(&mut self, path: PathBuf, now: Instant) -> bool {
         self.prune(now);
+        let newly_registered = !self.entries.contains_key(&path);
         self.entries.insert(path, now);
         if self.entries.len() > MAX_INDEXES
             && let Some(oldest) = self
@@ -1072,7 +1073,10 @@ impl IndexRegistry {
         {
             self.entries.remove(&oldest);
         }
-        self.wake_epoch = self.wake_epoch.wrapping_add(1);
+        if newly_registered {
+            self.wake_epoch = self.wake_epoch.wrapping_add(1);
+        }
+        newly_registered
     }
 }
 
@@ -1081,15 +1085,17 @@ fn registry() -> &'static (Mutex<IndexRegistry>, Condvar) {
     INDEXES.get_or_init(|| (Mutex::new(IndexRegistry::default()), Condvar::new()))
 }
 
-/// Registering an index refreshes its LRU age and wakes the worker. The
-/// process-local set is capped; persistent SQLite cursors remain authoritative.
+/// A new index wakes the worker; re-registering one only refreshes its LRU age.
+/// The process-local set is capped; persistent SQLite cursors remain authoritative.
 pub(crate) fn register_index(path: PathBuf) {
     let (state, wake) = registry();
-    state
+    let newly_registered = state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .register(path, Instant::now());
-    wake.notify_one();
+    if newly_registered {
+        wake.notify_one();
+    }
 }
 
 /// Wake a parked projection worker after a writer may have enqueued an owner.
@@ -1394,6 +1400,38 @@ mod tests {
         assert!(!registry.entries.contains_key(&recently_used));
         registry.prune(start + INDEX_RETIRE_AFTER + Duration::from_secs(72));
         assert!(registry.entries.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn index_registry_repeated_registration_wakes_only_for_new_or_retired_paths() {
+        let root = path().parent().unwrap().join("registry-wakes");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::write(&first, b"").unwrap();
+        fs::write(&second, b"").unwrap();
+        let start = Instant::now();
+        let mut registry = IndexRegistry::default();
+        let initial_epoch = registry.wake_epoch;
+
+        assert!(registry.register(first.clone(), start));
+        assert_eq!(registry.wake_epoch, initial_epoch + 1);
+        for touch in 1..8 {
+            assert!(!registry.register(first.clone(), start + Duration::from_secs(touch)));
+        }
+        assert_eq!(registry.wake_epoch, initial_epoch + 1);
+
+        assert!(registry.register(second.clone(), start + Duration::from_secs(8)));
+        assert_eq!(registry.wake_epoch, initial_epoch + 2);
+
+        let retired_at = start + INDEX_RETIRE_AFTER + Duration::from_secs(9);
+        registry.prune(retired_at);
+        assert!(!registry.entries.contains_key(&first));
+        let before_reregister = registry.wake_epoch;
+        assert!(registry.register(first.clone(), retired_at));
+        assert_eq!(registry.wake_epoch, before_reregister + 1);
+
         fs::remove_dir_all(root).unwrap();
     }
 
