@@ -44,6 +44,8 @@ impl ProofChunks {
 pub(crate) struct Sources {
     proofs: BTreeMap<PathBuf, Proof>,
     paths: BTreeMap<(String, String), PathBuf>,
+    #[cfg(feature = "test-hooks")]
+    cache: PathBuf,
 }
 
 fn unavailable() -> io::Error {
@@ -128,7 +130,11 @@ impl Sources {
         sources: impl Iterator<Item = (CatalogSource, Option<ProofChunks>)>,
         require_references: bool,
     ) -> io::Result<Self> {
-        let mut captured = Self::default();
+        let mut captured = Self {
+            #[cfg(feature = "test-hooks")]
+            cache: options.cache.clone(),
+            ..Self::default()
+        };
         for (source, chunks) in sources {
             let chunks = chunks
                 .filter(|chunks| match chunks {
@@ -268,6 +274,7 @@ impl Sources {
             checked_evidence: Mutex::default(),
             prepared: Mutex::default(),
             failed: Mutex::new(false),
+            revision: Mutex::new(None),
         }
     }
 }
@@ -286,6 +293,7 @@ pub(crate) struct Records<'a> {
     // block on every read. Completion reopens and checks every used source.
     prepared: Mutex<Option<PreparedBlock>>,
     failed: Mutex<bool>,
+    revision: Mutex<Option<crate::source_carrier::RevisionReason>>,
 }
 
 struct PreparedBlock {
@@ -299,6 +307,34 @@ struct PreparedBlock {
 }
 
 impl Records<'_> {
+    // Preserve the first physical revision failure even when a presentation
+    // parser tolerates a missing record. No partial answer may hide this fence.
+    fn reject_revision(&self, reason: crate::source_carrier::RevisionReason) -> io::Error {
+        if let Ok(mut revision) = self.revision.lock() {
+            revision.get_or_insert(reason);
+        }
+        reason.error()
+    }
+
+    fn recheck(&self, path: &Path, file: &LogFile, before: &Stat) -> io::Result<()> {
+        crate::source_carrier::recheck(path, file, before).map_err(|_| {
+            let reason = file
+                .metadata()
+                .ok()
+                .and_then(|metadata| Stat::from_metadata(&metadata).ok())
+                .and_then(|after| crate::source_carrier::mismatch(before, &after))
+                .unwrap_or(crate::source_carrier::RevisionReason::Identity);
+            self.reject_revision(reason)
+        })
+    }
+
+    pub(crate) fn query_error(&self, error: impl std::fmt::Display) -> crate::QueryError {
+        match self.revision.lock().ok().and_then(|revision| *revision) {
+            Some(reason) => crate::QueryError::local_revision(reason),
+            None => crate::QueryError::new("io", error.to_string()),
+        }
+    }
+
     fn pinned_provider(&self, path: &Path) -> io::Result<bool> {
         Ok(matches!(
             self.mode,
@@ -398,7 +434,7 @@ impl Records<'_> {
             }
             let value = read(&mut file)?;
             if qualified {
-                crate::source_carrier::recheck(path, &file, &before)?;
+                self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -536,6 +572,18 @@ impl Records<'_> {
         };
         let before = Stat::from_metadata(&file.metadata()?)?;
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
+        if let Some(prior) = checked.get(path)
+            && matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            )
+            && prior != &before
+        {
+            return Err(self.reject_revision(
+                crate::source_carrier::mismatch(prior, &before)
+                    .unwrap_or(crate::source_carrier::RevisionReason::MissingChangeToken),
+            ));
+        }
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
                 || checked.get(path) == Some(&before));
@@ -543,10 +591,8 @@ impl Records<'_> {
             self.mode,
             crate::SessionSourceReadMode::LocalOrPinnedProvider
         ) {
-            if before.size < proof.ledger.offset
-                || checked.get(path).is_some_and(|prior| prior != &before)
-            {
-                return Err(unavailable());
+            if before.size < proof.ledger.offset {
+                return Err(self.reject_revision(crate::source_carrier::RevisionReason::SizeShrank));
             }
             if !unchanged && proof.ledger.offset != 0 {
                 proof.chunks.read(&mut file, 0)?;
@@ -557,7 +603,7 @@ impl Records<'_> {
                     .or_default()
                     .insert(0);
             }
-            crate::source_carrier::recheck(path, &file, &before)?;
+            self.recheck(path, &file, &before)?;
         } else if (!unchanged && !proof.ledger.resumes(&before, &mut file))
             || Stat::from_metadata(&file.metadata()?)? != before
         {
@@ -610,6 +656,9 @@ impl Records<'_> {
     /// Recheck touched sources before returning an answer, including native
     /// records served from the pager's short-lived line cache.
     pub(crate) fn finish(&self) -> io::Result<()> {
+        if let Some(reason) = *self.revision.lock().map_err(|_| unavailable())? {
+            return Err(reason.error());
+        }
         if *self.failed.lock().map_err(|_| unavailable())? {
             return Err(unavailable());
         }
@@ -666,7 +715,7 @@ impl Records<'_> {
                 proof.chunks.read(&mut file, *index)?;
             }
             if qualified {
-                crate::source_carrier::recheck(path, &file, &before)?;
+                self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -696,7 +745,7 @@ impl Records<'_> {
                 record.verify(&mut file)?;
             }
             if qualified {
-                crate::source_carrier::recheck(path, &file, &before)?;
+                self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -787,6 +836,9 @@ impl Records<'_> {
             self.mode,
             crate::SessionSourceReadMode::LocalOrPinnedProvider
         );
+        if qualified && before.size < proof.ledger.offset {
+            return Err(self.reject_revision(crate::source_carrier::RevisionReason::SizeShrank));
+        }
         if before.size < proof.ledger.offset
             || (!qualified
                 && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
@@ -794,8 +846,14 @@ impl Records<'_> {
             return Err(unavailable());
         }
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
-        if qualified && checked.get(path).is_some_and(|prior| prior != &before) {
-            return Err(unavailable());
+        if qualified
+            && let Some(prior) = checked.get(path)
+            && prior != &before
+        {
+            return Err(self.reject_revision(
+                crate::source_carrier::mismatch(prior, &before)
+                    .unwrap_or(crate::source_carrier::RevisionReason::MissingChangeToken),
+            ));
         }
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
@@ -833,15 +891,17 @@ impl Records<'_> {
             let hi = (end - start).min(part.len() as u64) as usize;
             bytes.extend_from_slice(&part[lo..hi]);
         }
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::run_cache(&self.sources.cache, "query_source_after_read");
+        if qualified {
+            self.recheck(path, &file, &before)?;
+        }
         if Stat::from_metadata(&file.metadata()?)? != before
             || (!qualified
                 && before.changed_ns.is_none()
                 && !proof.ledger.resumes(&before, &mut file))
         {
             return Err(unavailable());
-        }
-        if qualified {
-            crate::source_carrier::recheck(path, &file, &before)?;
         }
         checked.insert(path.to_owned(), before);
         if let Some(block) = prepared.as_deref_mut().and_then(Option::as_mut) {
@@ -1192,6 +1252,14 @@ mod tests {
                         .is_err()
                 );
                 assert!(records.finish().is_err());
+                let rejected = records
+                    .query_error("presentation omitted a failed record")
+                    .to_json();
+                assert_eq!(rejected["error"]["code"], "stale_projection");
+                assert_eq!(rejected["status"], 409);
+                assert_eq!(rejected["fence_reason"], "local_source_revision");
+                assert_eq!(rejected["local_revision_reason"], "size_grew");
+                assert!(rejected.get("entries").is_none());
             }
             assert!(
                 records
