@@ -63,6 +63,19 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      - name: Prepare Rust formatting review patch
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff --binary -- crates > "$RUNNER_TEMP/rust-format-review.patch"
+      - name: Retain formatting changes without bypassing checks
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-format-review
+          path: ${{ runner.temp }}/rust-format-review.patch
+          if-no-files-found: error
+
       - name: Measure bounded upload codecs on non-private native fixtures
         run: python3 scripts/benchmark-upload-compression.py --mib 1 | tee "$RUNNER_TEMP/upload-compression.json"
 
@@ -120,6 +133,7 @@ jobs:
         env:
           SEMON_BUILD_TIMING: "0"
         run: |
+          cargo test -p semon-sessions --locked selected_record_windows_reuse_qualified_bytes_and_reject_rebinding -- --nocapture
           cargo test -p semon-sessions --locked recovery_tests:: -- --test-threads=1 --nocapture
           cargo test -p semon-sessions --locked selected_transcript_tail_scope_measurement -- --ignored --test-threads=1 --nocapture
           cargo test -p semon-sessions --locked focused_query_keeps_cross_harness_and_literal_native_identity_collision_context -- --test-threads=1 --nocapture

@@ -609,6 +609,14 @@ pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), 
     Ok((Box::new(store), loaded))
 }
 
+/// Qualify an exact selected or recovery path without traversing unrelated
+/// archived markers. An existing database is never initialized or reset here.
+pub(crate) fn open_selected(path: &Path) -> Result<(), String> {
+    SqliteStore::attempt_selected(path)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Restart/read interest can resume durable work without opening Event payloads.
 /// An absent store alone does not ask a qualified-read observer to cold-index.
 pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool> {
@@ -811,7 +819,7 @@ pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut found = std::collections::BTreeSet::new();
     let mut statement=store.connection.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
@@ -884,7 +892,7 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     if let Some((_, ledger)) =
         ledger_row(&store.connection, &path.to_string_lossy()).map_err(io::Error::other)?
@@ -909,11 +917,14 @@ pub(crate) fn complete_relocation(
     input: &crate::Input,
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
+    let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
+    let _ = archived_index(&tx, &evidence.from_path).map_err(io::Error::other)?;
     tx.execute(
         "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
         params![
@@ -932,13 +943,55 @@ pub(crate) fn complete_relocation(
     tx.commit().map_err(io::Error::other)
 }
 
-/// Discover prior current paths in bounded durable keyset pages during repair.
-/// Filesystem discovery cannot enumerate disappeared or deselected sources.
-pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+/// Selected upgrade demand shares the producer's durable invalidation queue.
+/// Existing revisions stay intact, including an in-flight producer's claim.
+pub(crate) fn prioritize_projection_sources(
+    options: &crate::Options,
+    sources: &[crate::model::summary::CatalogSource],
+) -> io::Result<()> {
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
+    }
+    tx.execute(
+        "DELETE FROM meta WHERE key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'",
+        [],
+    )
+    .map_err(io::Error::other)?;
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![format!("slot_upgrade_selected:{path}"), path],
+        )
+        .map_err(io::Error::other)?;
+        let pending: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [path.as_ref()],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
+        if !pending {
+            invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        }
+    }
+    tx.commit().map_err(io::Error::other)
+}
+
+/// Discover prior current paths in bounded durable keyset pages during repair.
+/// Filesystem discovery cannot enumerate disappeared or deselected sources.
+pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
     let after: Option<String> = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_recovery_after'",
@@ -951,6 +1004,9 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
         return Ok(true);
     };
     let paths=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?.query_map([after],|row|row.get::<_,String>(0)).map_err(io::Error::other)?.collect::<Result<Vec<_>,_>>().map_err(io::Error::other)?;
+    for path in &paths {
+        let _ = archived_index(&tx, path).map_err(io::Error::other)?;
+    }
     for path in &paths {
         if tx
             .execute(
@@ -979,10 +1035,11 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
     tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');").map_err(io::Error::other)?;
     tx.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_reason',?1)",
@@ -993,7 +1050,7 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
 }
 
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     store
         .connection
@@ -1037,10 +1094,14 @@ pub(crate) fn requeue_concurrent_sources(
     if paths.is_empty() {
         return Ok(());
     }
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
+    for path in &paths {
+        let _ = archived_index(&tx, path).map_err(io::Error::other)?;
+    }
     for path in paths {
         invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
     }
@@ -2245,12 +2306,29 @@ impl IndexStore for SqliteStore {
     }
 
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
-        let mut statement = self.connection.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
-        statement
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        require_current_sql(&transaction).map_err(failure)?;
+        let mut selected = transaction.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?;
+        let paths = selected
+            .query_map([limit as i64], |row| row.get(0))
+            .map_err(failure)?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(failure)?;
+        if !paths.is_empty() {
+            drop(selected);
+            transaction.commit().map_err(failure)?;
+            return Ok(paths);
+        }
+        drop(selected);
+        let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
+        let paths = statement
             .query_map([limit as i64], |row| row.get(0))
             .map_err(failure)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)
+            .map_err(failure)?;
+        drop(statement);
+        transaction.commit().map_err(failure)?;
+        Ok(paths)
     }
 
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
@@ -3701,6 +3779,79 @@ impl SqliteStore {
         Ok((store, loaded))
     }
 
+    /// Opens an existing current store for bounded selected or recovery work.
+    /// Unlike producer opens, this does not initialize storage or inspect
+    /// unrelated archived markers.
+    fn attempt_selected(path: &Path) -> Result<Self, Unopened> {
+        if !path.exists() {
+            return Self::attempt_scoped(path, true).map(|(store, _)| store);
+        }
+        let classify = |error: rusqlite::Error| {
+            if is_corrupt(&error) {
+                Unopened::Corrupt(error)
+            } else if is_unavailable(&error) {
+                Unopened::Other(error.to_string())
+            } else {
+                Unopened::Unsupported(format!(
+                    "unsupported session index: malformed persistent state ({error})"
+                ))
+            }
+        };
+        {
+            let db = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(classify)?;
+            db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+            let read = db.unchecked_transaction().map_err(classify)?;
+            match qualify_contract(&read).map_err(classify)? {
+                Init::Ready => {}
+                Init::Unsupported(reason) => {
+                    return Err(Unopened::Unsupported(reason.into()));
+                }
+                _ => {
+                    return Err(Unopened::Unsupported(
+                        "unsupported session index: existing store is not initialized".into(),
+                    ));
+                }
+            }
+            read.commit().map_err(classify)?;
+            let mode: String = db
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .map_err(classify)?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(Unopened::Unsupported(
+                    "unsupported session index: journal mode".into(),
+                ));
+            }
+        }
+
+        // Keep the usual owner-only file and WAL permissions, but only after
+        // the persistent contract has been qualified and without creating it.
+        make_existing_private(path, &crate::state_dir())
+            .map_err(|error| Unopened::Other(error.to_string()))?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(classify)?;
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+        let store = Self {
+            connection,
+            path: path.to_owned(),
+            selected_runs: Some(std::collections::BTreeSet::new()),
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        Ok(store)
+    }
+
     fn read_stamp(&self) -> rusqlite::Result<Option<ReportedFileStamp>> {
         Ok(self
             .connection
@@ -3842,6 +3993,7 @@ impl SqliteStore {
         if !current(&transaction)? {
             return Ok(Outcome::Stale);
         }
+        require_current_sql(&transaction)?;
         let found = ledger_row(&transaction, path)?;
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
@@ -3866,6 +4018,7 @@ impl SqliteStore {
         if !current(&transaction)? {
             return Ok(Outcome::Stale);
         }
+        require_current_sql(&transaction)?;
         for (path, expected) in files {
             match (ledger_row(&transaction, path), expected) {
                 (Ok(Some((_, found))), Some(expected)) if found == *expected => {
@@ -4103,6 +4256,46 @@ fn create_private(path: &Path, semon_state: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Tightens the existing store and its SQLite siblings without creating any
+/// of them. Selected opens call this only after read-only qualification.
+fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::other("its path is a symlink"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(O_NOFOLLOW);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for sibling_path in [path.to_owned(), sibling(path, "-wal"), sibling(path, "-shm")] {
+            if let Ok(metadata) = fs::symlink_metadata(&sibling_path)
+                && metadata.is_file()
+                && metadata.permissions().mode() & 0o077 != 0
+            {
+                fs::set_permissions(&sibling_path, fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        let owner = file.metadata()?.uid();
+        if let Some(state) = tightened(path, semon_state)
+            && let Ok(metadata) = fs::symlink_metadata(&state)
+            && metadata.is_dir()
+            && metadata.uid() == owner
+            && metadata.permissions().mode() & 0o077 != 0
+        {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = semon_state;
+        drop(file);
+    }
+    Ok(())
+}
+
 /// Renames a damaged store to `<path>.corrupt` and drops its `-wal` and
 /// `-shm`, which belong to it and must not meet the new file.
 fn set_aside(path: &Path) -> io::Result<()> {
@@ -4269,6 +4462,19 @@ pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
         Init::Ready => Ok(()),
         Init::Unsupported(reason) => Err(io::Error::other(reason)),
         _ => Err(io::Error::other("session index is not initialized")),
+    }
+}
+
+/// A writer qualifies the fixed-size current contract in its own transaction
+/// before changing durable rows or proof metadata. Writers that touch archive
+/// custody validate only the selected marker at that call site.
+pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<()> {
+    match qualify_contract(connection)? {
+        Init::Ready => Ok(()),
+        Init::Unsupported(reason) => Err(rusqlite::Error::InvalidParameterName(reason.into())),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "session index is not initialized".to_owned(),
+        )),
     }
 }
 
@@ -6448,6 +6654,182 @@ mod tests {
         let (rows, projections) = catalog_fixture_projection(&options);
         assert_eq!(rows.len(), count);
         (options, rows, projections)
+    }
+
+    #[test]
+    fn selected_projection_upgrade_precedes_draining_and_preserves_revision() {
+        let root = scratch("selected-upgrade-priority");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let selected = &rows[1];
+        let path = selected.sources[0].path.to_string_lossy().into_owned();
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
+        db.execute(
+            "UPDATE session_slot_projections SET version=5 WHERE session_key=?1",
+            [&selected.key],
+        )
+        .unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        invalidate_catalog_source(&tx, "/unrelated/first.jsonl", "changed").unwrap();
+        invalidate_catalog_source(&tx, &path, "changed").unwrap();
+        tx.commit().unwrap();
+        let revision: i64 = db
+            .query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
+        let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
+        assert_eq!(
+            store.pending_catalog_sources(64).unwrap(),
+            vec![path.clone()]
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&path],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            revision
+        );
+        drop(store);
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let upgraded = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    CATALOG_FIXTURE_NOW,
+                )
+                .unwrap();
+            db.query_row(
+                "SELECT version FROM session_slot_projections WHERE session_key=?1",
+                [&selected.key],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap()
+                == crate::slot_projection::VERSION
+        });
+        evidence.retire();
+        assert!(
+            upgraded,
+            "ordinary producer must complete the selected upgrade"
+        );
+        eprintln!("slot_upgrade stage=producer selected_first=true version=6");
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_selected_upgrade_ignores_unrelated_archive_and_refuses_selected_marker_without_writes() {
+        let root = scratch("selected-open-public-entry");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let selected = &rows[1];
+        let path = selected.sources[0].path.to_string_lossy().into_owned();
+        let cache_path = super::super::EventCache::path(&options.cache);
+        let db = Connection::open(&cache_path).unwrap();
+        db.execute(
+            "UPDATE session_slot_projections SET version=5 WHERE session_key=?1",
+            [&selected.key],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            params![archive_index_key("/synthetic/unrelated.jsonl"), r#"{"version":1}"#],
+        )
+        .unwrap();
+        db.execute(
+            "DELETE FROM session_catalog_invalidations WHERE source_path=?1",
+            [&path],
+        )
+        .unwrap();
+        drop(db);
+        assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
+        let db = Connection::open(&cache_path).unwrap();
+        let selected_meta = format!("slot_upgrade_selected:{path}");
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [&selected_meta],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            path
+        );
+        assert!(db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&path],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap());
+
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            params![archive_index_key(&path), r#"{"version":5}"#],
+        )
+        .unwrap();
+        let snapshot = |connection: &Connection| {
+            let mut meta_statement =
+                connection.prepare("SELECT key,value FROM meta ORDER BY key").unwrap();
+            let meta = meta_statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let mut invalidation_statement = connection
+                .prepare(
+                    "SELECT source_path,revision,reason FROM session_catalog_invalidations ORDER BY source_path",
+                )
+                .unwrap();
+            let invalidations = invalidation_statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let mut claims_statement = connection
+                .prepare(
+                    "SELECT source_path,claim FROM catalog_semantic_sources WHERE claim IS NOT NULL ORDER BY source_path",
+                )
+                .unwrap();
+            let claims = claims_statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (meta, invalidations, claims)
+        };
+        let before = snapshot(&db);
+        let mut wal_path = cache_path.as_os_str().to_owned();
+        wal_path.push("-wal");
+        let wal_path = PathBuf::from(wal_path);
+        let read_wal = || match fs::read(&wal_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read SQLite WAL: {error}"),
+        };
+        let wal_before = read_wal();
+        drop(db);
+        assert!(crate::request_session_projection_upgrade(&options, &selected.key).is_err());
+        let wal_after = read_wal();
+        let frame_bytes = |wal: &[u8]| wal.get(32..).unwrap_or_default().to_vec();
+        assert_eq!(frame_bytes(&wal_after), frame_bytes(&wal_before));
+        let db = Connection::open(&cache_path).unwrap();
+        assert_eq!(snapshot(&db), before);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn catalog_fixture_projection(
@@ -9019,6 +9401,100 @@ mod tests {
             .write_one("a.jsonl", None, None, &ledger(3), &full())
             .unwrap();
         assert_eq!(invalidation(&store), Some((4, "changed".into())));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_repair_ignores_unrelated_archive_markers_and_refuses_selected_damage() {
+        let root = scratch("selected-archive-marker");
+        let (mut store, _) = opened(&root.join("index.sqlite3"));
+        let unrelated_key = archive_index_key("unrelated.jsonl");
+        let selected_key = archive_index_key("selected.jsonl");
+        store
+            .write_one("selected.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![unrelated_key, r#"{"version":1}"#],
+            )
+            .unwrap();
+
+        // Focused qualification and a selected removal do not traverse an
+        // unrelated archive marker. The selected operation remains usable.
+        require_current(&store.connection).unwrap();
+        assert_eq!(
+            store
+                .remove(&[("selected.jsonl".into(), Some(ledger(1)))])
+                .unwrap(),
+            Outcome::Written
+        );
+        assert!(store.read_one("selected.jsonl").unwrap().is_none());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [&unrelated_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            r#"{"version":1}"#
+        );
+
+        // An invalid marker for the selected key still refuses the repair
+        // before it changes the indexed source, its events or its claim.
+        store
+            .write_one("selected.jsonl", None, None, &ledger(2), &full())
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![selected_key, r#"{"version":1}"#],
+            )
+            .unwrap();
+        let before = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM files), (SELECT COUNT(*) FROM events), \
+                 (SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path='selected.jsonl'), \
+                 (SELECT value FROM meta WHERE key=?1)",
+                [&selected_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert!(store
+            .remove(&[("selected.jsonl".into(), Some(ledger(2)))])
+            .is_err());
+        let after = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM files), (SELECT COUNT(*) FROM events), \
+                 (SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path='selected.jsonl'), \
+                 (SELECT value FROM meta WHERE key=?1)",
+                [&selected_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(store.read_one("selected.jsonl").unwrap().unwrap().0, ledger(2));
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 

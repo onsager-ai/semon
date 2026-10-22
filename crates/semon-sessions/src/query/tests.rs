@@ -3583,11 +3583,11 @@ fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publi
         if selected_changes {
             let error = result.unwrap_err();
             assert_eq!(error.code, "io");
-            assert_eq!(error.stage, Some("proof_changed"));
             assert_eq!(
                 error.message,
-                "Original native transcript proofs are unavailable"
+                "Selected native transcript publication changed"
             );
+            assert_eq!(error.stage, None);
         } else {
             assert_eq!(result.unwrap(), before);
         }

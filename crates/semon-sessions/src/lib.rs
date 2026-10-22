@@ -24,7 +24,8 @@ pub use overview::{
 };
 pub use overview_repair::{
     overview_repair_candidates, overview_repair_sources, repair_session_overview,
-    repair_session_overview_with_control, session_overview_observe, session_query_sources,
+    repair_session_overview_with_control, request_session_projection_upgrade,
+    session_overview_observe, session_query_sources,
 };
 mod catalog;
 mod catalog_changes;
