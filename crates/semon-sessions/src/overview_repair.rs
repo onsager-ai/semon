@@ -21,6 +21,95 @@ type EvidenceRead<'a> =
 type NativeRead<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Value> + 'a>;
 type NativeBytes<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Vec<u8>> + 'a>;
 
+// One already-qualified window per admitted source, owned by this preparation.
+// Preserve the rest of an 8 KiB read after a newline instead of asking the
+// provider again for every short record or every field in that record.
+#[derive(Default)]
+struct RecordWindows(std::sync::Mutex<BTreeMap<(String, String), RecordWindow>>);
+struct RecordWindow {
+    source: crate::SessionSourceRef,
+    part: crate::SessionSourceRange,
+}
+struct WindowReader<'a> {
+    reader: &'a dyn SessionSourceReader,
+    windows: &'a RecordWindows,
+}
+impl SessionSourceReader for WindowReader<'_> {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        crate::selected_read::check()?;
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "Native recipe window changed");
+        if max == 0 || offset >= source.offset {
+            return Err(invalid());
+        }
+        let key = (source.root.clone(), source.path.clone());
+        let mut windows = self.windows.0.lock().map_err(|_| invalid())?;
+        let prior = windows.get(&key);
+        if let Some(prior) = prior {
+            if prior.source != *source
+                || expected.is_some_and(|value| value != prior.part.generation)
+            {
+                return Err(invalid());
+            }
+            if let Some(start) = offset.checked_sub(prior.part.offset)
+                && let Ok(start) = usize::try_from(start)
+                && start < prior.part.bytes.len()
+            {
+                let end = start + max.min(prior.part.bytes.len() - start);
+                return Ok(crate::SessionSourceRange {
+                    generation: prior.part.generation.clone(),
+                    length: prior.part.length,
+                    offset,
+                    bytes: std::sync::Arc::from(&prior.part.bytes[start..end]),
+                    cached: true,
+                });
+            }
+        } else if windows.len() >= SOURCES_MAX {
+            return Err(invalid());
+        }
+        let max = max
+            .min(8 * 1024)
+            .min((source.offset - offset).min(8192) as usize);
+        let part = self.reader.read_range(
+            source,
+            prior
+                .map(|prior| prior.part.generation.as_str())
+                .or(expected),
+            offset,
+            max,
+        )?;
+        if part.offset != offset
+            || part.bytes.is_empty()
+            || part.bytes.len() > max
+            || part.length < source.offset
+            || part.generation.is_empty()
+            || part.generation.len() > 4096
+            || expected.is_some_and(|value| value != part.generation)
+            || prior.is_some_and(|prior| {
+                prior.part.generation != part.generation || prior.part.length != part.length
+            })
+        {
+            return Err(invalid());
+        }
+        // Charge retained bytes before storing them. At most 64 * 8 KiB are
+        // resident; replacements also share the unchanged preparation budget.
+        crate::selected_read::charge(0, part.bytes.len())?;
+        windows.insert(
+            key,
+            RecordWindow {
+                source: source.clone(),
+                part: part.clone(),
+            },
+        );
+        Ok(part)
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     pub(crate) static BEFORE_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -1104,45 +1193,8 @@ fn with_records<T>(
     tx.commit().map_err(failure)?;
     let bytes_left = std::cell::RefCell::new(BYTES_MAX as usize);
     let requests = std::cell::Cell::new(1024usize);
+    let windows = RecordWindows::default();
     let memo = std::cell::RefCell::new(BTreeMap::<(PathBuf, u64), Value>::new());
-    let read = |path: &Path, offset: u64| -> io::Result<Value> {
-        let key = (path.to_owned(), offset);
-        if let Some(value) = memo.borrow().get(&key) {
-            return Ok(value.clone());
-        }
-        let row = rows
-            .iter()
-            .find(|row| row.sources.iter().any(|source| source.path == path))
-            .ok_or_else(|| failure("Unqualified native producer source"))?;
-        let value = crate::transcript_range::with_source_reader(
-            options,
-            &row.harness,
-            &row.sources,
-            provider,
-            mode,
-            |reader, refs| {
-                let reader = crate::source_reader::BudgetedReader::new(reader, requests.get());
-                let value = crate::source_reader::read_record_bounded(
-                    &reader,
-                    refs.get(path)
-                        .ok_or_else(|| failure("Unknown producer source"))?,
-                    offset,
-                    32 * 1024 * 1024,
-                    &mut bytes_left.borrow_mut(),
-                );
-                requests.set(reader.remaining());
-                value
-            },
-        )?;
-        if value.to_string().len() <= 1048576 {
-            let mut memo = memo.borrow_mut();
-            if memo.len() >= 16 {
-                memo.clear();
-            }
-            memo.insert(key, value.clone());
-        }
-        Ok(value)
-    };
     let raw = |path: &Path, offset: u64| -> io::Result<Vec<u8>> {
         let row = rows
             .iter()
@@ -1157,7 +1209,10 @@ fn with_records<T>(
             |reader, refs| {
                 let reader = crate::source_reader::BudgetedReader::new(reader, requests.get());
                 let bytes = crate::source_reader::read_record_bytes_bounded(
-                    &reader,
+                    &WindowReader {
+                        reader: &reader,
+                        windows: &windows,
+                    },
                     refs.get(path)
                         .ok_or_else(|| failure("Unknown recipe source"))?,
                     offset,
@@ -1170,6 +1225,23 @@ fn with_records<T>(
                 Ok(bytes)
             },
         )
+    };
+    let read = |path: &Path, offset: u64| -> io::Result<Value> {
+        let key = (path.to_owned(), offset);
+        if let Some(value) = memo.borrow().get(&key) {
+            return Ok(value.clone());
+        }
+        let bytes = raw(path, offset)?;
+        let value = crate::tx::parse_native_record(&bytes)
+            .ok_or_else(|| failure("Native producer record is malformed"))?;
+        if bytes.len() <= 1048576 {
+            let mut memo = memo.borrow_mut();
+            if memo.len() >= 16 {
+                memo.clear();
+            }
+            memo.insert(key, value.clone());
+        }
+        Ok(value)
     };
     let evidence = |path: &Path, proof: &crate::native_record::Record| -> io::Result<Vec<u8>> {
         let row = rows
@@ -1350,6 +1422,89 @@ pub(crate) fn with_query<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_record_windows_reuse_qualified_bytes_and_reject_rebinding() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Reader {
+            generation: AtomicUsize,
+            length: AtomicUsize,
+        }
+        impl SessionSourceReader for Reader {
+            fn read_range(
+                &self,
+                _source: &crate::SessionSourceRef,
+                _expected: Option<&str>,
+                offset: u64,
+                max: usize,
+            ) -> io::Result<crate::SessionSourceRange> {
+                Ok(crate::SessionSourceRange {
+                    generation: self.generation.load(Ordering::Relaxed).to_string(),
+                    length: self.length.load(Ordering::Relaxed) as u64,
+                    offset,
+                    bytes: Arc::from(vec![b'x'; max]),
+                    cached: false,
+                })
+            }
+        }
+        let reader = Reader {
+            generation: AtomicUsize::new(1),
+            length: AtomicUsize::new(24 * 1024),
+        };
+        let bounded = crate::source_reader::BudgetedReader::new(&reader, 4);
+        let windows = RecordWindows::default();
+        let windowed = WindowReader {
+            reader: &bounded,
+            windows: &windows,
+        };
+        let source = crate::SessionSourceRef {
+            root: "claude".into(),
+            path: "projects/fixture.jsonl".into(),
+            native_id: "fixture".into(),
+            offset: 24 * 1024,
+            prefix_sha256: [1; 32],
+            tail_sha256: [2; 32],
+        };
+        assert_eq!(
+            windowed
+                .read_range(&source, None, 0, 8192)
+                .unwrap()
+                .bytes
+                .len(),
+            8192
+        );
+        for offset in 0..1024 {
+            let part = windowed
+                .read_range(&source, Some("1"), offset, 8192)
+                .unwrap();
+            assert_eq!(part.offset, offset);
+            assert_eq!(part.bytes.len(), 8192 - offset as usize);
+        }
+        assert_eq!(
+            bounded.remaining(),
+            3,
+            "adjacent records reuse qualified bytes"
+        );
+        let mut changed = source.clone();
+        changed.prefix_sha256 = [3; 32];
+        assert!(windowed.read_range(&changed, None, 0, 1).is_err());
+        assert!(windowed.read_range(&source, Some("2"), 0, 1).is_err());
+        reader.generation.store(2, Ordering::Relaxed);
+        assert!(windowed.read_range(&source, None, 8192, 8192).is_err());
+        reader.generation.store(1, Ordering::Relaxed);
+        reader.length.store(24 * 1024 + 1, Ordering::Relaxed);
+        assert!(windowed.read_range(&source, None, 8192, 8192).is_err());
+        assert!(
+            windowed
+                .read_range(&source, None, source.offset, 1)
+                .is_err()
+        );
+        assert_eq!(bounded.remaining(), 1);
+    }
+
     #[test]
     fn migration_candidate_work_is_independent_of_unrelated_history() {
         let db = Connection::open_in_memory().unwrap();
