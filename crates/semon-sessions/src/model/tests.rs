@@ -10813,7 +10813,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
             .unwrap(),
         1
     );
-    // Simulate a v26 event and slot projection that cached this direct result
+    // Simulate a v27 event and slot projection that cached this direct result
     // as unknown and did not persist the new direct-call qualification.
     assert_eq!(
         connection
@@ -10842,7 +10842,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
         .unwrap();
     assert!(
         stale_state.is_none(),
-        "main v26 stored no direct-call envelope"
+        "main v27 stored no direct-call envelope"
     );
     drop(connection);
 
@@ -10853,7 +10853,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
     );
     let stale_projection = stale_cache
         .session_slots(row, Some(&old_catalog_generation), slots.len())
-        .expect("the coherent v26 projection remains readable under its source fence");
+        .expect("the coherent v27 projection remains readable under its source fence");
     assert!(matches!(
         &stale_projection[tool_at].recipe,
         crate::slot_projection::Recipe::Tool {
@@ -10866,7 +10866,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
 
     rusqlite::Connection::open(&cache_path)
         .unwrap()
-        .execute("UPDATE meta SET value='26' WHERE key='cache_version'", [])
+        .execute("UPDATE meta SET value='27' WHERE key='cache_version'", [])
         .unwrap();
 
     observe();
@@ -10883,7 +10883,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
             |record| record.get(0),
         )
         .unwrap();
-    assert_eq!(cache_version, "27");
+    assert_eq!(cache_version, "28");
     let (reply_flags, state): (i64, Option<String>) = connection
         .query_row(
             "SELECT reply_f,y FROM events JOIN files USING(file_id) WHERE files.path=?1 AND events.id='direct-cache' AND events.reply=1",

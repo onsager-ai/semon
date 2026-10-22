@@ -1838,6 +1838,7 @@ struct SessionInputs {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DescriptionInputs {
+    pricing_fingerprint: String,
     files: Vec<(PathBuf, FileRevision)>,
     metadata: Vec<String>,
     baseline: String,
@@ -2535,6 +2536,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         let inputs = DescriptionInputs {
+            pricing_fingerprint: crate::pricing::snapshot().fingerprint.clone(),
             files,
             metadata,
             repos,

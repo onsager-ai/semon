@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+# Fixture processes use deterministic bundled reference prices.
+env:
+  SEMON_PRICING_REFRESH: "off"
+
 concurrency:
   group: viewer-ui-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

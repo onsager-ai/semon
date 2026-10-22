@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+# Fixture processes use deterministic bundled reference prices.
+env:
+  SEMON_PRICING_REFRESH: "off"
+
 # A newer PR revision supersedes only that PR's earlier Rust run.
 concurrency:
   group: rust-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -88,6 +92,12 @@ jobs:
       # as published (vendor/tiny_http/SEMON-PATCH.md).
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- --no-deps -D warnings
+
+      - name: Runtime pricing regressions
+        run: |
+          cargo test -p semon-sessions --lib --locked pricing::runtime::tests::
+          cargo test -p semon-sessions --lib --locked events::store::reprice::tests::
+          cargo test -p semon-sessions --lib --locked catalog_statement_journal_batch_probe_preserves_catalog_feed_and_transaction_rollback
 
       - name: Collection pause boundaries before broad regressions
         run: |

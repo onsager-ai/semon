@@ -505,6 +505,15 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
 }
 
 fn run(command: Command) -> Result<(), String> {
+    semon_sessions::pricing::initialize_default();
+    if matches!(
+        &command,
+        Command::Mcp(_)
+            | Command::Sessions(SessionsArgs { serve: true, .. })
+            | Command::Sessions(SessionsArgs { watch: true, .. })
+    ) {
+        semon_sessions::pricing::start_default_refresh();
+    }
     match command {
         Command::Control(args) => run_control(args),
         Command::Version => {

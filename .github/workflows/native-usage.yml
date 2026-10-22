@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SEMON_PRICING_REFRESH: "off"
+
 concurrency:
   group: native-usage-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
