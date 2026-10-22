@@ -5875,6 +5875,7 @@ impl<'a> Builder<'a> {
                         {
                             SlotKind::Sent {
                                 shown,
+                                result_source: found.result_source,
                                 reply: found.r.clone(),
                                 start: started.o,
                                 done: started
@@ -5886,6 +5887,7 @@ impl<'a> Builder<'a> {
                         }
                         _ => SlotKind::Tool {
                             shown,
+                            result_source: found.is_some_and(|found| found.result_source),
                             name: found
                                 .and_then(|found| found.n.clone())
                                 .unwrap_or_else(|| "tool".into()),
@@ -6581,6 +6583,8 @@ pub(crate) enum SlotKind {
     Tool {
         shown: Shown,
         name: String,
+        /// This code-mode call prints its exact single awaited result.
+        result_source: bool,
         reply: Option<events::Reply>,
         /// A plain Codex call's `CommandExecution` item line, when the logs
         /// have one: its output is the whole copy.
@@ -6619,6 +6623,8 @@ pub(crate) enum SlotKind {
     /// A poll that sent input to a yielded command: a step of its own.
     Sent {
         shown: Shown,
+        /// This poll prints its exact single awaited result.
+        result_source: bool,
         reply: Option<events::Reply>,
         /// The line of the script that started the command, and of the item
         /// that completed it.
