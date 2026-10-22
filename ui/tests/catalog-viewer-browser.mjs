@@ -3149,7 +3149,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
           json: {
             api: 1,
             identity: { ...identity('one'), read_scope: 'retained_history' },
-            projection: { version: 5, generation: 'b'.repeat(64) },
+            projection: { version: 6, generation: 'b'.repeat(64) },
             slot: 400,
             field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
             text,
