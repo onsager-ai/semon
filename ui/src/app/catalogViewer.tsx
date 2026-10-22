@@ -20,6 +20,7 @@ import {
   type CatalogPage,
   type CatalogSession,
 } from '../state/catalog-wire';
+import type { CatalogSessionIdentity } from '../domain/catalog';
 import {
   catalogCountWitness,
   completeCatalogCount,
@@ -28,7 +29,10 @@ import {
 import { CatalogSelectionStore, type CatalogSelectionRequest } from '../state/catalog-selection';
 import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catalog-annotations';
 import { CatalogTranscriptStore } from '../state/catalog-transcript';
-import { CatalogRecovery } from '../state/catalog-recovery';
+import {
+  CatalogRecovery,
+  type CatalogRecoveryProgress,
+} from '../state/catalog-recovery';
 import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
 import { createRecentRenderer } from '../lib/recent';
@@ -165,6 +169,42 @@ interface SelectedView {
     find?: string;
     filter?: string;
     focus: string;
+  };
+}
+
+function catalogRecoveryProgress(value: CatalogSession): CatalogRecoveryProgress {
+  return {
+    source: JSON.stringify(
+      value.source_refs.map(({ state, source }) => [
+        state,
+        source.offset,
+        source.prefix_sha256,
+        source.tail_sha256,
+      ]),
+    ),
+    catalog: JSON.stringify(
+      value.transcript
+        ? [
+            value.transcript.generation,
+            value.transcript.errorsGeneration,
+            value.transcript.total,
+          ]
+        : null,
+    ),
+  };
+}
+
+function identityRecoveryProgress(value: CatalogSessionIdentity): CatalogRecoveryProgress {
+  return {
+    source: JSON.stringify(
+      value.source_refs.map(({ state, source }) => [
+        state,
+        source.offset,
+        source.prefix_sha256,
+        source.tail_sha256,
+      ]),
+    ),
+    identity: value.generation,
   };
 }
 /** The advertised bounded reader has no complete ModelStore or global content poller. */
@@ -2599,11 +2639,30 @@ export function createCatalogViewer(
       void loadList(false);
     shell.closeDrawer(true);
   }
+  function observeSelectedProgress(view: SelectedView, progress: CatalogRecoveryProgress) {
+    if (view.sourceKey !== capabilities.source_key) return;
+    if (!view.recovery.observeProgress(progress)) return;
+    view.note = '';
+    view.transientNote = false;
+    view.renderedRevision = -1;
+    drawSelected(view);
+    if (
+      !disposed &&
+      active === view &&
+      !view.loading &&
+      view.retry === undefined &&
+      capabilities.selected_transcript
+    )
+      void loadSelected(view);
+  }
   function drawSelected(view: SelectedView, captureReading = true) {
     if (disposed || active !== view) return;
     const current = view.store.selectedPage(),
       identity = selection.selectedIdentity(),
-      observationNote = [
+      recoveryNote = view.recovery.stopped
+        ? 'Recorded history could not be loaded. Retry to try again.'
+        : undefined,
+      observationNote = recoveryNote ?? [
         view.anchorNote,
         view.note,
         view.observationFailure?.text,
@@ -2629,7 +2688,7 @@ export function createCatalogViewer(
             ? 'Recorded history is unavailable'
             : 'Recorded history is updating',
           retry:
-            view.note && !view.loading
+            view.recovery.stopped || (view.note && !view.loading)
               ? {
                   label: 'Retry selected transcript',
                   run() {
@@ -2641,6 +2700,7 @@ export function createCatalogViewer(
                 }
               : undefined,
           empty:
+            recoveryNote ||
             observationNote ||
             (capabilities.selected_transcript
               ? 'Loading recorded session…'
@@ -3159,12 +3219,13 @@ export function createCatalogViewer(
       view.store = candidate;
       pruneSelectedFields(view);
       view.renderedRevision = -1;
+      view.recovery.reset();
       view.meta = {
         ...candidate.selectedPage()!.session,
         ...(view.observedName === undefined ? {} : { name: view.observedName }),
       };
+      view.recovery.observeProgress(catalogRecoveryProgress(view.meta));
       view.note = '';
-      view.recovery.reset();
       if (active === view) {
         void loadIdentity(view);
       }
@@ -3227,6 +3288,7 @@ export function createCatalogViewer(
           ...current.session,
           ...(view.observedName === undefined ? {} : { name: view.observedName }),
         };
+        view.recovery.observeProgress(catalogRecoveryProgress(view.meta));
         if (active === view) {
           if (view.errorMode && view.annotations?.generation !== annotationGeneration(view))
             void readAnnotations(view, true);
@@ -3472,9 +3534,13 @@ export function createCatalogViewer(
       if (reply.api !== 1) throw new Error('Unsupported source identity response');
       const previousLabel = sourceLabel(view.sourceKey);
       if (active === view && selection.accept(ticket, reply.identity)) {
-        if (selection.selectedIdentity()?.owner_qualification === 'provisional')
-          view.note = 'Session identity is provisional while history is being discovered.';
-        else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        const accepted = selection.selectedIdentity();
+        if (accepted) observeSelectedProgress(view, identityRecoveryProgress(accepted));
+        if (!view.recovery.stopped) {
+          if (accepted?.owner_qualification === 'provisional')
+            view.note = 'Session identity is provisional while history is being discovered.';
+          else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        }
         if (previousLabel !== sourceLabel(view.sourceKey)) {
           view.renderedRevision = -1;
           chrome();
@@ -3497,10 +3563,11 @@ export function createCatalogViewer(
           catalog_key: view.key,
         });
       }
-      view.note =
-        error && typeof error === 'object' && 'status' in error && error.status === 404
-          ? 'Current native session selection is unavailable. Retained history remains readable.'
-          : readError(error);
+      if (!view.recovery.stopped)
+        view.note =
+          error && typeof error === 'object' && 'status' in error && error.status === 404
+            ? 'Current native session selection is unavailable. Retained history remains readable.'
+            : readError(error);
       drawSelected(view);
     } finally {
       view.identityLoading = false;
@@ -3542,6 +3609,7 @@ export function createCatalogViewer(
         newCount: 0,
         lastTotal: null,
       };
+      if (meta) view.recovery.observeProgress(catalogRecoveryProgress(meta));
       view.root.className = 'catalog-session';
       readerResize.observe(view.root);
       selected.set(cacheKey(key), view);
@@ -3818,7 +3886,8 @@ export function createCatalogViewer(
     const observed = new Map(value.items.map((item) => [item.key, item]));
     const names = new Map(value.items.map((item) => [item.key, item.name]));
     const view = active;
-    if (view && !names.has(view.key)) {
+    let activeMetadata = view ? observed.get(view.key) : undefined;
+    if (view && !activeMetadata) {
       const selectedParams = params();
       selectedParams.set('sid', view.key);
       const selectedMeta = parseCatalogPage(await api('/api/sessions?' + selectedParams));
@@ -3831,8 +3900,13 @@ export function createCatalogViewer(
       )
         return;
       const match = selectedMeta.items.find((item) => item.key === view.key);
-      if (match) names.set(match.key, match.name);
+      if (match) {
+        names.set(match.key, match.name);
+        activeMetadata = match;
+      }
     }
+    if (view && activeMetadata)
+      observeSelectedProgress(view, catalogRecoveryProgress(activeMetadata));
     // Rotate bounded exact lookups for loaded history and retained Recent views
     // outside the first page. The active reader is always checked above.
     const remaining = [
@@ -3892,6 +3966,7 @@ export function createCatalogViewer(
       if (!active && !sourcesOpen) drawList();
       chrome();
     }
+    if (view && active === view && view.recovery.stopped) drawSelected(view);
   }
   async function recheckCapabilities() {
     const observedSource = capabilities.source_key,
