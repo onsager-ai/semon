@@ -8201,7 +8201,10 @@ mod tests {
             .unwrap();
         let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
         let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
-        assert_eq!(codex_fixture_snapshot(&appended), codex_fixture_snapshot(&cold));
+        assert_eq!(
+            codex_fixture_snapshot(&appended),
+            codex_fixture_snapshot(&cold)
+        );
         let old = &appended.events[0];
         assert_eq!(old.id.as_deref(), Some("start-26789"));
         assert_eq!(old.o, 0);
@@ -8242,7 +8245,10 @@ mod tests {
             &mut false,
         )
         .unwrap();
-        assert_eq!(codex_fixture_snapshot(&reopened), codex_fixture_snapshot(&cold));
+        assert_eq!(
+            codex_fixture_snapshot(&reopened),
+            codex_fixture_snapshot(&cold)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8918,7 +8924,10 @@ mod tests {
         }
         assert!(index.yields.is_empty());
         let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
-        assert_eq!(codex_fixture_snapshot(&index), codex_fixture_snapshot(&cold));
+        assert_eq!(
+            codex_fixture_snapshot(&index),
+            codex_fixture_snapshot(&cold)
+        );
         drop(cache);
         let replay = scan_file(
             &log,
@@ -8927,7 +8936,10 @@ mod tests {
             &mut false,
         )
         .unwrap();
-        assert_eq!(codex_fixture_snapshot(&index), codex_fixture_snapshot(&replay));
+        assert_eq!(
+            codex_fixture_snapshot(&index),
+            codex_fixture_snapshot(&replay)
+        );
 
         // The native Paginated carrier survives independently in source bytes;
         // current Semon does not expose an unowned completed command as an event.
