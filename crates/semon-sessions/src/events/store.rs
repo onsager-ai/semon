@@ -585,7 +585,9 @@ struct SqliteStore {
 pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
     let (store, loaded) = match SqliteStore::attempt(path) {
         Err(Unopened::Corrupt(error)) => {
-            set_aside(path).map_err(|aside| Unopened::Other(format!("{error}; it can't be set aside: {aside}")))?;
+            set_aside(path).map_err(|aside| {
+                Unopened::Other(format!("{error}; it can't be set aside: {aside}"))
+            })?;
             eprintln!(
                 "semon: the session index {} was damaged ({error}); it was set aside and is being rebuilt",
                 path.display()
@@ -2321,11 +2323,13 @@ impl IndexStore for SqliteStore {
     }
 
     fn tree_repair_pending(&self) -> Result<bool, StoreError> {
-        Ok(native_usage::repair_pending(&self.connection).map_err(failure)?
-            || tree_state::work_pending(&self.connection).map_err(failure)?)
+        Ok(
+            native_usage::repair_pending(&self.connection).map_err(failure)?
+                || tree_state::work_pending(&self.connection).map_err(failure)?,
+        )
     }
 
-    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, harness: &str) -> io::Result<()> {
+    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, _harness: &str) -> io::Result<()> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3637,7 +3641,8 @@ impl SqliteStore {
             let db = Connection::open_with_flags(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            ).map_err(classify)?;
+            )
+            .map_err(classify)?;
             db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
             let read = db.unchecked_transaction().map_err(classify)?;
             if let Init::Unsupported(reason) = qualify(&read).map_err(classify)? {
@@ -4122,22 +4127,41 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         |row| row.get(0),
     )?;
     if !meta {
-        return Ok(Init::Unsupported("unsupported session index: missing metadata"));
+        return Ok(Init::Unsupported(
+            "unsupported session index: missing metadata",
+        ));
     }
-    let parser = match connection.query_row(
-        "SELECT value FROM meta WHERE key='cache_version'",
-        [],
-        |row| row.get::<_, String>(0),
-    ).optional() {
+    let parser = match connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='cache_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+    {
         Ok(Some(value)) => match value.parse::<u32>() {
             Ok(version) => version,
-            Err(_) => return Ok(Init::Unsupported("unsupported session index: malformed metadata")),
+            Err(_) => {
+                return Ok(Init::Unsupported(
+                    "unsupported session index: malformed metadata",
+                ));
+            }
         },
-        Ok(None) => return Ok(Init::Unsupported("unsupported session index: missing metadata")),
-        Err(_) => return Ok(Init::Unsupported("unsupported session index: malformed metadata")),
+        Ok(None) => {
+            return Ok(Init::Unsupported(
+                "unsupported session index: missing metadata",
+            ));
+        }
+        Err(_) => {
+            return Ok(Init::Unsupported(
+                "unsupported session index: malformed metadata",
+            ));
+        }
     };
     if parser != CACHE_VERSION {
-        return Ok(Init::Unsupported("unsupported session index: parser version mismatch"));
+        return Ok(Init::Unsupported(
+            "unsupported session index: parser version mismatch",
+        ));
     }
     let publication: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2)",
@@ -4145,7 +4169,9 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         |row| row.get(0),
     )?;
     if publication {
-        return Ok(Init::Unsupported("unsupported session index: publication version"));
+        return Ok(Init::Unsupported(
+            "unsupported session index: publication version",
+        ));
     }
     let unsupported_archive: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN json_valid(value) THEN COALESCE(json_extract(value,'$.version')<>6,1) ELSE 1 END)",
@@ -4153,7 +4179,9 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         |row| row.get(0),
     )?;
     if unsupported_archive {
-        return Ok(Init::Unsupported("unsupported session index: archived marker version"));
+        return Ok(Init::Unsupported(
+            "unsupported session index: archived marker version",
+        ));
     }
     Ok(Init::Ready)
 }
@@ -4325,15 +4353,17 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
         "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1",
         [archive_index_key(path)], |row| row.get(0),
     ).optional()?;
-    encoded.map(|value| {
-        let record: ArchivedIndex = serde_json::from_str(
-            &value.ok_or(rusqlite::Error::InvalidQuery)?,
-        ).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if record.version != 6 || record.parser_version != CACHE_VERSION {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        Ok(record)
-    }).transpose()
+    encoded
+        .map(|value| {
+            let record: ArchivedIndex =
+                serde_json::from_str(&value.ok_or(rusqlite::Error::InvalidQuery)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if record.version != 6 || record.parser_version != CACHE_VERSION {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(record)
+        })
+        .transpose()
 }
 
 fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
@@ -4640,7 +4670,10 @@ fn write_tree_summary(
             // Retain the source and current rows, but stop retrying a scalar
             // that cannot fit the compact projection budget.
             transaction.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("native_tree_failure:{path}"),header_ledger(ledger)])?;
-            transaction.execute("UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",[path])?;
+            transaction.execute(
+                "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
+                [path],
+            )?;
             return Ok(());
         }
         transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![tree_summary_key(path), encoded])?;
@@ -7003,7 +7036,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn catalog_batch_complete_publisher_matches_row_wise_rows_feed_sources_slots_and_repairs() {
         let root = scratch("catalog-publisher-parity");
@@ -8958,35 +8990,79 @@ mod tests {
     #[test]
     fn unsupported_contracts_refuse_every_open_without_mutating_originals() {
         for (name, change, reason) in [
-            ("nonempty-zero", "PRAGMA user_version=0", "nonempty schema zero"),
+            (
+                "nonempty-zero",
+                "PRAGMA user_version=0",
+                "nonempty schema zero",
+            ),
             ("older", "PRAGMA user_version=1", "older schema"),
             ("newer", "PRAGMA user_version=2147483647", "newer schema"),
-            ("missing", "DELETE FROM meta WHERE key='cache_version'", "missing metadata"),
-            ("missing-table", "ALTER TABLE meta RENAME TO original_meta", "missing metadata"),
-            ("malformed", "UPDATE meta SET value='invalid' WHERE key='cache_version'", "malformed metadata"),
-            ("older-parser", "UPDATE meta SET value='1' WHERE key='cache_version'", "parser version mismatch"),
-            ("newer-parser", "UPDATE meta SET value='4294967295' WHERE key='cache_version'", "parser version mismatch"),
-            ("publication", "INSERT INTO meta VALUES('catalog_version','1')", "publication version"),
-            ("search", "INSERT INTO meta VALUES('search_version','1')", "publication version"),
-            ("archive", "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":1}')", "archived marker version"),
+            (
+                "missing",
+                "DELETE FROM meta WHERE key='cache_version'",
+                "missing metadata",
+            ),
+            (
+                "missing-table",
+                "ALTER TABLE meta RENAME TO original_meta",
+                "missing metadata",
+            ),
+            (
+                "malformed",
+                "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+                "malformed metadata",
+            ),
+            (
+                "older-parser",
+                "UPDATE meta SET value='1' WHERE key='cache_version'",
+                "parser version mismatch",
+            ),
+            (
+                "newer-parser",
+                "UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "parser version mismatch",
+            ),
+            (
+                "publication",
+                "INSERT INTO meta VALUES('catalog_version','1')",
+                "publication version",
+            ),
+            (
+                "search",
+                "INSERT INTO meta VALUES('search_version','1')",
+                "publication version",
+            ),
+            (
+                "archive",
+                "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":1}')",
+                "archived marker version",
+            ),
         ] {
             let root = scratch(name);
             let v1 = root.join("index.json");
             let path = v1.with_extension("sqlite3");
             let (mut store, _) = opened(&path);
             store.write_runs(&[run()], &stamp()).unwrap();
-            store.write_one("original", None, None, &ledger(1), &full()).unwrap();
+            store
+                .write_one("original", None, None, &ledger(1), &full())
+                .unwrap();
             // Custody is deliberately opaque to version classification.
             store.connection.execute("INSERT INTO session_history_catalog VALUES('original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
-            store.connection.execute("INSERT INTO meta VALUES('archive-custody','original proof')", []).unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO meta VALUES('archive-custody','original proof')",
+                    [],
+                )
+                .unwrap();
             store.connection.execute_batch(change).unwrap();
             drop(store);
             let original = fs::read(&path).unwrap();
-            let fail = |result: Result<(SqliteStore, Loaded), Unopened>| {
-                match result {
-                    Err(Unopened::Unsupported(error)) => assert!(error.contains(reason), "{name}: {error}"),
-                    _ => panic!("{name} must be explicitly unsupported"),
+            let fail = |result: Result<(SqliteStore, Loaded), Unopened>| match result {
+                Err(Unopened::Unsupported(error)) => {
+                    assert!(error.contains(reason), "{name}: {error}")
                 }
+                _ => panic!("{name} must be explicitly unsupported"),
             };
             fail(SqliteStore::attempt(&path));
             fail(SqliteStore::attempt_scoped(&path, true));
@@ -8995,12 +9071,27 @@ mod tests {
                 Err(error) => assert!(error.contains(reason), "{error}"),
                 Ok(_) => panic!("unsupported {name} became valid in-memory history"),
             }
-            assert_eq!(fs::read(&path).unwrap(), original, "{name} changed original bytes");
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                original,
+                "{name} changed original bytes"
+            );
             assert!(!sibling(&path, ".corrupt").exists());
             assert!(!sibling(&path, "-wal").exists());
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-            assert_eq!(db.query_row("SELECT count(*) FROM reported_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-            assert_eq!(db.query_row("SELECT metadata FROM session_history_catalog", [], |r| r.get::<_, String>(0)).unwrap(), "{\"custody\":\"retain exact bytes\"}");
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM reported_runs", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.query_row("SELECT metadata FROM session_history_catalog", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "{\"custody\":\"retain exact bytes\"}"
+            );
             drop(db);
             fs::remove_dir_all(root).unwrap();
         }
@@ -9013,14 +9104,28 @@ mod tests {
         fs::write(&path, []).unwrap();
         let (mut store, loaded) = opened(&path);
         assert!(loaded.files.is_empty() && loaded.reported_runs.is_empty());
-        for (table, column) in [("files", "codex_pricing_fingerprint"), ("session_catalog", "pricing_fingerprint")] {
-            assert!(store.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)", params![table,column], |r| r.get::<_, bool>(0)).unwrap());
+        for (table, column) in [
+            ("files", "codex_pricing_fingerprint"),
+            ("session_catalog", "pricing_fingerprint"),
+        ] {
+            assert!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                        params![table, column],
+                        |r| r.get::<_, bool>(0)
+                    )
+                    .unwrap()
+            );
         }
         let default: String = store.connection.query_row("SELECT dflt_value FROM pragma_table_info('native_usage_sources') WHERE name='usage_ready'", [], |r| r.get(0)).unwrap();
         assert_eq!(default, "0");
         let retired: i64 = store.connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('native_usage_migrations','native_tree_copy_queue','session_search_postings')", [], |r| r.get(0)).unwrap();
         assert_eq!(retired, 0);
-        store.write_one("current", None, None, &ledger(1), &full()).unwrap();
+        store
+            .write_one("current", None, None, &ledger(1), &full())
+            .unwrap();
         store.write_runs(&[run()], &stamp()).unwrap();
         drop(store);
         let (store, loaded) = opened(&path);
