@@ -203,6 +203,9 @@ pub(super) fn write_values(
     id: i64,
     summary: &Summary,
 ) -> rusqlite::Result<()> {
+    let turn = serde_json::to_string(&summary.codex_turn)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    tx.prepare_cached("INSERT INTO native_tree_labels VALUES(?1,'codex_turn',?2) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value")?.execute(params![id,turn])?;
     for (label, value) in [
         ("first", &summary.first),
         ("last", &summary.last),
@@ -246,6 +249,10 @@ pub(super) fn restore_labels(
             "last" => summary.last = value,
             "cwd" => summary.cwd = value,
             "branch" => summary.branch = value,
+            "codex_turn" => {
+                summary.codex_turn = serde_json::from_str(value.as_deref().unwrap_or(""))
+                    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?;
+            }
             _ => return Err(rusqlite::Error::InvalidQuery),
         }
     }

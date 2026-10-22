@@ -61,7 +61,21 @@ jobs:
             ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: cargo fmt --check
+        id: rustfmt
         run: cargo fmt --all --check
+
+      - name: Prepare Rust formatting changes for thermal-restricted review
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        run: |
+          cargo fmt --all
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/rustfmt-review.patch"
+      - name: Retain formatting changes without bypassing the check
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustfmt-review
+          path: ${{ runner.temp }}/rustfmt-review.patch
+          if-no-files-found: error
 
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
