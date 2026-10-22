@@ -88,9 +88,20 @@ fn extracted_part(
         }
         "out" => {
             let (text, source, cut) = match &slot.kind {
-                SlotKind::Tool { reply, item, .. } => {
-                    let (text, source) = tool_output(&mut lines, &file.path, reply.as_ref(), *item)
-                        .ok_or_else(invalid)?;
+                SlotKind::Tool {
+                    reply,
+                    item,
+                    result_source,
+                    ..
+                } => {
+                    let (text, source) = tool_output(
+                        &mut lines,
+                        &file.path,
+                        reply.as_ref(),
+                        *item,
+                        *result_source,
+                    )
+                    .ok_or_else(invalid)?;
                     (text, source, false)
                 }
                 SlotKind::Operation { kind, .. } if kind == "CommandExecution" => {
@@ -837,6 +848,7 @@ fn a_live_tool_entry_has_its_start_and_a_finished_entry_has_no_since() {
         kind: SlotKind::Tool {
             shown,
             name: "Bash".to_owned(),
+            result_source: false,
             reply: None,
             item: None,
             bg: None,
@@ -1669,6 +1681,8 @@ fn a_code_mode_result_cut_in_its_json_falls_back_to_its_text_without_the_header(
     let home = Home::new();
     let header =
         "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n";
+    // Source-shaped synthetic results use the pinned normal success header
+    // and a qualifying direct awaited result print, not arbitrary JSON.
     // Whole JSON around the cut: the script's output field is read.
     let whole = format!(
         "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…line 899\\n\"}}"
@@ -1677,15 +1691,34 @@ fn a_code_mode_result_cut_in_its_json_falls_back_to_its_text_without_the_header(
     let broken = format!(
         "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…lin"
     );
-    let result = |call: &str, body: &str| json!({"type":"custom_tool_call_output","call_id":call,"output":[{"type":"input_text","text":"Script completed\nWall time 1.0s\nOutput:\n"},{"type":"input_text","text":body}]});
+    let result = |call: &str, body: &str| json!({"type":"custom_tool_call_output","call_id":call,"output":[{"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},{"type":"input_text","text":body}]});
+    let fake = json!({"wall_time_seconds":1.0,"session_id":26789,"output":"printed, not a native result"}).to_string();
     home.lines(
         "codex/sessions/2026/09/24/rollout-code-cut.jsonl",
         &[
-            codex_line(ts(6, 0, 0), "session_meta", json!({"id":"code-cut","cwd":"/work/proj"})),
-            codex_line(ts(6, 1, 0), "response_item", json!({"type":"custom_tool_call","call_id":"one","name":"exec","input":"text('one')"})),
+            codex_line(
+                ts(6, 0, 0),
+                "session_meta",
+                json!({"id":"code-cut","cwd":"/work/proj"}),
+            ),
+            codex_line(
+                ts(6, 1, 0),
+                "response_item",
+                script_call("one", "text(await tools.exec_command({cmd:'one'}));"),
+            ),
             codex_line(ts(6, 1, 500), "response_item", result("one", &whole)),
-            codex_line(ts(6, 2, 0), "response_item", json!({"type":"custom_tool_call","call_id":"two","name":"exec","input":"text('two')"})),
+            codex_line(
+                ts(6, 2, 0),
+                "response_item",
+                script_call("two", "text(await tools.exec_command({cmd:'two'}));"),
+            ),
             codex_line(ts(6, 2, 500), "response_item", result("two", &broken)),
+            codex_line(
+                ts(6, 3, 0),
+                "response_item",
+                script_call("fake", "text('one')"),
+            ),
+            codex_line(ts(6, 3, 500), "response_item", result("fake", &fake)),
         ],
     );
     let built = home.built(BASE + 86_400_000);
@@ -1696,7 +1729,7 @@ fn a_code_mode_result_cut_in_its_json_falls_back_to_its_text_without_the_header(
         .iter()
         .filter(|entry| entry["k"] == "tool")
         .collect();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(
         entries[0]["out"],
         "line 1\nline 2…19500 tokens truncated…line 899\n"
@@ -1714,6 +1747,13 @@ fn a_code_mode_result_cut_in_its_json_falls_back_to_its_text_without_the_header(
         json!({"gap": {"n": 19500, "unit": "tokens"}})
     );
     assert_eq!(entries[1]["cut"]["lines"], 900);
+    assert_eq!(entries[2]["name"], "exec");
+    assert_eq!(entries[2]["out"], fake);
+    assert!(entries[2].get("cut").is_none());
+    let slot = &built.tx["code-cut"].slots[entries[2]["slot"].as_u64().unwrap() as usize];
+    assert!(
+        matches!(&slot.kind, SlotKind::Tool { name, result_source: false, item: None, .. } if name == "exec")
+    );
 }
 
 #[test]
@@ -2552,8 +2592,8 @@ fn a_script_with_no_operations_shows_its_text_output() {
                     {"type":"input_text","text":"hello"},
                 ]}),
             ),
-            // A poll of a command these logs never saw start: that
-            // command is a step from here on.
+            // An orphan poll stays on its native outer exec cell: no
+            // observed start exists to establish a yielded/poll relation.
             codex_line(ts(10, 2, 0), "response_item", script_call("orphan", &poll(777, ""))),
             codex_line(
                 ts(10, 2, 500),
@@ -2568,9 +2608,23 @@ fn a_script_with_no_operations_shows_its_text_output() {
     assert_eq!(steps.len(), 2, "{steps:?}");
     assert_eq!(steps[0]["name"], "exec");
     assert_eq!(steps[0]["out"], "hello");
-    assert_eq!(steps[1]["name"], "exec_command");
-    assert_eq!(steps[1]["unfinished"], true);
+    assert_eq!(steps[1]["name"], "exec");
+    assert!(steps[1].get("unfinished").is_none());
     assert_eq!(steps[1]["out"], "still running\n");
+    let transcript = &built.tx["printed"];
+    assert!(
+        transcript.slots.iter().all(|slot| !matches!(
+            &slot.kind,
+            SlotKind::Yielded { .. } | SlotKind::Sent { .. }
+        ))
+    );
+    let slot = &transcript.slots[steps[1]["slot"].as_u64().unwrap() as usize];
+    assert!(matches!(&slot.kind, SlotKind::Tool { name, item: None, .. } if name == "exec"));
+    let record = Lines::default()
+        .get(&slot.file.as_ref().unwrap().path, slot.offset)
+        .unwrap();
+    assert_eq!(record["payload"]["call_id"], "orphan");
+    assert_eq!(record["payload"]["input"], poll(777, ""));
 }
 
 #[test]
@@ -2620,10 +2674,11 @@ fn an_interrupted_code_mode_call_shows_unfinished_after_its_operations() {
 }
 
 #[test]
-fn a_completion_that_matches_no_poll_is_not_the_yielded_step() {
+fn exact_completion_without_a_poll_is_preserved_without_inferred_reuse() {
     let home = Home::new();
-    // Session id 4242 again, for a command the next script starts and
-    // finishes itself: the id was used again, the old process is gone.
+    // An open exec wrapper cannot prove reuse of 4242. The old startup
+    // can finish during it. Preserve distinct old/new commands and outputs;
+    // independent native invocation identity would be needed to prove reuse.
     let mut records = yielded("reused");
     records.extend([
         codex_line(
@@ -2634,7 +2689,7 @@ fn a_completion_that_matches_no_poll_is_not_the_yielded_step() {
         codex_line(
             ts(10, 6, 500),
             "event_msg",
-            json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-date","process_id":"4242","command":["/bin/zsh","-lc","date"],"exit_code":0,"aggregated_output":"Thu\n"}}),
+            json!({"type":"item_completed","item":{"type":"CommandExecution","id":"exec-old","process_id":"4242","command":["/bin/zsh","-lc","make watch"],"exit_code":0,"aggregated_output":"one\ntwo\nthree\n"}}),
         ),
         codex_line(
             ts(10, 6, 1000),
@@ -2663,27 +2718,57 @@ fn a_completion_that_matches_no_poll_is_not_the_yielded_step() {
     home.lines("codex/sessions/2026/09/24/rollout-stray.jsonl", &stray);
     let built = home.built(BASE + 86_400_000);
     // The stray poll's own chunk is still the command's output.
-    for (sid, other, out) in [
-        ("reused", "date", "one\ntwo\nthree\n"),
-        ("stray", "echo other", "one\ntwo\nthree\nfive\n"),
+    for (sid, arg, other, out, unfinished) in [
+        ("reused", "make watch", "date", "one\ntwo\nthree\n", false),
+        (
+            "stray",
+            "make watch",
+            "echo other",
+            "one\ntwo\nthree\nfive\n",
+            true,
+        ),
     ] {
         let page = page_of(&built, sid, &Anchor::Last);
         let steps = tools(&page);
         assert_eq!(steps.len(), 2, "{sid}: {steps:?}");
-        assert_eq!(steps[0]["arg"], "make watch", "{sid}");
-        assert_eq!(steps[0]["unfinished"], true, "{sid}");
+        assert_eq!(steps[0]["arg"], arg, "{sid}");
+        assert_eq!(steps[0]["unfinished"] == true, unfinished, "{sid}");
+        if !unfinished {
+            assert_eq!(steps[0]["ok"], true, "{sid}");
+        }
         assert_eq!(steps[0]["out"], out, "{sid}");
-        assert_eq!(steps[1]["name"], "exec_command", "{sid}");
-        assert_eq!(steps[1]["arg"], other, "{sid}");
-        assert_eq!(steps[1]["ok"], true, "{sid}");
+        if sid == "reused" {
+            // No independent nested native identity exists for date.
+            // Its distinct source/result stays on the outer exec cell.
+            assert_eq!(steps[1]["name"], "exec");
+            assert!(steps[1]["ok"].is_null());
+            assert_eq!(steps[1]["out"], "Thu\n");
+            let slot = &built.tx[sid].slots[steps[1]["slot"].as_u64().unwrap() as usize];
+            assert!(
+                matches!(&slot.kind, SlotKind::Tool { name, item: None, .. } if name == "exec")
+            );
+            let record = Lines::default()
+                .get(&slot.file.as_ref().unwrap().path, slot.offset)
+                .unwrap();
+            assert_eq!(record["payload"]["call_id"], "date");
+            assert_eq!(
+                record["payload"]["input"],
+                "const r = await tools.exec_command({cmd:\"date\"});\ntext(JSON.stringify(r));"
+            );
+        } else {
+            assert_eq!(steps[1]["ok"], true, "{sid}");
+            assert_eq!(steps[1]["name"], "exec_command", "{sid}");
+            assert_eq!(steps[1]["arg"], other, "{sid}");
+        }
     }
 }
 
 #[test]
-fn a_script_that_starts_and_polls_its_command_is_its_start() {
+fn a_script_with_looped_operations_keeps_its_outer_cells_visible() {
     let home = Home::new();
-    // It starts the command and polls it in a loop, and the command
-    // still outlives the script. A comment names another call.
+    // It starts and polls in a loop with reassignment. The printed result
+    // cannot be assigned to one nested operation, so the wrapper stays
+    // visible with its native output. A comment names another call.
     let script = "let r = await tools.exec_command({cmd:\"make watch\",yield_time_ms:1000});\n// then tools.write_stdin({session_id, chars:\"q\"}) to quit\nwhile (r.session_id && Date.now() < end) {\n  r = await tools.write_stdin({session_id: r.session_id, chars: \"\"});\n}\ntext(JSON.stringify(r));\n";
     let mut records = vec![
         codex_line(
@@ -2713,11 +2798,24 @@ fn a_script_that_starts_and_polls_its_command_is_its_start() {
     let built = home.built(BASE + 86_400_000);
     let page = page_of(&built, "looped", &Anchor::Last);
     let steps = tools(&page);
-    assert_eq!(steps.len(), 1, "{steps:?}");
-    assert_eq!(steps[0]["name"], "exec_command");
-    assert_eq!(steps[0]["arg"], "make watch");
-    assert_eq!(steps[0]["exit"], 0);
-    assert_eq!(steps[0]["out"], "one\ntwo\nfour\n");
+    let transcript = built.tx.get("looped").unwrap();
+    assert!(steps.len() > 1, "{steps:?}");
+    assert!(transcript.slots.iter().any(|slot| matches!(
+        &slot.kind,
+        SlotKind::Tool { name, .. } if name == "exec"
+    )));
+    assert!(steps.iter().any(|step| {
+        step["name"] == "exec"
+            && step["out"].as_str().is_some_and(|out| {
+                out.contains("\"session_id\":4242") && out.contains("\"output\":\"one\\n\"")
+            })
+    }));
+    assert!(
+        transcript
+            .slots
+            .iter()
+            .all(|slot| !matches!(&slot.kind, SlotKind::Yielded { .. }))
+    );
 }
 
 #[test]
@@ -3001,6 +3099,377 @@ fn a_command_longer_than_its_summary_shows_as_input() {
     );
     let short = json!({"command": "ls -la"});
     assert_eq!(tool_in("Bash", &short, "ls -la"), None);
+}
+
+#[test]
+fn selected_output_preserves_claude_and_codex_results_without_optional_blocks() {
+    let home = Home::new();
+    let text = "selected native result".repeat(100);
+    home.lines(
+        "claude/projects/-work-proj/selected-claude.jsonl",
+        &[
+            said("selected-claude", ts(1, 0, 0), json!([{
+                "type":"tool_use","id":"plain-call","name":"Bash","input":{"command":"plain"}
+            }])),
+            result("selected-claude", ts(1, 0, 500), "plain-call", &text, false),
+        ],
+    );
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-selected-codex.jsonl",
+        &[
+            codex_line(ts(1, 0, 0), "session_meta", json!({"id":"selected-codex","cwd":"/work/proj"})),
+            codex_line(ts(1, 1, 0), "response_item", json!({"type":"function_call","call_id":"plain-call","name":"exec_command","arguments":"{\"cmd\":\"plain\"}"})),
+            codex_line(ts(1, 1, 500), "response_item", json!({"type":"function_call_output","call_id":"plain-call","output":text})),
+        ],
+    );
+    let built = home.built(BASE + 86_400_000);
+    for sid in ["selected-claude", "selected-codex"] {
+        let transcript = &built.tx[sid];
+        let slot = transcript
+            .slots
+            .iter()
+            .find(|slot| matches!(&slot.kind, SlotKind::Tool { .. }))
+            .unwrap();
+        let output = selected_output(&mut Lines::default(), slot).unwrap();
+        assert_eq!(output["text"], text, "{sid}");
+        assert_eq!(output["truncated"], false, "{sid}");
+        assert!(output.get("blocks").is_none(), "{sid}");
+        assert!(output.get("blocks_truncated").is_none(), "{sid}");
+        assert!(output.get("blocks_omitted").is_none(), "{sid}");
+    }
+}
+
+#[test]
+fn codex_native_fixture_selected_output_keeps_bounded_native_blocks() {
+    const FIXTURE: &str = include_str!(
+        "../../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
+    );
+    const MANIFEST: &str = include_str!(
+        "../../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
+    );
+    let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+    let expected = manifest["expected_blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["call_id"] == "image-unknown")
+        .unwrap();
+    let home = Home::new();
+    home.write(
+        "codex/sessions/2026/09/24/rollout-parser-cases.jsonl",
+        FIXTURE,
+    );
+    let built = home.built(BASE + 86_400_000);
+    let transcript = built.tx.get("parser-cases").unwrap();
+    let call_id = expected["call_id"].as_str().unwrap();
+    let call_offset = manifest["expected_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == call_id)
+        .unwrap()["offset"]
+        .as_u64()
+        .unwrap();
+    let slot = transcript
+        .slots
+        .iter()
+        .find(|slot| slot.offset == call_offset)
+        .unwrap_or_else(|| panic!("visible image-unknown wrapper at {call_offset}"));
+    assert!(matches!(&slot.kind, SlotKind::Tool { .. }));
+    let output = selected_output(&mut Lines::default(), slot).unwrap();
+    let blocks = output["blocks"].as_array().unwrap();
+    let expected_blocks = expected["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), expected_blocks.len());
+    for (actual, expected) in blocks.iter().zip(expected_blocks) {
+        assert_eq!(actual["ordinal"], expected["ordinal"]);
+        assert_eq!(actual["type"], expected["type"]);
+        assert_eq!(actual["role"], expected["role"]);
+        if let Some(fallback) = expected.get("fallback") {
+            assert_eq!(actual["fallback"], *fallback);
+        }
+    }
+    assert_eq!(blocks[1]["fallback"], "[image]");
+    assert_eq!(blocks[2]["fallback"], "[unsupported output block]");
+    let text_bytes = output["text"].as_str().unwrap().len()
+        + blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .map(str::len)
+            .sum::<usize>();
+    assert!(text_bytes <= 64 * 1024);
+    let serialized = output.to_string();
+    assert!(!serialized.contains("synthetic-base64-secret"));
+    assert!(!serialized.contains("synthetic private payload"));
+    assert!(output.get("blocks_truncated").is_none());
+    assert!(output.get("blocks_omitted").is_none());
+
+    for (call_id, printed_text, printed_session) in [
+        ("fake-exec-json", "printed object, not result", 7171),
+        ("fake-poll-json", "printed object, not poll result", 95583),
+    ] {
+        let call_offset = manifest["expected_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == call_id)
+            .unwrap()["offset"]
+            .as_u64()
+            .unwrap();
+        let slot = transcript
+            .slots
+            .iter()
+            .find(|slot| slot.offset == call_offset)
+            .unwrap();
+        assert!(matches!(
+            &slot.kind,
+            SlotKind::Tool {
+                result_source: false,
+                ..
+            }
+        ));
+        let printed = selected_output(&mut Lines::default(), slot).unwrap();
+        let text = printed["text"].as_str().unwrap();
+        assert!(text.contains(printed_text));
+        assert!(text.contains(&format!("\"session_id\":{printed_session}")));
+        assert_ne!(text, printed_text);
+    }
+}
+
+#[test]
+fn codex_reference_conformance_selected_output_keeps_native_coordinates() {
+    const FIXTURE: &str = include_str!(
+        "../../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-legacy.jsonl"
+    );
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/compatibility/codex-reference-a9b0815/manifest.json"
+    ))
+    .unwrap();
+    let home = Home::new();
+    let path = home.write("codex/sessions/2026/09/24/rollout-reference.jsonl", FIXTURE);
+    let built = home.built(BASE + 86_400_000);
+    let transcript = built.tx.get("legacy-reference").unwrap();
+    let mut lines = Lines::default();
+    let mut offset = 0_u64;
+    let mut tested = 0;
+    for native_line in FIXTURE.split_inclusive('\n') {
+        let record = Lines::default().get(&path, offset).unwrap();
+        let kind = record["payload"]["type"].as_str();
+        if matches!(kind, Some("function_call" | "custom_tool_call")) {
+            let call_id = record["payload"]["call_id"].as_str().unwrap();
+            assert_eq!(
+                manifest["semon_adapter_contract"]["model_call_ids"][tested],
+                call_id
+            );
+            let slot = transcript
+                .slots
+                .iter()
+                .find(|slot| slot.offset == offset)
+                .unwrap();
+            assert_eq!(slot.file.as_ref().unwrap().path, path);
+            assert_eq!(slot.block, 0);
+            let SlotKind::Tool {
+                reply: Some(reply),
+                result_source,
+                item,
+                ..
+            } = &slot.kind
+            else {
+                panic!("{call_id} must remain a visible tool wrapper");
+            };
+            assert!(!result_source);
+            assert!(item.is_none());
+            assert_eq!(reply.o, offset + native_line.len() as u64);
+            assert_eq!(reply.b, 0);
+            assert!(reply.o < FIXTURE.len() as u64);
+            let native_output = Lines::default().get(&path, reply.o).unwrap();
+            assert_eq!(native_output["payload"]["call_id"], call_id);
+            let selected = selected_output(&mut lines, slot).unwrap();
+            if call_id == "start-26789" {
+                assert_eq!(selected["text"], native_output["payload"]["output"]);
+                assert!(selected.get("blocks").is_none());
+            } else {
+                let blocks = selected["blocks"].as_array().unwrap();
+                let parts = native_output["payload"]["output"].as_array().unwrap();
+                assert_eq!(blocks.len(), 3);
+                for (ordinal, (block, part)) in blocks.iter().zip(parts).enumerate() {
+                    assert_eq!(block["ordinal"], ordinal);
+                    assert_eq!(block["type"], part["type"]);
+                    assert_eq!(block["text"], part["text"]);
+                    assert_eq!(block["role"], if ordinal == 0 { "header" } else { "body" });
+                }
+                assert_eq!(
+                    blocks[0]["text"],
+                    "Script completed\nWall time 0.1 seconds\nOutput:\n"
+                );
+                let new: Value =
+                    serde_json::from_str(blocks[1]["text"].as_str().unwrap()).unwrap();
+                let poll: Value =
+                    serde_json::from_str(blocks[2]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(new["session_id"], 95583);
+                assert!(poll.get("session_id").is_none());
+                assert_eq!(poll["output"], "old poll");
+                assert_eq!(
+                    selected["text"],
+                    format!(
+                        "{}\n{}",
+                        parts[1]["text"].as_str().unwrap(),
+                        parts[2]["text"].as_str().unwrap()
+                    )
+                );
+                assert!(selected.get("blocks_truncated").is_none());
+                assert!(selected.get("blocks_omitted").is_none());
+            }
+            assert!(string_value_bytes(&selected) <= 64 * 1024);
+            tested += 1;
+        }
+        offset += native_line.len() as u64;
+    }
+    assert_eq!(tested, 2);
+    assert_eq!(offset, FIXTURE.len() as u64);
+    assert_eq!(
+        transcript
+            .slots
+            .iter()
+            .filter(|slot| matches!(&slot.kind, SlotKind::Tool { .. }))
+            .count(),
+        2
+    );
+    assert!(!transcript.slots.iter().any(|slot| matches!(
+        &slot.kind,
+        SlotKind::Yielded { .. } | SlotKind::Sent { .. } | SlotKind::Operation { .. }
+    )));
+    assert!(lines.bytes <= FIXTURE.len() as u64);
+}
+
+#[test]
+fn selected_output_blocks_obey_count_and_text_budgets() {
+    let output = Value::Array(
+        (0..OUTPUT_BLOCKS_MAX + 2)
+            .map(|ordinal| json!({"type":"input_text","text":format!("block-{ordinal}")}))
+            .collect(),
+    );
+    let (blocks, truncated, omitted) = selected_output_blocks(&output, 5).unwrap();
+    let blocks = blocks.as_array().unwrap();
+    assert_eq!(blocks.len(), OUTPUT_BLOCKS_MAX);
+    assert!(truncated);
+    assert_eq!(omitted, 2);
+    let text_bytes = blocks
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::len)
+        .sum::<usize>();
+    assert!(text_bytes <= 5);
+}
+
+#[test]
+fn selected_output_text_stays_within_shared_utf8_budget() {
+    let ascii = "a".repeat(SELECTED_OUTPUT_MAX + 1);
+    let selected = selected_text_value(&ascii, Source::Plain, false, SELECTED_OUTPUT_MAX);
+    let flat = selected["text"].as_str().unwrap();
+    assert_eq!(flat.len(), SELECTED_OUTPUT_MAX);
+    assert!(flat.ends_with('…'));
+    assert_eq!(selected["truncated"], true);
+
+    let multibyte = "é".repeat(SELECTED_OUTPUT_MAX / 2 + 1);
+    let selected = selected_text_value(&multibyte, Source::Plain, false, SELECTED_OUTPUT_MAX);
+    let flat = selected["text"].as_str().unwrap();
+    assert!(flat.len() <= SELECTED_OUTPUT_MAX);
+    assert!(flat.is_char_boundary(flat.len()));
+    assert!(flat.ends_with('…'));
+
+    let selected = selected_text_value("flat", Source::Plain, false, SELECTED_OUTPUT_MAX);
+    let remaining = SELECTED_OUTPUT_MAX.saturating_sub(string_value_bytes(&selected));
+    let output = json!([{"type":"input_text","text":"block".repeat(SELECTED_OUTPUT_MAX)}]);
+    let (blocks, truncated, _) = selected_output_blocks(&output, remaining).unwrap();
+    let block_text_bytes = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::len)
+        .sum::<usize>();
+    assert!(truncated);
+    assert!(selected["text"].as_str().unwrap().len() + block_text_bytes <= SELECTED_OUTPUT_MAX);
+}
+
+#[test]
+fn selected_native_cut_parts_report_local_ascii_and_utf8_clipping() {
+    for unit in ["a", "é"] {
+        let side = unit.repeat(20 * 1024 / unit.len());
+        let body = format!("{side}…9 tokens truncated…{side}");
+        let native = format!(
+            "Warning: truncated output (original token count: 24000)\nTotal output lines: 900\n\n{body}"
+        );
+        // The flat native text fits. Its duplicated structured parts need
+        // Semon clipping under the shared selected-output budget.
+        assert!(body.len() < SELECTED_OUTPUT_MAX);
+        let selected = selected_text_value(&native, Source::Model, false, SELECTED_OUTPUT_MAX);
+        assert_eq!(selected["text"], body);
+        assert_eq!(selected["truncated"], true);
+        assert_eq!(selected["cut"]["by"], "codex");
+        assert_eq!(selected["cut"]["original_tokens"], 24000);
+        assert_eq!(selected["cut"]["lines"], 900);
+        assert_eq!(
+            selected["cut"]["parts"][1],
+            json!({"gap":{"n":9,"unit":"tokens"}})
+        );
+        let parts = selected["cut"]["parts"].as_array().unwrap();
+        let part_bytes = parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .map(str::len)
+            .sum::<usize>();
+        assert!(selected["text"].as_str().unwrap().len() + part_bytes <= SELECTED_OUTPUT_MAX);
+        assert!(string_value_bytes(&selected) <= SELECTED_OUTPUT_MAX);
+        for part in parts.iter().filter_map(|part| part["text"].as_str()) {
+            assert!(part.ends_with('…'));
+            assert!(part.len() < side.len());
+        }
+    }
+}
+
+#[test]
+fn selected_native_gap_without_local_clipping_is_not_truncated() {
+    let native = "Warning: truncated output (original token count: 24)\nTotal output lines: 9\n\nhead…9 tokens truncated…tail";
+    let selected = selected_text_value(native, Source::Model, false, SELECTED_OUTPUT_MAX);
+    assert_eq!(selected["text"], "head…9 tokens truncated…tail");
+    assert_eq!(selected["truncated"], false);
+    assert_eq!(selected["cut"]["by"], "codex");
+    assert_eq!(
+        selected["cut"]["parts"],
+        json!([
+            {"text":"head"}, {"gap":{"n":9,"unit":"tokens"}}, {"text":"tail"}
+        ])
+    );
+}
+
+#[test]
+fn selected_large_native_cut_reserves_metadata_in_ascii_and_utf8_budget() {
+    for unit in ["a", "é"] {
+        let side = unit.repeat(SELECTED_OUTPUT_MAX / unit.len());
+        let native = format!(
+            "Warning: truncated output (original token count: 50000)\nTotal output lines: 900\n\n{side}…9 tokens truncated…{side}"
+        );
+        let selected = selected_text_value(&native, Source::Model, false, SELECTED_OUTPUT_MAX);
+        let flat = selected["text"].as_str().unwrap();
+        assert!(flat.ends_with('…'));
+        assert!(flat.len() < SELECTED_OUTPUT_MAX);
+        assert!(string_value_bytes(&selected) <= SELECTED_OUTPUT_MAX);
+        assert_eq!(selected["truncated"], true);
+        assert_eq!(selected["cut"]["by"], "codex");
+        assert_eq!(selected["cut"]["original_tokens"], 50000);
+        assert_eq!(
+            selected["cut"]["parts"][1],
+            json!({"gap":{"n":9,"unit":"tokens"}})
+        );
+        let parts = selected["cut"]["parts"].as_array().unwrap();
+        let part_bytes = parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .map(str::len)
+            .sum::<usize>();
+        assert!(flat.len() + part_bytes <= SELECTED_OUTPUT_MAX);
+    }
 }
 
 /// Prints every session's last page of a fixture home written by

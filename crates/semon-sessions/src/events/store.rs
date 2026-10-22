@@ -575,6 +575,21 @@ const PUT_EVENT: &str = "INSERT OR REPLACE INTO events (file_id, extra, seq, k, 
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)";
 
+/// Event-local parser metadata kept in the existing `events.y` JSON slot.
+/// The parser version invalidates older rows when this envelope is introduced.
+#[derive(Debug, Deserialize, Serialize)]
+struct EventState {
+    version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    yielded: Option<Box<Yield>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    poll_target: Option<String>,
+    #[serde(default)]
+    result_source: bool,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    native_direct_call: bool,
+}
+
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
 const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
@@ -4704,6 +4719,21 @@ fn from_json<T: DeserializeOwned>(column: usize, text: &str) -> rusqlite::Result
     })
 }
 
+fn event_state(column: usize, text: &str) -> rusqlite::Result<EventState> {
+    let state: EventState = from_json(column, text)?;
+    if state.version != 1 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported event-state version",
+            )),
+        ));
+    }
+    Ok(state)
+}
+
 /// An enum's serde name (`Kind`, `SignalKind`), so a new variant needs no
 /// table change and an unknown name fails to decode.
 fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
@@ -5267,10 +5297,19 @@ fn read_file(
 
 /// One `events` row, selected as [`EVENT_COLUMNS`].
 fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
-    let y = row
+    let state = row
         .get::<_, Option<String>>(12)?
-        .map(|text| from_json::<Yield>(12, &text).map(Box::new))
+        .map(|text| event_state(12, &text))
         .transpose()?;
+    let (y, poll_target, result_source, native_direct_call) = match state {
+        Some(state) => (
+            state.yielded,
+            state.poll_target,
+            state.result_source,
+            state.native_direct_call,
+        ),
+        None => (None, None, false, false),
+    };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
             o: uint(row.get(15)?),
@@ -5300,9 +5339,12 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         id: row.get(6)?,
         n: row.get(7)?,
         code_mode: row.get(8)?,
+        native_direct_call,
         code_mode_open: row.get(9)?,
         parent: row.get::<_, Option<i64>>(10)?.map(seq_of),
         script: row.get(11)?,
+        poll_target,
+        result_source,
         y,
         poll: row.get::<_, Option<i64>>(13)?.map(seq_of),
         r,
@@ -5844,9 +5886,12 @@ fn put_event(
         id,
         n,
         code_mode,
+        native_direct_call,
         code_mode_open,
         parent,
         script,
+        poll_target,
+        result_source,
         y,
         poll,
         r,
@@ -5854,7 +5899,17 @@ fn put_event(
         peer,
         u,
     } = event;
-    let y = y.as_deref().map(json).transpose()?;
+    let y = if y.is_some() || poll_target.is_some() || *result_source || *native_direct_call {
+        Some(json(&EventState {
+            version: 1,
+            yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
+            poll_target: poll_target.as_ref().cloned(),
+            result_source: *result_source,
+            native_direct_call: *native_direct_call,
+        })?)
+    } else {
+        None
+    };
     let (reply, reply_o, reply_b, reply_t, reply_e, reply_f, reply_m) = match r {
         Some(Reply {
             o: reply_o,
@@ -8831,8 +8886,11 @@ mod tests {
                     n: Some("Bash".to_owned()),
                     code_mode: true,
                     code_mode_open: true,
+                    native_direct_call: true,
                     parent: Some(7),
                     script: STDIN | SENDS,
+                    poll_target: Some("26789".to_owned()),
+                    result_source: true,
                     y: Some(Box::new(Yield {
                         polls: vec![1, 2, u64::MAX],
                         cut: true,

@@ -1710,7 +1710,7 @@ mod tests {
             before
         );
         assert_eq!(versions(&c).unwrap().1, Some(CACHE_VERSION));
-        assert_eq!(CACHE_VERSION, 27);
+        assert_eq!(CACHE_VERSION, 28);
         drop(c);
         let second = table("anthropic", "claude-opus-5-5", 12.0, 2);
         drain(&path, &second);
@@ -1818,7 +1818,7 @@ mod tests {
             .unwrap(),
             facts
         );
-        assert_eq!(versions(&c).unwrap().1, Some(27));
+        assert_eq!(versions(&c).unwrap().1, Some(CACHE_VERSION));
         drop(c);
         fs::remove_dir_all(root).unwrap();
     }
