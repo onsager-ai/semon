@@ -2965,10 +2965,19 @@ mod tests {
     #[test]
     fn unsupported_publication_recipe_refuses_without_erasing_history() {
         let (root, mut store, _) = header_repair_store("unsupported-recipe");
-        store.connection.execute("UPDATE meta SET value='unsupported' WHERE key='catalog_semantic_recipe'", []).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value='unsupported' WHERE key='catalog_semantic_recipe'",
+                [],
+            )
+            .unwrap();
         let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
         assert!(store.semantic_next(64).is_err());
-        assert_eq!(crate::native_timing::cleanup_tests::snapshot(&store.connection), before);
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&store.connection),
+            before
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

@@ -99,6 +99,7 @@ pub fn compact_session_catalog_changes(
     connection
         .busy_timeout(Duration::from_millis(100))
         .map_err(|_| CatalogIdentityError::Unavailable)?;
+    crate::events::store::require_current(&connection).map_err(|_| CatalogIdentityError::Unavailable)?;
     compact(
         &mut connection,
         scope,
@@ -119,6 +120,9 @@ fn compact(
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failed)?;
+    if !crate::events::store::current(&tx).map_err(failed)? {
+        return Err(CatalogIdentityError::Unavailable);
+    }
     let version: String = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_version'",
@@ -220,6 +224,7 @@ pub fn session_catalog_changes(
     connection
         .busy_timeout(Duration::from_millis(100))
         .map_err(|_| CatalogIdentityError::Unavailable)?;
+    crate::events::store::require_current(&connection).map_err(|_| CatalogIdentityError::Unavailable)?;
     read(
         &mut connection,
         source_key,
@@ -239,6 +244,9 @@ fn read(
 ) -> Result<CatalogChangePage, CatalogIdentityError> {
     let failed = |_: rusqlite::Error| CatalogIdentityError::Unavailable;
     let tx = connection.transaction().map_err(failed)?;
+    if !crate::events::store::current(&tx).map_err(failed)? {
+        return Err(CatalogIdentityError::Unavailable);
+    }
     let meta = |key: &str| {
         tx.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| {
             r.get::<_, String>(0)
@@ -309,6 +317,8 @@ mod tests {
     fn initialize(db: &Connection) {
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION).unwrap();
+        db.execute("INSERT INTO meta VALUES('cache_version',?1)", [crate::events::CACHE_VERSION.to_string()]).unwrap();
         db.execute(
             "INSERT INTO meta VALUES('catalog_version',?1)",
             [CATALOG_VERSION.to_string()],
