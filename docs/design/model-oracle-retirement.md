@@ -16,7 +16,7 @@ This records code retirement, not merge, release or live-data cleanup.
 | Native discovery/parsing in `events.rs`; older Claude tags, Codex tool formats, Copilot records, native ancestry, source proofs, retained recipes and archive generations | Supported native behavior and persisted history. Kept. A symbol containing `legacy` does not establish dead code. |
 | `CatalogWriter::Legacy`, old runtime/proof/recipe versions and migration tests | Existing complete-producer transaction and persisted-data compatibility, independent of Model transport. Kept with their generation, custody and refusal assertions. |
 | Retired `/api/model`, `/api/tx`, `/api/transcript`, `/api/entry`, `/api/analytics`, deltas/SSE and `compat=1` | Already removed from production at the audited base. Existing Viewer 404 and consumer transport regressions remain. No replacement routes or fallback are added. |
-| Query `contract-reference.json`, five `model/golden/*.json` files, historical browser/reference evidence | Independent regression evidence. Kept byte-for-byte; never loaded by production. Historical design documents are explicitly marked and linked to current ownership. |
+| Query `contract-reference.json`, five `model/golden/*.json` files, historical browser/reference evidence | Independent regression evidence. Kept byte-for-byte from the independently captured Query reference and current upstream goldens; see the pricing-only upstream refresh below. Never loaded by production. Historical design documents are explicitly marked and linked to current ownership. |
 | Old JSON event-cache import | Removed on 2026-10-22 at the user's explicit no-compatibility decision. Historical reported facts that exist only in this cache are no longer imported; existing cache files are left untouched. |
 
 ## Independent expectations and assertion migration
@@ -24,7 +24,14 @@ This records code retirement, not merge, release or live-data cleanup.
 The 134-response Query reference remains from retired production
 `7ce1ac4d4f34af9143aa292b631a07fd797890b1`. Its fixture families,
 clock and capture method remain in [the Query contract](../../crates/semon-sessions/src/query/README.md).
-All five original semantic golden files retain their exact bytes. Tests compare
+All five semantic golden files retain their exact bytes from upstream
+`634b5312f9359dae1a9ab1c6979ae4878539e5bc` (#466), integrated after the original
+retirement review. That independent runtime-pricing change updated only the
+`pricing` object: its date and the `claude-haiku-5-5`/`gpt-6.1-sol` entries.
+The sessions, handoffs, turns, machine and busy expectations are unchanged from
+the original `5f346070` Model capture. This cleanup generates no replacement
+expectations; its integrity guard pins the independently updated upstream bytes.
+Tests compare
 native sessions, source-backed handoffs, turns, merged busy intervals, machine
 identity and the shared pricing table against those preserved fields. Additions
 that predate this retirement but postdate the goldens retain their explicit
