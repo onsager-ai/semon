@@ -897,7 +897,7 @@ mod sqlite_tests {
     use super::*;
     use crate::{CatalogReadScope, model::summary::CatalogLifecycle};
 
-    const LOGICAL_POSITIONS: &str = "SELECT json_array(read_scope,session_key,gram,last_ms) FROM (SELECT 'current',session_key,gram,current_last_ms FROM session_search_memberships WHERE current_last_ms IS NOT NULL UNION ALL SELECT 'retained_history',session_key,gram,history_last_ms FROM session_search_memberships WHERE history_last_ms IS NOT NULL) ORDER BY read_scope,session_key,gram";
+    const LOGICAL_POSITIONS: &str = "SELECT json_array(read_scope,session_key,gram,last_ms) FROM (SELECT 'current' AS read_scope,session_key,gram,current_last_ms AS last_ms FROM session_search_memberships WHERE current_last_ms IS NOT NULL UNION ALL SELECT 'retained_history',session_key,gram,history_last_ms FROM session_search_memberships WHERE history_last_ms IS NOT NULL) ORDER BY read_scope,session_key,gram";
     const PHYSICAL_COMPACT: &str = "SELECT json_array(session_key,gram,current_last_ms,history_last_ms) FROM session_search_memberships ORDER BY session_key,gram";
 
     fn strings(connection: &Connection, sql: &str) -> Vec<String> {
@@ -1024,7 +1024,6 @@ mod sqlite_tests {
             [
                 LOGICAL_POSITIONS,
                 PHYSICAL_COMPACT,
-                PHYSICAL_COMPACT,
                 "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
                 "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key",
                 "SELECT json_array(read_scope,incomplete) FROM session_search_coverage ORDER BY read_scope",
@@ -1098,7 +1097,6 @@ mod sqlite_tests {
         for sql in [
             LOGICAL_POSITIONS,
             PHYSICAL_COMPACT,
-            PHYSICAL_COMPACT,
             "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram",
             "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key",
             "SELECT json_array(read_scope,incomplete) FROM session_search_coverage ORDER BY read_scope",
@@ -1147,14 +1145,13 @@ mod sqlite_tests {
         }
         assert_eq!(postings(&connection), original);
         assert_eq!(count(&connection, "current", "sha"), 3);
-        let ordering_index: String = connection
-            .query_row(
-                "SELECT name FROM sqlite_schema WHERE type='index' AND name='session_search_order'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(ordering_index, "session_search_order");
+        assert_eq!(
+            strings(
+                &connection,
+                "SELECT name FROM sqlite_schema WHERE type='index' AND name IN ('session_search_current_order','session_search_history_order') ORDER BY name",
+            ),
+            ["session_search_current_order", "session_search_history_order"]
+        );
         assert_eq!(
             connection
                 .query_row(

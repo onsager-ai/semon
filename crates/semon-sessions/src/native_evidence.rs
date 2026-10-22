@@ -2122,7 +2122,7 @@ mod catalog_owner_tests {
     }
 
     #[test]
-    fn old_publication_with_active_subset_rebuilds_unrelated_metadata_before_qualification() {
+    fn unsupported_publication_with_active_subset_refuses_without_rebinding_history() {
         let (root, options, input) = audit_fixture();
         let unrelated = crate::Input {
             root: crate::InputRoot::Codex,
@@ -2155,47 +2155,33 @@ mod catalog_owner_tests {
         assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
         db.execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
             .unwrap();
-        let published: i64 = db
-            .query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row.get(0))
-            .unwrap();
-        {
+        let before = crate::native_timing::cleanup_tests::snapshot(&db);
+        let path = EventCache::path(&options.cache);
+        let wal = path.with_extension("sqlite3-wal");
+        let original = fs::read(&path).unwrap();
+        let original_wal = fs::read(&wal).unwrap();
+        for _ in 0..2 {
             let mut work = lock(&evidence.work);
-            assert!(
-                !evidence
-                    .refresh_catalog(&mut work, model::now_ms())
-                    .unwrap()
-            );
-            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
-        }
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            published,
-            "upgrade must retain published history"
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT value FROM meta WHERE key='catalog_backfill_state'",
-                [],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-            "discovering"
-        );
-        let mut complete = false;
-        for _ in 0..128 {
-            let mut work = lock(&evidence.work);
-            if evidence
+            let error = evidence
                 .refresh_catalog(&mut work, model::now_ms())
-                .unwrap()
-            {
-                assert!(work.events.as_ref().unwrap().qualified_catalog().unwrap());
-                complete = true;
-                break;
-            }
+                .unwrap_err();
+            assert!(error.to_string().contains("unsupported semantic recipe"));
+            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
+            assert!(EventCache::open_scoped(&options.cache).is_err());
+            assert!(EventCache::open(&options.cache).is_err());
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&db),
+                before,
+                "refusal preserves the active subset and unrelated published history"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert_eq!(fs::read(&wal).unwrap(), original_wal);
         }
-        assert!(complete, "bounded upgrade did not finish");
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            crate::events::store::SCHEMA_VERSION
+        );
         let name: String = db
             .query_row(
                 "SELECT json_extract(metadata,'$.name') FROM session_catalog WHERE session_key=?1",
@@ -2203,9 +2189,9 @@ mod catalog_owner_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             name, "old derived metadata",
-            "subset publication qualified untouched old metadata"
+            "unsupported publication must not rewrite unrelated metadata"
         );
         drop(db);
         drop(evidence);

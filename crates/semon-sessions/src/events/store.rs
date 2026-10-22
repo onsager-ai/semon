@@ -4540,6 +4540,8 @@ pub(crate) fn retain_archive_index(
     if !current(connection)? {
         return Ok(false);
     }
+    // Refuse unsupported retained custody metadata before replacing its marker.
+    let _ = archived_index(connection, path)?;
     let expected = proof_ledger(proof);
     let native_header_sha256;
     let source_chunks_sha256;
