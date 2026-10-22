@@ -685,9 +685,8 @@ pub(crate) fn note_catalog_audit(
     expected: Option<&str>,
     now: i64,
 ) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage)", [expected], |r| r.get(0)).map_err(io::Error::other)?;
@@ -710,9 +709,8 @@ pub(crate) fn audit_catalog_sources(
     after: Option<&str>,
     _runtime: &str,
 ) -> io::Result<Option<String>> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
@@ -851,9 +849,8 @@ pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut found = std::collections::BTreeSet::new();
     let mut statement=store.connection.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
     let expanded = selectors.iter().flat_map(|(harness, id)| {
@@ -925,9 +922,8 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     if let Some((_, ledger)) =
         ledger_row(&store.connection, &path.to_string_lossy()).map_err(io::Error::other)?
         && ledger.stat == *stat
@@ -951,9 +947,8 @@ pub(crate) fn complete_relocation(
     input: &crate::Input,
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
@@ -978,9 +973,8 @@ pub(crate) fn complete_relocation(
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
 pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let after: Option<String> = tx
@@ -1023,9 +1017,8 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');").map_err(io::Error::other)?;
@@ -1041,9 +1034,8 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
 /// can publish the current version. Published history remains available while
 /// the ordinary discovery and drain owners rebuild its derived metadata.
 pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let unsupported: bool = tx.query_row(
@@ -1058,9 +1050,8 @@ pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Resul
 }
 
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     store
         .connection
         .query_row(
@@ -1103,9 +1094,8 @@ pub(crate) fn requeue_concurrent_sources(
     if paths.is_empty() {
         return Ok(());
     }
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     for path in paths {
@@ -1118,9 +1108,8 @@ pub(crate) fn enqueue_sources(
     options: &crate::Options,
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     for input in inputs {
@@ -1162,18 +1151,16 @@ fn enqueue_native_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusqlite:
     Ok(())
 }
 pub(crate) fn enqueue_native(options: &crate::Options, harness: &str, id: &str) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     enqueue_native_tx(&tx, harness, id).map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
 }
 pub(crate) fn enqueue_pid(options: &crate::Options, pid: u32) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     enqueue_dependency_tx(&tx, "runtime:pid", &pid.to_string()).map_err(io::Error::other)?;
@@ -1203,9 +1190,8 @@ pub(crate) fn preserve_legacy_runtime(
     let previous = crate::native_evidence::recorded_runtime_fingerprint(options, before)?;
     let wanted = crate::native_evidence::recorded_runtime_fingerprint(options, after)?;
     let legacy = crate::native_evidence::legacy_runtime_generation(options)?;
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let existing: Option<String> = tx
@@ -1237,9 +1223,8 @@ pub(crate) fn enqueue_facts(
     after: &crate::Facts,
     push_driven: bool,
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let global = before.hostname != after.hostname
@@ -1497,9 +1482,8 @@ pub(crate) fn resume_runtime_input(options: &crate::Options, path: &str) -> io::
     if options.facts.is_none() {
         return Ok(());
     }
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     resume_runtime_input_tx(&tx, options, path).map_err(io::Error::other)?;
@@ -1555,9 +1539,8 @@ pub(crate) fn begin_source_write(
     options: &crate::Options,
     input: &crate::Input,
 ) -> io::Result<(i64, Option<crate::source_change::AppendEvidence>)> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1630,9 +1613,8 @@ pub(crate) fn complete_source_write(
     revision: i64,
     evidence: Option<&crate::source_change::AppendEvidence>,
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -9890,8 +9872,7 @@ mod summary_tests {
             "semon-summary-rollback-{}.sqlite3",
             std::process::id()
         ));
-        let (mut store, _) =
-            SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
+        let (mut store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
@@ -9912,8 +9893,7 @@ mod summary_tests {
             None
         );
         drop(store);
-        let (store, _) =
-            SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
+        let (store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")

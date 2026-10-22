@@ -764,11 +764,10 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Runs the JSON event cache captured before the SQLite index (a1) are
-    /// in the facts again once it is imported: `~/.claude.json` has since
-    /// overwritten them, so nothing else could give them back.
+    /// Current reported runs persist in SQLite while retired JSON-only facts
+    /// are ignored and their original cache is left untouched.
     #[test]
-    fn reported_runs_from_before_the_index_show_again() {
+    fn retired_json_cache_is_ignored_while_current_reported_runs_persist() {
         let root = env::temp_dir().join(format!(
             "semon-facts-legacy-runs-{}-{}",
             std::process::id(),
@@ -800,18 +799,16 @@ mod tests {
         )
         .unwrap();
         // The JSON event cache still holds an earlier one.
-        fs::write(
-            crate::events::EventCache::legacy_path(&options.cache),
-            serde_json::json!({
-                "version": 14,
-                "files": {},
-                "reported_runs": {"earlier-run": {"1000": {
-                    "lastSessionId":"earlier-run","lastStartTime":1000,"lastCost":0.25,"captureAt":1500
-                }}}
-            })
-            .to_string(),
-        )
+        let legacy = options.cache.with_extension("events.json");
+        let legacy_bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 14,
+            "files": {},
+            "reported_runs": {"earlier-run": {"1000": {
+                "lastSessionId":"earlier-run","lastStartTime":1000,"lastCost":0.25,"captureAt":1500
+            }}}
+        }))
         .unwrap();
+        fs::write(&legacy, &legacy_bytes).unwrap();
 
         let facts = local_facts(&options).unwrap();
         let ids: BTreeSet<&str> = facts
@@ -819,11 +816,13 @@ mod tests {
             .iter()
             .map(|run| run.last_session_id.as_str())
             .collect();
-        assert_eq!(ids, BTreeSet::from(["earlier-run", "latest-run"]));
-        assert!(!crate::events::EventCache::legacy_path(&options.cache).exists());
-        // And they stay: the next process reads them from the index.
+        assert_eq!(ids, BTreeSet::from(["latest-run"]));
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        // The current snapshot stays: the next process reads it from the index.
         let again = local_facts(&options).unwrap();
-        assert_eq!(again.reported_runs.len(), 2);
+        assert_eq!(again.reported_runs.len(), 1);
+        assert_eq!(again.reported_runs[0].last_session_id, "latest-run");
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
         fs::remove_dir_all(root).unwrap();
     }
 }
