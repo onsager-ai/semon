@@ -40,6 +40,11 @@ function turnOutcome(session: CatalogSession): string | undefined {
     unknown: 'Unknown',
   }[phase];
 }
+export function selectedSessionStatusTip(session: CatalogSession): string {
+  const outcome = turnOutcome(session);
+  return 'Status: ' + (STATE[selectedSessionState(session)] ?? 'Recorded history') +
+    (outcome ? ' · Last turn: ' + outcome : '');
+}
 function recordedCostTip(cost: Cost): string {
   const groups = Object.entries(cost.by_model ?? {}).map(([id, model]) => {
     const values = model.usd_by_kind ?? {},

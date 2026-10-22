@@ -446,6 +446,7 @@ mod tests {
             let mut facts = crate::facts::Facts {
                 version: crate::facts::FACTS_VERSION,
                 hostname: "synthetic".into(),
+                codex_rollouts: Some(BTreeSet::from(["sessions/2026/09/24/rollout-owner.jsonl".into()])),
                 ..Default::default()
             };
             if live {
@@ -466,6 +467,14 @@ mod tests {
             .unwrap();
         }
         fn query(&self) -> Value {
+            // Query's complete fallback does not itself promise Catalog/trace
+            // publication. Exercise the owning native producer before asserting
+            // either its persisted rows or portable archive custody.
+            let evidence = crate::native_evidence::NativeEvidence::new(self.options.clone());
+            let mut work = crate::viewer::lock(&evidence.work);
+            while !evidence.refresh_catalog(&mut work, NOW).unwrap() {}
+            drop(work);
+            evidence.retire();
             Query::new(self.options.clone())
                 .call_at("list_sessions", &json!({}), NOW)
                 .unwrap()["sessions"][0]
