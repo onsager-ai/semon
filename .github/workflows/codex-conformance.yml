@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+# Keep both reusable-workflow jobs on the bundled reference prices.
+env:
+  SEMON_PRICING_REFRESH: "off"
+
 concurrency:
   group: codex-conformance-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
