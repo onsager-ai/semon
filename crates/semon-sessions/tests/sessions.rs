@@ -426,14 +426,18 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
     let nodes = collect(&fixture.options).unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].children.len(), 2);
-    assert_eq!(nodes[0].children[0].id, "child-a");
-    assert_eq!(nodes[0].children[1].id, "child-b");
+    let child_a = nodes[0].children.iter().find(|child| child.id == "child-a").unwrap();
+    let child_b = nodes[0].children.iter().find(|child| child.id == "child-b").unwrap();
+    assert_eq!(child_a.id, "child-a");
+    assert_eq!(child_b.id, "child-b");
+    assert!(child_b.last_activity > child_a.last_activity);
+    assert_eq!(nodes[0].children[0].id, "child-b", "newer activity sorts first");
     // An empty rollout has no terminal evidence; the completed control does.
-    assert_eq!(nodes[0].children[0].state, "unknown");
-    assert!(nodes[0].children[0].turn_lifecycle.is_none());
-    assert_eq!(nodes[0].children[1].state, "ended");
+    assert_eq!(child_a.state, "unknown");
+    assert!(child_a.turn_lifecycle.is_none());
+    assert_eq!(child_b.state, "ended");
     assert_eq!(
-        nodes[0].children[1].turn_lifecycle.as_ref().unwrap().phase,
+        child_b.turn_lifecycle.as_ref().unwrap().phase,
         semon_sessions::TurnPhase::Completed
     );
     assert_eq!(nodes[0].tokens.input, 9);
@@ -1038,6 +1042,24 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             prior["tokens_by_model"],
             "{id}: exact per-model native usage"
         );
+        if id == "codex-run" && session["harness"] == "codex"
+            && session.get("turn_lifecycle").is_none()
+        {
+            // Inspect the full synthetic-fixture difference in CI before any
+            // further contract adaptation. The strict assertions below stay.
+            let related = |field: &str| Value::Array(expected[field].as_array().unwrap()
+                .iter().filter(|row| row["sid"] == id || row["from"] == id || row["to"] == id)
+                .cloned().collect());
+            let parent = query.call_at("get_session", &json!({"id":"harbor"}), now).unwrap();
+            let parent_edges: Vec<_> = parent["session"]["handoffs"].as_array().unwrap()
+                .iter().filter(|edge| edge["from"] == id || edge["to"] == id).cloned().collect();
+            let diagnostic = json!({"id":id,
+                "actual_turns":session["turns"],"expected_turns":related("turns"),
+                "actual_handoffs":session["handoffs"],"expected_handoffs":related("handoffs"),
+                "actual_parent_handoff_copies":parent_edges}).to_string();
+            assert!(diagnostic.len() <= 16384, "synthetic lifecycle diagnostic exceeds bound");
+            eprintln!("missing-lifecycle-contract {diagnostic}");
+        }
         for field in ["turns", "handoffs"] {
             let rows: Vec<_> = expected[field]
                 .as_array()

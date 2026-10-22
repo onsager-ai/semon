@@ -988,6 +988,7 @@ for (const width of [390, 1280])
           await page.locator('#page [data-id="turn"]').click();
           await page.locator('#page [data-entry-key="turn:0"]').waitFor();
           assert.doesNotMatch(await page.locator('body').innerText(), /invalid history view/i);
+          await assertCodexIconsLoaded(page);
           const tooltip = page.locator('#topbar [data-tip*="Last turn:"]:visible').first();
           assert.match(await tooltip.getAttribute('data-tip'), new RegExp(outcome));
           if (width === 390) await tooltip.tap();
@@ -1010,6 +1011,7 @@ for (const width of [390, 1280])
           await last.waitFor();
           assert.equal(await last.innerText(), outcome);
           assert.doesNotMatch(await page.locator('body').innerText(), /PRIVATE-|987654321/);
+          await assertCodexIconsLoaded(page);
           if (process.env.SEMON_CATALOG_OUT)
             await page.screenshot({
               path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-menu.png`,
@@ -2565,7 +2567,23 @@ for (const width of [390, 1280])
       }
     });
 
+async function assertCodexIconsLoaded(page) {
+  await page.waitForFunction(() => {
+    const icons = [...document.querySelectorAll('img[src="/harness/codex.svg"], img[src="/harness/codex-black.svg"]')];
+    return icons.length > 0 && icons.every((icon) => icon.complete && icon.naturalWidth > 0);
+  });
+}
+
 async function fulfillCatalogStatic(route, url) {
+  // Exact production HARNESS_ICONS allowlist; never resolve arbitrary URL paths.
+  const icons = ['claude-code.svg', 'codex.svg', 'codex-black.svg', 'copilot.svg',
+    'opencode-light.svg', 'opencode-dark.svg'];
+  const icon = icons.find((name) => url.pathname === '/harness/' + name);
+  if (icon) return route.fulfill({
+    contentType: 'image/svg+xml',
+    body: await readFile(new URL('../../assets/harnesses/' + icon, import.meta.url)),
+  });
+  if (url.pathname.startsWith('/harness/')) return route.fulfill({ status: 404, body: '' });
   const font = url.pathname.match(
     /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
   );

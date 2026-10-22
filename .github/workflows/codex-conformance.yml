@@ -51,6 +51,9 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions codex_lifecycle::tests::
 
+      - name: Run native sessions integration contracts early on the exact head
+        run: cargo test --locked -p semon-sessions --test sessions
+
       - name: Run focused native selected-details and transcript contract
         run: |
           cargo test --locked -p semon-sessions catalog::tests::selected_details_are_body_free_exact_and_bound_to_the_original_source_generation
