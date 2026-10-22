@@ -19,6 +19,7 @@ const CANDIDATES: &str = "SELECT substr(key,17) FROM meta WHERE key>'overview_ne
 type EvidenceRead<'a> =
     Box<dyn Fn(&Path, &crate::native_record::Record) -> io::Result<Vec<u8>> + 'a>;
 type NativeRead<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Value> + 'a>;
+type NativeBytes<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Vec<u8>> + 'a>;
 
 #[cfg(test)]
 thread_local! {
@@ -29,6 +30,7 @@ pub(crate) struct NativeRecords<'a> {
     full: BTreeMap<PathBuf, Vec<u8>>,
     selected: Option<&'a EventCache>,
     read: Option<NativeRead<'a>>,
+    raw: Option<NativeBytes<'a>>,
     evidence: Option<EvidenceRead<'a>>,
     error: std::cell::RefCell<Option<io::Error>>,
     fields: BTreeMap<(PathBuf, u64, u32), crate::native_field::NativeField>,
@@ -49,6 +51,15 @@ impl NativeRecords<'_> {
         self.fields.get(&(path.to_owned(), offset, block)).cloned()
     }
     pub(crate) fn record_bytes(&self, path: &Path, offset: u64) -> Option<Vec<u8>> {
+        if let Some(read) = &self.raw {
+            return match read(path, offset) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    self.error.replace(Some(error));
+                    None
+                }
+            };
+        }
         let rest = self.bytes(path)?.get(usize::try_from(offset).ok()?..)?;
         let end = rest.iter().position(|byte| *byte == b'\n')? + 1;
         (end <= 32 * 1024 * 1024).then(|| rest[..end].to_vec())
@@ -1019,6 +1030,7 @@ fn with_records<T>(
             full: BTreeMap::new(),
             selected: None,
             read: None,
+            raw: None,
             evidence: None,
             error: std::cell::RefCell::new(None),
             fields: BTreeMap::new(),
@@ -1131,6 +1143,32 @@ fn with_records<T>(
         }
         Ok(value)
     };
+    let raw = |path: &Path, offset: u64| -> io::Result<Vec<u8>> {
+        let row = rows
+            .iter()
+            .find(|row| row.sources.iter().any(|source| source.path == path))
+            .ok_or_else(|| failure("Unqualified native recipe source"))?;
+        crate::transcript_range::with_source_reader(
+            options,
+            &row.harness,
+            &row.sources,
+            provider,
+            mode,
+            |reader, refs| {
+                let reader = crate::source_reader::BudgetedReader::new(reader, requests.get());
+                let bytes = crate::source_reader::read_record_bytes_bounded(
+                    &reader,
+                    refs.get(path)
+                        .ok_or_else(|| failure("Unknown recipe source"))?,
+                    offset,
+                    32 * 1024 * 1024,
+                    &mut bytes_left.borrow_mut(),
+                );
+                requests.set(reader.remaining());
+                bytes
+            },
+        )
+    };
     let evidence = |path: &Path, proof: &crate::native_record::Record| -> io::Result<Vec<u8>> {
         let row = rows
             .iter()
@@ -1162,6 +1200,7 @@ fn with_records<T>(
         read: selected
             .as_ref()
             .map(|_| Box::new(read) as Box<dyn Fn(&Path, u64) -> io::Result<Value>>),
+        raw: selected.as_ref().map(|_| Box::new(raw) as NativeBytes),
         evidence: selected
             .as_ref()
             .map(|_| Box::new(evidence) as EvidenceRead),
