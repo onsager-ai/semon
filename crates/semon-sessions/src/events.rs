@@ -1421,6 +1421,8 @@ impl EventCache {
 
     /// The retired JSON event cache, `sessions-index.events.json`: its
     /// reported runs are imported when the store opens, and it is removed.
+    /// This is persisted-fact migration, independent of the retired Model. See
+    /// `docs/design/model-oracle-retirement.md` for custody and removal criteria.
     pub(crate) fn legacy_path(v1_cache: &Path) -> PathBuf {
         v1_cache.with_extension("events.json")
     }
@@ -1462,7 +1464,7 @@ impl EventCache {
         Ok(cache)
     }
 
-    /// Only the complete compatibility/background scan owns disappearance
+    /// Only the complete native background scan owns disappearance
     /// reconciliation. Capture ledger metadata before discovery so a concurrent
     /// newly committed source cannot be mistaken for a disappeared source.
     pub(crate) fn begin_full_scan(&mut self) -> io::Result<()> {

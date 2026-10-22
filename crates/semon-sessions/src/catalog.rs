@@ -2681,13 +2681,9 @@ mod tests {
         writeln!(file,"{}",json!({"type":"user","sessionId":"home","uuid":"answer","parentUuid":"question","timestamp":"2026-10-01T00:00:02Z","toolUseResult":{"answers":{"NATIVE_PRIVATE_QUESTION":"NATIVE_PRIVATE_ANSWER"}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ask-native","content":"User has answered your questions"}]}})).unwrap();
         drop(file);
         fixture.publish(1);
-        let model = crate::model::reference_json(&fixture.options, crate::model::now_ms());
-        let question = model["handoffs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|h| h["ask"] == "question" && h["from"] == "home")
-            .unwrap();
+        let reference: Value =
+            serde_json::from_str(include_str!("model/retirement-reference.json")).unwrap();
+        let question = &reference["question"];
         let source = crate::OverviewSource {
             key: "source".into(),
             label: "Machine".into(),
@@ -8112,7 +8108,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_native_index_and_scoped_builder_preserve_membership_and_oracle() {
+    fn selected_native_index_preserves_membership_and_independent_reference() {
         let fixture = Fixture::new();
         fixture.publish(3);
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -8120,44 +8116,44 @@ mod tests {
         let metadata = rows(&transaction, &Request::parse("sid=session-00000").unwrap()).unwrap();
         let source = &metadata[0];
         let ids = source.native_ids.iter().cloned().collect();
-        let mut selected = EventCache::from_selected(&transaction, &source.sources, &ids).unwrap();
+        let selected = EventCache::from_selected(&transaction, &source.sources, &ids).unwrap();
         assert_eq!(selected.paths().count(), 1);
-        let paths: Vec<_> = source
-            .sources
-            .iter()
-            .map(|source| crate::inputs::Input {
-                root: crate::inputs::InputRoot::parse(&metadata[0].harness).unwrap(),
-                path: source_relative(&fixture.options, &metadata[0].harness, source).unwrap(),
-            })
-            .collect();
         let now = crate::model::now_ms();
-        let mut all = EventCache::open(&fixture.options.cache);
-        let full = crate::model::build(
+        let reference: Value =
+            serde_json::from_str(include_str!("model/retirement-reference.json")).unwrap();
+        let builds = crate::model::BUILDS.with(std::cell::Cell::get);
+        let reads = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let mut query = crate::Query::new(fixture.options.clone());
+        let page = query
+            .call_selected_at(
+                "",
+                &source.key,
+                "read_transcript",
+                &json!({"id":source.key}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                now,
+            )
+            .unwrap();
+        assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
+        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
+        let mut expected_page = reference["selected"]["page"].clone();
+        expected_page["window_start"] = Value::Null;
+        assert_eq!(page, expected_page);
+        let session = &reference["selected"]["session"];
+        let full = crate::model::build_query(
             &fixture.options,
-            &mut all,
+            &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
             &mut false,
             &mut crate::model::Texts::default(),
             now,
         )
         .unwrap();
-        let built = crate::model::build_sources(
-            &fixture.options,
-            &mut selected,
-            &mut false,
-            &mut crate::model::Texts::default(),
-            now,
-            Some(&paths),
-        )
-        .unwrap();
-        assert_eq!(built.sessions.len(), 1);
         assert_eq!(
-            serde_json::to_value(&built.sessions[&source.key]).unwrap(),
-            serde_json::to_value(&full.sessions[&source.key]).unwrap()
+            serde_json::to_value(&full.sessions[&source.key]).unwrap(),
+            *session
         );
-        assert_eq!(
-            crate::tx::page(&built, &source.key, &crate::tx::Anchor::Last, now).unwrap(),
-            crate::tx::page(&full, &source.key, &crate::tx::Anchor::Last, now).unwrap()
-        );
+
         assert_eq!(selected.paths().count(), 1);
         let files: i64 = connection
             .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
