@@ -503,7 +503,10 @@ test('a user-directed turn waits only for a handoff recorded as waiting', () => 
 });
 
 test('Codex child handoff outcomes retain idle and unknown observations', () => {
-  for (const [status, text] of [['idle', 'idle'], ['off', 'status unknown']]) {
+  for (const [status, text] of [
+    ['idle', 'idle'],
+    ['off', 'status unknown'],
+  ]) {
     const edge = relationship('child', 'spawn', 'claude-parent', 'codex-child', { status });
     assert.deepEqual(traceHandoffOutcome(edge), { state: status, text });
   }
