@@ -985,10 +985,11 @@ for (const width of [390, 1280])
           await page.goto('http://catalog.test/sessions');
           await page.addScriptTag({ content: outputFiles[0].text });
           await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+          await page.locator('#page [data-id="turn"]').waitFor({ state: 'visible' });
+          await assertCodexIconsLoaded(page);
           await page.locator('#page [data-id="turn"]').click();
           await page.locator('#page [data-entry-key="turn:0"]').waitFor();
           assert.doesNotMatch(await page.locator('body').innerText(), /invalid history view/i);
-          await assertCodexIconsLoaded(page);
           const tooltip = page.locator('#topbar [data-tip*="Last turn:"]:visible').first();
           assert.match(await tooltip.getAttribute('data-tip'), new RegExp(outcome));
           if (width === 390) await tooltip.tap();
