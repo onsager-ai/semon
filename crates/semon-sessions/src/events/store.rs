@@ -9182,12 +9182,12 @@ mod tests {
             (
                 "missing-file-column",
                 "ALTER TABLE files DROP COLUMN pending",
-                "malformed schema",
+                "malformed persistent state",
             ),
             (
                 "missing-event-column",
                 "ALTER TABLE events DROP COLUMN reply_m",
-                "malformed schema",
+                "malformed persistent state",
             ),
             (
                 "missing-child-table",
