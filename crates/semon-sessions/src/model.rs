@@ -1279,7 +1279,7 @@ fn scan(
             "selected native input is outside the log allowlist",
         ));
     }
-    cache.begin_scan();
+    cache.begin_scan()?;
     if selected.is_none() {
         cache.begin_full_scan()?;
     }

@@ -329,7 +329,7 @@ impl NativeEvidence {
                 Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
                     return Err(io::Error::other(error));
                 }
-                Err(_) => EventCache::open(&self.options.cache),
+                Err(_) => EventCache::open(&self.options.cache).map_err(io::Error::other)?,
             });
         }
         let cache = work.events.as_mut().expect("event cache initialized");
@@ -901,7 +901,7 @@ impl NativeEvidence {
         before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
         let complete = self.refresh_catalog_step(work, now, before_build)?;
-        Ok(complete && !work.usage_migration_pending)
+        Ok(complete && !work.tree_repair_pending)
     }
 
     fn refresh_catalog_step(
@@ -923,18 +923,11 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
-        work.usage_migration_pending = work
+        work.tree_repair_pending = work
             .events
             .as_mut()
             .expect("event cache initialized")
-            .advance_native_usage_migration(&self.options)?;
-        if work.events.as_ref().is_some_and(EventCache::is_scoped)
-            && crate::events::store::recover_unsupported_catalog(&self.options)?
-        {
-            work.cold_catalog = None;
-            work.catalog_snapshot = None;
-            work.pending_sources = true;
-        }
+            .advance_tree_repair(&self.options)?;
         if self.advance_semantic_stage(work, now, &mut before_build)? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
@@ -1324,7 +1317,7 @@ impl NativeEvidence {
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
-        work.usage_migration_pending
+        work.tree_repair_pending
             || work.cold_catalog.is_some()
             || work.audit.is_some()
             || (work.pending_sources
@@ -1332,11 +1325,11 @@ impl NativeEvidence {
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
-        work.usage_migration_pending
+        work.tree_repair_pending
             || work
                 .events
                 .as_ref()
-                .is_some_and(EventCache::native_usage_migration_pending)
+                .is_some_and(EventCache::tree_repair_pending)
             || work.cold_catalog.is_some()
             || work.pending_sources
             || work.audit.is_some()
@@ -1417,7 +1410,7 @@ pub(crate) struct Work {
     observed_catalog_generation: Option<String>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
-    usage_migration_pending: bool,
+    tree_repair_pending: bool,
     audit: Option<CatalogAudit>,
     audit_revision: u64,
     /// When the last native preparation started.
