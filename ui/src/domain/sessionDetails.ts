@@ -142,7 +142,10 @@ export function parseSessionDetails(value: unknown): SessionDetails {
   const turn = rawTurn == null ? null : { phase: 'unknown' };
   if (turn && typeof rawTurn === 'object' && !Array.isArray(rawTurn)) {
     const phase = (rawTurn as Record<string, unknown>).phase;
-    if (typeof phase === 'string' && ['active', 'completed', 'aborted', 'errored', 'unknown'].includes(phase))
+    if (
+      typeof phase === 'string' &&
+      ['active', 'completed', 'aborted', 'errored', 'unknown'].includes(phase)
+    )
       turn.phase = phase;
   }
   const activity = row.activity == null ? null : object(row.activity);

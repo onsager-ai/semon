@@ -120,13 +120,12 @@ test('malformed or unsupported turn lifecycle cannot be accepted as successful c
     { phase: null },
     { phase: 'future' },
     { phase: 1 },
-  ])
-    {
-      const parsed = parseSessionDetails({ ...details(), turn_lifecycle });
-      assert.deepEqual(parsed.turn_lifecycle, { phase: 'unknown' });
-      assert.equal(parsed.turns, 2);
-      assert.equal(parsed.calls, 1);
-    }
+  ]) {
+    const parsed = parseSessionDetails({ ...details(), turn_lifecycle });
+    assert.deepEqual(parsed.turn_lifecycle, { phase: 'unknown' });
+    assert.equal(parsed.turns, 2);
+    assert.equal(parsed.calls, 1);
+  }
 });
 test('Claude details without Codex lifecycle retain independently validated fields', () => {
   for (const turn_lifecycle of [undefined, null]) {

@@ -48,7 +48,8 @@ jobs:
         run: cargo test --locked -p semon-sessions 'events::tests::'
 
       - name: Run durable owned-turn lifecycle regressions on the exact head
-        run: cargo test --locked -p semon-sessions codex_lifecycle::tests::
+        run: |
+          cargo test --locked -p semon-sessions codex_lifecycle::tests::
 
       - name: Run focused native selected-details and transcript contract
         run: |

@@ -116,12 +116,25 @@ test('a Claude selected range remains readable when its Codex child is unknown o
   for (const status of ['off', 'idle']) {
     const raw = page();
     raw.relationship_context.state = 'complete';
-    raw.relationship_context.handoffs = [{
-      id: 'action-native', kind: 'spawn', from: 'session', to: 'codex-child',
-      at: 1000, status, declined: false,
-    }];
+    raw.relationship_context.handoffs = [
+      {
+        id: 'action-native',
+        kind: 'spawn',
+        from: 'session',
+        to: 'codex-child',
+        at: 1000,
+        status,
+        declined: false,
+      },
+    ];
     raw.relationship_context.sessions = {
-      'codex-child': { name: 'Codex child', harness: 'codex', model: 'model', state: status, live_observation: 1 },
+      'codex-child': {
+        name: 'Codex child',
+        harness: 'codex',
+        model: 'model',
+        state: status,
+        live_observation: 1,
+      },
     };
     const parsed = parseCatalogTranscriptPage(raw);
     assert.equal(parsed.session.name, 'Saved native session');
@@ -129,9 +142,9 @@ test('a Claude selected range remains readable when its Codex child is unknown o
     assert.equal(parsed.relationship_context.handoffs[0].edge.status, status);
     assert.equal(parsed.relationship_context.sessions['codex-child'].state, status);
     for (const mutate of [
-      (value) => value.relationship_context.handoffs[0].status = 'invented',
-      (value) => value.relationship_context.handoffs[0].from = 'foreign-owner',
-      (value) => value.relationship_context.handoffs[0].id = 'unselected-edge',
+      (value) => (value.relationship_context.handoffs[0].status = 'invented'),
+      (value) => (value.relationship_context.handoffs[0].from = 'foreign-owner'),
+      (value) => (value.relationship_context.handoffs[0].id = 'unselected-edge'),
     ]) {
       const invalid = structuredClone(raw);
       mutate(invalid);

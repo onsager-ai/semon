@@ -1376,8 +1376,9 @@ export function createCatalogViewer(
                 session: active.key,
                 state: selectedSessionState(session),
                 stateLabel: STATE[selectedSessionState(session)] ?? 'Recorded history',
-                stateTip: selectedSessionLabels(session).find((label) => label.key === 'state')?.tip ??
-                  ('Status: ' + (STATE[selectedSessionState(session)] ?? 'Recorded history')),
+                stateTip:
+                  selectedSessionLabels(session).find((label) => label.key === 'state')?.tip ??
+                  'Status: ' + (STATE[selectedSessionState(session)] ?? 'Recorded history'),
                 showState: !(phone && ancestors.length),
                 ancestors: (phone ? [] : ancestors).map((row) => ({
                   id: row.key,

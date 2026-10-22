@@ -898,26 +898,57 @@ for (const width of [390, 1280])
       const browser = await chromium.launch();
       try {
         for (const [phase, state, outcome] of [
-          ['completed', 'idle', 'Completed'], ['aborted', 'idle', 'Aborted'],
-          ['errored', 'err', 'Errored'], ['active', 'work', 'Terminal not recorded'],
+          ['completed', 'idle', 'Completed'],
+          ['aborted', 'idle', 'Aborted'],
+          ['errored', 'err', 'Errored'],
+          ['active', 'work', 'Terminal not recorded'],
           [null, 'off', 'Unknown'],
         ]) {
           const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
           const nativeSource = { ...source('turn'), root: 'codex' };
           const references = [{ source: nativeSource, state: 'cached' }];
           const details = {
-            state, turns: 1, calls: 0, errors: 0, tool_calls: {}, signals: {},
-            cost: { usd: null }, copied_usage: false, copilot: null,
-            reported_runs: [], cost_check: [], live_observation: true,
-            turn_lifecycle: phase && { phase, thread_id: 'PRIVATE-THREAD', turn_id: 'PRIVATE-TURN', offset: 987654321, source_generation: 'PRIVATE-GENERATION' },
+            state,
+            turns: 1,
+            calls: 0,
+            errors: 0,
+            tool_calls: {},
+            signals: {},
+            cost: { usd: null },
+            copied_usage: false,
+            copilot: null,
+            reported_runs: [],
+            cost_check: [],
+            live_observation: true,
+            turn_lifecycle: phase && {
+              phase,
+              thread_id: 'PRIVATE-THREAD',
+              turn_id: 'PRIVATE-TURN',
+              offset: 987654321,
+              source_generation: 'PRIVATE-GENERATION',
+            },
           };
-          const selected = { ...meta('turn'), name: 'Codex lifecycle fixture', harness: 'codex', kind: 'codex-run', source_refs: references, details };
-          const nativeIdentity = { ...identity('turn'), harness: 'codex', source_refs: references, read_scope: 'retained_history' };
+          const selected = {
+            ...meta('turn'),
+            name: 'Codex lifecycle fixture',
+            harness: 'codex',
+            kind: 'codex-run',
+            source_refs: references,
+            details,
+          };
+          const nativeIdentity = {
+            ...identity('turn'),
+            harness: 'codex',
+            source_refs: references,
+            read_scope: 'retained_history',
+          };
           await page.route('http://catalog.test/**', async (route) => {
             const url = new URL(route.request().url());
-            if (url.pathname === '/api/session-capabilities') return route.fulfill({ json: capabilities(true) });
+            if (url.pathname === '/api/session-capabilities')
+              return route.fulfill({ json: capabilities(true) });
             if (url.pathname === '/api/sessions') return route.fulfill({ json: list([selected]) });
-            if (url.pathname === '/api/session-identity') return route.fulfill({ json: { api: 1, identity: nativeIdentity } });
+            if (url.pathname === '/api/session-identity')
+              return route.fulfill({ json: { api: 1, identity: nativeIdentity } });
             if (url.pathname === '/api/session-transcript') {
               const value = transcript('turn', url.searchParams, 1);
               value.session = selected;
@@ -938,18 +969,29 @@ for (const width of [390, 1280])
           if (process.env.SEMON_CATALOG_OUT) {
             await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
             if (width === 1280) await tooltip.hover();
-            await page.screenshot({ path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-tooltip.png` });
+            await page.screenshot({
+              path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-tooltip.png`,
+            });
           }
-          await page.getByRole('button', { name: 'Session menu: details, cost and actions' }).click();
-          const last = page.locator('dt').filter({ hasText: /^Last turn$/ }).locator('xpath=following-sibling::dd[1]');
+          await page
+            .getByRole('button', { name: 'Session menu: details, cost and actions' })
+            .click();
+          const last = page
+            .locator('dt')
+            .filter({ hasText: /^Last turn$/ })
+            .locator('xpath=following-sibling::dd[1]');
           await last.waitFor();
           assert.equal(await last.innerText(), outcome);
           assert.doesNotMatch(await page.locator('body').innerText(), /PRIVATE-|987654321/);
           if (process.env.SEMON_CATALOG_OUT)
-            await page.screenshot({ path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-menu.png` });
+            await page.screenshot({
+              path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-menu.png`,
+            });
           await page.close();
         }
-      } finally { await browser.close(); }
+      } finally {
+        await browser.close();
+      }
     });
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
