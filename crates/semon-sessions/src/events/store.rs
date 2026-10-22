@@ -504,7 +504,7 @@ DELETE FROM catalog_semantic_paths;
 DELETE FROM catalog_semantic_relations;
 DELETE FROM catalog_semantic_events;
 DELETE FROM catalog_semantic_names;
-DELETE FROM meta WHERE key IN ('catalog_semantic_gc','catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after','catalog_legacy_runtime_anchor','catalog_legacy_runtime_semantics');
+DELETE FROM meta WHERE key IN ('catalog_semantic_gc','catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after');
 UPDATE session_catalog SET lifecycle='retained',metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END;
 UPDATE session_catalog_sources SET lifecycle='retained';
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at', 'catalog_completeness', 'catalog_publication_epoch');
@@ -1179,44 +1179,6 @@ fn enqueue_dependency_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusql
     Ok(())
 }
 
-/// Keep a previously qualified legacy runtime fence usable across a journaled
-/// facts write. Only fingerprints are persisted; no process payload is copied.
-/// Row readers additionally reject pending source/dependency revisions.
-pub(crate) fn preserve_legacy_runtime(
-    options: &crate::Options,
-    before: &crate::Facts,
-    after: &crate::Facts,
-) -> io::Result<()> {
-    let previous = crate::native_evidence::recorded_runtime_fingerprint(options, before)?;
-    let wanted = crate::native_evidence::recorded_runtime_fingerprint(options, after)?;
-    let legacy = crate::native_evidence::legacy_runtime_generation(options)?;
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    let existing: Option<String> = tx
-        .query_row(
-            "SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(io::Error::other)?;
-    if existing.as_deref() != Some(previous.as_str()) {
-        tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor',?1)",
-            [legacy],
-        )
-        .map_err(io::Error::other)?;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
-        [wanted],
-    )
-    .map_err(io::Error::other)?;
-    tx.commit().map_err(io::Error::other)
-}
-
 pub(crate) fn enqueue_facts(
     options: &crate::Options,
     before: &crate::Facts,
@@ -1466,18 +1428,13 @@ fn runtime_input_evidence(
             serde_json::from_str::<crate::source_change::RuntimeInputEvidence>(&text).ok()
         })
         .filter(|evidence| {
-            [
-                &evidence.runtime_before,
-                &evidence.legacy_before,
-                &evidence.unaffected,
-            ]
-            .into_iter()
-            .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            let hash = &evidence.unaffected;
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         }))
 }
 
-/// Resolve a pre-Raw runtime witness under the input's facts fence. This also
-/// runs on replay; a crash cannot lose the pre-mutation legacy qualification.
+/// Replay a PID input's dependency invalidation under its facts fence.
+/// Unrelated process inputs and semantic facts must still match the witness.
 pub(crate) fn resume_runtime_input(options: &crate::Options, path: &str) -> io::Result<()> {
     if options.facts.is_none() {
         return Ok(());
@@ -1514,7 +1471,7 @@ fn resume_runtime_input_tx(
     if unaffected != evidence.unaffected {
         return Ok(());
     }
-    // The new PID identity is dirtied before advancing the compatibility fence.
+    // Dirty the new PID identity before acknowledging the source mutation.
     if let Some(id) = crate::read_regular_at_most(Path::new(path), 65536)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -1522,16 +1479,6 @@ fn resume_runtime_input_tx(
     {
         enqueue_native_tx(tx, "claude", &id)?;
     }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor',?1)",
-        [&evidence.legacy_before],
-    )?;
-    let wanted = crate::native_evidence::recorded_runtime_fingerprint(options, &facts)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
-        [wanted],
-    )?;
     Ok(())
 }
 
@@ -1577,15 +1524,7 @@ pub(crate) fn begin_source_write(
             .as_ref()
             .and_then(|file| crate::read_facts(file).ok())
     {
-        let runtime_before = crate::native_evidence::recorded_runtime_fingerprint(options, &facts)?;
-        let preserved: Option<(String,String)> = tx.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_legacy_runtime_anchor'),(SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics')",[],|row|Ok((row.get(0)?,row.get(1)?))).ok();
-        let legacy_before = match preserved {
-            Some((anchor, semantics)) if semantics == runtime_before => anchor,
-            _ => crate::native_evidence::legacy_runtime_generation(options)?,
-        };
         let evidence = crate::source_change::RuntimeInputEvidence {
-            runtime_before,
-            legacy_before,
             unaffected: crate::native_evidence::recorded_runtime_fingerprint_excluding(
                 options,
                 &facts,
@@ -1665,7 +1604,7 @@ fn read_append_evidence(
 }
 
 /// Load only the selected native sources in the caller's existing read snapshot.
-/// This never opens a writable store, imports legacy data, walks roots or prunes
+/// This never opens a writable store, walks roots or prunes
 /// source membership. Catalog identities and event ledgers must agree exactly.
 pub(super) fn read_selected(
     connection: &Connection,
@@ -1777,7 +1716,7 @@ pub(super) fn selected_roles_current(
 }
 
 /// Additive storage preparation for already-published focused recipes. This is
-/// the existing schema owner with lazy loading and no legacy-file import. A
+/// the existing schema owner with lazy loading. A
 /// parser change is left to its producer instead of resetting evidence in a read.
 pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -9084,68 +9023,6 @@ mod tests {
             size: 3,
             modified_ns: 1_790_000_000_123_456_789,
         }
-    }
-
-    #[test]
-    fn writable_opens_ignore_retired_json_cache_and_interrupted_import_claim() {
-        let root = scratch("ignored-json-cache");
-        let path = root.join("index.sqlite3");
-        let legacy = root.join("index.events.json");
-        let legacy_bytes = legacy_cache_bytes("legacy-cache-only");
-        let mut importing_name = legacy.clone().into_os_string();
-        importing_name.push(".importing.4242.0.0123456789abcdef");
-        let importing = PathBuf::from(importing_name);
-        let importing_bytes = legacy_cache_bytes("legacy-importing-only");
-        fs::write(&legacy, &legacy_bytes).unwrap();
-        fs::write(&importing, &importing_bytes).unwrap();
-
-        let (full, loaded) = open(&path).expect("full writable store opens");
-        assert!(loaded.reported_runs.is_empty());
-        assert!(loaded.stamp.is_none());
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
-        assert_eq!(fs::read(&importing).unwrap(), importing_bytes);
-        drop(full);
-
-        let (mut scoped, loaded) = open_scoped(&path).expect("scoped writable store opens");
-        assert!(loaded.reported_runs.is_empty());
-        assert!(loaded.stamp.is_none());
-        let selected = BTreeSet::from([
-            "legacy-cache-only".to_owned(),
-            "legacy-importing-only".to_owned(),
-        ]);
-        assert!(scoped.select_reported_runs(&selected).unwrap().is_empty());
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
-        assert_eq!(fs::read(&importing).unwrap(), importing_bytes);
-
-        drop(scoped);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    fn legacy_cache_bytes(session_id: &str) -> Vec<u8> {
-        let mut by_start = serde_json::Map::new();
-        by_start.insert(
-            "1000".to_owned(),
-            serde_json::json!({
-                "lastSessionId": session_id,
-                "lastStartTime": 1000,
-                "lastCost": 1.5,
-                "captureAt": 900
-            }),
-        );
-        let mut reported_runs = serde_json::Map::new();
-        reported_runs.insert(session_id.to_owned(), serde_json::Value::Object(by_start));
-        serde_json::to_vec(&serde_json::json!({
-            "version": 9,
-            "files": {},
-            "reported_runs": reported_runs,
-            "claude_json_stamp": {
-                "dev": 1,
-                "ino": 2,
-                "size": 3,
-                "modified_ns": 4
-            }
-        }))
-        .unwrap()
     }
 
     #[test]

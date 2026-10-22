@@ -764,12 +764,11 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Current reported runs persist in SQLite while retired JSON-only facts
-    /// are ignored and their original cache is left untouched.
+    /// SQLite retains reported runs after the live source overwrites them.
     #[test]
-    fn retired_json_cache_is_ignored_while_current_reported_runs_persist() {
+    fn reported_runs_persist_after_live_source_overwrite_and_reopen() {
         let root = env::temp_dir().join(format!(
-            "semon-facts-legacy-runs-{}-{}",
+            "semon-facts-reported-runs-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -791,38 +790,47 @@ mod tests {
         fs::write(options.proc_root.join("sys/kernel/hostname"), "fixture\n").unwrap();
         fs::create_dir_all(&options.claude_home).unwrap();
         fs::create_dir_all(&options.codex_home).unwrap();
-        // Today's `~/.claude.json` holds only the latest run.
+        // Collect the first live reported run.
         fs::write(
             &options.claude_json,
-            serde_json::json!({"projects":{"/p":{"lastSessionId":"latest-run","lastStartTime":2000}}})
+            serde_json::json!({"projects":{"/p":{"lastSessionId":"first-run","lastStartTime":1000,"lastCost":0.25}}})
                 .to_string(),
         )
         .unwrap();
-        // The JSON event cache still holds an earlier one.
-        let legacy = options.cache.with_extension("events.json");
-        let legacy_bytes = serde_json::to_vec(&serde_json::json!({
-            "version": 14,
-            "files": {},
-            "reported_runs": {"earlier-run": {"1000": {
-                "lastSessionId":"earlier-run","lastStartTime":1000,"lastCost":0.25,"captureAt":1500
-            }}}
-        }))
-        .unwrap();
-        fs::write(&legacy, &legacy_bytes).unwrap();
-
         let facts = local_facts(&options).unwrap();
         let ids: BTreeSet<&str> = facts
             .reported_runs
             .iter()
             .map(|run| run.last_session_id.as_str())
             .collect();
-        assert_eq!(ids, BTreeSet::from(["latest-run"]));
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
-        // The current snapshot stays: the next process reads it from the index.
+        assert_eq!(ids, BTreeSet::from(["first-run"]));
+        // The collector reopens SQLite after the source advances to another run.
+        fs::write(
+            &options.claude_json,
+            serde_json::json!({"projects":{"/p":{"lastSessionId":"second-run","lastStartTime":2000,"lastCost":0.5}}}).to_string(),
+        )
+        .unwrap();
+        let next = local_facts(&options).unwrap();
+        assert_eq!(
+            next.reported_runs
+                .iter()
+                .map(|run| run.last_session_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["first-run", "second-run"])
+        );
+        // Neither run remains in the live file; both come from persisted snapshots.
+        fs::write(&options.claude_json, r#"{"projects":{}}"#).unwrap();
         let again = local_facts(&options).unwrap();
-        assert_eq!(again.reported_runs.len(), 1);
-        assert_eq!(again.reported_runs[0].last_session_id, "latest-run");
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        assert_eq!(again.reported_runs.len(), 2);
+        for (id, start, cost) in [("first-run", 1000, 0.25), ("second-run", 2000, 0.5)] {
+            let run = again
+                .reported_runs
+                .iter()
+                .find(|run| run.last_session_id == id)
+                .unwrap();
+            assert_eq!(run.last_start_time, start);
+            assert_eq!(run.last_cost, Some(cost));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

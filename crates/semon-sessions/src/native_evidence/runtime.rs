@@ -13,10 +13,8 @@ pub(crate) struct RuntimeObservations {
     runs: BTreeMap<String, Vec<usize>>,
     connection: Option<Connection>,
     fallback: Option<String>,
-    legacy: Option<String>,
-    preserved: Option<(String, String)>,
 }
-/// Scope-only publication observations cannot enter reader compatibility lookup.
+/// Runtime dependencies captured for native publication.
 pub(crate) struct ScopedRuntimeObservations(RuntimeObservations);
 impl ScopedRuntimeObservations {
     pub(crate) fn scope(&self, row: &crate::model::summary::CatalogRow) -> io::Result<String> {
@@ -33,14 +31,8 @@ impl RuntimeObservations {
     ) -> Self {
         let mut observations = Self::fresh_measured(options, measurements);
         let started = measurements.start();
-        observations.preserved = observations.connection.as_ref().and_then(|db| db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_legacy_runtime_anchor'),(SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics')",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).ok());
-        measurements.record("runtime_ctor_preserved", started, 1);
-        let started = measurements.start();
         observations.fallback = query_runtime_generation(options).ok();
         measurements.record("runtime_ctor_fallback", started, 1);
-        let started = measurements.start();
-        observations.legacy = legacy_runtime_generation(options).ok();
-        measurements.record("runtime_ctor_legacy", started, 1);
         observations
     }
     /// Only for a publication that captured this initial runtime successfully
@@ -120,8 +112,6 @@ impl RuntimeObservations {
             runs,
             connection,
             fallback: None,
-            legacy: None,
-            preserved: None,
         }
     }
     pub(crate) fn expected(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
@@ -135,58 +125,7 @@ impl RuntimeObservations {
         if saved == self.fallback.as_deref() {
             return self.fallback.clone();
         }
-        if saved == self.legacy.as_deref() {
-            return self.legacy.clone();
-        }
-        if let Some((anchor, semantics)) = &self.preserved
-            && saved == Some(anchor.as_str())
-            && self.fallback.as_deref() == Some(semantics.as_str())
-            && self.legacy_dependencies_clean(row).unwrap_or(false)
-        {
-            return Some(anchor.clone());
-        }
-        self.legacy.clone()
-    }
-    fn legacy_dependencies_clean(
-        &self,
-        row: &crate::model::summary::CatalogRow,
-    ) -> rusqlite::Result<bool> {
-        let Some(db) = &self.connection else {
-            return Ok(false);
-        };
-        for source in &row.sources {
-            if db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
-                [source.path.to_string_lossy()],
-                |row| row.get::<_, bool>(0),
-            )? {
-                return Ok(false);
-            }
-        }
-        let mut ids = row
-            .native_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        if let Some(rows) = row
-            .query
-            .as_ref()
-            .and_then(|query| query["rows"].as_object())
-        {
-            ids.extend(rows.keys().map(String::as_str));
-        }
-        if ids.len() > 64 {
-            return Ok(false);
-        }
-        let mut pending=db.prepare("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path IN (SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 UNION SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND session_key=?2))")?;
-        for id in ids {
-            if pending.query_row(rusqlite::params![row.harness, id], |row| {
-                row.get::<_, bool>(0)
-            })? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        None
     }
     pub(crate) fn scope(&self, row: &crate::model::summary::CatalogRow) -> io::Result<String> {
         let Some(facts) = &self.facts else {
@@ -209,9 +148,8 @@ impl RuntimeObservations {
         }
         let mut cwds = BTreeSet::new();
         let Some(connection) = self.connection.as_ref() else {
-            // Compatibility/in-memory model builders have no durable source
-            // metadata. Keep their original observation fence; only a scoped
-            // persisted producer can qualify dependency-specific recipes.
+            // Without durable source metadata, publication can only bind the
+            // aggregate observation captured and rechecked by its producer.
             return self
                 .fallback
                 .clone()

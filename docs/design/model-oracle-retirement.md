@@ -14,7 +14,9 @@ This records code retirement, not merge, release or live-data cleanup.
 | `tx::page`, `page_limited`, `page_from`, `signals`, `errors`, `errors_limited`, `ERRORS_MAX`, `full_slot`, `full_yielded`, `full`, `text_json`, `read_record` | Retired Model/transport adapters deleted. `tx.rs` retains shared native rendering. `tx/tests.rs` owns focused, typed parser assertions and a generation-bound native page adapter; it builds no Model/version/transport envelope. |
 | `model.rs`, `model/summary.rs`, `model/relation_stage.rs`, `QueryData`, `build_query`, `prepare_*`, `query_history`, native `Session`/`Turn`/`Handoff`/`Transcript` types, text caches and active Analytics derivation | Active shared native semantics. Kept under their existing owner; renaming the module would obscure a focused deletion with a repository-wide import change. The only build targets are Query, Catalog and Sources. |
 | Native discovery/parsing in `events.rs`; older Claude tags, Codex tool formats, Copilot records, native ancestry, source proofs, retained recipes and archive generations | Supported native behavior and persisted history. Kept. A symbol containing `legacy` does not establish dead code. |
-| `CatalogWriter::Legacy`, old runtime/proof/recipe versions and migration tests | Existing complete-producer transaction and persisted-data compatibility, independent of Model transport. Kept with their generation, custody and refusal assertions. |
+| `CatalogWriter::Legacy` | Active row-by-row SQL transaction used when a Catalog batch is unsupported or oversized. Kept as a current producer path, independent of the retired Model. |
+| Pre-scoped Catalog runtime anchors and upgrade qualification | Deleted. Current runtime observations qualify their own scoped dependencies; unsupported old runtime observations are not promoted through an upgrade anchor. |
+| Persisted native proofs, retained recipes and schema custody | Existing storage ownership and refusal assertions remain. These protect native history independently of the retired Model. |
 | Retired `/api/model`, `/api/tx`, `/api/transcript`, `/api/entry`, `/api/analytics`, deltas/SSE and `compat=1` | Already removed from production at the audited base. Existing Viewer 404 and consumer transport regressions remain. No replacement routes or fallback are added. |
 | Query `contract-reference.json`, five `model/golden/*.json` files, historical browser/reference evidence | Independent regression evidence. Kept byte-for-byte from the independently captured Query reference and current upstream goldens; see the pricing-only upstream refresh below. Never loaded by production. Historical design documents are explicitly marked and linked to current ownership. |
 | Old JSON event-cache import | Removed on 2026-10-22 at the user's explicit no-compatibility decision. Historical reported facts that exist only in this cache are no longer imported; existing cache files are left untouched. |
@@ -37,21 +39,11 @@ identity and the shared pricing table against those preserved fields. Additions
 that predate this retirement but postdate the goldens retain their explicit
 usage/cost/call-count assertions. There is no golden-update switch.
 
-`crates/semon-sessions/src/model/retirement-reference.json` additionally preserves:
-
-- The complete selected session metadata and transcript page from the original
-  `catalog::tests::selected_native_index_and_scoped_builder_preserve_membership_and_oracle`.
-- The answered question event from the original
-  `catalog::tests::home_native_previews_preserve_question_answers_and_archive_generation_without_caching_text`.
-
-Both were captured before deletion from an isolated checkout of audited base
-`5f34607070ff2e7cd5ef4f1e41a5ca9c2935f9f8`. Only writes of the existing old results
-were inserted immediately before their assertions. The original Model, Query,
-Viewer and parser bytes were unchanged, and both original tests passed. Inputs
-are the existing synthetic `synthetic-catalog` fixtures, October 1 timestamps,
-and `NATIVE_PRIVATE_*` sentinel text, not personal logs. The selected native Query
-response has its existing `window_start: null` in addition to the old page.
-The preserved file contains no filesystem paths, credentials or generator.
+Catalog tests now state native expectations directly: selected session metadata,
+transcript entries and turn identity, answered question timestamps and status,
+and source-backed private question/answer text. They retain build/read counts,
+unrelated membership, conflicting source rejection and archive generation checks.
+No supplementary snapshot of the retired Model is loaded by these tests.
 
 The new native tests request briefs through generation-bound recipes instead of
 assuming that metadata preparation materializes every prompt. Rewrite coverage
@@ -88,11 +80,21 @@ The current SQLite reported-usage snapshots and live collection from
 that exist only in the retired JSON cache are no longer imported and cannot be
 reconstructed from native logs.
 
-Any old JSON cache or interrupted import file already present is left byte for
-byte untouched. Removing the reader does not authorize data cleanup; deletion
+There is no retired JSON test schema or import simulation. The reported-run
+regression collects two successive live snapshots, overwrites the live source,
+and reopens SQLite to verify both runs and their recorded costs remain.
+
+Any old JSON cache or interrupted import file already present is left
+untouched because no code opens it. Removing the reader does not authorize data cleanup; deletion
 remains an explicit operator action. This decision removes compatibility support
 without changing current SQLite schema preparation, corruption recovery, or
 native event parsing.
+
+The pre-scoped Catalog runtime upgrade path is also removed: no compatibility
+anchors are written, preserved or accepted by readers. Local process and naming
+observations still supply the current aggregate generation. PID write intents
+retain only the fingerprint of unaffected inputs so interrupted writes can
+replay dependency invalidation without rebuilding unrelated native history.
 
 ## Reconciliation with #385 and #380
 

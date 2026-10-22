@@ -1472,7 +1472,7 @@ pub(crate) fn query_runtime_generation(options: &Options) -> io::Result<String> 
             .unwrap_or_default();
         return recorded_runtime_fingerprint(options, &facts);
     }
-    legacy_runtime_generation(options)
+    local_runtime_generation(options)
 }
 
 /// Semantic hosted runtime fence. Source selection has its independent authority
@@ -1520,8 +1520,8 @@ pub(crate) fn recorded_runtime_fingerprint_excluding(
     ))
 }
 
-/// Qualification of pre-scoped Catalog recipes during an additive upgrade.
-pub(crate) fn legacy_runtime_generation(options: &Options) -> io::Result<String> {
+/// Aggregate generation for current local process and naming observations.
+fn local_runtime_generation(options: &Options) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut watched = BTreeMap::new();
     watch_tree(
@@ -1529,51 +1529,43 @@ pub(crate) fn legacy_runtime_generation(options: &Options) -> io::Result<String>
         &[".json"],
         &mut watched,
     );
-    for path in [&options.claude_json]
-        .into_iter()
-        .chain(options.facts.iter())
-    {
-        watched.insert(path.clone(), stamp(path));
-    }
+    watched.insert(options.claude_json.clone(), stamp(&options.claude_json));
     let mut processes = BTreeMap::new();
-    let mut locks = None;
-    if options.facts.is_none() {
-        let path = options.proc_root.join("sys/kernel/hostname");
+    let path = options.proc_root.join("sys/kernel/hostname");
+    watched.insert(path.clone(), stamp(&path));
+    for name in [
+        "session_index.jsonl",
+        "state_5.sqlite",
+        "state_5.sqlite-wal",
+    ] {
+        let path = options.codex_home.join(name);
         watched.insert(path.clone(), stamp(&path));
-        for name in [
-            "session_index.jsonl",
-            "state_5.sqlite",
-            "state_5.sqlite-wal",
-        ] {
-            let path = options.codex_home.join(name);
-            watched.insert(path.clone(), stamp(&path));
-        }
-        watch_tree(
-            &options.codex_home.join("thread-writer-locks"),
-            &[".lock"],
-            &mut watched,
+    }
+    watch_tree(
+        &options.codex_home.join("thread-writer-locks"),
+        &[".lock"],
+        &mut watched,
+    );
+    let ids = lock_ids(options);
+    let locks = writer_locks(options, &ids);
+    let machine = crate::facts::MachineFacts::Local;
+    let pids = model::pid_files(options, &machine)
+        .into_iter()
+        .map(|pid| pid.pid)
+        .chain(
+            machine
+                .codex_lock_pids(options)
+                .into_iter()
+                .flat_map(|pids| pids.into_values()),
         );
-        let ids = lock_ids(options);
-        locks = writer_locks(options, &ids);
-        let machine = crate::facts::MachineFacts::Local;
-        let pids = model::pid_files(options, &machine)
-            .into_iter()
-            .map(|pid| pid.pid)
-            .chain(
-                machine
-                    .codex_lock_pids(options)
-                    .into_iter()
-                    .flat_map(|pids| pids.into_values()),
-            );
-        for pid in pids {
-            processes.insert(
-                pid,
-                (
-                    proc_start(&options.proc_root, pid),
-                    machine.run(options, pid, None),
-                ),
-            );
-        }
+    for pid in pids {
+        processes.insert(
+            pid,
+            (
+                proc_start(&options.proc_root, pid),
+                machine.run(options, pid, None),
+            ),
+        );
     }
     let paths: Vec<_> = watched
         .into_iter()
