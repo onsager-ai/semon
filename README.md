@@ -174,3 +174,6 @@ repository's Apache-2.0 license.
 Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.
 
 SSH onboarding, testing, installation/bootstrap/update, tunneling and SSH-mediated collection/execution are paused. Public transport calls refuse before credentials or network admission. [SSH bootstrap](docs/ssh-bootstrap.md) records the retained private transport and deferred qualification; existing credentials, installations and history are preserved.
+
+Model reference prices refresh automatically in long-running processes; see
+[runtime pricing](docs/runtime-pricing.md) for offline fallback and configuration.

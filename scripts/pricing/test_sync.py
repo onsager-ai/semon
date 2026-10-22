@@ -47,6 +47,13 @@ class PricingParserTests(unittest.TestCase):
                 self.assertTrue(row["source"].startswith("https://"))
                 self.assertEqual(set(row["legacy"]), set(sync.LEGACY_FIELDS))
 
+    def test_build_preserves_explicitly_pinned_restoration_rows(self) -> None:
+        current = sync.load_pricing(PRICING)
+        built = sync.build_prices(self.anthropic_html, self.openai_html, current)
+        for model in ("claude-haiku-5-5", "gpt-6.1-sol"):
+            with self.subTest(model=model):
+                self.assertEqual(built[model], current["models"][model])
+
     def test_page_without_a_pricing_section_is_rejected(self) -> None:
         with self.assertRaises(sync.PricingParseError):
             sync.parse_anthropic("<!doctype html><html><body><p>Page layout changed</p></body></html>")
