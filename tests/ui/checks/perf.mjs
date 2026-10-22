@@ -173,13 +173,17 @@ async function paintFailureDiagnostics(page, marker, apiRequests, server) {
   const dom = await page
     .evaluate((expected) => {
       const text = (node) =>
-        String(node?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        String(node?.textContent ?? '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 300);
       const messages = [
         ...document.querySelectorAll('#page section[aria-label="Transcript"] .msg.assistant'),
       ];
       return {
         readyState: document.readyState,
-        title: document.title.slice(0, 120), marker: expected,
+        title: document.title.slice(0, 120),
+        marker: expected,
         markerVisible: messages.at(-1)?.textContent.includes(expected) ?? false,
         assistantCount: messages.length,
         lastAssistantMessages: messages.slice(-4).map((node) => text(node).slice(-300)),
@@ -206,11 +210,7 @@ async function paintFailureDiagnostics(page, marker, apiRequests, server) {
         summary.errorBodySkipped = 'response body did not complete before the paint timeout';
       } else if (errorBodies >= 4) {
         summary.errorBodySkipped = 'per-timeout body capture limit reached';
-      } else if (
-        Number.isInteger(contentLength) &&
-        contentLength >= 0 &&
-        contentLength <= 4096
-      ) {
+      } else if (Number.isInteger(contentLength) && contentLength >= 0 && contentLength <= 4096) {
         errorBodies++;
         try {
           summary.errorBody = (await response.text()).slice(0, 1024);
