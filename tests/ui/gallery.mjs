@@ -7,6 +7,7 @@ import { buildConsumer } from '../../ui/build.mjs';
 import { launch } from './lib.mjs';
 import { auditText } from './text-audit.mjs';
 import { createVisualContract } from './visual-contract.mjs';
+import { nativePresentationWitness } from './storybook-presentation-witness.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url)),
   root = path.resolve(dir, '../..');
@@ -15,7 +16,7 @@ if (args.length && (args.length !== 1 || args[0] !== '--update-baselines'))
   throw new Error('Usage: node tests/ui/gallery.mjs [--update-baselines]');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'semon-gallery-'));
 const output = path.join(temp, 'gallery.js');
-await buildConsumer(path.join(root, 'ui/tests/fixtures/design-gallery.tsx'), output);
+await buildConsumer(path.join(root, 'ui/tests/fixtures/design-gallery-entry.tsx'), output);
 const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'gallery-visual.json'), 'utf8'));
 const out = path.resolve(process.env.SEMON_UI_OUT ?? path.join(dir, 'out'), 'gallery');
 const visuals = createVisualContract({
@@ -99,6 +100,19 @@ try {
         }
         report.push({ width, scheme, state, text });
         await visuals.capture(page, `${state}-${width}-${scheme}`);
+        // Additional unapproved migration witness; the original comparator,
+        // screenshot options, thresholds and baseline ownership above stay intact.
+        fs.writeFileSync(
+          path.join(out, `${state}-${width}-${scheme}-presentation.json`),
+          JSON.stringify(
+            await nativePresentationWitness(
+              page,
+              fs.readFileSync(path.join(out, `${state}-${width}-${scheme}.png`)),
+            ),
+            null,
+            2,
+          ) + '\n',
+        );
       };
       await audit('primitives');
       // Keyboard opens and selects through the real shared Select controller.

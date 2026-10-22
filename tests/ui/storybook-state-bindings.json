@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "referenceDisposition": "pending-storybook-review",
+  "retiredFrames": [
+    {
+      "frames": ["u2bYht", "ztAky", "Jb6nO", "x3zFKU"],
+      "disposition": "superseded",
+      "decisionSource": "ui/README.md",
+      "reason": "The canonical navigation registry has no standalone Sources destination. Current reader ownership keeps source selection in Sessions context; the historical Sources navigation row must not be claimed visible in either catalog or transcript chrome."
+    }
+  ],
+  "stories": {
+    "semon-production-owners--home": {"expectedState": "Populated Home counters, inbox and working session", "assertions": [{"kind": "visible", "selector": ".ph .sub", "text": "waiting on you"}, {"kind": "visible", "selector": ".nrow[data-id=\"session-1\"]", "text": "Migrate the visual acceptance surfaces"}]},
+    "semon-production-owners--machines": {"expectedState": "Machines inventory with online and offline rows", "assertions": [{"kind": "visible", "selector": "button[data-m=\"laptop\"]", "text": "Marvin’s laptop"}, {"kind": "visible", "selector": "button[data-m=\"desktop\"]", "text": "Build desktop"}]},
+    "semon-production-owners--session-row": {"expectedState": "Parent and indented child session rows", "assertions": [{"kind": "visible", "selector": "[data-session-row]", "text": "Check visual diffs"}]},
+    "semon-production-owners--keyboard-focus": {"expectedState": "Production row with visible keyboard focus", "assertions": [{"kind": "focused", "selector": "[data-session-row=\"list\"]"}]},
+    "semon-production-owners--component-gallery": {"expectedState": "Mounted shared shell, native controls, error, loading and closed overlay triggers", "assertions": [{"kind": "visible", "selector": "#sheet-trigger"}, {"kind": "visible", "selector": "#field-error", "text": "Enter a valid email address."}]},
+    "semon-production-owners--navigation-recent": {"expectedState": "Production shell with a populated expanded Recent tree; phone tree requires the drawer capture", "assertions": [{"kind": "visible", "selector": "#topbar .ttl", "text": "Sessions"}]},
+    "semon-production-owners--gallery-lifecycle": {"expectedState": "Mounted gallery under a test-only teardown owner", "assertions": [{"kind": "visible", "selector": "button[aria-label=\"Unmount gallery\"]"}, {"kind": "visible", "selector": "#sheet-trigger"}]},
+    "semon-production-owners--tooltip": {"expectedState": "Closed source-status tooltip trigger", "assertions": [{"kind": "visible", "selector": "button[data-tip]", "text": "Source status"}]},
+    "semon-production-owners--analytics-states": {"expectedState": "Analytics with no activity, no fabricated chart data", "assertions": [{"kind": "visible", "selector": ".ph .sub", "text": "No activity is available in this time range."}]},
+    "semon-production-owners--analytics-loaded": {"expectedState": "Loaded metrics, chart and harness breakdown", "assertions": [{"kind": "visible", "selector": ".analytics-metrics", "text": "$0.42"}, {"kind": "visible", "selector": "[aria-label=\"Recorded daily cost by harness\"]"}]},
+    "semon-production-owners--source-candidates": {"expectedState": "Incomplete history with an archived source candidate", "assertions": [{"kind": "visible", "selector": "section[aria-label=\"Archived sources awaiting sessions\"]", "text": "Imported session"}]},
+    "semon-production-owners--sessions-catalog": {"expectedState": "Populated workspace catalog with source-qualified row metadata", "assertions": [{"kind": "visible", "selector": ".session-list [data-session-row]", "count": 1, "rows": [{"attributes": {"data-id": "session-1"}, "text": "Review the new visual contract"}]}]},
+    "semon-production-owners--filtered-catalog": {"expectedState": "Metadata filter form with bounded-index search qualification", "assertions": [{"kind": "visible", "selector": "input[aria-label=\"Search session details\"]"}, {"kind": "visible", "selector": ".catalog-note", "text": "Only the loaded part of the index has been searched."}]},
+    "semon-production-owners--machine-filter": {"expectedState": "Closed production workspace Machine facet", "assertions": [{"kind": "visible", "selector": "button[aria-label=\"Filter\"]"}]},
+    "semon-production-owners--catalog-failure": {"expectedState": "Unavailable retained history with retry", "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "Session history could not be loaded."}]},
+    "semon-production-owners--catalog-empty": {"expectedState": "Empty source with Refresh history action", "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "No recorded sessions in this source yet."}]},
+    "semon-production-owners--catalog-loading": {"expectedState": "Updating retained source history", "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "Updating history"}]},
+    "semon-production-owners--session-menu": {"expectedState": "Production session menu contents and recorded cost", "assertions": [{"kind": "visible", "selector": ".menu-item", "text": "Copy session ID"}, {"kind": "visible", "selector": ".cost-big", "text": "$0.04"}]},
+    "semon-production-owners--trace-empty": {"expectedState": "Missing causal turn with explicit empty state", "assertions": [{"kind": "visible", "selector": ".empty", "text": "This turn isn't in the logs on this machine."}]},
+    "semon-production-owners--trace-flow": {"expectedState": "Two-hop causal flow and parent/child agent chart", "assertions": [{"kind": "visible", "selector": ".trace-summary", "text": "One request led to two recorded child sessions."}, {"kind": "visible", "selector": ".agent-row[data-agent-id=\"child-1\"]"}]},
+    "semon-production-owners--transcript-empty": {"expectedState": "Selected session with no recorded messages", "assertions": [{"kind": "visible", "selector": ".transcript .empty", "text": "No messages have been recorded for this session."}]},
+    "semon-production-owners--compact-reader": {"expectedState": "Closed compact related-session summary, distinct navigation and disclosure", "assertions": [{"kind": "visible", "selector": "button.cc-toggle[aria-expanded=\"false\"]"}, {"kind": "hidden", "selector": ".cc-details"}]},
+    "semon-production-owners--collapsed-tool": {"expectedState": "Recorded request, Thinking and assistant reply above a collapsed Bash step", "assertions": [{"kind": "visible", "selector": "[data-e=\"collapsed-tool\"] > button[aria-expanded=\"false\"]", "text": "cargo test -p harbor-sync"}]},
+    "semon-production-owners--long-transcript": {"expectedState": "Full long recorded response, with final paragraph retained", "assertions": [{"kind": "visible", "selector": ".msg.assistant[data-e=\"long-answer\"]", "text": "Review note 24:"}]},
+    "semon-production-owners--failure-inspection": {"expectedState": "Production failed-step geometry, error label and initially closed command", "assertions": [{"kind": "visible", "selector": ".step.err[data-e=\"failed-tool\"] > button[aria-expanded=\"false\"]", "text": "Failed"}]},
+    "semon-production-owners--loading-empty-error": {"expectedState": "Incomplete retained history with loading status and retry guidance", "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "Loading retained history. Retry if this message stays visible."}]}
+  },
+  "targets": {
+    "catalog": {
+      "storyId": "semon-production-owners--sessions-catalog",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": ".ph .sub", "text": "Workspace"}, {"kind": "visible", "selector": ".session-list [data-session-row]", "count": 1, "rows": [{"attributes": {"data-id": "session-1"}, "text": "Review the new visual contract"}]}]
+    },
+    "filters": {
+      "storyId": "semon-production-owners--filtered-catalog",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": "input[aria-label=\"Search session details\"]"}, {"kind": "visible", "selector": "input[aria-label=\"Harness\"]"}, {"kind": "visible", "selector": "input[aria-label=\"Repository\"]"}, {"kind": "visible", "selector": "button.catalog-apply", "text": "Apply filters"}]
+    },
+    "row": {
+      "storyId": "semon-production-owners--session-row",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": "[data-session-row]", "count": 2, "rows": [{"attributes": {"data-id": "session-1"}, "text": "Review the new visual contract"}, {"attributes": {"data-id": "child-1"}, "text": "Check visual diffs"}]}]
+    },
+    "scope": {"interactionId": "source-scope-expanded"},
+    "failed": {"interactionId": "failed-tool-output-expanded"},
+    "loading": {
+      "storyId": "semon-production-owners--catalog-loading",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "Updating history"}]
+    },
+    "empty": {
+      "storyId": "semon-production-owners--catalog-empty",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "No recorded sessions in this source yet"}]
+    },
+    "error": {
+      "storyId": "semon-production-owners--catalog-failure",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": ".catalog-note", "text": "Session history could not be loaded"}]
+    },
+    "collapsed-tool": {
+      "storyId": "semon-production-owners--collapsed-tool",
+      "widths": [390, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": ".step[data-e=\"collapsed-tool\"] > button[aria-expanded=\"false\"]", "text": "cargo test -p harbor-sync"}, {"kind": "absent", "selector": "[data-e=\"collapsed-tool\"] .out"}]
+    },
+    "compact": {
+      "storyId": "semon-production-owners--compact-reader",
+      "widths": [334, 390, 696, 820, 1280], "schemes": ["light", "dark"],
+      "assertions": [{"kind": "visible", "selector": "button[aria-label=\"Expand Check the phone layout details\"]"}, {"kind": "visible", "selector": ".child-card .hicon"}, {"kind": "visible", "selector": ".child-card", "expectedWidths": {"334": 334, "390": 390, "696": 696, "820": 696, "1280": 696}}]
+    },
+    "compact-open": {"interactionId": "related-session-expanded"},
+    "machine-filter": {"interactionId": "machine-filter-open"},
+    "recent": {
+      "storyId": "semon-production-owners--navigation-recent",
+      "widths": [820, 1280], "schemes": ["light", "dark"],
+      "assertions": [
+        {"kind": "visible", "selector": "#nav a[href=\"/sessions\"]", "text": "Sessions", "inViewport": true},
+        {"kind": "visible", "selector": "#nav a[href=\"/machines\"]", "text": "Machines", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"deps\"]", "text": "deps audit", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"offline\"]", "text": "feat/offline-sync", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"review\"]", "text": "Review offline-sync diff", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"flush\"]", "text": "Check flush ordering", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"harbor\"]", "text": "harbor", "inViewport": true},
+        {"kind": "visible", "selector": ".srow[data-id=\"retry\"]", "text": "Check retry safety", "inViewport": true}
+      ]
+    },
+    "catalog-shell": {
+      "legacyKeys": ["preservation:required:frame:1280-light-sessions", "preservation:required:frame:1280-dark-sessions"],
+      "referenceDisposition": "pending-storybook-review",
+      "expectedState": "Sessions route with production navigation, source-scoped Recent tree and toolbar visible. Historical Sources navigation is now owned by Sessions source context (ui/README.md)."
+    },
+    "reader-shell": {
+      "legacyKeys": ["preservation:required:frame:1280-light-session-harbor", "preservation:required:frame:1280-dark-session-harbor"],
+      "referenceDisposition": "pending-storybook-review",
+      "expectedState": "Selected harbor transcript with production navigation, populated nested Recent tree and selected-session toolbar visible."
+    },
+    "phone-toolbar": {
+      "legacyKeys": ["preservation:required:frame:390-light-sessions", "preservation:required:frame:390-dark-sessions"],
+      "referenceDisposition": "pending-storybook-review",
+      "expectedState": "Phone Sessions toolbar with compact menu trigger; sidebar stays hidden until drawer interaction."
+    }
+  },
+  "bindings": [
+    {"frames": ["Nt3eb", "gbtK3"], "targets": ["catalog-shell", "catalog", "filters"], "visibleOwnership": "Whole catalog compositions bind actual shell route Storybook captures and separate production catalog/filter captures; component captures do not claim sidebar pixels."},
+    {"frames": ["P4cT3K", "wCnIL"], "targets": ["catalog-shell", "recent"], "visibleOwnership": "#sidebar shell and populated expanded Recent are separate explicit owners; the Recent story asserts every named descendant visible."},
+    {"frames": ["XxrIN", "XwmtP"], "targets": ["catalog-shell"], "visibleOwnership": "#sidebar Sessions navigation link."},
+    {"frames": ["GZCvb", "g8aOkf"], "targets": ["catalog-shell"], "visibleOwnership": "#sidebar Machines navigation link."},
+    {"frames": ["K22Z2", "Xo51R"], "targets": ["recent"], "visibleOwnership": "Recent deps root row in #sidebar, including native harness metadata."},
+    {"frames": ["siYza", "s4RT1R"], "targets": ["recent"], "visibleOwnership": "Recent offline-sync root row in #sidebar."},
+    {"frames": ["Sughc", "trEGm"], "targets": ["recent"], "visibleOwnership": "Recent offline-sync review child row in the expanded native tree."},
+    {"frames": ["K0C2W", "jsUvU"], "targets": ["recent"], "visibleOwnership": "Recent flush-ordering nested child row in the expanded native tree."},
+    {"frames": ["ARFew", "v0xoB"], "targets": ["recent"], "visibleOwnership": "Recent harbor root row in #sidebar."},
+    {"frames": ["hFSHE", "WrISy"], "targets": ["recent"], "visibleOwnership": "Recent retry-safety child row under harbor."},
+    {"frames": ["t6oQxQ", "e3gpV"], "targets": ["catalog-shell"], "visibleOwnership": "#topbar Sessions route title and compact menu ownership."},
+    {"frames": ["BR60V", "W0tEEh"], "targets": ["catalog", "filters"], "visibleOwnership": "Catalog content region combines source header, metadata filters and contiguous rows; every claimed child has a separate explicit binding below."},
+    {"frames": ["SHMo4", "uj2tA"], "targets": ["catalog"], "visibleOwnership": ".ph Sessions heading and source observation."},
+    {"frames": ["BcZql", "l1X7z"], "targets": ["filters"], "visibleOwnership": ".catalog-filters responsive native form with search, harness, repository and submit."},
+    {"frames": ["eoiQs", "NFwCK"], "targets": ["filters"], "visibleOwnership": "Search session details and Harness fields in the production catalog form."},
+    {"frames": ["D4FY6", "B9gQL"], "targets": ["filters"], "visibleOwnership": "Repository field and native Apply filters submit in .catalog-filters."},
+    {"frames": ["cMHEB", "CQZfM"], "targets": ["filters"], "visibleOwnership": "button.catalog-apply uses the actual native submit owner."},
+    {"frames": ["EGONE", "wWSJr"], "targets": ["scope"], "visibleOwnership": "details.catalog-scope expanded metadata scope disclosure and result qualification."},
+    {"frames": ["I0NY3", "KMzk2"], "targets": ["catalog"], "visibleOwnership": ".session-list contiguous production session rows."},
+    {"frames": ["BYbh8", "rzFC5"], "targets": ["filters"], "visibleOwnership": "Production Search session details input surface, using canonical colors and focus geometry."},
+    {"frames": ["raaGL"], "targets": ["row"], "visibleOwnership": "Production session row identity, harness, state and metadata."},
+    {"frames": ["gZYIY"], "targets": ["phone-toolbar", "filters", "scope", "catalog"], "visibleOwnership": "Phone composition binds the actual compact shell route Storybook capture plus responsive form, disclosure and row captures."},
+    {"frames": ["FIwqa"], "targets": ["phone-toolbar"], "visibleOwnership": "#topbar owns the compact phone toolbar."},
+    {"frames": ["ypFy7"], "targets": ["filters", "scope", "catalog"], "visibleOwnership": "Phone content comprises the visible catalog form, disclosure and rows."},
+    {"frames": ["vFIlg"], "targets": ["filters"], "visibleOwnership": "Narrow metadata search/harness/repository filter form."},
+    {"frames": ["XUBQx"], "targets": ["filters"], "visibleOwnership": "Narrow native Apply filters submit."},
+    {"frames": ["gXHrB"], "targets": ["scope"], "visibleOwnership": "Narrow expanded source-scope disclosure."},
+    {"frames": ["TRQHl"], "targets": ["catalog"], "visibleOwnership": "Narrow contiguous session rows."},
+    {"frames": ["nGo6u"], "targets": ["reader-shell", "failed"], "visibleOwnership": "Failed transcript composition explicitly separates shell/Recent from expanded production failed step and command output."},
+    {"frames": ["FiLXX", "hnbrS"], "targets": ["reader-shell", "recent"], "visibleOwnership": "#sidebar owns selected reader navigation; Recent story explicitly asserts every named root and descendant visible."},
+    {"frames": ["dcx52", "UOPSN"], "targets": ["reader-shell"], "visibleOwnership": "#sidebar Sessions navigation link in selected reader."},
+    {"frames": ["t5d78r", "O7h1ft"], "targets": ["reader-shell"], "visibleOwnership": "#sidebar Machines navigation link in selected reader."},
+    {"frames": ["ikalf", "oZ1Jj"], "targets": ["recent"], "visibleOwnership": "Recent deps root row with harness metadata."},
+    {"frames": ["be8BK", "eWa49"], "targets": ["recent"], "visibleOwnership": "Recent offline-sync root row."},
+    {"frames": ["tg2IX", "nj0hK"], "targets": ["recent"], "visibleOwnership": "Recent offline-sync review child row."},
+    {"frames": ["vzVL5", "YvyEJ"], "targets": ["recent"], "visibleOwnership": "Recent nested flush-ordering child row."},
+    {"frames": ["zWtI1", "DQHeF"], "targets": ["recent"], "visibleOwnership": "Recent selected harbor root row."},
+    {"frames": ["PzYKs", "sXwhD"], "targets": ["recent"], "visibleOwnership": "Recent retry-safety child row under harbor."},
+    {"frames": ["o0s4e", "K5eEtt"], "targets": ["reader-shell"], "visibleOwnership": "#topbar owns selected-session title, back/menu actions and session identity."},
+    {"frames": ["oLroE"], "targets": ["failed"], "visibleOwnership": "Transcript content shows the recorded failed command, error and expanded output."},
+    {"frames": ["M7Zjq"], "targets": ["failed"], "visibleOwnership": "User message preceding the failed command retains full readable request text."},
+    {"frames": ["kD4Pe", "V6i5L"], "targets": ["failed"], "visibleOwnership": ".step.err owns failed command heading, production touch geometry, output and copy action."},
+    {"frames": ["Oo357"], "targets": ["loading", "empty", "error", "scope"], "visibleOwnership": "State sheet is a container of four separately executable production catalog states."},
+    {"frames": ["qO2OE"], "targets": ["loading"], "visibleOwnership": "Updating retained history status in the actual catalog."},
+    {"frames": ["OxmTy"], "targets": ["empty"], "visibleOwnership": "Empty recorded-session list retains its production empty state."},
+    {"frames": ["KEdPz"], "targets": ["error"], "visibleOwnership": "Unavailable history with actionable retry status."},
+    {"frames": ["C3JzD2"], "targets": ["scope"], "visibleOwnership": "Expanded source scope disclosure in the actual catalog."},
+    {"frames": ["vGVHj"], "targets": ["reader-shell", "collapsed-tool"], "visibleOwnership": "Whole reader explicitly combines shell evidence with a real collapsed production tool, readable thought and messages; no expanded/empty story substitutes for that state."},
+    {"frames": ["j1fnH", "Wd35g"], "targets": ["collapsed-tool"], "visibleOwnership": "Recorded transcript region and wrapping user request remain visible above a collapsed Bash command."},
+    {"frames": ["uGNh2", "AWPNE", "IDwPX", "xH7RQ", "G9XjGN"], "targets": ["compact"], "visibleOwnership": "Compact related-session summary explicitly owns identity, native harness mark, metadata, status and separate disclosure trigger in one visible row."},
+    {"frames": ["DikBn", "FPbSc"], "targets": ["compact-open"], "visibleOwnership": "Disclosure interaction reveals .cc-details without navigating away from related-session identity."},
+    {"frames": ["pkKQT", "KcVGn", "GdtyG", "S8I0nF"], "targets": ["compact", "compact-open"], "visibleOwnership": "Matching compact closed/open rows at exact 334px and 696px reader widths in both themes; container owns only these explicitly bound component variants."},
+    {"frames": ["workspaceSessions20261019"], "targets": ["machine-filter"], "visibleOwnership": "Open production machine facet and select options for workspace Sessions."}
+  ]
+}

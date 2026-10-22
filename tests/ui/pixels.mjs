@@ -3,6 +3,7 @@
 // and regions remain a coverage contract; the mockup renderers are not loaded.
 import fs from 'node:fs';
 import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
+import { nativePresentationWitness } from './storybook-presentation-witness.mjs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
@@ -775,6 +776,8 @@ async function captureFrame(candidate, reference, key, phone) {
         const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
           bytes = prepared.bytes;
         save(key, name, bytes);
+        if (name === 'candidate')
+          saveJson(key, 'candidate-presentation', await nativePresentationWitness(page, bytes));
         evidenceBySide[name] = await snapshot(page);
         if (includePaintDiagnostics)
           evidenceBySide[name].phoneHarborPaint = {
@@ -881,6 +884,12 @@ async function regionShot(page, region, key, side) {
   const bytes = clip
     ? await page.screenshot({ clip, animations: 'disabled', caret: 'hide' })
     : await target.screenshot({ animations: 'disabled', caret: 'hide' });
+  if (side === 'candidate')
+    saveJson(
+      key,
+      'candidate-presentation',
+      await nativePresentationWitness(page, bytes, region.selector),
+    );
   if (region.open) await closeRegionPanel(page, region, key);
   save(key, side, bytes);
   return {

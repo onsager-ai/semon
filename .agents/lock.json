@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "be019483c36e0d4afb9aca1b94b2dc7eccb20eceb8c9b8ab88e540a204da0590",
+  "manifest_sha256": "dddbf6ad42c296de26247dd4fe8c68f40c9a42dc6f1452ba7267b415f69adcb7",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -73,7 +73,7 @@
       "mode": "100644"
     },
     ".agents/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "bd4bd6fbd8aab970057c4e2cb252d1a2115d3649d59602ffc82d31d2361d9d31",
+      "sha256": "99f7aab66016c08f894010419c60ec6101cf793b14b90f4e8b8b0d6a37b7780e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -83,7 +83,12 @@
       "mode": "100644"
     },
     ".agents/skills/ui-design/references/integrations.md": {
-      "sha256": "3af777b4a5c00a896fb200d50dc7d0e0db787ffcb348eb2bee1f140e32f3a0bc",
+      "sha256": "af57395c5d152ddf78e1acff2e25ddd9e99d7233baf2d7faabf0336f56b31b33",
+      "owner": "shared",
+      "mode": "100644"
+    },
+    ".agents/skills/ui-design/references/storybook-visual-testing.md": {
+      "sha256": "8f00612a64b1d08fd7c5c9f7ef95c5c5af92a1d4628d720985a1d3e86a3e8687",
       "owner": "shared",
       "mode": "100644"
     },
@@ -128,7 +133,7 @@
       "mode": "100755"
     },
     ".agents/skills/ui-design/SKILL.md": {
-      "sha256": "2b2e16461ead87a05e3d6d50869573eddaf0e1d9a79c437b0df9ee892f863bc4",
+      "sha256": "8401121df804dbe5079471ce4fb0f2761c932159cfe4dd39d0ca32c26b7d922f",
       "owner": "shared",
       "mode": "100644"
     },
@@ -198,7 +203,7 @@
       "mode": "100644"
     },
     ".claude/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "bd4bd6fbd8aab970057c4e2cb252d1a2115d3649d59602ffc82d31d2361d9d31",
+      "sha256": "99f7aab66016c08f894010419c60ec6101cf793b14b90f4e8b8b0d6a37b7780e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -208,7 +213,12 @@
       "mode": "100644"
     },
     ".claude/skills/ui-design/references/integrations.md": {
-      "sha256": "3af777b4a5c00a896fb200d50dc7d0e0db787ffcb348eb2bee1f140e32f3a0bc",
+      "sha256": "af57395c5d152ddf78e1acff2e25ddd9e99d7233baf2d7faabf0336f56b31b33",
+      "owner": "shared",
+      "mode": "100644"
+    },
+    ".claude/skills/ui-design/references/storybook-visual-testing.md": {
+      "sha256": "8f00612a64b1d08fd7c5c9f7ef95c5c5af92a1d4628d720985a1d3e86a3e8687",
       "owner": "shared",
       "mode": "100644"
     },
@@ -253,7 +263,7 @@
       "mode": "100755"
     },
     ".claude/skills/ui-design/SKILL.md": {
-      "sha256": "2b2e16461ead87a05e3d6d50869573eddaf0e1d9a79c437b0df9ee892f863bc4",
+      "sha256": "8401121df804dbe5079471ce4fb0f2761c932159cfe4dd39d0ca32c26b7d922f",
       "owner": "shared",
       "mode": "100644"
     },

@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.lib.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": [
+    ".storybook/preview.tsx",
+    "stories/**/*.tsx",
+    "stories/**/*.d.ts",
+    "tests/fixtures/design-gallery.tsx"
+  ]
+}

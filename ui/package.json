@@ -7,6 +7,9 @@
   },
   "scripts": {
     "build": "node build.mjs",
+    "storybook": "storybook dev -p 6006",
+    "storybook:build": "storybook build --output-dir ../tests/ui/storybook-static",
+    "storybook:typecheck": "tsc --project tsconfig.storybook.json --noEmit",
     "check:bundle": "node build.mjs --check",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.mjs",
@@ -22,10 +25,13 @@
     "preact": "10.29.8"
   },
   "devDependencies": {
+    "@types/node": "22.19.0",
+    "@storybook/preact-vite": "10.6.0",
     "esbuild": "0.28.2",
     "postcss": "8.5.28",
     "postcss-value-parser": "4.2.0",
     "prettier": "3.6.2",
+    "storybook": "10.6.0",
     "typescript": "6.0.3"
   }
 }

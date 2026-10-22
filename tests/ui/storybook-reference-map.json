@@ -1,0 +1,6 @@
+{
+  "$schema": "./storybook-reference-map.schema.json",
+  "version": 2,
+  "approved": {},
+  "pending": "Storybook candidate captures require a separately reviewed image, digest, exact dimensions/theme, and owner decision before reference approval. CI must never add entries here."
+}

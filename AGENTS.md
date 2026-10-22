@@ -28,10 +28,7 @@ cargo clippy --all-targets --locked -- --no-deps -D warnings
 cargo test --locked
 ```
 
-Viewer changes require applicable fixture/browser suites and reviewed pixel
-baselines. Do not loosen existing thresholds or remove required checks.
-Reconcile current product decisions with the baseline scope before UI work;
-follow docs/design/ai-design-workflow.md for actual-image review and classification.
+Viewer changes require applicable fixture/browser suites and reviewed pixel baselines. Visual acceptance maps production components to deterministic Storybook/Playwright states; inspect actual matched reference, candidate and diff images before proposing Git-reviewed baseline changes. Do not loosen existing thresholds or remove required checks. Reconcile current product decisions with the baseline scope before UI work; follow docs/design/ai-design-workflow.md.
 Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci
 --no-audit --no-fund`, then `npm --prefix ui run typecheck`, `npm --prefix ui test`,
 `npm --prefix ui run check:bundle` and `npm --prefix ui run sizes`.
@@ -48,9 +45,7 @@ The temporary collection configuration pauses control delivery, broad full-text 
   docs/design/design-contract.md,
   tests/ui/README.md and viewer-verification skill. Viewer refactors must follow
   the ownership contract and complete its refactoring review checklist.
-- AI-assisted UI/UX: docs/design/ai-design-workflow.md and ui-design skill.
-  User-level pen.dev tooling is optional; keep vendor skills and credentials
-  outside the checkout and preserve the existing visual/implementation contract.
+- AI-assisted UI/UX: docs/design/ai-design-workflow.md and ui-design skill. Implement in production sources and use tests/ui/storybook-contract.json for complete active-state coverage; pen.dev canvases are optional historical/exploration inputs, and ordinary implementation and acceptance require no pen account, key, app or tool call.
 - Relay/protocol changes: docs/mirror-protocol.md and
   docs/design/session-foundation-retirement.md.
 

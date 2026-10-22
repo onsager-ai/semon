@@ -1,0 +1,426 @@
+{
+  "version": 2,
+  "method": "CI lexical census of authored JavaScript/TypeScript. It reports direct screenshot calls, singular Playwright mask and maskColor options, plural masks metadata, and imports/calls of shared capture helpers. Every mask signal is bound by owner, option kind, occurrence ordinal, normalized exact value, and classification; line and excerpt remain report locations only. The inventory records bounded source purpose and gate ownership, not runtime evaluation or blanket capture approval.",
+  "records": [
+    {
+      "owner": "tests/ui/pixels.mjs",
+      "status": "active",
+      "disposition": "retained strict native pixel comparator; its frame and region geometry remain distinct from Storybook captures",
+      "successor": "storybook-legacy.mjs exact frames and regions add coverage; native comparator remains required",
+      "requiredGate": "storybook-gates.json#gates.strict-pixels",
+      "evidence": "Inspected captureFrame/regionShot: explicit fullPage/clip screenshot arguments and captureStableFrame options contain no mask property; this does not infer options in other owners.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/preservation.mjs",
+      "status": "active",
+      "disposition": "retained strict native preservation comparator and required content checks",
+      "successor": "storybook-legacy.mjs exact preservation states add coverage; native comparator remains required",
+      "requiredGate": "storybook-gates.json#gates.strict-preservation",
+      "evidence": "Inspected captureStableFrame call: fullPage false, animations allow, caret hide; no mask property at this call site.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/gallery.mjs",
+      "status": "active",
+      "disposition": "retained independent interaction and visual comparator over the five native gallery states",
+      "successor": "storybook-legacy.mjs five exact gallery states add coverage",
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected capture(page,key): caller supplies no extra options; visual-contract forwards supplied options unchanged, so this call's lack of options is local evidence only.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/compact-gallery.mjs",
+      "status": "active",
+      "disposition": "retained compact-density, text-audit and geometry assertions with diagnostic screenshots",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected the two page.screenshot calls around compact gallery states; output supports the test and is not a golden approval source.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/catalog-served.mjs",
+      "status": "active",
+      "disposition": "retained native served-page browser checks with diagnostic screenshots",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected served-page screenshot call and its test owner; screenshot is browser-check evidence, not a baseline comparator.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/overview-served.mjs",
+      "status": "active",
+      "disposition": "retained native overview served-page browser checks with diagnostic screenshots",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected overview capture helper and home/trace/analytics/machine/session-menu call sites; outputs are test diagnostics, not golden approvals.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/storybook-capture.mjs",
+      "status": "active",
+      "disposition": "candidate-only Storybook capture runner; exact references remain pending and capture behavior is owned by supplied plan options",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.storybook (temporary feedback workflow; not active aggregate coverage)",
+      "evidence": "Inspected capture dispatch: frame/locator/clip calls select fields from options; stable and direct calls forward options. No global no-mask inference is made; callers and plan own forwarded options.",
+      "maskOptions": [],
+      "optionForwarding": "options is forwarded to captureStableFrame/page.screenshot; mask ownership must be established at the caller and plan declaration."
+    },
+    {
+      "owner": "tests/ui/native-controls.mjs",
+      "status": "active",
+      "disposition": "retained native consumer form, link, text and touch-target assertions with diagnostic screenshot evidence",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected page.screenshot call at native-controls runner: only output path is supplied; it is not a golden comparator.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/capture-paint.mjs",
+      "status": "active",
+      "disposition": "retained shared capture-paint helper: aligns DOM evidence with animation phase and requires repeatable full-frame pixels",
+      "successor": "storybook-capture.mjs uses captureStableFrame",
+      "requiredGate": "storybook-gates.json#gates.independent-interaction (capture-paint.test.mjs)",
+      "evidence": "Inspected withCapturePaint(capture) and captureStableFrame(page,options); page.screenshot receives caller options unchanged. Its comment mentions screenshot suppression; no mask conclusion follows from the opaque options argument.",
+      "maskOptions": [],
+      "optionForwarding": "captureStableFrame forwards opaque caller options to page.screenshot; callers own any mask policy."
+    },
+    {
+      "owner": "tests/ui/capture-paint.test.mjs",
+      "status": "active",
+      "disposition": "retained independent visual behavior tests for animation phase stability and exact edge/text pixels",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected named tests and captureStableFrame calls; assertions compare repeat captures and deliberately changed pixels without masking content.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/catalog-filter-check.mjs",
+      "status": "active",
+      "disposition": "retained canonical Sessions/Analytics filter behavior, query and overflow checks; screenshot is supplementary diagnostic output",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (filter check callers)",
+      "evidence": "Inspected page.screenshot({path}) after filter URL/overflow assertions; no baseline comparison or mask option is present.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/agentfont.mjs",
+      "status": "active",
+      "disposition": "retained font-family, font-face, typography and tabular-number functional assertions; screenshots are visual-pass diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (shell/agentfont)",
+      "evidence": "Inspected top-level contract and page.screenshot(path); images go to out/agentfont for review and are not automated goldens.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/analytics.mjs",
+      "status": "active",
+      "disposition": "retained analytics range, figures, chart, drill-in, filtering, cost and served allowance assertions; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (navigation/analytics)",
+      "evidence": "Inspected range loop page.screenshot(path, fullPage); it records checked UI states and is not a golden comparator.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/attach.mjs",
+      "status": "active",
+      "disposition": "retained native attachment authorization, headers, identity, thumbnail, sheet and touch behavior checks; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (transcript/attach)",
+      "evidence": "Inspected three page.screenshot path calls for thumbnails, chip and opened sheet. Source text says masked image, meaning attachment privacy state; no Playwright mask option is declared.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/breakdown.mjs",
+      "status": "active",
+      "disposition": "retained analytics ranked-list geometry, pinned strip and link assertions; screenshots are visual-pass diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/breakdown)",
+      "evidence": "Inspected repo/machine/top-session page.screenshot calls; they capture asserted scroll positions and are not baselines.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/check-real.mjs",
+      "status": "active",
+      "disposition": "retained exhaustive served sample walk across Home, Sessions, Machines, sessions and traces; home screenshot is diagnostic",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (transcript/check-real)",
+      "evidence": "Inspected ported check contract and page.screenshot(check-real-home.png); assertions cover overflow, transcript population and trace rail alignment.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/details.mjs",
+      "status": "active",
+      "disposition": "retained session detail cost and token table assertions; screenshots support manual visual review",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/details)",
+      "evidence": "Inspected cost detail contract and page.screenshot calls; outputs under out/details are review evidence rather than golden comparisons.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/embedsidebar.mjs",
+      "status": "active",
+      "disposition": "retained typed native host chrome and independently built consumer checks; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (shell/embedsidebar)",
+      "evidence": "Inspected page.screenshot output following native request and sidebar state capture; no baseline or mask policy is defined here.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/errnav.mjs",
+      "status": "active",
+      "disposition": "retained error-navigation behavior and performance suite check; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.errors",
+      "evidence": "Inspected error-mode contract and page.screenshot(errnav-<name>.png); screenshot does not approve pixels.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/extras.mjs",
+      "status": "active",
+      "disposition": "retained served viewer edge cases for paging, long text, background work, trace, injection and failed sends; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (transcript/extras)",
+      "evidence": "Inspected screenshot calls for captured code mode, cut step/sheet and spawn card after served-state assertions; none are golden approvals.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/filters.mjs",
+      "status": "active",
+      "disposition": "retained filter button, chip, sheet, focus, keyboard, back and overflow behavior; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/filters)",
+      "evidence": "Inspected declared closed/chips/open screenshot matrix and page.screenshot calls; these artifacts accompany assertions, not golden requirements.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/full.mjs",
+      "status": "active",
+      "disposition": "retained exhaustive served sample expansion and overflow checks; screenshots capture step and relay diagnostic states",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (transcript/full)",
+      "evidence": "Inspected phone-dark contract and page.screenshot(full-step.png/full-relay.png); no image comparison is performed.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/hicons.mjs",
+      "status": "active",
+      "disposition": "retained harness mark asset, theme, accessible-name and trademark assertions; screenshots are visual-pass diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (shell/hicons)",
+      "evidence": "Inspected page.screenshot helper and hicons assertions; artifacts go to out/hicons for visual pass, not baseline acceptance.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/home.mjs",
+      "status": "active",
+      "disposition": "retained Home, drawer, Sessions, Machines, grouping, navigation and overflow checks; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (navigation/home)",
+      "evidence": "Inspected sample-home/drawer/machines and desktop screenshot calls after served navigation assertions; not golden captures.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/md.mjs",
+      "status": "active",
+      "disposition": "retained served markdown rendering, raw syntax, overflow, link safety, injection and answer-card checks; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (transcript/md)",
+      "evidence": "Inspected screenshot calls across sample and synthetic extras fixture; generated outputs demonstrate checked states and are not pixel gates.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/names.mjs",
+      "status": "active",
+      "disposition": "retained neutral text harness naming, contrast and line-wrap assertions; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (shell/names)",
+      "evidence": "Inspected names screenshot helper for sidebar/session/analytics; artifacts support visual pass, not golden acceptance.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/perf.mjs",
+      "status": "active",
+      "disposition": "retained long-session performance and paint-marker/error gate; metric budgets remain report-only and screenshot is diagnostic",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.performance",
+      "evidence": "Inspected performance contract and page.screenshot call; the check measures browser behavior and does not compare the image.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/scrollbars.mjs",
+      "status": "active",
+      "disposition": "retained scrollbar color/contrast/style assertions; platform-dependent scrollbar images are explicitly visual diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/scrollbars)",
+      "evidence": "Inspected comment defining headless scrollbar limitation and session/code/sidebar screenshots; computed CSS assertions are the functional gate.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/select.mjs",
+      "status": "active",
+      "disposition": "retained filter combobox options, search, keyboard, touch, geometry and focus checks; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/select)",
+      "evidence": "Inspected closed/open screenshot matrix and page.screenshot calls; no golden comparison or mask option is declared.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/shell.mjs",
+      "status": "active",
+      "disposition": "retained served shell gallery and sign-in select interaction screenshots for native functional checks",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (shell group)",
+      "evidence": "Inspected select closed/open/search/flip/drawer/sheet screenshot calls; images accompany shell assertions and are not golden requirements.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/tokens.mjs",
+      "status": "active",
+      "disposition": "retained minimum text size and WCAG contrast audit; screenshots are diagnostic samples",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/tokens)",
+      "evidence": "Inspected three screenshot calls within light/dark text audit; measured text size and contrast are the assertions, not screenshot pixels.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/tooltip.mjs",
+      "status": "active",
+      "disposition": "retained tooltip timing, keyboard, pointer, viewport, contrast and live-update checks; screenshots are visual-pass diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (interaction/tooltip)",
+      "evidence": "Inspected tooltip-open screenshot destinations and broad behavior contract; outputs are not automated baselines.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/turns.mjs",
+      "status": "active",
+      "disposition": "retained turn counts, independent trace census, deep links, back navigation, find/filter and overflow assertions; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (navigation/turns)",
+      "evidence": "Inspected home/session/trace screenshot calls and served fixture contract; the images are not comparison baselines.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/checks/viewer.mjs",
+      "status": "active",
+      "disposition": "retained transcript preview and View all dialog geometry, content, close and back assertions; screenshots are diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.functional (transcript/viewer)",
+      "evidence": "Inspected preview, sheet, sheet-end and desktop screenshot calls in the native served check; these do not approve golden pixels.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/conversation-control.mjs",
+      "status": "active",
+      "disposition": "retained real native conversation-control qualification screenshots and behavioral checks",
+      "successor": null,
+      "requiredGate": null,
+      "evidence": "Inspected launch, desktop, phone, and session screenshots in the real native fixture flow; these are evidence of a control scenario, not Storybook goldens. No direct current gate owner for this file is listed in storybook-gates.json.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/fixture.mjs",
+      "status": "active",
+      "disposition": "retained synthetic native-log fixture writer; no screenshot API call exists in this file",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.strict-pixels (fixture policy dependency) and functional fixture consumers",
+      "evidence": "Census screenshot-call signal is a comment describing a screenshot shape; bounded source read shows this module writes fixture logs and exports no capture function. Classified as a documented lexical false positive, not blanket ignored.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/local-control.mjs",
+      "status": "active",
+      "disposition": "retained real native local-control probe with desktop/phone/session screenshots and control-response assertions",
+      "successor": null,
+      "requiredGate": null,
+      "evidence": "Inspected page.screenshot(path, fullPage) calls and owner-cookie native fixture setup; artifacts support control behavior review, not pixel acceptance. No direct current gate owner for this file is listed in storybook-gates.json.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/storybook-contract.mjs",
+      "status": "active",
+      "disposition": "retained structural validator for Storybook route, gate, state and exact visual coverage contracts",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.storybook (temporary feedback workflow; not active aggregate coverage)",
+      "evidence": "Inspected captureStableFrame contract check and exact-frame/coverage validation; this validator reads manifests and does not capture screenshots itself.",
+      "maskOptions": []
+    },
+    {
+      "owner": "tests/ui/storybook-legacy.mjs",
+      "status": "active",
+      "disposition": "retained exact legacy-to-Storybook capture plan and caller-owned capture options; exact references remain subject to Storybook gate status",
+      "successor": "tests/ui/storybook-capture.mjs exact candidate captures; approvals remain pending",
+      "requiredGate": "storybook-gates.json#gates.storybook (temporary feedback workflow; not active aggregate coverage)",
+      "evidence": "Inspected plan expansion and both masks metadata declarations. These plural masks fields are exact comparison-plan metadata, not Playwright screenshot mask options; each currently declares an empty list.",
+      "maskOptions": [
+        {"kind":"masks-metadata","ordinal":1,"value":"[]","classification":"literal-static"},
+        {"kind":"masks-metadata","ordinal":2,"value":"[]","classification":"literal-static"}
+      ]
+    },
+    {
+      "owner": "tests/ui/visual-contract.mjs",
+      "status": "active",
+      "disposition": "retained deliberate baseline comparator with strict geometry/pixel failure and diagnostic diff output",
+      "successor": "storybook-legacy.mjs exact state plan is a separate candidate path; this comparator remains owned by gallery calls",
+      "requiredGate": "storybook-gates.json#gates.independent-interaction (gallery) and gates.foundation (visual-contract unit coverage)",
+      "evidence": "Inspected capture(page,key,options): it spreads options into page.screenshot and overwrites path/animations. This call has dynamic caller-owned options; no global no-mask conclusion is made.",
+      "maskOptions": [],
+      "optionForwarding": "options is spread into page.screenshot; each capture caller owns the effective mask options."
+    },
+    {
+      "owner": "tests/ui/visual-contract.test.mjs",
+      "status": "active",
+      "disposition": "retained focused unit tests for missing coverage/baselines, geometry, pixel changes and duplicate cases",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.foundation (visual-contract.test.mjs)",
+      "evidence": "The original helper-import signal came from node:assert, not a capture module; corrected import census matches only a capture/visual module specifier. Test capture calls exercise the comparator with default options and do not establish caller-wide mask policy.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/catalog-viewer-browser.mjs",
+      "status": "active",
+      "disposition": "retained native catalog/viewer lifecycle, host chrome, workspace and route browser assertions; screenshots are test diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected browser test definitions and four page.screenshot call sites; artifacts diagnose browser outcomes and are not golden comparisons.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/code-scroll.mjs",
+      "status": "active",
+      "disposition": "retained long-code edge-hint assertions using locator screenshot pixels as a local measurement input",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected locator.screenshot() followed by PNG pixel reads for edge hints; this is a functional pixel measurement, not a screenshot baseline.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/continuity-refinement-browser.mjs",
+      "status": "active",
+      "disposition": "retained source recovery, error state and linked-context browser assertions; saved screenshots are optional diagnostics",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected capture(state) path writer for empty-source, retained-error, linked-collapsed and linked-expanded states; no image comparator is present.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/jump-toolbar.mjs",
+      "status": "active",
+      "disposition": "retained reading-dock jump content and focus assertions with optional diagnostic screenshot output",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected page.screenshot path call inside browser test before Enter/focus assertions; it is not a golden capture.",
+      "maskOptions": []
+    },
+    {
+      "owner": "ui/tests/staging-viewer-browser.mjs",
+      "status": "active",
+      "disposition": "retained staging viewer approved-state, availability, text-audit and panel interaction checks; screenshot is diagnostic",
+      "successor": null,
+      "requiredGate": "storybook-gates.json#gates.independent-interaction",
+      "evidence": "Inspected expanded-state screenshot and neighboring test assertions. The word masked labels a harness-hidden thought fixture state, not a Playwright mask option.",
+      "maskOptions": []
+    }
+  ]
+}
