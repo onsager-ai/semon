@@ -904,10 +904,17 @@ for (const width of [390, 1280])
           ['active', 'work', 'Terminal not recorded'],
           [null, 'off', 'Unknown'],
         ]) {
-          const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme,
-            isMobile: width === 390, hasTouch: width === 390 });
-          const nativeSource = { ...source('turn'), root: 'codex',
-            path: 'sessions/2026/10/22/rollout-native-turn.jsonl' };
+          const page = await browser.newPage({
+            viewport: { width, height: 900 },
+            colorScheme,
+            isMobile: width === 390,
+            hasTouch: width === 390,
+          });
+          const nativeSource = {
+            ...source('turn'),
+            root: 'codex',
+            path: 'sessions/2026/10/22/rollout-native-turn.jsonl',
+          };
           const references = [{ source: nativeSource, state: 'cached' }];
           const details = {
             state,
@@ -949,16 +956,26 @@ for (const width of [390, 1280])
             const machine = url.searchParams.get('machine') ?? 'source';
             if (url.pathname === '/api/session-capabilities')
               return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
-            if (url.pathname === '/api/sessions') return route.fulfill({ json: {
-              ...list([selected]), machine,
-              machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
-            } });
+            if (url.pathname === '/api/sessions')
+              return route.fulfill({
+                json: {
+                  ...list([selected]),
+                  machine,
+                  machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
+                },
+              });
             if (url.pathname === '/api/session-identity')
-              return route.fulfill({ json: { api: 1, identity: { ...nativeIdentity, source_key: machine } } });
+              return route.fulfill({
+                json: { api: 1, identity: { ...nativeIdentity, source_key: machine } },
+              });
             if (url.pathname === '/api/session-transcript') {
               const value = transcript('turn', url.searchParams, 1);
               value.session = selected;
-              value.identity = { ...nativeIdentity, source_key: machine, read_scope: 'retained_history' };
+              value.identity = {
+                ...nativeIdentity,
+                source_key: machine,
+                read_scope: 'retained_history',
+              };
               value.entries[0].provenance.source = nativeSource;
               return route.fulfill({ json: value });
             }
