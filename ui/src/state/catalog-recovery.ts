@@ -1,7 +1,7 @@
 /** One selected reader's automatic retry budget. Manual retry starts a new budget. */
 export const CATALOG_RECOVERY_WALL_BUDGET_MS = 45_000;
 
-export type CatalogRecoveryProgress = Partial<Record<'source' | 'catalog' | 'identity', string>>;
+export type CatalogRecoveryProgress = Partial<Record<'source' | 'catalog', string>>;
 
 export class CatalogRecovery {
   private failures = 0;
@@ -45,7 +45,7 @@ export class CatalogRecovery {
    */
   observeProgress(progress: CatalogRecoveryProgress, now = Date.now()): boolean {
     let changed = false;
-    for (const key of ['source', 'catalog', 'identity'] as const) {
+    for (const key of ['source', 'catalog'] as const) {
       const next = progress[key];
       if (next === undefined) continue;
       const previous = this.progress[key];

@@ -217,6 +217,7 @@ for (const width of [390, 1280])
       let failing = true,
         provisional = false,
         publishedGeneration = 'a'.repeat(64),
+        identityGeneration = 'a'.repeat(64),
         publishedOffset = 100,
         reads = 0;
       const errors = [];
@@ -241,9 +242,14 @@ for (const width of [390, 1280])
             api: 1,
             identity: {
               ...identity('one'),
-              generation: publishedGeneration,
+              generation: identityGeneration,
               owner_qualification: provisional ? 'provisional' : 'qualified',
-              source_refs: currentMeta.source_refs,
+              source_refs: [
+                {
+                  state: 'cached',
+                  source: { ...source('one'), offset: publishedOffset + 1 },
+                },
+              ],
             },
           };
         if (url.pathname === '/api/session-capabilities')
@@ -283,6 +289,7 @@ for (const width of [390, 1280])
       );
 
       provisional = true;
+      identityGeneration = 'c'.repeat(64);
       for (let attempt = 0; attempt < 4; ++attempt) {
         await page.clock.runFor(1000);
         await page.waitForTimeout(20);
