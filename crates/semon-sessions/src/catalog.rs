@@ -1088,14 +1088,8 @@ fn read_page_snapshot(
     } else {
         (rows(transaction, request)?, None, None)
     };
-    let has_history = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
     let mut partial_history = std::collections::BTreeSet::new();
-    if has_history {
-        for row in &selected {
+    for row in &selected {
             if transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
                 [&row.key],
@@ -1104,7 +1098,6 @@ fn read_page_snapshot(
                 partial_history.insert(row.key.clone());
             }
         }
-    }
 
     if request.scope == CatalogReadScope::RetainedHistory {
         for current in &mut selected {
@@ -3439,9 +3432,6 @@ mod tests {
         eprintln!("exact source proof selected catalog VM steps={steps:?}");
     }
 
-
-
-
     #[test]
     fn retained_projection_survives_source_disappearance_and_reappearance() {
         let fixture = Fixture::new();
@@ -4652,76 +4642,17 @@ mod tests {
     }
 
     #[test]
-    fn source_observer_upgrades_old_recipes_without_a_source_append() {
+    fn unsupported_recipe_stays_unavailable_without_implicit_upgrade() {
         let fixture = Fixture::new();
         fixture.publish(1);
-        let before = crate::session_transcript_range(
-            &fixture.options,
-            "source",
-            "sid=session-00000&after=0&limit=1",
-            None,
-        );
-        assert_eq!(before.status, 200);
-        let before: Value = serde_json::from_slice(&before.body).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let ledger: (i64, Vec<u8>) = connection
-            .query_row(
-                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        connection.execute("UPDATE session_slot_projections SET version=3,generation=?1 WHERE session_key='session-00000'",["0".repeat(64)]).unwrap();
-        connection.execute("UPDATE session_slots SET metadata=json_remove(metadata,'$.field.layers') WHERE session_key='session-00000'",[]).unwrap();
-        let unavailable = crate::session_transcript_range(
-            &fixture.options,
-            "source",
-            "sid=session-00000&after=0&limit=1",
-            None,
-        );
+        connection.execute("UPDATE session_slot_projections SET version=3 WHERE session_key='session-00000'", []).unwrap();
+        let before = crate::native_timing::cleanup_tests::snapshot(&connection);
+        let cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        assert!(cache.qualified_catalog().unwrap());
+        let unavailable = crate::session_transcript_range(&fixture.options, "source", "sid=session-00000&after=0&limit=1", None);
         assert_eq!(unavailable.status, 503);
-        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
-        observer.demand().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let reply = crate::session_transcript_range(
-                &fixture.options,
-                "source",
-                "sid=session-00000&after=0&limit=1",
-                None,
-            );
-            if reply.status == 200 {
-                let after: Value = serde_json::from_slice(&reply.body).unwrap();
-                assert_eq!(
-                    after["projection"]["version"],
-                    crate::slot_projection::VERSION
-                );
-                assert_eq!(
-                    after["entries"][0]["entry_id"],
-                    before["entries"][0]["entry_id"]
-                );
-                assert_eq!(
-                    after["entries"][0]["provenance"],
-                    before["entries"][0]["provenance"]
-                );
-                assert_eq!(after["entries"][0]["field"]["layers"], 1);
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "unchanged-source recipe upgrade did not complete"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        observer.close();
-        let after: (i64, Vec<u8>) = connection
-            .query_row(
-                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(after, ledger);
+        assert_eq!(crate::native_timing::cleanup_tests::snapshot(&connection), before);
     }
 
     #[test]

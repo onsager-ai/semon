@@ -3835,7 +3835,6 @@ fn unsent_query_uses_indexed_bookmark_evidence() {
     assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
 }
 
-
 #[test]
 fn selected_native_query_closes_nested_parent_dependencies_without_unrelated_sources() {
     let home = Home::new("nested-query");
