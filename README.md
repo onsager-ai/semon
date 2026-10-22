@@ -46,6 +46,14 @@ Live Claude statuses observed so far are `busy`, `idle`, `shell` (a finished tur
 
 JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
 
+Native `.jsonl.zst` history is included in normal `push` and `push --watch` runs,
+with no manual decompression. The sender verifies archives in bounded slices,
+redacts the logical records, and keeps the existing `.jsonl` mirror paths and
+cursors. It continues discovering new archives and following live logs after
+catchup. A private transport cache beside the cursor avoids decompressing the
+same archive after every batch or restart; see the
+[archive transport contract](docs/native-archive-transport.md) for limits and measurements.
+
 ## Receive pushes from your other machines
 
 `semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
