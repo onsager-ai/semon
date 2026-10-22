@@ -136,9 +136,15 @@ export function parseSessionDetails(value: unknown): SessionDetails {
   )
     throw Error('Recorded family exceeds its bound');
   const copilot = row.copilot == null ? null : object(row.copilot);
-  const turn = row.turn_lifecycle == null ? null : object(row.turn_lifecycle);
-  if (turn && !['active', 'completed', 'aborted', 'errored', 'unknown'].includes(text(turn.phase)))
-    throw Error('Invalid recorded turn phase');
+  // Lifecycle is an optional observation. An unsupported phase cannot discard
+  // independently validated title, usage or transcript metadata.
+  const rawTurn = row.turn_lifecycle;
+  const turn = rawTurn == null ? null : { phase: 'unknown' };
+  if (turn && typeof rawTurn === 'object' && !Array.isArray(rawTurn)) {
+    const phase = (rawTurn as Record<string, unknown>).phase;
+    if (typeof phase === 'string' && ['active', 'completed', 'aborted', 'errored', 'unknown'].includes(phase))
+      turn.phase = phase;
+  }
   const activity = row.activity == null ? null : object(row.activity);
   if (activity && text(activity.tool).length > 256) throw Error('Invalid recorded activity tool');
   const ancestors = family ? array(family.ancestors, parseRelative) : [],

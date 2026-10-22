@@ -708,6 +708,7 @@ export function write(out, { extras = false } = {}) {
   // ---- Codex ---------------------------------------------------------------------------------------------------------
   function codex(id, start, { cwd, branch, tokens, nickname, agentPath }) {
     const lines = [];
+    const turnId = 'synthetic-turn-' + id;
     const at = (t, type, payload) => lines.push([t, { timestamp: iso(t), type, payload }]);
     lines.push([
       start - 1,
@@ -727,6 +728,7 @@ export function write(out, { extras = false } = {}) {
         },
       },
     ]);
+    at(start, 'event_msg', { type: 'task_started', turn_id: turnId, model_context_window: null });
     at(start, 'turn_context', { cwd, model: 'gpt-6-luna', approval_policy: 'never' });
     // No code: an output with no exit status, as some Codex calls record.
     const out = (text, code) =>
@@ -826,8 +828,10 @@ export function write(out, { extras = false } = {}) {
       failed: (t) =>
         at(t, 'event_msg', {
           type: 'task_complete',
+          turn_id: turnId,
           error: { message: 'the layout suite failed' },
         }),
+      completed: (t) => at(t, 'event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: null }),
       tokens: (t) => {
         const modelsUsed = Object.values(SESS[id]?.tokensByModel ?? {});
         const use = modelsUsed.reduce(
@@ -1145,6 +1149,7 @@ export function write(out, { extras = false } = {}) {
       r.text(ms(doneAt, -60), st[2].text);
       r.handback(ms(doneAt), HB[handoff].result);
       if (failed) r.failed(ms(doneAt));
+      else r.completed(ms(doneAt));
       r.tokens(ms(doneAt, -1));
       return r;
     };

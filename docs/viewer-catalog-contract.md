@@ -6,6 +6,14 @@ Query publication and Home summary. Writer `pid`/`alive`, remote freshness and
 the last turn outcome are independent. Missing terminal evidence never implies
 successful completion. See [the supported carriers and limitations](design/codex-turn-lifecycle.md).
 
+Recorded spawn/relationship status also admits `idle` and `off`: a child whose
+writer remains held after a terminal can be idle, and missing lifecycle is an
+unknown observation (`off`). A parent's selected range retains these child
+observations without rejecting its own transcript. Arbitrary states, foreign
+edges and source/generation mismatches remain invalid. Optional unsupported
+turn-lifecycle metadata degrades only that observation to unknown; other
+independently validated selected details remain readable.
+
 Archive source discovery is an optional, separate read contract. A host advertises
 `source_candidates: true` only when it implements both
 `GET /api/session-source-candidates?machine=&limit=&cursor=` (maximum 60 hints) and

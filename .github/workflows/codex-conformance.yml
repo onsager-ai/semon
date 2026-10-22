@@ -47,6 +47,14 @@ jobs:
       - name: Run parser event fixture tests on the exact head
         run: cargo test --locked -p semon-sessions 'events::tests::'
 
+      - name: Run durable owned-turn lifecycle regressions on the exact head
+        run: cargo test --locked -p semon-sessions codex_lifecycle::tests::
+
+      - name: Run focused native selected-details and transcript contract
+        run: |
+          cargo test --locked -p semon-sessions catalog::tests::selected_details_are_body_free_exact_and_bound_to_the_original_source_generation
+          cargo test --locked -p semon-sessions catalog::tests::selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable
+
       - name: Run parser transaction and selected-output tests on the exact head
         run: cargo test --locked -p semon-sessions 'tx::tests::'
 
