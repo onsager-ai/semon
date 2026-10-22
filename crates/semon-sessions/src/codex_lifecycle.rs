@@ -602,15 +602,20 @@ mod tests {
         assert!(current.get("turn_lifecycle").is_none());
         assert_ne!(current["state"], "working");
         assert!(current["exit"].is_null());
-        let reply = crate::session_catalog_page(
-            &home.options,
-            "local",
-            "sid=owner&scope=retained_history",
+        let reply =
+            crate::session_catalog_page(&home.options, "local", "sid=owner&scope=retained_history");
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
         );
-        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
         let page: Value = serde_json::from_slice(&reply.body).unwrap();
         let retained = &page["items"][0];
-        assert_eq!(retained["details"]["turn_lifecycle"], observed["turn_lifecycle"]);
+        assert_eq!(
+            retained["details"]["turn_lifecycle"],
+            observed["turn_lifecycle"]
+        );
         assert_eq!(retained["details"]["live_observation"], false);
         assert_ne!(retained["status"]["state"], "work");
         assert!(retained.get("alive").is_none());
