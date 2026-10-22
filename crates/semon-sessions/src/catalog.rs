@@ -5527,6 +5527,134 @@ mod tests {
     }
 
     #[test]
+    fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
+        use std::io::Write;
+        for mutation in ["append", "copy"] {
+            let (fixture, path) = local_only_codex_fixture();
+            let get = |after: usize, generation: Option<&str>| {
+                crate::session_transcript_range_with_mode(
+                    &fixture.options,
+                    "source",
+                    &format!(
+                        "sid=local-proof&after={after}&limit=1{}",
+                        generation
+                            .map(|g| format!("&generation={g}"))
+                            .unwrap_or_default()
+                    ),
+                    None,
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                )
+            };
+            let before = get(0, None);
+            assert_eq!(before.status, 200);
+            let before: Value = serde_json::from_slice(&before.body).unwrap();
+            let generation = before["projection"]["generation"].as_str().unwrap();
+            for append in 0..3 {
+                if mutation == "copy" && append == 0 {
+                    fs::rename(&path, path.with_extension("saved")).unwrap();
+                    fs::copy(path.with_extension("saved"), &path).unwrap();
+                }
+                writeln!(
+                    fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                    "{}",
+                    json!({"type":"synthetic_append","iteration":append})
+                )
+                .unwrap();
+                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                // Commit Index/proofs and deliberately defer Catalog publication.
+                let _prepared = crate::model::prepare_sources(
+                    &fixture.options,
+                    &mut cache,
+                    &[crate::Input {
+                        root: crate::InputRoot::Codex,
+                        path: path
+                            .strip_prefix(&fixture.options.codex_home)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .into(),
+                    }],
+                    crate::model::now_ms(),
+                )
+                .unwrap();
+                drop(cache);
+                crate::events::FILE_READS.with(|n| n.set(0));
+                crate::events::HASHED_BYTES.with(|n| n.set(0));
+                crate::source_chunks::READ_BYTES.with(|n| n.set(0));
+                for (after, text) in [(0, "local original prompt"), (1, "local original answer")] {
+                    let page = get(after, Some(generation));
+                    assert_eq!(
+                        page.status,
+                        200,
+                        "{mutation}/{append}: {}",
+                        String::from_utf8_lossy(&page.body)
+                    );
+                    let body: Value = serde_json::from_slice(&page.body).unwrap();
+                    assert_eq!(body["entries"][0]["text"], text);
+                    // Native message scalars support the same generation-bound
+                    // field expansion as the initially rendered preview.
+                    let expanded = crate::session_entry_field_with_mode(
+                        &fixture.options,
+                        "source",
+                        &format!(
+                            "sid=local-proof&after={after}&limit=1&generation={generation}&field_chunk=0"
+                        ),
+                        None,
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    );
+                    assert_eq!(
+                        expanded.status,
+                        200,
+                        "{mutation}: {}",
+                        String::from_utf8_lossy(&expanded.body)
+                    );
+                    let expanded: Value = serde_json::from_slice(&expanded.body).unwrap();
+                    assert_eq!(expanded["text"], text);
+                }
+                let mut query =
+                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                for tool in ["get_session", "read_transcript"] {
+                    let args = if tool == "get_session" {
+                        json!({"id":"local-proof"})
+                    } else {
+                        json!({"id":"local-proof","after":0,"limit":1})
+                    };
+                    let value = query
+                        .call_selected(
+                            "source",
+                            "local-proof",
+                            tool,
+                            &args,
+                            None,
+                            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                        )
+                        .unwrap();
+                    assert!(value.get("error").is_none(), "{tool}: {value}");
+                    assert!(
+                        value.to_string().contains("local original prompt"),
+                        "{tool}: {value}"
+                    );
+                }
+                assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
+                assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
+                assert!(
+                    crate::source_chunks::READ_BYTES.with(std::cell::Cell::get)
+                        < 32 * crate::source_chunks::SIZE as u64
+                );
+            }
+            // Preserved proofs still reject changed original bytes.
+            let mut bytes = fs::read(&path).unwrap();
+            let at = bytes
+                .windows(b"local original prompt".len())
+                .position(|s| s == b"local original prompt")
+                .unwrap();
+            bytes[at] = b'X';
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(get(0, Some(generation)).status, 409);
+        }
+    }
+
+    #[test]
     fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
         use std::io::Write;
         for mutation in ["append", "copy", "touch", "legacy"] {
