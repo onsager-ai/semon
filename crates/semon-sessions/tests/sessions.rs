@@ -401,12 +401,16 @@ fn set_lock(fixture: &Fixture, id: &str, held: bool) {
 #[test]
 fn codex_subagents_use_thread_ids_and_lock_states() {
     let fixture = Fixture::new();
-    fixture.codex("parent", None, &[codex_line("turn_context", json!({"model":"gpt-test"})),
+    fixture.codex("parent", None, &[codex_line("event_msg", json!({"type":"task_started","turn_id":"parent-turn"})),
+        codex_line("turn_context", json!({"model":"gpt-test"})),
         codex_line("response_item", json!({"type":"function_call","name":"shell","call_id":"open-call","arguments":"{}"})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}}))]);
     fixture.codex("child-a", Some("parent"), &[]);
-    fixture.codex("child-b", Some("parent"), &[]);
+    fixture.codex("child-b", Some("parent"), &[
+        codex_line("event_msg", json!({"type":"task_started","turn_id":"child-turn"})),
+        codex_line("event_msg", json!({"type":"task_complete","turn_id":"child-turn"})),
+    ]);
     #[cfg(unix)]
     set_lock(&fixture, "parent", true);
     let nodes = collect(&fixture.options).unwrap();
@@ -414,13 +418,18 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
     assert_eq!(nodes[0].children.len(), 2);
     assert_eq!(nodes[0].children[0].id, "child-a");
     assert_eq!(nodes[0].children[1].id, "child-b");
+    // An empty rollout has no terminal evidence; the completed control does.
+    assert_eq!(nodes[0].children[0].state, "unknown");
+    assert!(nodes[0].children[0].turn_lifecycle.is_none());
+    assert_eq!(nodes[0].children[1].state, "ended");
+    assert_eq!(nodes[0].children[1].turn_lifecycle.as_ref().unwrap().phase,
+        semon_sessions::TurnPhase::Completed);
     assert_eq!(nodes[0].tokens.input, 9);
     assert!(nodes[0].open_tools.is_empty());
     #[cfg(unix)]
     {
         assert_eq!(nodes[0].state, "running");
         assert_eq!(nodes[0].pid, Some(4242));
-        assert_eq!(nodes[0].children[0].state, "ended");
         fs::remove_file(fixture.options.proc_root.join("locks")).unwrap();
         assert_eq!(collect(&fixture.options).unwrap()[0].state, "unknown");
     }
@@ -980,6 +989,10 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             "{id}: last activity"
         );
         let state = match prior["state"].as_str().unwrap() {
+            // The frozen codex-run source has no lifecycle: absent writers
+            // no longer turn its historical `done` inference into completion.
+            "done" if id == "codex-run" && session["harness"] == "codex"
+                && session.get("turn_lifecycle").is_none() => "unknown",
             "done" => "ended",
             "idle" => "idle",
             state => panic!("unexpected pinned state: {state}"),

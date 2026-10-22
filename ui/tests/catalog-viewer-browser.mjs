@@ -7,7 +7,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "import {installSelect} from './src/lib/select'; installSelect(); export {mountViewerApplication} from './src/app/viewer';",
+      "import {installSelect} from './src/lib/select'; import {installTooltip} from './src/lib/tooltip'; installSelect(); installTooltip(); export {mountViewerApplication} from './src/app/viewer';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
