@@ -28,6 +28,7 @@ import {
 import { CatalogSelectionStore, type CatalogSelectionRequest } from '../state/catalog-selection';
 import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catalog-annotations';
 import { CatalogTranscriptStore } from '../state/catalog-transcript';
+import { CatalogRecovery } from '../state/catalog-recovery';
 import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
 import { createRecentRenderer } from '../lib/recent';
@@ -112,7 +113,7 @@ interface SelectedView {
   identityLoading: boolean;
   opening: boolean;
   retry?: number;
-  retryDelay: number;
+  recovery: CatalogRecovery;
   renderedRevision: number;
   renderedNote: string;
   renderedFooter: string;
@@ -2631,6 +2632,7 @@ export function createCatalogViewer(
                   label: 'Retry selected transcript',
                   run() {
                     scope.clearTimeout(view.retry);
+                    view.recovery.reset();
                     void loadSelected(view);
                   },
                 }
@@ -2757,6 +2759,15 @@ export function createCatalogViewer(
         footer,
         control: controlFor(view),
         runtime: runtimeFor(view),
+        retry: view.recovery.stopped
+          ? {
+              label: 'Retry selected transcript',
+              run() {
+                view.recovery.reset();
+                void loadSelected(view);
+              },
+            }
+          : undefined,
         observation:
           observationNote ||
           {
@@ -2863,7 +2874,9 @@ export function createCatalogViewer(
                 busy: view.loading,
               }
             : undefined,
-        empty: visibleEntries(view).length
+        empty: view.recovery.stopped
+          ? view.note
+          : visibleEntries(view).length
           ? undefined
           : view.store.entries().length
             ? 'No loaded records match your search or filter.'
@@ -3146,7 +3159,7 @@ export function createCatalogViewer(
         ...(view.observedName === undefined ? {} : { name: view.observedName }),
       };
       view.note = '';
-      view.retryDelay = 1000;
+      view.recovery.reset();
       if (active === view) {
         void loadIdentity(view);
       }
@@ -3172,6 +3185,7 @@ export function createCatalogViewer(
     if (
       disposed ||
       view.sourceKey !== capabilities.source_key ||
+      view.recovery.stopped ||
       !capabilities.selected_transcript
     ) {
       drawSelected(view);
@@ -3200,7 +3214,7 @@ export function createCatalogViewer(
       if (disposed || view.store !== store) return;
       if (view.store.accept(request, value)) {
         void hydrateContext(view);
-        view.retryDelay = 1000;
+        view.recovery.reset();
         const current = view.store.selectedPage()!;
         pruneSelectedFields(view);
         view.meta = {
@@ -3231,11 +3245,15 @@ export function createCatalogViewer(
         retryable(error) ||
         !!(error && typeof error === 'object' && 'status' in error && error.status === 409);
       if (view.transientNote) {
-        view.retry = scope.timeout(
-          () => void loadSelected(view, after, preservePosition),
-          view.retryDelay,
-        );
-        view.retryDelay = Math.min(8000, view.retryDelay * 2);
+        const delay = view.recovery.fail();
+        if (delay === null) {
+          view.transientNote = false;
+          view.note = 'Recorded history could not be loaded. Retry to try again.';
+        } else {
+          view.retry = scope.timeout(() => {
+            if (active === view) void loadSelected(view, after, preservePosition);
+          }, delay);
+        }
       }
     } finally {
       view.loading = false;
@@ -3506,7 +3524,7 @@ export function createCatalogViewer(
         note: '',
         opening: true,
         identityLoading: false,
-        retryDelay: 1000,
+        recovery: new CatalogRecovery(),
         renderedRevision: -1,
         renderedNote: '',
         renderedFooter: '',

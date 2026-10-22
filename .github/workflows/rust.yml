@@ -63,6 +63,19 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      - name: Prepare Rust formatting review patch
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff --binary -- crates > "$RUNNER_TEMP/rust-format-review.patch"
+      - name: Retain formatting changes without bypassing checks
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-format-review
+          path: ${{ runner.temp }}/rust-format-review.patch
+          if-no-files-found: error
+
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
 
