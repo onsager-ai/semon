@@ -943,7 +943,7 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
     write_model_home(&fixture, false);
     // Preserve the native semantics from the former golden; the retired
     // model envelope, pricing transport and transcript growth marks are gone.
-    let expected: Value =
+    let mut expected: Value =
         serde_json::from_str(include_str!("golden/native-session-evidence.json")).unwrap();
     let now = i64::try_from(
         SystemTime::now()
@@ -972,6 +972,40 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             .map(String::as_str)
             .collect()
     );
+    // This exact native child has no durable lifecycle. codex_spawns
+    // (model.rs:3734-3808) now leaves its spawn off instead of inferring done
+    // from a missing writer. The existing trace fallback (model.rs:6336)
+    // consequently says replied rather than returned. A trace-turn end is
+    // separate from durable lifecycle; parent process exit cannot prove its terminal.
+    const CODEX_SPAWN: &str = "s249fde0718402de8";
+    let codex = query.call_at("get_session", &json!({"id":"codex-run"}), now).unwrap();
+    let child = &codex["session"];
+    assert_eq!(child["id"], "codex-run");
+    assert_eq!(child["harness"], "codex");
+    assert!(child.get("turn_lifecycle").is_none());
+    assert_eq!(child["state"], "unknown");
+    let exact_spawn = |edge: &Value| edge["id"] == CODEX_SPAWN
+        && edge["kind"] == "spawn" && edge["from"] == "harbor" && edge["to"] == "codex-run";
+    let actual_edges: Vec<_> = child["handoffs"].as_array().unwrap().iter()
+        .filter(|edge| exact_spawn(edge)).collect();
+    assert_eq!(actual_edges.len(), 1);
+    assert_eq!(actual_edges[0]["status"], "off", "missing lifecycle cannot prove handoff completion");
+    // CI inspected every field before this adapter was introduced. Project
+    // only these two proven differences in memory; frozen bytes stay fixed.
+    let turns = expected["turns"].as_array_mut().unwrap();
+    let affected_turns: Vec<_> = turns.iter_mut()
+        .filter(|turn| turn["id"] == CODEX_SPAWN && turn["sid"] == "codex-run").collect();
+    assert_eq!(affected_turns.len(), 1);
+    let turn = affected_turns.into_iter().next().unwrap();
+    assert_eq!(turn["end"]["st"], "done");
+    assert_eq!(turn["end"]["why"], "returned");
+    turn["end"]["why"] = json!("replied");
+    let edges = expected["handoffs"].as_array_mut().unwrap();
+    let affected_edges: Vec<_> = edges.iter_mut().filter(|edge| exact_spawn(edge)).collect();
+    assert_eq!(affected_edges.len(), 1);
+    let edge = affected_edges.into_iter().next().unwrap();
+    assert_eq!(edge["status"], "done");
+    edge["status"] = json!("off");
     let core = ViewerCore::new(fixture.options.clone());
     let read_catalog = || {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1057,8 +1091,8 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             && session["harness"] == "codex"
             && session.get("turn_lifecycle").is_none()
         {
-            // Inspect the full synthetic-fixture difference in CI before any
-            // further contract adaptation. The strict assertions below stay.
+            // Keep every synthetic-fixture field visible if the strict
+            // assertions below expose a difference beyond the proven adapter.
             let related = |field: &str| {
                 Value::Array(
                     expected[field]
