@@ -17,7 +17,7 @@ This records code retirement, not merge, release or live-data cleanup.
 | `CatalogWriter::Legacy`, old runtime/proof/recipe versions and migration tests | Existing complete-producer transaction and persisted-data compatibility, independent of Model transport. Kept with their generation, custody and refusal assertions. |
 | Retired `/api/model`, `/api/tx`, `/api/transcript`, `/api/entry`, `/api/analytics`, deltas/SSE and `compat=1` | Already removed from production at the audited base. Existing Viewer 404 and consumer transport regressions remain. No replacement routes or fallback are added. |
 | Query `contract-reference.json`, five `model/golden/*.json` files, historical browser/reference evidence | Independent regression evidence. Kept byte-for-byte; never loaded by production. Historical design documents are explicitly marked and linked to current ownership. |
-| Old JSON event-cache import | Required persisted-fact migration, isolated in `events/store/json_migration.rs`; see below. |
+| Old JSON event-cache import | Removed on 2026-10-22 at the user's explicit no-compatibility decision. Historical reported facts that exist only in this cache are no longer imported; existing cache files are left untouched. |
 
 ## Independent expectations and assertion migration
 
@@ -69,35 +69,23 @@ security, generation or integrity expectation is regenerated from the candidate.
 hashes the independently preserved references; existing runtime tests retain
 actual native build/parse/read accounting and retired-route refusals.
 
-## Supported JSON cache/history disposition
+## Retired JSON event-cache import
 
-`sessions-index.events.json` is not the retired Model JSON envelope. Its event
-rows and file indexes are rebuildable and are skipped by the streaming importer.
-Two fields remain supported: historical `reported_runs` and `claude_json_stamp`.
-`~/.claude.json` overwrites its last reported run, so older captured costs,
-durations and model usage can exist only in this cache or the SQLite store.
-Native logs cannot reconstruct those reported facts. There is no evidence that
-all supported installations have already transferred them. Removing the importer
-would silently lose that history.
+On 2026-10-22, the user decided to drop compatibility and remove the old JSON
+event-cache importer. Writable full and scoped SQLite store opens no longer look
+for or read `sessions-index.events.json` or interrupted `.importing` claims.
+They do not claim, rename, quarantine or delete those files.
 
-The isolated migration retains the existing behavior without a schema change:
+The current SQLite reported-usage snapshots and live collection from
+`~/.claude.json` remain supported. Historical reported runs or the file stamp
+that exist only in the retired JSON cache are no longer imported and cannot be
+reconstructed from native logs.
 
-- Import reported runs with `INSERT OR IGNORE`, preserving an already accepted
-  snapshot. Adopt the stamp only when absent. Native parsing owns rebuildable rows.
-- Commit with `synchronous=FULL` before removing a claimed JSON file. Repeated
-  opens and concurrent importers remain idempotent.
-- Claim by rename and verify the open-file identity before removal. Replaced
-  files, old writers and crash-left claims are imported before disposition.
-- Preserve unreadable files for retry; set malformed JSON aside without replacing
-  another saved copy. Refuse symlinks/FIFOs and retain the collision/race tests.
-- Read-only selected consumers perform no import. Writable Event Index opening
-  owns migration. Shared regular-file admission remains with the storage owner.
-
-Removal requires an explicit supported installation/cache policy and a proven
-custody/export disposition for every non-rebuildable reported fact, including
-old-writer and interrupted-import cases. #469 establishes neither global
-migration completion nor authority to delete user caches, SQLite databases,
-native logs, archives, credentials or deployed services.
+Any old JSON cache or interrupted import file already present is left byte for
+byte untouched. Removing the reader does not authorize data cleanup; deletion
+remains an explicit operator action. This decision removes compatibility support
+without changing current SQLite schema preparation, corruption recovery, or
+native event parsing.
 
 ## Reconciliation with #385 and #380
 

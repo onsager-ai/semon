@@ -60,9 +60,11 @@ Viewer/Query consumers and rejects the retired Model/transcript/analytics routes
 #385's older route/owner/warming checklist is historical, not a second migration
 plan. The follow-up removes its remaining executable test oracle and exclusive
 serialization/transport preparation. Shared native derivation and independently
-preserved responses remain; JSON cache import retains non-rebuildable reported
-facts through an isolated migration boundary. See the [inventory, reference
-provenance and acceptance reconciliation](model-oracle-retirement.md).
+preserved responses remain. On 2026-10-22 the user explicitly chose to drop
+compatibility and remove the retired JSON event-cache importer: facts found only
+in that file are no longer imported, and any existing cache or interrupted
+`.importing` file is left untouched because deletion remains an operator action.
+See the [inventory, reference provenance and acceptance reconciliation](model-oracle-retirement.md).
 Final integration, consumer/release qualification and the separate transcript
 proof repair remain under their existing owners. No merge or deployment is implied.
 

@@ -26,6 +26,23 @@ class ModelRetirement(unittest.TestCase):
         self.assertNotRegex(renderer, r"\bfn\s+(?:page|page_limited|page_from|signals|errors|errors_limited|full_slot|full_yielded|full|text_json|read_record)\s*\(")
         self.assertNotIn("ERRORS_MAX", renderer)
 
+    def test_retired_json_cache_import_is_removed(self):
+        self.assertFalse((SRC / "events/store/json_migration.rs").exists())
+        events = (SRC / "events.rs").read_text()
+        store = (SRC / "events/store.rs").read_text()
+        self.assertNotIn("legacy_path", events)
+        for symbol in (
+            "json_migration",
+            "import_legacy",
+            "warn_import",
+            "BEFORE_IMPORT",
+            "AFTER_CLAIM",
+            "IMPORTS",
+            "set_aside_legacy",
+        ):
+            with self.subTest(symbol=symbol):
+                self.assertNotIn(symbol, store)
+
     def test_independent_reference_bytes_and_capture_provenance(self):
         expected = {
             "query/contract-reference.json": "19c05ca78463bdc64dc8f54696994bdda108078d036cca80c5c648b7016cbe7c",
