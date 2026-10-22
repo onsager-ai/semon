@@ -4661,7 +4661,16 @@ mod tests {
             assert!(crate::collect(&fixture.options).is_err());
             assert!(crate::local_facts(&fixture.options).is_err());
             assert_eq!(fixture.body("").0, 503);
-            assert_eq!(crate::session_transcript_range(&fixture.options, "source", "sid=session-00000&after=0&limit=1", None).status, 503);
+            assert_eq!(
+                crate::session_transcript_range(
+                    &fixture.options,
+                    "source",
+                    "sid=session-00000&after=0&limit=1",
+                    None
+                )
+                .status,
+                503
+            );
             let mut query = crate::Query::new(fixture.options.clone());
             assert!(query.call("list_sessions", &json!({})).is_err());
             assert_eq!(fs::read(&path).unwrap(), original);

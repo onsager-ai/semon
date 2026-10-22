@@ -4108,11 +4108,10 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
 fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if schema == 0 {
-        let nonempty: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema)",
-            [],
-            |row| row.get(0),
-        )?;
+        let nonempty: bool =
+            connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |row| {
+                row.get(0)
+            })?;
         return Ok(if nonempty {
             Init::Unsupported("unsupported session index: nonempty schema zero")
         } else {
