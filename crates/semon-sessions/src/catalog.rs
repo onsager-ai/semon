@@ -2681,9 +2681,6 @@ mod tests {
         writeln!(file,"{}",json!({"type":"user","sessionId":"home","uuid":"answer","parentUuid":"question","timestamp":"2026-10-01T00:00:02Z","toolUseResult":{"answers":{"NATIVE_PRIVATE_QUESTION":"NATIVE_PRIVATE_ANSWER"}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ask-native","content":"User has answered your questions"}]}})).unwrap();
         drop(file);
         fixture.publish(1);
-        let reference: Value =
-            serde_json::from_str(include_str!("model/retirement-reference.json")).unwrap();
-        let question = &reference["question"];
         let source = crate::OverviewSource {
             key: "source".into(),
             label: "Machine".into(),
@@ -2700,8 +2697,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["event"]["id"] == question["id"])
+            .find(|row| row["event"]["ask"] == "question")
             .unwrap();
+        let question_id = row["event"]["id"].as_str().unwrap();
+        assert_eq!(row["event"]["status"], "done");
+        assert_eq!(row["event"]["at"], 1790812801000_i64);
+        assert_eq!(row["event"]["done"], 1790812802000_i64);
         assert_eq!(row["event"]["brief"], "");
         let trace_query = format!(
             "sid=home&scope=retained_history&turn={}",
@@ -2720,7 +2721,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|edge| edge["id"] == question["id"])
+                .any(|edge| edge["id"] == question_id)
         );
         assert!(!String::from_utf8_lossy(&trace.body).contains("NATIVE_PRIVATE_"));
         assert_eq!(
@@ -2739,7 +2740,7 @@ mod tests {
         let query = format!(
             "sid=home&scope=retained_history&generation={}&events={}",
             row["session"]["content_generation"].as_str().unwrap(),
-            crate::viewer::percent_encode(&json!([question["id"]]).to_string())
+            crate::viewer::percent_encode(&json!([question_id]).to_string())
         );
         let read = crate::session_home_details_with_mode(
             &fixture.options,
@@ -2750,13 +2751,10 @@ mod tests {
         );
         assert_eq!(read.status, 200, "{}", String::from_utf8_lossy(&read.body));
         let details: Value = serde_json::from_slice(&read.body).unwrap();
+        assert_eq!(details["events"][question_id]["brief"], "NATIVE_PRIVATE_QUESTION");
         assert_eq!(
-            details["events"][question["id"].as_str().unwrap()]["brief"],
-            question["brief"]
-        );
-        assert_eq!(
-            details["events"][question["id"].as_str().unwrap()]["answer"],
-            question["answer"]
+            details["events"][question_id]["answer"],
+            json!(["NATIVE_PRIVATE_ANSWER"])
         );
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let saved: String = db
@@ -7358,23 +7356,20 @@ mod tests {
             let metadata = || {
                 db.prepare("SELECT session_key,metadata FROM session_catalog WHERE lifecycle='current' ORDER BY session_key").unwrap().query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap().collect::<Result<std::collections::BTreeMap<_,_>,_>>().unwrap()
             };
-            // Simulate an already qualified pre-scoped integration Catalog.
-            db.execute("DELETE FROM meta WHERE key IN ('catalog_legacy_runtime_anchor','catalog_legacy_runtime_semantics')",[]).unwrap();
-            let legacy =
-                crate::native_evidence::legacy_runtime_generation(&fixture.options).unwrap();
-            db.execute(
-                "UPDATE session_catalog SET metadata=json_set(metadata,'$.query.runtime',?1)",
-                [legacy],
-            )
-            .unwrap();
             let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
             fixture.publish_existing();
             assert_eq!(
                 crate::events::FILE_READS.with(std::cell::Cell::get),
                 loads,
-                "legacy warm restart loaded history"
+                "warm restart loaded history"
             );
             let original = metadata();
+            assert!(original.values().all(|text| {
+                let row: Value = serde_json::from_str(text).unwrap();
+                row["query"]["runtime"]
+                    .as_str()
+                    .is_some_and(|runtime| runtime.starts_with("scoped-v1:"))
+            }));
             for phase in 0..3 {
                 match phase {
                     0 => facts.native_names[0].name = "After".into(),
@@ -7478,7 +7473,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pid_mutations_replay_without_rebuilding_unrelated_catalog_rows() {
+    fn pid_mutations_replay_without_rebuilding_unrelated_catalog_rows() {
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
             for n in 0..unrelated {
@@ -7489,14 +7484,6 @@ mod tests {
             fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
             fixture.publish_existing();
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-            db.execute("DELETE FROM meta WHERE key IN ('catalog_legacy_runtime_anchor','catalog_legacy_runtime_semantics')",[]).unwrap();
-            let legacy =
-                crate::native_evidence::legacy_runtime_generation(&fixture.options).unwrap();
-            db.execute(
-                "UPDATE session_catalog SET metadata=json_set(metadata,'$.query.runtime',?1)",
-                [legacy],
-            )
-            .unwrap();
             let metadata = || {
                 db.prepare("SELECT session_key,metadata FROM session_catalog ORDER BY session_key")
                     .unwrap()
@@ -7543,7 +7530,7 @@ mod tests {
                 assert_eq!(
                     crate::events::FILE_READS.with(std::cell::Cell::get) - loads,
                     if phase == 1 { 2 } else { 1 },
-                    "legacy PID phase={phase} unrelated={unrelated}"
+                    "PID phase={phase} unrelated={unrelated}"
                 );
                 assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
                 let after = metadata();
@@ -7551,7 +7538,7 @@ mod tests {
                     if key.starts_with("history-") {
                         assert_eq!(
                             &after[key], value,
-                            "PID mutation invalidated an unrelated legacy recipe"
+                            "PID mutation invalidated an unrelated scoped recipe"
                         );
                     }
                 }
@@ -7562,11 +7549,11 @@ mod tests {
                         .unwrap()
                         .iter()
                         .all(|row| row["facts_observation"]["state"] == "cached"),
-                    "legacy PID phase={phase} page={page}"
+                    "PID phase={phase} page={page}"
                 );
                 assert!(start.elapsed() < Duration::from_secs(10));
                 eprintln!(
-                    "legacy-pid-scope unrelated={unrelated} phase={phase} loads={} records=0 elapsed_us={}",
+                    "pid-scope unrelated={unrelated} phase={phase} loads={} records=0 elapsed_us={}",
                     if phase == 1 { 2 } else { 1 },
                     start.elapsed().as_micros()
                 );
@@ -8108,7 +8095,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_native_index_preserves_membership_and_independent_reference() {
+    fn selected_native_index_preserves_membership_and_native_semantics() {
         let fixture = Fixture::new();
         fixture.publish(3);
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -8119,8 +8106,6 @@ mod tests {
         let selected = EventCache::from_selected(&transaction, &source.sources, &ids).unwrap();
         assert_eq!(selected.paths().count(), 1);
         let now = crate::model::now_ms();
-        let reference: Value =
-            serde_json::from_str(include_str!("model/retirement-reference.json")).unwrap();
         let builds = crate::model::BUILDS.with(std::cell::Cell::get);
         let reads = crate::events::FILE_READS.with(std::cell::Cell::get);
         let mut query = crate::Query::new(fixture.options.clone());
@@ -8137,10 +8122,11 @@ mod tests {
             .unwrap();
         assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
         assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
-        let mut expected_page = reference["selected"]["page"].clone();
-        expected_page["window_start"] = Value::Null;
-        assert_eq!(page, expected_page);
-        let session = &reference["selected"]["session"];
+        assert_eq!(page, json!({
+            "sid": "session-00000", "from": 0, "to": 1, "total": 1,
+            "calls": 0, "errors": 0, "window_start": null,
+            "entries": [{"k": "u", "text": "synthetic prompt", "turn": "session-00000:session-00000:0"}]
+        }));
         let full = crate::model::build_query(
             &fixture.options,
             &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
@@ -8149,20 +8135,21 @@ mod tests {
             now,
         )
         .unwrap();
-        // Upstream #466 adds provenance after this frozen Model capture.
-        let mut actual = serde_json::to_value(&full.sessions[&source.key]).unwrap();
-        assert!(session["cost"].get("pricing_fingerprint").is_none());
-        let fingerprint = actual["cost"]
-            .as_object_mut()
-            .unwrap()
-            .remove("pricing_fingerprint")
-            .unwrap();
-        assert!(fingerprint.as_str().is_some_and(|value| !value.is_empty()));
+        assert!(!crate::pricing::snapshot().fingerprint.is_empty());
         assert_eq!(
-            fingerprint,
-            Value::String(crate::pricing::snapshot().fingerprint.clone())
+            serde_json::to_value(&full.sessions[&source.key]).unwrap(),
+            json!({
+            "name": "project", "harness": "claude", "lane": true,
+            "machine": "synthetic-catalog", "state": "done", "model": "—",
+            "tokens": [0.0, 0.0, 0.0], "tokens_by_model": {},
+            "cost": {"usd": 0.0, "unpriced_models": [], "split_unknown_messages": 0,
+                "by_model": {}, "by_day": {},
+                "pricing_fingerprint": crate::pricing::snapshot().fingerprint},
+            "reported_runs": [], "cost_check": [], "repo": "project",
+            "start": 1790812800000_i64, "last": 1790812800000_i64,
+            "busy": [[1790812800000_i64, 1790812800000_i64]], "calls": 0, "errors": 0
+            })
         );
-        assert_eq!(actual, *session);
 
         assert_eq!(selected.paths().count(), 1);
         let files: i64 = connection

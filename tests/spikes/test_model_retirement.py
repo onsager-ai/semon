@@ -43,6 +43,13 @@ class ModelRetirement(unittest.TestCase):
             with self.subTest(symbol=symbol):
                 self.assertNotIn(symbol, store)
 
+    def test_runtime_fences_have_no_upgrade_anchors(self):
+        for path in ("events/store.rs", "source_change.rs", "native_evidence.rs", "native_evidence/runtime.rs"):
+            text = (SRC / path).read_text()
+            for symbol in ("preserve_legacy_runtime", "legacy_runtime_generation", "legacy_before", "catalog_legacy_runtime"):
+                with self.subTest(source=path, symbol=symbol):
+                    self.assertNotIn(symbol, text)
+
     def test_independent_reference_bytes_and_capture_provenance(self):
         expected = {
             "query/contract-reference.json": "19c05ca78463bdc64dc8f54696994bdda108078d036cca80c5c648b7016cbe7c",
@@ -54,7 +61,6 @@ class ModelRetirement(unittest.TestCase):
             "model/golden/relays.json": "8b48fd581ec5c254b759d9a1fce23440fef9cccf99e68ded1f33b30bdf0bcf6e",
             "model/golden/spawns.json": "69037bf44b4654bcbf68818c3c26bcc95f1982eb695190c6177bf273f3ce0972",
             "model/golden/turns.json": "ae0d3a4a529400fff361d21674b01a81ffd039e110a4a3038489988c7cb83781",
-            "model/retirement-reference.json": "cc72b196dec3d9a97f16c45d41af55ce2adf88234e2c8fb03c24ba8719d55972",
         }
         for path, digest in expected.items():
             with self.subTest(reference=path):
@@ -62,8 +68,6 @@ class ModelRetirement(unittest.TestCase):
         query = json.loads((SRC / "query/contract-reference.json").read_text())
         self.assertEqual(query["source_revision"], "7ce1ac4d4f34af9143aa292b631a07fd797890b1")
         self.assertEqual(len(query["responses"]), 134)
-        extra = json.loads((SRC / "model/retirement-reference.json").read_text())
-        self.assertEqual(extra["source_commit"], "5f34607070ff2e7cd5ef4f1e41a5ca9c2935f9f8")
 
 
 if __name__ == "__main__":
