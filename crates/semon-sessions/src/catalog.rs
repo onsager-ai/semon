@@ -8149,10 +8149,24 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(
-            serde_json::to_value(&full.sessions[&source.key]).unwrap(),
-            *session
+        // Upstream #466 adds provenance after this frozen Model capture.
+        let mut actual = serde_json::to_value(&full.sessions[&source.key]).unwrap();
+        assert!(session["cost"].get("pricing_fingerprint").is_none());
+        let fingerprint = actual["cost"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pricing_fingerprint")
+            .unwrap();
+        assert!(
+            fingerprint
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
         );
+        assert_eq!(
+            fingerprint,
+            Value::String(crate::pricing::snapshot().fingerprint.clone())
+        );
+        assert_eq!(actual, *session);
 
         assert_eq!(selected.paths().count(), 1);
         let files: i64 = connection
