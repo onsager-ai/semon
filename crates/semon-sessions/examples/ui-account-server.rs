@@ -287,16 +287,21 @@ fn main() {
     let started = std::time::Instant::now();
     loop {
         let reply = core.respond("GET", "/api/viewer/home", "", None);
-        let home: serde_json::Value = serde_json::from_slice(&reply.body)
-            .expect("fixture Home publication is JSON");
+        let home: serde_json::Value =
+            serde_json::from_slice(&reply.body).expect("fixture Home publication is JSON");
         if reply.status == 200
             && home["observations"].as_array().is_some_and(Vec::is_empty)
-            && home["recent"].as_array().is_some_and(|rows| !rows.is_empty())
+            && home["recent"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
         {
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(10),
-            "fixture native publication did not become ready (Home status {})", reply.status);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "fixture native publication did not become ready (Home status {})",
+            reply.status
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     eprintln!("Fixture native publication ready");

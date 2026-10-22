@@ -2608,7 +2608,10 @@ mod tests {
                 "message":{"id":"call","role":"assistant","content":[{"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex exec"}}]}
             })).unwrap();
             let relative = fixture.codex_source("child", None, 1);
-            let mut file = fs::OpenOptions::new().append(true).open(fixture.options.codex_home.join(&relative)).unwrap();
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(fixture.options.codex_home.join(&relative))
+                .unwrap();
             writeln!(file, "{}", json!({"type":"response_item","timestamp":"2026-10-01T00:02:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Semon-Parent: claude:parent:launch\nInspect child"}]}})).unwrap();
             if completed {
                 for kind in ["task_started", "task_complete"] {
@@ -2621,12 +2624,28 @@ mod tests {
             facts.codex_locks.insert("child".into(), 42);
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             fixture.publish_existing();
-            let range = crate::transcript_range::read(&fixture.options, "source", "sid=parent&scope=retained_history&limit=100", None, crate::SessionSourceReadMode::ProviderOnly)
-                .unwrap_or_else(|error| panic!("source-shaped selected parent failed: {error}"));
-            assert_eq!(range.status, 200, "{}", String::from_utf8_lossy(&range.body));
+            let range = crate::transcript_range::read(
+                &fixture.options,
+                "source",
+                "sid=parent&scope=retained_history&limit=100",
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+            .unwrap_or_else(|error| panic!("source-shaped selected parent failed: {error}"));
+            assert_eq!(
+                range.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&range.body)
+            );
             let body: Value = serde_json::from_slice(&range.body).unwrap();
             assert!(!body["entries"].as_array().unwrap().is_empty());
-            let edge = body["relationship_context"]["handoffs"].as_array().unwrap().iter().find(|edge| edge["to"] == "child").unwrap();
+            let edge = body["relationship_context"]["handoffs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|edge| edge["to"] == "child")
+                .unwrap();
             assert_eq!(edge["status"], if completed { "idle" } else { "off" });
             assert_eq!(body["session"]["harness"], "claude");
         }

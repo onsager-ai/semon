@@ -831,7 +831,8 @@ export function write(out, { extras = false } = {}) {
           turn_id: turnId,
           error: { message: 'the layout suite failed' },
         }),
-      completed: (t) => at(t, 'event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: null }),
+      completed: (t) =>
+        at(t, 'event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: null }),
       tokens: (t) => {
         const modelsUsed = Object.values(SESS[id]?.tokensByModel ?? {});
         const use = modelsUsed.reduce(
