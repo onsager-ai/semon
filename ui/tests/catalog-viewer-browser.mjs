@@ -2569,20 +2569,31 @@ for (const width of [390, 1280])
 
 async function assertCodexIconsLoaded(page) {
   await page.waitForFunction(() => {
-    const icons = [...document.querySelectorAll('img[src="/harness/codex.svg"], img[src="/harness/codex-black.svg"]')];
+    const icons = [
+      ...document.querySelectorAll(
+        'img[src="/harness/codex.svg"], img[src="/harness/codex-black.svg"]',
+      ),
+    ];
     return icons.length > 0 && icons.every((icon) => icon.complete && icon.naturalWidth > 0);
   });
 }
 
 async function fulfillCatalogStatic(route, url) {
   // Exact production HARNESS_ICONS allowlist; never resolve arbitrary URL paths.
-  const icons = ['claude-code.svg', 'codex.svg', 'codex-black.svg', 'copilot.svg',
-    'opencode-light.svg', 'opencode-dark.svg'];
+  const icons = [
+    'claude-code.svg',
+    'codex.svg',
+    'codex-black.svg',
+    'copilot.svg',
+    'opencode-light.svg',
+    'opencode-dark.svg',
+  ];
   const icon = icons.find((name) => url.pathname === '/harness/' + name);
-  if (icon) return route.fulfill({
-    contentType: 'image/svg+xml',
-    body: await readFile(new URL('../../assets/harnesses/' + icon, import.meta.url)),
-  });
+  if (icon)
+    return route.fulfill({
+      contentType: 'image/svg+xml',
+      body: await readFile(new URL('../../assets/harnesses/' + icon, import.meta.url)),
+    });
   if (url.pathname.startsWith('/harness/')) return route.fulfill({ status: 404, body: '' });
   const font = url.pathname.match(
     /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
