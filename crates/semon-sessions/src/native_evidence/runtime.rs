@@ -125,7 +125,7 @@ impl RuntimeObservations {
         if saved == self.fallback.as_deref() {
             return self.fallback.clone();
         }
-        None
+        self.fallback.clone()
     }
     pub(crate) fn scope(&self, row: &crate::model::summary::CatalogRow) -> io::Result<String> {
         let Some(facts) = &self.facts else {
