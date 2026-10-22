@@ -23,6 +23,10 @@ same fact. Home receives the same state and lifecycle. The focused Viewer retain
 the existing `work`/`idle`/`err`/`off` status presentation and shows the last turn
 outcome in its existing Session menu and status tooltip. Retained
 observations preserve last known lifecycle without inheriting live authority.
+Retained outcomes are read through the explicitly selected Catalog history
+scope. A current Query list can expose a writer-only stub after the native
+source disappears; that stub has no lifecycle evidence and cannot stand in for
+the retained source projection.
 
 ## Source contract and support matrix
 
@@ -65,7 +69,8 @@ generation; rebuilding the same over-limit source remains unknown. It never
 evicts old IDs and then accepts an old start as new. This is an explicit metadata
 availability limit, not truncated successful lifecycle analysis.
 
-Parser cache 29 rebuilds preexisting current facts from native source. Storage
+Parser cache 29 rebuilds the current SQLite parsed facts from native source;
+it does not import retired JSON caches. Storage
 schema and retained slot recipe version 6 are unchanged. Retained projections
 remain historical observations under their existing original/source custody
 contract. Tests use sanitized source-shaped JSON records, with no personal logs.
