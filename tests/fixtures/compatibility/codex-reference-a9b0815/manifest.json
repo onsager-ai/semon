@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "fixture_id": "codex-reference-a9b0815",
+  "source_origin": "source-shaped synthetic; not a runtime capture",
+  "upstream_repository": "openai/codex",
+  "upstream_commit": "a9b0815167c27ab13719dd12d13b63e02b70d221",
+  "qualified_cli_versions": [],
+  "history_modes": {
+    "legacy": "rollout-legacy.jsonl",
+    "paginated": "rollout-paginated.jsonl",
+    "legacy_completed_command_execution_retained": false,
+    "paginated_completed_command_execution_retained": true,
+    "paginated_command_output_max_bytes": 65536,
+    "paginated_command_execution_fixture_process_ids": [
+      "95583"
+    ]
+  },
+  "paired_default_and_trace_scenario": {
+    "direct_start_call_id": "start-26789",
+    "direct_start_process_id": "26789",
+    "outer_cell_call_id": "multi-output",
+    "outer_cell_source": "text(await tools.exec_command({cmd:\"printf new\"})); text(await tools.write_stdin({session_id:26789,chars:\"\"}));",
+    "synthetic_shell_environment": {
+      "shell": "/bin/sh",
+      "login": false,
+      "direct_process_source": "unified_exec_startup",
+      "nested_process_source": "unified_exec_startup",
+      "direct_process_command": [
+        "/bin/sh",
+        "-c",
+        "printf old"
+      ],
+      "nested_process_command": [
+        "/bin/sh",
+        "-c",
+        "printf new"
+      ]
+    },
+    "outer_output_entries": [
+      "success_header",
+      "new_95583_json",
+      "completed_poll_json_without_session_id"
+    ],
+    "runtime_nested_tool_ids": [
+      "tool-new",
+      "tool-poll"
+    ],
+    "trace_runtime_qualification": "source-shaped synthetic; write_stdin terminal relation comes from canonical dispatch invocation/result, not fictitious runtime begin/end",
+    "direct_runtime_call_id": "start-26789"
+  },
+  "trace_bundle": {
+    "trace_id": "synthetic-trace",
+    "rollout_id": "synthetic-rollout",
+    "root_thread_id": "thread-root"
+  },
+  "expected_upstream_reducer": {
+    "nested_tool_call_ids": [
+      "tool-new",
+      "tool-poll"
+    ],
+    "nested_tool_edges": [
+      {
+        "tool_call_id": "tool-new",
+        "terminal_operation_id": "terminal_operation:2",
+        "terminal_id": "95583"
+      },
+      {
+        "tool_call_id": "tool-poll",
+        "terminal_operation_id": "terminal_operation:3",
+        "terminal_id": "26789"
+      }
+    ],
+    "terminal_sessions": [
+      {
+        "terminal_id": "26789",
+        "operation_ids": [
+          "terminal_operation:1",
+          "terminal_operation:3"
+        ]
+      },
+      {
+        "terminal_id": "95583",
+        "operation_ids": [
+          "terminal_operation:2"
+        ]
+      }
+    ]
+  },
+  "edge_classification": {
+    "recoverable": [
+      {
+        "edge": "direct start-26789 function_call to its function_call_output",
+        "basis": "exact model-visible call_id start-26789",
+        "kind": "model_pair",
+        "call_id": "start-26789",
+        "semon_supported": true
+      },
+      {
+        "edge": "direct start-26789 result to terminal session 26789",
+        "basis": "exact session ID in pinned direct formatter text; a recoverable source contract that the current Semon adapter does not decode",
+        "semon_supported": false,
+        "kind": "formatted_terminal",
+        "process_id": "26789"
+      },
+      {
+        "edge": "outer multi-output custom_tool_call to its custom_tool_call_output",
+        "basis": "exact model-visible call_id multi-output",
+        "kind": "model_pair",
+        "call_id": "multi-output",
+        "semon_supported": true
+      },
+      {
+        "edge": "paginated CommandExecution to terminal 95583",
+        "basis": "exact process_id in separate Paginated completed-item carrier; current Semon adapter has no standalone unowned command projection",
+        "semon_supported": false,
+        "kind": "standalone_completed_command",
+        "process_id": "95583"
+      },
+      {
+        "edge": "Paginated completed CommandExecution tool-new to runtime tool tool-new",
+        "basis": "pinned core/src/tools/events.rs emits CommandExecution.id from ctx.call_id; protocol_event.rs uses the same event.call_id for the runtime ToolCallID; current Semon adapter has no standalone unowned command projection",
+        "kind": "completed_runtime_identity",
+        "item_id": "tool-new",
+        "runtime_tool_call_id": "tool-new",
+        "semon_supported": false
+      }
+    ],
+    "ambiguous": [
+      {
+        "edge": "multi-output JSON bodies to nested runtime tool identities",
+        "basis": "the printed array has no nested call IDs; do not align its bodies to runtime calls by position"
+      },
+      {
+        "edge": "completed poll output to terminal 26789",
+        "basis": "the completion JSON has no session_id or independently recorded operation ID"
+      },
+      {
+        "edge": "Paginated CommandExecution to a model-visible invocation or outer CodeCell",
+        "basis": "native id identifies runtime tool-new exactly, but the completed carrier supplies no model_visible_call_id or CodeCell requester"
+      }
+    ],
+    "absent": [
+      {
+        "edge": "Legacy CommandExecution process_id",
+        "basis": "the pinned Legacy persistence policy drops completed CommandExecution items"
+      },
+      {
+        "edge": "default rollout outer-cell to nested runtime tool IDs",
+        "basis": "the default rollout fixture has no nested runtime tool ID carrier"
+      }
+    ],
+    "trace_only": [
+      {
+        "edge": "outer multi-output cell to tool-new and tool-poll",
+        "basis": "synthetic CodeCell requester events reduced by the pinned upstream trace reducer"
+      },
+      {
+        "edge": "runtime tool calls to terminal operations and process IDs",
+        "basis": "synthetic exec runtime begin/end and write_stdin canonical invocation/result reduced by pinned upstream trace reducer"
+      }
+    ]
+  },
+  "semon_adapter_contract": {
+    "model_call_ids": [
+      "start-26789",
+      "multi-output"
+    ],
+    "unsupported_relations": [
+      "direct formatted terminal ID",
+      "standalone Paginated command projection"
+    ],
+    "native_capture": null,
+    "cli_version": null,
+    "excluded_runtime_tool_ids": [
+      "tool-new",
+      "tool-poll"
+    ]
+  }
+}

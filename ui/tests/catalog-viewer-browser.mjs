@@ -1094,7 +1094,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
     projection: {
-      version: 5,
+      version: 6,
       generation: generation.repeat(64),
       errors_generation: generation.repeat(64),
       total,
@@ -1177,7 +1177,7 @@ for (const width of [390, 1280])
               json: {
                 api: 1,
                 identity: { ...identity(key), read_scope: 'retained_history' },
-                projection: { version: 5, generation: nativeGeneration.repeat(64) },
+                projection: { version: 6, generation: nativeGeneration.repeat(64) },
                 slot: 6,
                 field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
                 text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
@@ -3371,7 +3371,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
           json: {
             api: 1,
             identity: { ...identity('one'), read_scope: 'retained_history' },
-            projection: { version: 5, generation: 'b'.repeat(64) },
+            projection: { version: 6, generation: 'b'.repeat(64) },
             slot: 400,
             field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
             text,
