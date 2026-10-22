@@ -31,9 +31,13 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
          SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END
          FROM session_catalog_sources s JOIN session_history_catalog c USING(session_key) WHERE s.source_path=?1"
     )?;
-    for text in statement.query_map([path], |r| r.get::<_, String>(0))? {
+    for text in statement.query_map([path], |r| r.get::<_, Option<String>>(0))? {
+        // An oversized owner cannot be silently excluded from the reference
+        // set: that could collect its still-published proof. Refuse the Index
+        // mutation before any retention/GC writes and preserve its old state.
+        let text = text?.ok_or(rusqlite::Error::InvalidQuery)?;
         let row: crate::model::summary::CatalogRow =
-            serde_json::from_str(&text?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)?;
         for source in row
             .sources
             .iter()

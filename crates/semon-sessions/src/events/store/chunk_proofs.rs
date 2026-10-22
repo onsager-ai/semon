@@ -1394,6 +1394,61 @@ mod tests {
     }
 
     #[test]
+    fn oversized_published_owner_refuses_mutation_without_collecting_its_proofs() {
+        let root = cleanup_root();
+        let path = root.join("index.sqlite3");
+        let mut store = cleanup_store(&root, "index.sqlite3");
+        let (old, index) = cleanup_proof(1, 0);
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &old, index.source_chunks.as_deref()).unwrap();
+        tx.execute(
+            "INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('owner',0,'codex',?1)",
+            [published_metadata(&old)],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('owner','codex','owner','original')",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let mut next = old.clone();
+        next.stat.modified_ns += 1;
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &next, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        let mut owner: serde_json::Value = serde_json::from_str(&published_metadata(&old)).unwrap();
+        owner["name"] = serde_json::Value::String("x".repeat(1024 * 1024));
+        store
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'",
+                [owner.to_string()],
+            )
+            .unwrap();
+        let key = format!("{}header", prefix("original"));
+        let before: String = store
+            .connection
+            .query_row(NATIVE_METADATA_VALUE, [&key], |row| row.get(0))
+            .unwrap();
+        next.stat.modified_ns += 1;
+        let tx = store.connection.transaction().unwrap();
+        assert!(write(&tx, "original", &next, index.source_chunks.as_deref()).is_err());
+        drop(tx);
+        let after: String = store
+            .connection
+            .query_row(NATIVE_METADATA_VALUE, [&key], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "failed preservation must not advance the live proof"
+        );
+        assert!(Focused::open(&path, "original", &old).is_ok());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn published_proofs_follow_catalog_references_and_survive_gc_until_last_reader_drop() {
         for legacy in [false, true] {
             let root = cleanup_root();
