@@ -985,6 +985,42 @@ pub(crate) fn complete_relocation(
     tx.commit().map_err(io::Error::other)
 }
 
+/// Selected upgrade demand shares the producer's durable invalidation queue.
+/// Existing revisions stay intact, including an in-flight producer's claim.
+pub(crate) fn prioritize_projection_sources(
+    options: &crate::Options,
+    sources: &[crate::model::summary::CatalogSource],
+) -> io::Result<()> {
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    tx.execute(
+        "DELETE FROM meta WHERE key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'",
+        [],
+    )
+    .map_err(io::Error::other)?;
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![format!("slot_upgrade_selected:{path}"), path],
+        )
+        .map_err(io::Error::other)?;
+        let pending: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [path.as_ref()],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
+        if !pending {
+            invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
+        }
+    }
+    tx.commit().map_err(io::Error::other)
+}
+
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
 pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
@@ -2324,6 +2360,15 @@ impl IndexStore for SqliteStore {
     }
 
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
+        let mut selected = self.connection.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?;
+        let paths = selected
+            .query_map([limit as i64], |row| row.get(0))
+            .map_err(failure)?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(failure)?;
+        if !paths.is_empty() {
+            return Ok(paths);
+        }
         let mut statement = self.connection.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
         statement
             .query_map([limit as i64], |row| row.get(0))
@@ -6456,6 +6501,72 @@ mod tests {
         let (rows, projections) = catalog_fixture_projection(&options);
         assert_eq!(rows.len(), count);
         (options, rows, projections)
+    }
+
+    #[test]
+    fn selected_projection_upgrade_precedes_draining_and_preserves_revision() {
+        let root = scratch("selected-upgrade-priority");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let selected = &rows[1];
+        let path = selected.sources[0].path.to_string_lossy().into_owned();
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
+        db.execute(
+            "UPDATE session_slot_projections SET version=5 WHERE session_key=?1",
+            [&selected.key],
+        )
+        .unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        invalidate_catalog_source(&tx, "/unrelated/first.jsonl", "changed").unwrap();
+        invalidate_catalog_source(&tx, &path, "changed").unwrap();
+        tx.commit().unwrap();
+        let revision: i64 = db
+            .query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
+        let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
+        assert_eq!(
+            store.pending_catalog_sources(64).unwrap(),
+            vec![path.clone()]
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&path],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            revision
+        );
+        drop(store);
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let upgraded = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    CATALOG_FIXTURE_NOW,
+                )
+                .unwrap();
+            db.query_row(
+                "SELECT version FROM session_slot_projections WHERE session_key=?1",
+                [&selected.key],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap()
+                == crate::slot_projection::VERSION
+        });
+        evidence.retire();
+        assert!(
+            upgraded,
+            "ordinary producer must complete the selected upgrade"
+        );
+        eprintln!("slot_upgrade stage=producer selected_first=true version=6");
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn catalog_fixture_projection(
