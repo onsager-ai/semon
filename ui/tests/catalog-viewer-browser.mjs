@@ -2569,12 +2569,31 @@ for (const width of [390, 1280])
 
 async function assertCodexIconsLoaded(page) {
   await page.waitForFunction(() => {
+    const theme = document.documentElement.dataset.theme;
+    const dark =
+      theme === 'dark' ||
+      (theme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    // HARNESS_ICONS maps light to codex-black and dark to codex. Production
+    // CSS hides the inactive image, which Harness intentionally leaves lazy.
+    const expected = dark ? '/harness/codex.svg' : '/harness/codex-black.svg';
     const icons = [
       ...document.querySelectorAll(
         'img[src="/harness/codex.svg"], img[src="/harness/codex-black.svg"]',
       ),
-    ];
-    return icons.length > 0 && icons.every((icon) => icon.complete && icon.naturalWidth > 0);
+    ].filter((icon) => {
+      const style = window.getComputedStyle(icon);
+      return (
+        icon.getClientRects().length > 0 &&
+        style.display !== 'none' &&
+        style.visibility === 'visible'
+      );
+    });
+    return (
+      icons.length > 0 &&
+      icons.every(
+        (icon) => icon.getAttribute('src') === expected && icon.complete && icon.naturalWidth > 0,
+      )
+    );
   });
 }
 
