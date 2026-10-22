@@ -1,4 +1,11 @@
 
+Codex native observations may include `turn_lifecycle` with the exactly owned
+thread/turn, last durable phase, source record offset and consumed-prefix
+generation. The Event Index supplies this fact through the existing Catalog
+Query publication and Home summary. Writer `pid`/`alive`, remote freshness and
+the last turn outcome are independent. Missing terminal evidence never implies
+successful completion. See [the supported carriers and limitations](design/codex-turn-lifecycle.md).
+
 Archive source discovery is an optional, separate read contract. A host advertises
 `source_candidates: true` only when it implements both
 `GET /api/session-source-candidates?machine=&limit=&cursor=` (maximum 60 hints) and
