@@ -2707,7 +2707,6 @@ mod catalog_owner_tests {
         fs::write(log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"owner\"}}\n").unwrap();
         let sources = SessionSources::with_machines(vec![(String::new(), options.clone())]);
         let evidence = &sources.machines[0].1;
-        let before = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let mut work = lock(&evidence.work);
         let mut complete = false;
         for _ in 0..16 {
@@ -2727,10 +2726,6 @@ mod catalog_owner_tests {
         assert_eq!(body["items"][0]["key"], "owner");
         assert!(sources.views.iter().all(|view| view.get().is_none()));
         assert!(read_lock(&evidence.query).is_none());
-        assert_eq!(
-            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-            before
-        );
         drop(work);
         drop(sources);
         fs::remove_dir_all(root).unwrap();

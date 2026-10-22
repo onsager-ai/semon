@@ -1,0 +1,77 @@
+{
+  "source_commit": "5f34607070ff2e7cd5ef4f1e41a5ca9c2935f9f8",
+  "selected": {
+    "session": {
+      "name": "project",
+      "harness": "claude",
+      "lane": true,
+      "machine": "synthetic-catalog",
+      "state": "done",
+      "model": "—",
+      "tokens": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tokens_by_model": {},
+      "cost": {
+        "usd": 0.0,
+        "unpriced_models": [],
+        "split_unknown_messages": 0,
+        "by_model": {},
+        "by_day": {}
+      },
+      "reported_runs": [],
+      "cost_check": [],
+      "repo": "project",
+      "start": 1790812800000,
+      "last": 1790812800000,
+      "busy": [
+        [
+          1790812800000,
+          1790812800000
+        ]
+      ],
+      "calls": 0,
+      "errors": 0
+    },
+    "page": {
+      "sid": "session-00000",
+      "from": 0,
+      "to": 1,
+      "total": 1,
+      "calls": 0,
+      "errors": 0,
+      "entries": [
+        {
+          "k": "u",
+          "text": "synthetic prompt",
+          "turn": "session-00000:session-00000:0"
+        }
+      ]
+    }
+  },
+  "question": {
+    "id": "q8ac312096806c1fc",
+    "kind": "toyou",
+    "ask": "question",
+    "from": "home",
+    "to": "you",
+    "at": 1790812801000,
+    "done": 1790812802000,
+    "status": "done",
+    "brief": "NATIVE_PRIVATE_QUESTION",
+    "answer": [
+      "NATIVE_PRIVATE_ANSWER"
+    ],
+    "answers": [
+      {
+        "question": "NATIVE_PRIVATE_QUESTION",
+        "values": [
+          "NATIVE_PRIVATE_ANSWER"
+        ],
+        "free": true
+      }
+    ]
+  }
+}

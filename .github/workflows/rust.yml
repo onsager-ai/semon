@@ -62,6 +62,9 @@ jobs:
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
 
+      - name: Verify Model retirement and independent reference provenance
+        run: python3 -m unittest discover -s tests/spikes -p test_model_retirement.py -v
+
       - name: Verify separate native Codex control evidence and provenance
         run: python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
 

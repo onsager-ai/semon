@@ -53,6 +53,19 @@ Hub build owners, Docker, SSH, managed artifacts and CI use that binary owner.
 Hub's sole Semon pin is its submodule gitlink; verify the exact checked-out pair
 with `scripts/verify-source-pair.sh`. Do not add another source pin.
 
+## Model retirement follow-up — #469
+
+Audited main `5f34607070ff2e7cd5ef4f1e41a5ca9c2935f9f8` already uses native
+Viewer/Query consumers and rejects the retired Model/transcript/analytics routes.
+#385's older route/owner/warming checklist is historical, not a second migration
+plan. The follow-up removes its remaining executable test oracle and exclusive
+serialization/transport preparation. Shared native derivation and independently
+preserved responses remain; JSON cache import retains non-rebuildable reported
+facts through an isolated migration boundary. See the [inventory, reference
+provenance and acceptance reconciliation](model-oracle-retirement.md).
+Final integration, consumer/release qualification and the separate transcript
+proof repair remain under their existing owners. No merge or deployment is implied.
+
 ## Remaining acceptance
 
 - Catalog discovery and deterministic relationship closure are bounded. Publish
@@ -66,10 +79,10 @@ with `scripts/verify-source-pair.sh`. Do not add another source pin.
   relationship context, verify identity/generation/integrity, avoid tenant locks
   during remote I/O and unrelated restoration, coalesce duplicate reads and bound
   cache admission. Unavailable, incomplete and stale evidence fails explicitly.
-- Home/recent, navigation/tree, timeline/analytics, machine/runtime, transcript
-  expansion, embedded routes and native/no-JavaScript consumers migrate before
-  deleting full-workspace model ownership, /api/model, model transaction/delta/SSE,
-  compat=1, startup/push warming, global hydration and redundant caches.
+- Native Home/recent, navigation/tree, timeline/analytics, machine/runtime,
+  transcript expansion, embedded and native/no-JavaScript consumers retain their
+  behavior. Full-workspace Model ownership/routes, transaction/delta/SSE, compat=1
+  and warming are retired. Preserve structural and consumer regression evidence.
 - Preserve session names, selection/navigation, the paused control boundary, tool
   rendering, collapsed Thinking, scroll/focus, responsive/accessibility behavior
   and current/retained history. Preserve the approved visual references and tests.
@@ -94,7 +107,7 @@ progress and source custody. Unique native implementations and assertions are
 retained. Migration-only #392/#396/#400/#401 are intentionally discarded under
 the product boundary above. No shared stack branch is rewritten.
 
-The integration remains unmerged. Catalog bounded discovery, selected hosted
-Query archive access and remaining Viewer consumer migration require completion
-and exact-commit validation. A PR's existence or old passing CI is not delivery.
+The preceding integration snapshot is historical. Current native ownership and
+the #469 follow-up are reconciled above; final adoption still requires
+exact-commit validation. A PR's existence or old passing CI is not delivery.
 Merge, release publication and deployment remain separate authorized actions.
