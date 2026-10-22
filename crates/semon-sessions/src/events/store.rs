@@ -580,9 +580,9 @@ struct SqliteStore {
 
 /// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
-/// `<path>.corrupt` and a new store is made in its place. Any other failure
-/// (a read-only directory, a lock held past the timeout, a store a newer
-/// Semon wrote) is returned. Unsupported contracts never run in memory.
+/// `<path>.corrupt` and a new store is made in its place. Operational failures
+/// (a read-only directory or a lock held past the timeout) permit an in-memory
+/// cache. Unsupported contracts and malformed persistent values never do.
 pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
     let (store, loaded) = match SqliteStore::attempt(path) {
         Err(Unopened::Corrupt(error)) => {
@@ -3634,8 +3634,12 @@ impl SqliteStore {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
-            } else {
+            } else if is_unavailable(&error) {
                 Unopened::Other(error.to_string())
+            } else {
+                Unopened::Unsupported(format!(
+                    "unsupported session index: malformed persistent state ({error})"
+                ))
             }
         };
         if path.exists() {
@@ -3964,6 +3968,26 @@ fn is_busy(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// Only operational failures may become an in-memory cache. SQL/schema and
+/// persistent value decoding errors must remain observable refusals.
+fn is_unavailable(error: &rusqlite::Error) -> bool {
+    let rusqlite::Error::SqliteFailure(code, _) = error else {
+        return false;
+    };
+    matches!(
+        code.extended_code & 0xff,
+        rusqlite::ffi::SQLITE_BUSY
+            | rusqlite::ffi::SQLITE_LOCKED
+            | rusqlite::ffi::SQLITE_PERM
+            | rusqlite::ffi::SQLITE_READONLY
+            | rusqlite::ffi::SQLITE_IOERR
+            | rusqlite::ffi::SQLITE_FULL
+            | rusqlite::ffi::SQLITE_CANTOPEN
+            | rusqlite::ffi::SQLITE_NOMEM
+            | rusqlite::ffi::SQLITE_INTERRUPT
+    )
+}
+
 /// The file isn't a database, or is damaged.
 fn is_corrupt(error: &rusqlite::Error) -> bool {
     matches!(
@@ -4167,8 +4191,11 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
             "unsupported session index: parser version mismatch",
         ));
     }
-    // A current version label cannot make an incomplete/old table shape valid.
-    // Preparing these statements is read-only; no fallback may hide malformed DDL.
+    // Qualify the actual loader statements, including their child-row readers,
+    // even when files is empty. A current label cannot hide incomplete DDL.
+    if let Err(error) = qualify_load_schema(connection) {
+        return malformed_schema(error);
+    }
     for sql in [
         "SELECT codex_pricing_fingerprint,ctime_ns,copilot FROM files LIMIT 0",
         "SELECT pricing_fingerprint,lifecycle,parent_key FROM session_catalog LIMIT 0",
@@ -4178,10 +4205,8 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
-        if connection.prepare(sql).is_err() {
-            return Ok(Init::Unsupported(
-                "unsupported session index: malformed schema",
-            ));
+        if let Err(error) = connection.prepare(sql) {
+            return malformed_schema(error);
         }
     }
     let publication: bool = connection.query_row(
@@ -4195,6 +4220,43 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         ));
     }
     Ok(Init::Ready)
+}
+
+// SQLITE_ERROR describes a missing/malformed SQL object here. Busy, I/O and
+// physical-corruption errors retain their existing operational/recovery paths.
+fn malformed_schema(error: rusqlite::Error) -> rusqlite::Result<Init> {
+    if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_ERROR)
+    {
+        Ok(Init::Unsupported(
+            "unsupported session index: malformed schema",
+        ))
+    } else {
+        Err(error)
+    }
+}
+
+/// The complete open's SQL dependencies, without loading any source/history
+/// rows. Readers owns the event, signal, usage and native metadata statements;
+/// the other prepares cover the conditional normalized usage/tree restorers.
+fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
+    let _readers = Readers::new(connection)?;
+    connection.prepare(&format!("SELECT {FILE_COLUMNS} FROM files ORDER BY file_id LIMIT 0"))?;
+    connection.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start LIMIT 0"
+    ))?;
+    for sql in [
+        "SELECT source_path,source_id FROM native_usage_current LIMIT 0",
+        "SELECT source_id,receipt,parser_version,usage_ready FROM native_usage_sources LIMIT 0",
+        "SELECT source_id,kind,dimension,value FROM native_usage_dimensions LIMIT 0",
+        "SELECT source_path,file_id,projection_id,ledger FROM native_tree_headers LIMIT 0",
+        "SELECT projection_id,source_id,complete,version,receipt FROM native_tree_generations LIMIT 0",
+        "SELECT projection_id,label,value FROM native_tree_labels LIMIT 0",
+        "SELECT projection_id,model FROM native_tree_models LIMIT 0",
+        "SELECT projection_id,tool_id,name,closed FROM native_tree_tools LIMIT 0",
+    ] {
+        connection.prepare(sql)?;
+    }
+    Ok(())
 }
 
 /// Bounded selected reads qualify the storage contract in their own snapshot.
@@ -9106,6 +9168,31 @@ mod tests {
                 "missing metadata",
             ),
             (
+                "missing-reported-runs",
+                "DROP TABLE reported_runs",
+                "malformed schema",
+            ),
+            (
+                "missing-reported-column",
+                "ALTER TABLE reported_runs DROP COLUMN capture_at",
+                "malformed schema",
+            ),
+            (
+                "missing-file-column",
+                "ALTER TABLE files DROP COLUMN pending",
+                "malformed schema",
+            ),
+            (
+                "missing-event-column",
+                "ALTER TABLE events DROP COLUMN reply_m",
+                "malformed schema",
+            ),
+            (
+                "missing-child-table",
+                "DROP TABLE signals",
+                "malformed schema",
+            ),
+            (
                 "malformed",
                 "UPDATE meta SET value='invalid' WHERE key='cache_version'",
                 "malformed metadata",
@@ -9198,14 +9285,28 @@ mod tests {
                 Ok(_) => panic!("unsupported {name} became valid in-memory history"),
             }
             unchanged();
+            let options = crate::Options {
+                cache: v1.clone(),
+                claude_home: root.join("claude"),
+                claude_json: root.join(".claude.json"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                ..crate::Options::default()
+            };
+            let error = crate::local_facts(&options).unwrap_err();
+            assert!(error.to_string().contains(reason), "{name}: {error}");
+            unchanged();
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
             assert_eq!(snapshot(&db), original_state, "{name} schema and rows");
-            assert_eq!(
-                db.query_row("SELECT count(*) FROM reported_runs", [], |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                1
-            );
+            if name != "missing-reported-runs" {
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM reported_runs", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+            }
             assert_eq!(
                 db.query_row("SELECT metadata FROM session_history_catalog", [], |r| {
                     r.get::<_, String>(0)

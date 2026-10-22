@@ -10,7 +10,7 @@ unsupported. No operator data is deleted, reset or upgraded by this change.
 | --- | --- | --- | --- |
 | Schema 1–31 ALTER/additive upgrades, usage-identity bootstrap, schema-10 source hashes, schema-17/18 outbox bootstrap, overview/search promotion | ordinary/scoped store opens; focused reader | mixed derived rows, reported facts, retained recipes and proofs | Removed; one coherent fresh DDL; older/newer/nonempty-zero refused |
 | Parser/cache mismatch DERIVED reset | store init | derived rows mixed with retained provenance | Removed; parser mismatch refused before writes |
-| Generic cache open/reopen fallback for unsupported stores | NativeEvidence preparation; complete scan; FactsSource | observable history | Unsupported errors propagated; operational in-memory fallback and current corruption set-aside remain |
+| Generic cache open/reopen fallback for unsupported stores | NativeEvidence preparation; complete scan; FactsSource | observable history | Unsupported errors propagated; missing tables/columns required by the complete loader (including reported facts and conditional native projections) refused before writes; operational in-memory fallback and current physical-corruption set-aside remain |
 | Archived marker versions 1–5 | archive qualification, retention and publication membership | archive custody/source proofs | Refused; only marker 6 accepted; no archive deletion |
 | Tree summary versions 1–2 and old inline native-usage accumulator reader/writer | selected/native tree and FileIndex reads | derived native projections | Removed; current tree 3 and normalized usage root 1 only |
 | Native-usage discovery/conversion queue and old representation worker | background NativeEvidence scheduler | derived usage/tree with retained evidence | Removed; explicit current tree repair retains source locks, receipt/source/stat/generation and proof checks |
@@ -28,6 +28,15 @@ current database contract in their read paths. Outbox compaction and selected
 publication recheck versions under their write locks. Focused reads do not scan
 unrelated archived markers: marker consumers validate the selected record, while
 store initialization qualifies markers before mutation.
+
+Schema qualification prepares the complete loader's SQL dependencies without
+reading history rows, including the reported-run columns and conditional native
+usage/tree readers. Missing or malformed SQL objects are unsupported state, not
+an empty in-memory history. Persistent SQL/value decoding errors also propagate
+as refusals. Lock, permission, I/O, capacity and interruption failures retain the
+existing operational fallback; physically damaged/non-SQLite files retain the
+existing set-aside recovery. Refusal tests check EventCache and Facts, unchanged database and WAL
+bytes, schema/version/all remaining rows, and retained archive custody.
 
 Historical upgrade/parity fixtures are removed. Current cold-start, incremental,
 restart, refusal/no-mutation and corruption/availability/custody checks are the
