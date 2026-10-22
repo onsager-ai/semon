@@ -8143,6 +8143,19 @@ mod tests {
         }));
     }
 
+    // These synthetic Codex fixtures have no historical Tree accounting.
+    // Check that before compacting so unexpected metadata cannot be hidden.
+    fn codex_fixture_snapshot(index: &FileIndex) -> String {
+        let summary = index.tree_summary.as_ref().expect("fixture Tree metadata");
+        assert!(summary.usage_by_id.is_empty());
+        assert!(summary.usage_records.is_empty());
+        assert!(summary.usage_models.is_empty());
+        assert!(summary.closed_tools.is_empty());
+        assert!(summary.codex_native_usage.is_none());
+        assert!(summary.marker.is_none());
+        index_snapshot(index)
+    }
+
     #[test]
     fn delayed_startup_completion_during_different_exec_preserves_exact_join_and_cache_parity() {
         use std::io::Write;
@@ -8173,7 +8186,7 @@ mod tests {
             .unwrap();
         let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
         let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
-        assert_eq!(format!("{appended:?}"), format!("{cold:?}"));
+        assert_eq!(codex_fixture_snapshot(&appended), codex_fixture_snapshot(&cold));
         let old = &appended.events[0];
         assert_eq!(old.id.as_deref(), Some("start-26789"));
         assert_eq!(old.o, 0);
@@ -8214,7 +8227,7 @@ mod tests {
             &mut false,
         )
         .unwrap();
-        assert_eq!(format!("{reopened:?}"), format!("{cold:?}"));
+        assert_eq!(codex_fixture_snapshot(&reopened), codex_fixture_snapshot(&cold));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8479,7 +8492,7 @@ mod tests {
         fs::write(&log, FIXTURE).unwrap();
         let mut cold_cache = EventCache::default();
         let cold = scan_file(&log, "codex", &mut cold_cache, &mut false).unwrap();
-        let cold_debug = format!("{cold:?}");
+        let cold_debug = codex_fixture_snapshot(&cold);
 
         let by_id = |index: &FileIndex, id: &str| {
             index
@@ -8634,11 +8647,11 @@ mod tests {
             let mut cache = EventCache::open(&cache_path);
             assert!(cache.store.is_some(), "the SQLite event cache opens");
             let stored = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
-            assert_eq!(format!("{stored:?}"), cold_debug);
+            assert_eq!(codex_fixture_snapshot(&stored), cold_debug);
         }
         let mut reopened = EventCache::open(&cache_path);
         let reopened_index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
-        assert_eq!(format!("{reopened_index:?}"), cold_debug);
+        assert_eq!(codex_fixture_snapshot(&reopened_index), cold_debug);
         for (id, expected) in [
             ("direct-zero", true),
             ("direct-session-only", true),
@@ -8747,11 +8760,11 @@ mod tests {
             appended_namespaced_output_offset
         );
         assert_ne!(appended_namespaced_reply.f & UNKNOWN, 0);
-        let incremental_debug = format!("{incremental:?}");
+        let incremental_debug = codex_fixture_snapshot(&incremental);
         drop(reopened);
         let mut reopened = EventCache::open(&cache_path);
         let reopened_final = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
-        assert_eq!(format!("{reopened_final:?}"), incremental_debug);
+        assert_eq!(codex_fixture_snapshot(&reopened_final), incremental_debug);
         let reopened_appended = &reopened_final.events[by_id(&reopened_final, "appended-direct")];
         assert!(reopened_appended.native_direct_call);
         assert_eq!(
@@ -8771,7 +8784,7 @@ mod tests {
         assert!(reopened_replay.result_source);
         let mut final_cold_cache = EventCache::default();
         let final_cold = scan_file(&log, "codex", &mut final_cold_cache, &mut false).unwrap();
-        assert_eq!(format!("{final_cold:?}"), incremental_debug);
+        assert_eq!(codex_fixture_snapshot(&final_cold), incremental_debug);
         let final_direct = &final_cold.events[by_id(&final_cold, "appended-direct")];
         assert!(final_direct.native_direct_call);
         assert_eq!(final_direct.r.as_ref().unwrap().o, appended_output_offset);
@@ -8890,7 +8903,7 @@ mod tests {
         }
         assert!(index.yields.is_empty());
         let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
-        assert_eq!(format!("{index:?}"), format!("{cold:?}"));
+        assert_eq!(codex_fixture_snapshot(&index), codex_fixture_snapshot(&cold));
         drop(cache);
         let replay = scan_file(
             &log,
@@ -8899,7 +8912,7 @@ mod tests {
             &mut false,
         )
         .unwrap();
-        assert_eq!(format!("{index:?}"), format!("{replay:?}"));
+        assert_eq!(codex_fixture_snapshot(&index), codex_fixture_snapshot(&replay));
 
         // The native Paginated carrier survives independently in source bytes;
         // current Semon does not expose an unowned completed command as an event.
