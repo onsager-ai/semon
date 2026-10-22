@@ -348,6 +348,7 @@ enum GenerationSupport {
 struct Source {
     path: PathBuf,
     plain: Option<PathBuf>,
+    prepared: bool,
 }
 
 pub struct Client {
@@ -638,13 +639,16 @@ impl Client {
                 history.pop_front().expect("history")
             };
             let (input, target, rank) = selected.get_mut(&key).expect("selected");
-            let source = self.sources.get(&key).expect("discovered source");
+            let source = self.sources.get_mut(&key).expect("discovered source");
             let path = if source.path.extension().is_some_and(|ext| ext == "zst") {
                 match self.archives.step(&source.path, source.plain.as_deref()) {
                     Ok(Some(path)) => {
-                        *target = FileStat::from_metadata(
-                            &fs::metadata(&path).map_err(|e| e.to_string())?,
-                        );
+                        if !source.prepared {
+                            *target = FileStat::from_metadata(
+                                &fs::metadata(&path).map_err(|e| e.to_string())?,
+                            );
+                            source.prepared = true;
+                        }
                         path
                     }
                     Ok(None) => {
@@ -785,7 +789,17 @@ impl Client {
                     found.plain = Some(path);
                 }
             } else {
-                inputs.insert(key, (input, Source { path, plain: None }));
+                inputs.insert(
+                    key,
+                    (
+                        input,
+                        Source {
+                            path,
+                            plain: None,
+                            prepared: false,
+                        },
+                    ),
+                );
             }
         }
         let inputs = inputs.into_values().collect::<Vec<_>>();

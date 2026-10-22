@@ -30,6 +30,10 @@ prefix is reported rather than silently replacing one history with the other.
 Active/archive moves retain existing native-ID selection and proof rules;
 compressed input grants no extra inode-based relocation authority.
 
+An archive's logical target freezes when its verified view first becomes ready
+in a sweep. Re-preparation during later batches cannot advance that target;
+growth is transferred in the next sweep, just as with plain native logs.
+
 Preparation runs inside the existing foreground/history scheduler, with at most
 1 MiB of encoded input, 1 MiB of decoded output and 256 decoder operations per
 turn. Comparing coexisting encodings reads at most 1 MiB from each per turn.
