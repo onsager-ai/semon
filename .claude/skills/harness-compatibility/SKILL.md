@@ -11,6 +11,13 @@ Owns Semon's supported native source/control/session formats and source
 evidence. AGENTS.md owns native identity, provenance, custody and Rust gates. This skill does not
 configure the current coding harness; use harness-operations for tool mapping.
 
+Compatibility here concerns supported upstream harness inputs. Semon's own older
+versions have no pre-release compatibility guarantee; follow the policy in
+[AGENTS.md](../../../AGENTS.md) and use
+[semon-evolution](../semon-evolution/SKILL.md) for Semon-owned contract changes.
+Do not introduce old Semon schema readers, migrations or aliases as part of
+qualifying a native harness format.
+
 ## Prerequisites
 
 Read the affected adapter/module fixtures and applicable storage design. Identify
