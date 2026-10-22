@@ -1384,13 +1384,24 @@ mod tests {
         serde_json::json!({
             "key":"owner","name":"Synthetic owner","harness":"codex","kind":"Codex",
             "native_ids":["owner"],"model":"unknown","tokens":[0,0,0],
-            "cost":{"usd":null,"unpriced_models":[]},
+            "cost":{"pricing_fingerprint":"","usd":null,"unpriced_models":[],
+                "split_unknown_messages":0,"by_model":{},"by_day":{}},
             "sources":[{"path":"original","native_id":"owner", "dev":ledger.stat.dev,
                 "ino":ledger.stat.ino,"size":ledger.stat.size,"modified_ns":ledger.stat.modified_ns,
                 "changed_ns":ledger.stat.changed_ns,"offset":ledger.offset,
                 "prefix_sha256":ledger.prefix,"tail_sha256":ledger.tail}]
         })
         .to_string()
+    }
+
+    fn proof_catalog_tables(connection: &Connection) {
+        // Low-level proof tests use an in-memory meta table. Keep the tables
+        // queried by published::preserve present, as they are after a real
+        // Index open/migration, while leaving the reference set empty.
+        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .execute_batch(crate::history_projection::SCHEMA)
+            .unwrap();
     }
 
     #[test]
@@ -2004,6 +2015,7 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             .unwrap();
+        proof_catalog_tables(&connection);
         let path = "/fixture/parent[1]*.jsonl";
         let chunks = Chunks {
             offset: crate::source_chunks::SIZE as u64 * 1024 + 19,
@@ -2074,6 +2086,7 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             .unwrap();
+        proof_catalog_tables(&connection);
         connection
             .execute("INSERT INTO meta VALUES ('reported_runs','retained')", [])
             .unwrap();
