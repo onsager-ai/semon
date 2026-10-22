@@ -160,8 +160,7 @@ owners. Jump to Bottom belongs to the reading dock and is independent of that
 panel. The New Session native creation composer is a separate product flow.
 
 Local CLI and stdio MCP share native Session Query. Hosted focused MCP admits
-authorized native selections with bounded worker/custody lifetime; broad hosted
-queries still require archive-cohort retirement. ViewerCore owns standalone
+authorized native selections with bounded worker/custody lifetime; broad full-text retrieval remains paused. ViewerCore owns standalone
 native routing and refresh coordination, the supported CLI tree, and request
 chrome. It owns no full workspace model, model preparation, transcript body
 cache, raw file lookup cache or compatibility read fallback. `/api/model` and
@@ -339,7 +338,8 @@ without an existing shared-memory sidecar is skipped to avoid creating native
 files. Only validated name observations are carried in machine facts, with native
 harness/ID, metadata source, observation time and explicit current/stale freshness.
 Received sources use their own facts and never the viewer host's native database.
-Metadata changes invalidate the model snapshot but preserve transcript marks.
+Metadata changes invalidate native metadata observations while preserving
+unchanged transcript generations.
 
 ## Empty local native launch
 
