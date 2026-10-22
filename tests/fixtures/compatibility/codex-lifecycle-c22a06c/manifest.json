@@ -5,9 +5,9 @@
   "runtime_version": "unverified",
   "sources": [
     "codex-rs/protocol/src/protocol.rs",
-    "codex-rs/core/src/rollout/policy.rs",
-    "codex-rs/core/src/rollout/recorder.rs",
-    "codex-rs/core/src/rollout/ordinal.rs"
+    "codex-rs/rollout/src/policy.rs",
+    "codex-rs/rollout/src/recorder.rs",
+    "codex-rs/rollout/src/ordinal.rs"
   ],
   "modes": ["legacy", "paginated"],
   "scope": "durable source parsing and ownership; no runtime liveness or control grant"

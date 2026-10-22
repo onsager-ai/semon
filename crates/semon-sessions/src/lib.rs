@@ -67,6 +67,7 @@ mod query;
 mod query_projection;
 mod read_path;
 pub(crate) use read_path::open_input;
+mod codex_lifecycle;
 mod native_field;
 mod native_handoff;
 mod native_header;
@@ -76,7 +77,6 @@ mod native_page;
 mod native_record;
 mod native_sidecar;
 mod native_tree;
-mod codex_lifecycle;
 pub use codex_lifecycle::{TurnLifecycle, TurnPhase};
 use native_tree::Summary;
 mod read_capabilities;
@@ -643,13 +643,18 @@ fn modified_recently(path: &Path, cutoff: u64) -> bool {
 fn apply_summary(node: &mut Node, summary: &Summary, now: u64) {
     if node.harness == "codex" {
         node.turn_lifecycle = summary.codex_turn.owned(&node.id);
-        node.state = match node.turn_lifecycle.as_ref().map(|turn| turn.state(node.pid.is_some())) {
+        node.state = match node
+            .turn_lifecycle
+            .as_ref()
+            .map(|turn| turn.state(node.pid.is_some()))
+        {
             Some("work") => "running",
             Some("idle") => "idle",
             Some("done") => "ended",
             Some("err") => "error",
             _ => "unknown",
-        }.into();
+        }
+        .into();
     }
     node.models = summary.models.iter().cloned().collect();
     node.cwd = summary.cwd.clone().or_else(|| node.cwd.take());

@@ -280,9 +280,16 @@ fn prepare(
             .as_mut()
             .expect("tree initialized")
             .observe_counted(record.as_ref(), &harness, !known.tree);
-        if harness == "codex" && let Some(record) = &record {
-            batch.index.tree_summary.as_mut().expect("tree initialized")
-                .codex_turn.observe(record, batch.cursor);
+        if harness == "codex"
+            && let Some(record) = &record
+        {
+            batch
+                .index
+                .tree_summary
+                .as_mut()
+                .expect("tree initialized")
+                .codex_turn
+                .observe(record, batch.cursor);
         }
         if harness == "codex"
             && let Some(record) = &record

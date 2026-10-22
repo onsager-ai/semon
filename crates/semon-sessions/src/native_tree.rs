@@ -234,8 +234,12 @@ impl Summary {
             digest.update(&bytes);
             read += bytes.len() as u64;
             let record = serde_json::from_slice::<Value>(&bytes).ok();
-            if harness == "codex" && let Some(record) = &record {
-                summary.codex_turn.observe(record, read - bytes.len() as u64);
+            if harness == "codex"
+                && let Some(record) = &record
+            {
+                summary
+                    .codex_turn
+                    .observe(record, read - bytes.len() as u64);
             }
             summary.observe(record.as_ref(), harness);
             bytes.clear();

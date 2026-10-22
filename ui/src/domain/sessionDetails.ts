@@ -3,6 +3,9 @@ import type { Cost, TokenKind, Usage } from './types';
 
 export interface SessionDetails {
   state: string;
+  turn_lifecycle?: {
+    phase: 'active' | 'completed' | 'aborted' | 'errored' | 'unknown';
+  };
   role?: boolean | null;
   cwd?: string | null;
   family?: {
@@ -133,6 +136,9 @@ export function parseSessionDetails(value: unknown): SessionDetails {
   )
     throw Error('Recorded family exceeds its bound');
   const copilot = row.copilot == null ? null : object(row.copilot);
+  const turn = row.turn_lifecycle == null ? null : object(row.turn_lifecycle);
+  if (turn && !['active', 'completed', 'aborted', 'errored', 'unknown'].includes(text(turn.phase)))
+    throw Error('Invalid recorded turn phase');
   const activity = row.activity == null ? null : object(row.activity);
   if (activity && text(activity.tool).length > 256) throw Error('Invalid recorded activity tool');
   const ancestors = family ? array(family.ancestors, parseRelative) : [],
@@ -141,6 +147,9 @@ export function parseSessionDetails(value: unknown): SessionDetails {
   if (new Set(keys).size !== keys.length) throw Error('Invalid recorded family identity');
   return {
     state,
+    turn_lifecycle: turn
+      ? { phase: turn.phase as NonNullable<SessionDetails['turn_lifecycle']>['phase'] }
+      : undefined,
     role: row.role == null ? null : boolean(row.role),
     turns: count(row.turns),
     calls: row.calls == null ? null : count(row.calls),

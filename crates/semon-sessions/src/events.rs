@@ -85,6 +85,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v27: rebuild derived billing usage after a pricing-table restoration.
 /// v28: source-qualified code-mode output/terminal attribution and direct formatter
 /// outcomes; event-state envelopes preserve bounded selected output evidence.
+/// v29: durable source-owned Codex turn activity, separate from writer liveness.
 const CACHE_VERSION: u32 = 29;
 
 /// The four token categories the model serves for an exact model id.
@@ -3183,7 +3184,9 @@ fn parse(
             observations.push(observation);
         }
         if let Some(summary) = &mut index.tree_summary {
-            if harness == "codex" && let Ok(record) = &record {
+            if harness == "codex"
+                && let Ok(record) = &record
+            {
                 summary.codex_turn.observe(record, line_offset);
             }
             summary.observe_counted(record.as_ref().ok(), harness, !known.tree);

@@ -2420,10 +2420,16 @@ impl<'a> Builder<'a> {
                     let index =
                         self.add_session(file.id.clone(), SessKind::Codex, vec![position], out);
                     self.sessions[index].alive = held.contains(&file.id);
-                    self.sessions[index].out.turn_lifecycle = file.summary.tree_summary.as_ref()
+                    self.sessions[index].out.turn_lifecycle = file
+                        .summary
+                        .tree_summary
+                        .as_ref()
                         .and_then(|summary| summary.codex_turn.owned(&file.id))
                         .map(|turn| turn.with_generation(&file.revision.3));
-                    self.sessions[index].busy = self.sessions[index].out.turn_lifecycle.as_ref()
+                    self.sessions[index].busy = self.sessions[index]
+                        .out
+                        .turn_lifecycle
+                        .as_ref()
                         .is_some_and(|turn| turn.phase == crate::TurnPhase::Active)
                         && self.sessions[index].alive;
                 }
@@ -3824,7 +3830,10 @@ impl<'a> Builder<'a> {
             }
         }
         for (child, spawner, call, ambiguous) in spawns {
-            let state = self.sessions[child].out.turn_lifecycle.as_ref()
+            let state = self.sessions[child]
+                .out
+                .turn_lifecycle
+                .as_ref()
                 .map_or("off", |turn| turn.state(self.sessions[child].alive));
             self.sessions[child].out.state = state;
             let Some(spawner) = spawner else {
@@ -4599,7 +4608,7 @@ impl<'a> Builder<'a> {
                     self.sessions[child].key.clone(),
                 ),
                 self.sessions[child].out.start,
-                if self.sessions[child].alive {
+                if self.sessions[child].alive && self.sessions[child].kind != SessKind::Codex {
                     "work"
                 } else {
                     self.sessions[child].out.state
@@ -4740,7 +4749,9 @@ impl<'a> Builder<'a> {
                             .iter()
                             .map(|later| event(self.files, *later))
                             .find(|later| later.k == Kind::U);
-                        if self.sessions[index].alive && reply.is_none() && following.is_none() {
+                        if self.sessions[index].busy
+                            && self.sessions[index].out.turn_lifecycle.as_ref().is_some_and(|turn| found.o >= turn.offset)
+                            && reply.is_none() && following.is_none() {
                             handoff.status = "wait";
                         }
                         // It was answered when its output says so, else when
