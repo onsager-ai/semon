@@ -196,6 +196,7 @@ struct Received {
     relocation_supported: bool,
     relocation_requests: Vec<(Append, usize)>,
     grow_source: Option<PathBuf>,
+    grow_archive_source: Option<(PathBuf, Vec<u8>)>,
     discover_source: Option<(PathBuf, String)>,
     move_source: Option<(String, PathBuf, PathBuf)>,
     facts: Option<Facts>,
@@ -444,6 +445,15 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
             .open(source)
             .unwrap()
             .write_all(b"{}\n")
+            .unwrap();
+    }
+    if let Some((source, bytes)) = received.grow_archive_source.take() {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(source)
+            .unwrap()
+            .write_all(&bytes)
             .unwrap();
     }
     if let Some((source, contents)) = received.discover_source.take() {
@@ -1661,6 +1671,25 @@ fn native_compressed_history_keeps_paginated_query_and_web_parity_after_restart(
         fs::read(home.root.join(format!("{parent}.zst"))).unwrap(),
         encoded
     );
+}
+
+#[test]
+fn a_compressed_source_growing_between_batches_keeps_its_frozen_logical_target() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logical = "codex/archived_sessions/frozen.jsonl";
+    let text = line("synthetic frozen archive").repeat(5000);
+    assert!(text.len() > 256 * 1024);
+    write_archive(&home, logical, text.as_bytes());
+    let appended = line("next sweep only");
+    let frame = zstd::stream::encode_all(appended.as_bytes(), 3).unwrap();
+    receiver.state.lock().unwrap().grow_archive_source =
+        Some((home.root.join(format!("{logical}.zst")), frame));
+    let mut client = home.client(&receiver);
+    client.pass(&home.options).unwrap();
+    assert_eq!(copy(&receiver, logical), redacted(&text));
+    client.pass(&home.options).unwrap();
+    assert_eq!(copy(&receiver, logical), redacted(&(text + &appended)));
 }
 
 #[test]
