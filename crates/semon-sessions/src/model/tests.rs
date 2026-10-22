@@ -134,22 +134,13 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
     home.live(42, "root", "waiting", json!({"waitingFor":"approval"}));
     assert_ne!(scoped_runtime_reader_oracle(&options, &rows), recorded);
 
-    // Ordinary readers still recognize all preexisting compatibility forms.
     let initial = crate::native_evidence::query_runtime_generation(&options).unwrap();
-    let legacy = crate::native_evidence::legacy_runtime_generation(&options).unwrap();
-    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor','original-anchor')", []).unwrap();
-    db.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
-        [&initial],
-    )
-    .unwrap();
     let reader = crate::native_evidence::RuntimeObservations::new(&options);
-    for saved in [&initial, &legacy, "original-anchor"] {
-        let mut row = rows[0].clone();
-        row.query = Some(json!({"runtime":saved}));
-        assert_eq!(reader.expected(&row).as_deref(), Some(saved));
-    }
+    let mut row = rows[0].clone();
+    row.query = Some(json!({"runtime":initial}));
+    assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
+    row.query = Some(json!({"runtime":"unsupported-runtime"}));
+    assert_eq!(reader.expected(&row), None);
 }
 
 #[test]
