@@ -129,8 +129,8 @@ for (const width of [390, 1280])
                 {
                   ...meta('one'),
                   transcript: {
-                    generation: 'b'.repeat(64),
-                    errors_generation: 'b'.repeat(64),
+                    generation: (failing ? 'c' : 'b').repeat(64),
+                    errors_generation: (failing ? 'c' : 'b').repeat(64),
                     total: 65,
                   },
                 },
