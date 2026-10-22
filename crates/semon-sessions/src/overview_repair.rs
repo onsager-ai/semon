@@ -1164,8 +1164,10 @@ fn with_records<T>(
                     32 * 1024 * 1024,
                     &mut bytes_left.borrow_mut(),
                 );
-                requests.set(reader.remaining());
-                bytes
+            requests.set(reader.remaining());
+            let bytes = bytes?;
+            crate::selected_read::charge(0, bytes.len())?;
+            Ok(bytes)
             },
         )
     };
