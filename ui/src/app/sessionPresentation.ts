@@ -20,7 +20,10 @@ const trademark =
 export function selectedSessionState(session: CatalogSession): string {
   const details = session.details;
   if (!details) return 'off';
-  if (session.harness === 'codex' && (!details.turn_lifecycle || details.turn_lifecycle.phase === 'unknown'))
+  if (
+    session.harness === 'codex' &&
+    (!details.turn_lifecycle || details.turn_lifecycle.phase === 'unknown')
+  )
     return 'off';
   return (details.state === 'work' || details.state === 'wait') && !details.live_observation
     ? 'off'
@@ -318,7 +321,10 @@ export function selectedSessionLabels(session: CatalogSession, machine?: string)
     {
       key: 'state',
       text: STATE[state] ?? 'Recorded history',
-      tip: 'Recorded status · ' + (details?.turns ?? 0) + ' turns' +
+      tip:
+        'Recorded status · ' +
+        (details?.turns ?? 0) +
+        ' turns' +
         (turnOutcome(session) ? ' · Last turn: ' + turnOutcome(session) : ''),
       drop: 0,
       className: 'state ' + state,

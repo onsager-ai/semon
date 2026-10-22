@@ -4750,8 +4750,14 @@ impl<'a> Builder<'a> {
                             .map(|later| event(self.files, *later))
                             .find(|later| later.k == Kind::U);
                         if self.sessions[index].busy
-                            && self.sessions[index].out.turn_lifecycle.as_ref().is_some_and(|turn| found.o >= turn.offset)
-                            && reply.is_none() && following.is_none() {
+                            && self.sessions[index]
+                                .out
+                                .turn_lifecycle
+                                .as_ref()
+                                .is_some_and(|turn| found.o >= turn.offset)
+                            && reply.is_none()
+                            && following.is_none()
+                        {
                             handoff.status = "wait";
                         }
                         // It was answered when its output says so, else when
