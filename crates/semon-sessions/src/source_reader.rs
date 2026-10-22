@@ -240,7 +240,6 @@ pub(crate) fn read_native_record(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn read_record_bounded(
     reader: &dyn SessionSourceReader,
     source: &SessionSourceRef,
