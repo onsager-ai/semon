@@ -1,0 +1,243 @@
+# Auxiliary evidence transport; never included in the delivery branch.
+name: Codex visual fingerprint rebind candidate
+on:
+  push:
+    branches: ['fix/codex-visual-rebind-426']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8fc0fd62c4332426c306169bd8cd15bcbbeb4e51
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Read only two immutable CI reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          """Read one bounded CI report or image using HTTP ranges, never a local corpus."""
+          import io
+          import json
+          import pathlib
+          import sys
+          import urllib.request
+          import zipfile
+          
+          
+          class Ranges(io.RawIOBase):
+              def __init__(self, url):
+                  self.url = url
+                  with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=20) as response:
+                      self.size = int(response.headers["Content-Length"])
+                  self.at = 0
+                  self.total = 0
+          
+              def seekable(self):
+                  return True
+          
+              def tell(self):
+                  return self.at
+          
+              def seek(self, offset, whence=0):
+                  self.at = offset if whence == 0 else self.at + offset if whence == 1 else self.size + offset
+                  if not 0 <= self.at <= self.size:
+                      raise ValueError("range outside artifact")
+                  return self.at
+          
+              def read(self, size=-1):
+                  size = self.size - self.at if size < 0 else min(size, self.size - self.at)
+                  if size == 0:
+                      return b""
+                  if size > 8 * 1024 * 1024 or self.total + size > 10 * 1024 * 1024:
+                      raise ValueError("bounded artifact read limit")
+                  request = urllib.request.Request(self.url, headers={"Range": f"bytes={self.at}-{self.at+size-1}"})
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      if response.status != 206:
+                          raise ValueError("artifact server did not honor bounded range")
+                      data = response.read(size + 1)
+                  if len(data) != size:
+                      raise ValueError("unexpected artifact range size")
+                  self.at += size
+                  self.total += size
+                  return data
+          
+          
+          import os
+          import urllib.error
+          
+          api = 'https://api.github.com/repos/onsager-ai/semon/actions/artifacts/12400668006'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+          with urllib.request.urlopen(urllib.request.Request(api, headers=headers), timeout=30) as response:
+              metadata = json.load(response)
+          assert not metadata['expired']
+          assert metadata['workflow_run']['id'] == 39719244674
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          try:
+              urllib.request.build_opener(NoRedirect).open(urllib.request.Request(api + '/zip', headers=headers), timeout=30)
+              raise AssertionError('expected artifact redirect')
+          except urllib.error.HTTPError as response:
+              assert response.code == 302
+              url = response.headers['Location']
+          remote = Ranges(url)
+          with zipfile.ZipFile(remote) as archive:
+              for member, output in [('pixels.json', 'ci-artifact/pixels.json'), ('preservation/report.json', 'ci-artifact/preservation/report.json')]:
+                  info = archive.getinfo(member)
+                  assert info.file_size <= 3 * 1024 * 1024
+                  path = pathlib.Path(output)
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(archive.read(info))
+          print(json.dumps({'artifact': 12400668006, 'run': 39719244674, 'remote_bytes_read': remote.total}))
+          PY
+      - name: Retain exact procedure input substitutions
+        run: |
+          cat > ci-artifact/procedure-inputs.diff <<'DIFF'
+          --- original-Part-C.mjs
+          +++ main-integration-inputs.mjs
+          @@ -17,13 +17,13 @@
+           const original = read(file, 300000);
+           const blob = createHash('sha1')
+             .update('blob ' + Buffer.byteLength(original) + '\0').update(original).digest('hex');
+          -assert.equal(blob, 'c01774e7b5e74654ffc52b00cafae610ce2c21c9');
+          +assert.equal(blob, '607741c18836d799aff3d96f8fc9c4502d66ec28');
+           const registry = JSON.parse(original);
+           assert.equal(JSON.stringify(registry, null, 2) + '\n', original, 'no formatting rewrite');
+           const before = structuredClone(registry);
+          -const oldFingerprint = 'b8a0453a7375718ff98daae9982fc1b9fd2e9af528d824bedef82bdef08ea8a7';
+          -const newFingerprint = 'c024e0755319131642e71d67e9a1938414e1e267f463250a7dcaa6d620e7d46d';
+          -const suffix = ' Fingerprint-only rebind (2026-10-22): recipe-v6 bundle changed the runtime fingerprint. Gateway reports that all six artifact digests for all 111 pending states are unchanged in CI run 39713141191, artifact 12398066659 (https://github.com/onsager-ai/semon/actions/runs/39713141191/artifacts/12398066659). Gateway actual-image reinspection of desktop-light session-a-parse found only the previously owner-approved removal of "Native session controls are unavailable.". Original per-state image reviews, owner decisions, reference pins and exact artifact bindings remain in force; no new visual change is accepted.';
+          +const oldFingerprint = 'c024e0755319131642e71d67e9a1938414e1e267f463250a7dcaa6d620e7d46d';
+          +const newFingerprint = 'aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac';
+          +const suffix = " Fingerprint-only main integration rebind (2026-10-22): the fingerprint hashes the complete runtime binary; main634b5312 pricing and parser cache28 changed that binary. CI run39719244674 artifact12400668006 supplies the current reports. This procedure requires all666 artifact digests across111 pending states to equal their existing owner-reviewed bindings before writing. The earlier recipe-v6 attribution describes a whole-binary change that included the recipe-v6 bundle. Prior decisions, per-state reviews, reference pins and provenance remain unchanged; no new visual change is accepted.";
+           const plans = [
+             { comparator: 'pixels', scope: 'main', count: 69, frames: 113, regions: 162,
+               assess: assessPixelComparison, path: process.argv[2] },
+          DIFF
+      - name: Generate candidate with the exact Worker procedure
+        run: |
+          node --input-type=module - ci-artifact/pixels.json ci-artifact/preservation/report.json <<'JS' | tee ci-artifact/rebind-proof.json
+          import assert from 'node:assert/strict';
+          import { readFileSync, statSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import {
+            assessPixelComparison, assessPreservation, assessVisualAcceptances, MAX_RATIO,
+          } from './tests/ui/preservation-contract.mjs';
+          
+          assert.equal(process.env.CI, 'true', 'CI only; no thermal-restricted local execution');
+          assert.equal(process.argv.length, 4);
+          function read(file, limit) {
+            assert(statSync(file).isFile());
+            assert(statSync(file).size <= limit);
+            return readFileSync(file, 'utf8');
+          }
+          const digest = (text) => createHash('sha256').update(text).digest('hex');
+          const file = 'tests/ui/visual-acceptance.json';
+          const original = read(file, 300000);
+          const blob = createHash('sha1')
+            .update('blob ' + Buffer.byteLength(original) + '\0').update(original).digest('hex');
+          assert.equal(blob, '607741c18836d799aff3d96f8fc9c4502d66ec28');
+          const registry = JSON.parse(original);
+          assert.equal(JSON.stringify(registry, null, 2) + '\n', original, 'no formatting rewrite');
+          const before = structuredClone(registry);
+          const oldFingerprint = 'c024e0755319131642e71d67e9a1938414e1e267f463250a7dcaa6d620e7d46d';
+          const newFingerprint = 'aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac';
+          const suffix = " Fingerprint-only main integration rebind (2026-10-22): the fingerprint hashes the complete runtime binary; main634b5312 pricing and parser cache28 changed that binary. CI run39719244674 artifact12400668006 supplies the current reports. This procedure requires all666 artifact digests across111 pending states to equal their existing owner-reviewed bindings before writing. The earlier recipe-v6 attribution describes a whole-binary change that included the recipe-v6 bundle. Prior decisions, per-state reviews, reference pins and provenance remain unchanged; no new visual change is accepted.";
+          const plans = [
+            { comparator: 'pixels', scope: 'main', count: 69, frames: 113, regions: 162,
+              assess: assessPixelComparison, path: process.argv[2] },
+            { comparator: 'preservation', scope: 'required', count: 42, frames: 68, regions: 0,
+              assess: assessPreservation, path: process.argv[3] },
+          ];
+          const changed = new Set();
+          const inputs = [];
+          let capturedCandidate;
+          for (const plan of plans) {
+            const bytes = read(plan.path, 3 * 1024 * 1024);
+            const report = JSON.parse(bytes);
+            assert.match(report.candidate, /^[a-f0-9]{40}$/);
+            capturedCandidate ??= report.candidate;
+            assert.equal(report.candidate, capturedCandidate);
+            assert.equal(report.candidateFingerprint, newFingerprint);
+            assert.equal(report.scope ?? report.mode, plan.scope);
+            assert.equal(report.results.length, plan.frames);
+            assert.equal((report.regions ?? []).length, plan.regions);
+            const raw = plan.assess(report);
+            assert.deepEqual(raw.coverage, []);
+            assert.equal(raw.visual.length, plan.count);
+            const prior = assessVisualAcceptances(report, plan.comparator, raw, registry);
+            assert.equal(prior.pending.length, plan.count);
+            assert.equal(prior.accepted.length, 0);
+            assert.equal(prior.errors.length, plan.count);
+            const failures = [
+              ...report.results.map(row => ({ kind: 'frame', row })),
+              ...(report.regions ?? []).map(row => ({ kind: 'region', row })),
+            ].filter(({ row }) => row.size !== null || row.ratio > MAX_RATIO);
+            assert.equal(failures.length, plan.count);
+            for (const { kind, row } of failures) {
+              assert.equal(kind, 'frame', 'strict regions stay unaccepted');
+              const indices = registry.acceptances.flatMap((entry, index) =>
+                entry.comparator === plan.comparator && entry.scope === plan.scope &&
+                entry.kind === kind && entry.key === row.key ? [index] : []);
+              assert.equal(indices.length, 1);
+              const index = indices[0], entry = registry.acceptances[index];
+              assert(!changed.has(index));
+              assert.equal(entry.decision, 'accepted');
+              assert.equal(entry.candidateFingerprint, oldFingerprint);
+              assert.equal(entry.reference, report.reference);
+              assert.equal(entry.referenceHub ?? null, report.referenceHub ?? null);
+              assert.deepEqual(entry.artifactDigests, row.artifactDigests, 'all six digests must match');
+              entry.candidateFingerprint = newFingerprint;
+              entry.rationale += suffix;
+              changed.add(index);
+            }
+            inputs.push({ path: plan.path, sha256: digest(bytes), candidate: report.candidate });
+            plan.report = report;
+            plan.raw = raw;
+          }
+          assert.equal(changed.size, 111);
+          registry.acceptances.forEach((entry, index) => {
+            const expected = structuredClone(before.acceptances[index]);
+            if (changed.has(index)) {
+              expected.candidateFingerprint = newFingerprint;
+              expected.rationale += suffix;
+            }
+            assert.deepEqual(entry, expected, 'retain every other field and every unrelated entry');
+          });
+          for (const plan of plans) {
+            const result = assessVisualAcceptances(plan.report, plan.comparator, plan.raw, registry);
+            assert.equal(result.pass, true);
+            assert.deepEqual(result.errors, []);
+            assert.deepEqual(result.pending, []);
+            assert.equal(result.accepted.length, plan.count);
+          }
+          const output = JSON.stringify(registry, null, 2) + '\n';
+          writeFileSync(file, output);
+          console.log(JSON.stringify({
+            changed: 111, main: 69, preservation: 42,
+            beforeSha256: digest(original), afterSha256: digest(output), inputs,
+          }));
+          JS
+          sha256sum tests/ui/visual-acceptance.json > ci-artifact/registry.sha256
+          git rev-parse HEAD:tests/ui/visual-acceptance.json > ci-artifact/input-blob.txt
+          git diff -- tests/ui/visual-acceptance.json > ci-artifact/registry.patch
+      - name: Retain candidate without changing required Viewer gates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-visual-rebind-current-main
+          if-no-files-found: error
+          path: |
+            tests/ui/visual-acceptance.json
+            ci-artifact/rebind-proof.json
+            ci-artifact/registry.sha256
+            ci-artifact/input-blob.txt
+            ci-artifact/registry.patch
+            ci-artifact/procedure-inputs.diff
