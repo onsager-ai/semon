@@ -407,10 +407,20 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}}))]);
     fixture.codex("child-a", Some("parent"), &[]);
-    fixture.codex("child-b", Some("parent"), &[
-        codex_line("event_msg", json!({"type":"task_started","turn_id":"child-turn"})),
-        codex_line("event_msg", json!({"type":"task_complete","turn_id":"child-turn"})),
-    ]);
+    fixture.codex(
+        "child-b",
+        Some("parent"),
+        &[
+            codex_line(
+                "event_msg",
+                json!({"type":"task_started","turn_id":"child-turn"}),
+            ),
+            codex_line(
+                "event_msg",
+                json!({"type":"task_complete","turn_id":"child-turn"}),
+            ),
+        ],
+    );
     #[cfg(unix)]
     set_lock(&fixture, "parent", true);
     let nodes = collect(&fixture.options).unwrap();
@@ -422,8 +432,10 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
     assert_eq!(nodes[0].children[0].state, "unknown");
     assert!(nodes[0].children[0].turn_lifecycle.is_none());
     assert_eq!(nodes[0].children[1].state, "ended");
-    assert_eq!(nodes[0].children[1].turn_lifecycle.as_ref().unwrap().phase,
-        semon_sessions::TurnPhase::Completed);
+    assert_eq!(
+        nodes[0].children[1].turn_lifecycle.as_ref().unwrap().phase,
+        semon_sessions::TurnPhase::Completed
+    );
     assert_eq!(nodes[0].tokens.input, 9);
     assert!(nodes[0].open_tools.is_empty());
     #[cfg(unix)]
@@ -991,8 +1003,13 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
         let state = match prior["state"].as_str().unwrap() {
             // The frozen codex-run source has no lifecycle: absent writers
             // no longer turn its historical `done` inference into completion.
-            "done" if id == "codex-run" && session["harness"] == "codex"
-                && session.get("turn_lifecycle").is_none() => "unknown",
+            "done"
+                if id == "codex-run"
+                    && session["harness"] == "codex"
+                    && session.get("turn_lifecycle").is_none() =>
+            {
+                "unknown"
+            }
             "done" => "ended",
             "idle" => "idle",
             state => panic!("unexpected pinned state: {state}"),
