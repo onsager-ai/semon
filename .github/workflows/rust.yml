@@ -162,3 +162,7 @@ jobs:
         run: |
           cargo clippy -p semon-runtime --all-targets --features e2b-process --locked -- --no-deps -D warnings
           SEMON_TEST_COORDINATOR_SECRET=offline-fixture E2B_API_KEY=offline-fixture SEMON_TEST_NETWORK_GUARD=keep cargo test -p semon-runtime --features e2b-process --locked
+
+  codex-conformance:
+    name: Pinned Codex fixture conformance
+    uses: ./.github/workflows/codex-conformance.yml
