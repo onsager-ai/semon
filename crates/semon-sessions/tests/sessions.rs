@@ -978,23 +978,38 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
     // consequently says replied rather than returned. A trace-turn end is
     // separate from durable lifecycle; parent process exit cannot prove its terminal.
     const CODEX_SPAWN: &str = "s249fde0718402de8";
-    let codex = query.call_at("get_session", &json!({"id":"codex-run"}), now).unwrap();
+    let codex = query
+        .call_at("get_session", &json!({"id":"codex-run"}), now)
+        .unwrap();
     let child = &codex["session"];
     assert_eq!(child["id"], "codex-run");
     assert_eq!(child["harness"], "codex");
     assert!(child.get("turn_lifecycle").is_none());
     assert_eq!(child["state"], "unknown");
-    let exact_spawn = |edge: &Value| edge["id"] == CODEX_SPAWN
-        && edge["kind"] == "spawn" && edge["from"] == "harbor" && edge["to"] == "codex-run";
-    let actual_edges: Vec<_> = child["handoffs"].as_array().unwrap().iter()
-        .filter(|edge| exact_spawn(edge)).collect();
+    let exact_spawn = |edge: &Value| {
+        edge["id"] == CODEX_SPAWN
+            && edge["kind"] == "spawn"
+            && edge["from"] == "harbor"
+            && edge["to"] == "codex-run"
+    };
+    let actual_edges: Vec<_> = child["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| exact_spawn(edge))
+        .collect();
     assert_eq!(actual_edges.len(), 1);
-    assert_eq!(actual_edges[0]["status"], "off", "missing lifecycle cannot prove handoff completion");
+    assert_eq!(
+        actual_edges[0]["status"], "off",
+        "missing lifecycle cannot prove handoff completion"
+    );
     // CI inspected every field before this adapter was introduced. Project
     // only these two proven differences in memory; frozen bytes stay fixed.
     let turns = expected["turns"].as_array_mut().unwrap();
-    let affected_turns: Vec<_> = turns.iter_mut()
-        .filter(|turn| turn["id"] == CODEX_SPAWN && turn["sid"] == "codex-run").collect();
+    let affected_turns: Vec<_> = turns
+        .iter_mut()
+        .filter(|turn| turn["id"] == CODEX_SPAWN && turn["sid"] == "codex-run")
+        .collect();
     assert_eq!(affected_turns.len(), 1);
     let turn = affected_turns.into_iter().next().unwrap();
     assert_eq!(turn["end"]["st"], "done");
