@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fmt::Write;
 
 // Bound selected metadata, including exact replay rejection. Exhaustion refuses
 // further attribution instead of evicting IDs and accepting old starts again.
@@ -10,6 +11,194 @@ const MAX_TURNS: usize = 4096;
 
 fn id(value: Option<&str>) -> Option<&str> {
     value.filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnPhase {
+    Active,
+    Completed,
+    Aborted,
+    Errored,
+}
+
+/// Last exactly owned turn, observed at a complete native record boundary.
+/// This is an observation, never process exit status or control authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnLifecycle {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub phase: TurnPhase,
+    pub offset: u64,
+    /// Consumed native prefix SHA-256; not a proof of unread trailing bytes.
+    pub source_generation: String,
+}
+
+impl TurnLifecycle {
+    pub(crate) fn with_generation(mut self, prefix: &[u8; 32]) -> Self {
+        self.source_generation.clear();
+        for byte in prefix {
+            write!(&mut self.source_generation, "{byte:02x}").expect("writing a String cannot fail");
+        }
+        self
+    }
+    pub(crate) fn state(&self, writer_live: bool) -> &'static str {
+        match self.phase {
+            TurnPhase::Active if writer_live => "work",
+            TurnPhase::Active => "off",
+            TurnPhase::Errored => "err",
+            TurnPhase::Completed | TurnPhase::Aborted if writer_live => "idle",
+            TurnPhase::Completed | TurnPhase::Aborted => "done",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct State {
+    owner: Option<String>,
+    // Copied history without a qualified local boundary cannot establish ownership.
+    copied: bool,
+    invalid: bool,
+    paginated: bool,
+    local_start: Option<u64>,
+    ordinal: Option<u64>,
+    seen: BTreeSet<String>,
+    pub(crate) last: Option<TurnLifecycle>,
+}
+
+impl State {
+    pub(crate) fn owned(&self, id: &str) -> Option<TurnLifecycle> {
+        self.last
+            .as_ref()
+            .filter(|fact| fact.thread_id == id)
+            .cloned()
+    }
+
+    pub(crate) fn observe(&mut self, record: &Value, offset: u64) {
+        let payload = &record["payload"];
+        let kind = crate::field(record, "type");
+        if offset == 0 && kind == Some("session_meta") {
+            self.owner = id(crate::field(payload, "id")).map(str::to_owned);
+            self.copied = payload
+                .get("forked_from_id")
+                .is_some_and(|id| !id.is_null())
+                || payload
+                    .get("subagent_history_start_ordinal")
+                    .is_some_and(|id| !id.is_null());
+            self.paginated = crate::field(payload, "history_mode") == Some("paginated");
+            self.invalid = crate::field(payload, "history_mode")
+                .is_some_and(|mode| !matches!(mode, "legacy" | "paginated"));
+            // These are explicit logical/local boundaries. history_base names a
+            // physical rollout (possibly a revert), not the logical fork parent.
+            self.local_start = payload
+                .get("forked_from_ordinal_exclusive")
+                .and_then(Value::as_u64)
+                .into_iter()
+                .chain(
+                    payload
+                        .get("subagent_history_start_ordinal")
+                        .and_then(Value::as_u64),
+                )
+                .max();
+            self.ordinal = record.get("ordinal").and_then(Value::as_u64);
+            if self.paginated && self.ordinal.is_none() {
+                self.invalid = true;
+            }
+            return;
+        }
+        if kind == Some("session_meta") {
+            // A second source identity is not a thread ownership transition.
+            self.invalid = true;
+            self.last = None;
+            return;
+        }
+        if self.invalid {
+            return;
+        }
+        if self.paginated {
+            let Some(ordinal) = record.get("ordinal").and_then(Value::as_u64) else {
+                self.invalid = true;
+                self.last = None;
+                return;
+            };
+            if self.ordinal.is_some_and(|previous| ordinal <= previous) {
+                self.invalid = true;
+                self.last = None;
+                return;
+            }
+            self.ordinal = Some(ordinal);
+            if self.copied && self.local_start.is_none_or(|start| ordinal < start) {
+                return;
+            }
+        } else if self.copied {
+            return;
+        }
+        if kind != Some("event_msg") {
+            return;
+        }
+        let Some(owner) = &self.owner else { return };
+        // Native durable EventMsg payloads inherit their physical session owner.
+        // If a carrier supplies an explicit owner, it must agree exactly.
+        if crate::field(payload, "thread_id").is_some_and(|id| id != owner)
+            || crate::field(record, "thread_id").is_some_and(|id| id != owner)
+        {
+            return;
+        }
+        let Some(turn) = id(crate::field(payload, "turn_id")) else {
+            return;
+        };
+        match crate::field(payload, "type") {
+            Some("task_started" | "turn_started") => {
+                // A replayed start cannot reopen the terminal of that same turn.
+                if self.seen.contains(turn) {
+                    return;
+                }
+                if self.seen.len() >= MAX_TURNS {
+                    self.invalid = true;
+                    self.last = None;
+                    return;
+                }
+                self.seen.insert(turn.into());
+                self.last = Some(TurnLifecycle {
+                    thread_id: owner.clone(),
+                    turn_id: turn.into(),
+                    phase: TurnPhase::Active,
+                    offset,
+                    source_generation: String::new(),
+                });
+            }
+            Some("task_complete" | "turn_complete" | "turn_aborted") => {
+                if payload.get("error").is_some_and(|error| {
+                    !error.is_null()
+                        && (!error.is_object() || crate::field(error, "message").is_none())
+                }) {
+                    return;
+                }
+                if crate::field(payload, "type") == Some("turn_aborted")
+                    && !matches!(
+                        crate::field(payload, "reason"),
+                        Some("interrupted" | "replaced" | "review_ended" | "budget_limited")
+                    )
+                {
+                    return;
+                }
+                let Some(last) = &mut self.last else { return };
+                if last.turn_id != turn || last.phase != TurnPhase::Active {
+                    return;
+                }
+                last.phase = if payload.get("error").is_some_and(Value::is_object) {
+                    TurnPhase::Errored
+                } else if crate::field(payload, "type") == Some("turn_aborted") {
+                    TurnPhase::Aborted
+                } else {
+                    TurnPhase::Completed
+                };
+                last.offset = offset;
+            }
+            // Standalone Error is transient at the pinned upstream revision.
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -391,190 +580,5 @@ mod tests {
         assert!(retained["run"].is_null());
         assert_ne!(retained["state"], "working");
         assert!(retained["exit"].is_null());
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TurnPhase {
-    Active,
-    Completed,
-    Aborted,
-    Errored,
-}
-
-/// Last exactly owned turn, observed at a complete native record boundary.
-/// This is an observation, never process exit status or control authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnLifecycle {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub phase: TurnPhase,
-    pub offset: u64,
-    /// Consumed native prefix SHA-256; not a proof of unread trailing bytes.
-    pub source_generation: String,
-}
-
-impl TurnLifecycle {
-    pub(crate) fn with_generation(mut self, prefix: &[u8; 32]) -> Self {
-        self.source_generation = prefix.iter().map(|byte| format!("{byte:02x}")).collect();
-        self
-    }
-    pub(crate) fn state(&self, writer_live: bool) -> &'static str {
-        match self.phase {
-            TurnPhase::Active if writer_live => "work",
-            TurnPhase::Active => "off",
-            TurnPhase::Errored => "err",
-            TurnPhase::Completed | TurnPhase::Aborted if writer_live => "idle",
-            TurnPhase::Completed | TurnPhase::Aborted => "done",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct State {
-    owner: Option<String>,
-    // Copied history without a qualified local boundary cannot establish ownership.
-    copied: bool,
-    invalid: bool,
-    paginated: bool,
-    local_start: Option<u64>,
-    ordinal: Option<u64>,
-    seen: BTreeSet<String>,
-    pub(crate) last: Option<TurnLifecycle>,
-}
-
-impl State {
-    pub(crate) fn owned(&self, id: &str) -> Option<TurnLifecycle> {
-        self.last
-            .as_ref()
-            .filter(|fact| fact.thread_id == id)
-            .cloned()
-    }
-
-    pub(crate) fn observe(&mut self, record: &Value, offset: u64) {
-        let payload = &record["payload"];
-        let kind = crate::field(record, "type");
-        if offset == 0 && kind == Some("session_meta") {
-            self.owner = id(crate::field(payload, "id")).map(str::to_owned);
-            self.copied = payload
-                .get("forked_from_id")
-                .is_some_and(|id| !id.is_null())
-                || payload
-                    .get("subagent_history_start_ordinal")
-                    .is_some_and(|id| !id.is_null());
-            self.paginated = crate::field(payload, "history_mode") == Some("paginated");
-            self.invalid = crate::field(payload, "history_mode")
-                .is_some_and(|mode| !matches!(mode, "legacy" | "paginated"));
-            // These are explicit logical/local boundaries. history_base names a
-            // physical rollout (possibly a revert), not the logical fork parent.
-            self.local_start = payload
-                .get("forked_from_ordinal_exclusive")
-                .and_then(Value::as_u64)
-                .into_iter()
-                .chain(
-                    payload
-                        .get("subagent_history_start_ordinal")
-                        .and_then(Value::as_u64),
-                )
-                .max();
-            self.ordinal = record.get("ordinal").and_then(Value::as_u64);
-            if self.paginated && self.ordinal.is_none() {
-                self.invalid = true;
-            }
-            return;
-        }
-        if kind == Some("session_meta") {
-            // A second source identity is not a thread ownership transition.
-            self.invalid = true;
-            self.last = None;
-            return;
-        }
-        if self.invalid {
-            return;
-        }
-        if self.paginated {
-            let Some(ordinal) = record.get("ordinal").and_then(Value::as_u64) else {
-                self.invalid = true;
-                self.last = None;
-                return;
-            };
-            if self.ordinal.is_some_and(|previous| ordinal <= previous) {
-                self.invalid = true;
-                self.last = None;
-                return;
-            }
-            self.ordinal = Some(ordinal);
-            if self.copied && self.local_start.is_none_or(|start| ordinal < start) {
-                return;
-            }
-        } else if self.copied {
-            return;
-        }
-        if kind != Some("event_msg") {
-            return;
-        }
-        let Some(owner) = &self.owner else { return };
-        // Native durable EventMsg payloads inherit their physical session owner.
-        // If a carrier supplies an explicit owner, it must agree exactly.
-        if crate::field(payload, "thread_id").is_some_and(|id| id != owner)
-            || crate::field(record, "thread_id").is_some_and(|id| id != owner)
-        {
-            return;
-        }
-        let Some(turn) = id(crate::field(payload, "turn_id")) else {
-            return;
-        };
-        match crate::field(payload, "type") {
-            Some("task_started" | "turn_started") => {
-                // A replayed start cannot reopen the terminal of that same turn.
-                if self.seen.contains(turn) {
-                    return;
-                }
-                if self.seen.len() >= MAX_TURNS {
-                    self.invalid = true;
-                    self.last = None;
-                    return;
-                }
-                self.seen.insert(turn.into());
-                self.last = Some(TurnLifecycle {
-                    thread_id: owner.clone(),
-                    turn_id: turn.into(),
-                    phase: TurnPhase::Active,
-                    offset,
-                    source_generation: String::new(),
-                });
-            }
-            Some("task_complete" | "turn_complete" | "turn_aborted") => {
-                if payload.get("error").is_some_and(|error| {
-                    !error.is_null()
-                        && (!error.is_object() || crate::field(error, "message").is_none())
-                }) {
-                    return;
-                }
-                if crate::field(payload, "type") == Some("turn_aborted")
-                    && !matches!(
-                        crate::field(payload, "reason"),
-                        Some("interrupted" | "replaced" | "review_ended" | "budget_limited")
-                    )
-                {
-                    return;
-                }
-                let Some(last) = &mut self.last else { return };
-                if last.turn_id != turn || last.phase != TurnPhase::Active {
-                    return;
-                }
-                last.phase = if payload.get("error").is_some_and(Value::is_object) {
-                    TurnPhase::Errored
-                } else if crate::field(payload, "type") == Some("turn_aborted") {
-                    TurnPhase::Aborted
-                } else {
-                    TurnPhase::Completed
-                };
-                last.offset = offset;
-            }
-            // Standalone Error is transient at the pinned upstream revision.
-            _ => {}
-        }
     }
 }

@@ -3574,6 +3574,7 @@ mod tests {
             "codex/sessions/2026/09/24/rollout-run.jsonl",
             &[
                 codex(ts(3, 1, 0), "session_meta", json!({"id": "run", "cwd": "/work/proj"})),
+                codex(ts(3, 1, 0), "event_msg", json!({"type": "task_started", "turn_id": "failed-turn"})),
                 codex(ts(3, 1, 0), "response_item", json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Semon-Parent: claude:lead:bash-1\nImplement it"}]})),
                 codex(ts(3, 1, 1), "response_item", json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<recommended_plugins>x</recommended_plugins>"}]})),
                 codex(ts(3, 1, 2), "response_item", json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan it"}]})),
@@ -3582,7 +3583,7 @@ mod tests {
                 codex(ts(3, 3, 0), "response_item", json!({"type": "function_call", "name": "shell", "call_id": "c2", "arguments": "{\"command\":[\"make\"]}"})),
                 codex(ts(3, 3, 500), "response_item", json!({"type": "function_call_output", "call_id": "c2", "output": "no status"})),
                 codex(ts(3, 4, 0), "response_item", json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]})),
-                codex(ts(3, 4, 0), "event_msg", json!({"type": "task_complete", "error": {"message": "failed"}})),
+                codex(ts(3, 4, 0), "event_msg", json!({"type": "task_complete", "turn_id": "failed-turn", "error": {"message": "failed"}})),
             ],
         );
         let built = home.built(BASE + 86_400_000);
