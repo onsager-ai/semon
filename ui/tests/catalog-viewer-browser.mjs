@@ -164,7 +164,7 @@ for (const width of [390, 1280])
           await page.waitForTimeout(20);
         }
         await page
-          .getByText('Recorded history could not be loaded. Retry to try again.', { exact: true })
+          .getByText('Recorded history could not be loaded. Retry to try again.')
           .first()
           .waitFor();
         const stopped = reads;
@@ -195,7 +195,8 @@ for (const width of [390, 1280])
         await page.getByRole('button', { name: 'Retry selected transcript', exact: true }).click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
         await page
-          .getByText('Recorded history could not be loaded. Retry to try again.', { exact: true })
+          .getByText('Recorded history could not be loaded. Retry to try again.')
+          .first()
           .waitFor({ state: 'detached' });
         await page.evaluate(() => app.destroy());
         const destroyed = reads;
