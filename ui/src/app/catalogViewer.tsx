@@ -2625,13 +2625,16 @@ export function createCatalogViewer(
           runtime: runtimeFor(view),
           blocks: [],
           order: [],
-          observation: 'Recorded history is updating',
+          observation: view.recovery.stopped
+            ? 'Recorded history is unavailable'
+            : 'Recorded history is updating',
           retry:
             view.note && !view.loading
               ? {
                   label: 'Retry selected transcript',
                   run() {
                     scope.clearTimeout(view.retry);
+                    view.retry = undefined;
                     view.recovery.reset();
                     void loadSelected(view);
                   },
@@ -2763,6 +2766,8 @@ export function createCatalogViewer(
           ? {
               label: 'Retry selected transcript',
               run() {
+                scope.clearTimeout(view.retry);
+                view.retry = undefined;
                 view.recovery.reset();
                 void loadSelected(view);
               },
@@ -2877,10 +2882,10 @@ export function createCatalogViewer(
         empty: view.recovery.stopped
           ? view.note
           : visibleEntries(view).length
-          ? undefined
-          : view.store.entries().length
-            ? 'No loaded records match your search or filter.'
-            : 'No native records in this range.',
+            ? undefined
+            : view.store.entries().length
+              ? 'No loaded records match your search or filter.'
+              : 'No native records in this range.',
       },
       {
         committed() {},
@@ -3186,6 +3191,7 @@ export function createCatalogViewer(
       disposed ||
       view.sourceKey !== capabilities.source_key ||
       view.recovery.stopped ||
+      view.retry !== undefined ||
       !capabilities.selected_transcript
     ) {
       drawSelected(view);
@@ -3251,6 +3257,7 @@ export function createCatalogViewer(
           view.note = 'Recorded history could not be loaded. Retry to try again.';
         } else {
           view.retry = scope.timeout(() => {
+            view.retry = undefined;
             if (active === view) void loadSelected(view, after, preservePosition);
           }, delay);
         }

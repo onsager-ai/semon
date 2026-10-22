@@ -114,6 +114,7 @@ for (const width of [390, 1280])
         page.setDefaultTimeout(10000);
         let failing = !retained,
           reads = 0;
+        const readAt = [];
         const errors = [];
         page.on('pageerror', (error) => errors.push(String(error)));
         await page.route('http://catalog.test/**', async (route) => {
@@ -137,6 +138,7 @@ for (const width of [390, 1280])
             });
           if (url.pathname === '/api/session-transcript') {
             ++reads;
+            readAt.push(await page.evaluate(() => Date.now()));
             return failing
               ? route.fulfill({ status: 409, json: { error: 'stale_projection' } })
               : route.fulfill({ json: transcript('one', url.searchParams) });
@@ -161,21 +163,41 @@ for (const width of [390, 1280])
           await page.clock.runFor(1000);
           await page.waitForTimeout(20);
         }
-        await page.getByText('Recorded history could not be loaded. Retry to try again.', { exact: true }).first().waitFor();
+        await page
+          .getByText('Recorded history could not be loaded. Retry to try again.', { exact: true })
+          .first()
+          .waitFor();
         const stopped = reads;
-        assert.equal(stopped, retained ? 9 : 8, 'each of four attempts has one bounded resynchronization');
+        assert.equal(
+          stopped,
+          retained ? 9 : 8,
+          'each of four attempts has one bounded resynchronization',
+        );
+        const attempts = readAt.filter(
+          (_, index) =>
+            index >= (retained ? 1 : 0) && (index - (retained ? 1 : 0)) % 2 === 0,
+        );
+        for (let index = 1; index < attempts.length; ++index)
+          assert.ok(
+            attempts[index] - attempts[index - 1] >= 1000 * 2 ** (index - 1),
+            'metadata cadence bypassed the pending recovery backoff',
+          );
         await page.clock.runFor(60000);
         await page.waitForTimeout(30);
         assert.equal(reads, stopped, 'background observations bypassed the exhausted retry budget');
         if (retained) await page.locator('#page [data-entry-key="one:5"]').waitFor();
         if (process.env.SEMON_CATALOG_OUT) {
           await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
-          await page.screenshot({ path: `${process.env.SEMON_CATALOG_OUT}/stale-terminal-${width}-${retained}.png` });
+          await page.screenshot({
+            path: `${process.env.SEMON_CATALOG_OUT}/stale-terminal-${width}-${retained}.png`,
+          });
         }
         failing = false;
         await page.getByRole('button', { name: 'Retry selected transcript', exact: true }).click();
         await page.locator('#page [data-entry-key="one:5"]').waitFor();
-        await page.getByText('Recorded history could not be loaded. Retry to try again.', { exact: true }).waitFor({ state: 'detached' });
+        await page
+          .getByText('Recorded history could not be loaded. Retry to try again.', { exact: true })
+          .waitFor({ state: 'detached' });
         await page.evaluate(() => app.destroy());
         const destroyed = reads;
         await page.clock.runFor(60000);

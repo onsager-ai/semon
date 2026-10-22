@@ -505,13 +505,7 @@ impl Focused {
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
             db.busy_timeout(Duration::from_millis(100))
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
-            Self::with_db_inner(
-                Snapshot::new(db),
-                cache,
-                path,
-                ledger,
-                &mut diagnostic,
-            )
+            Self::with_db_inner(Snapshot::new(db), cache, path, ledger, &mut diagnostic)
         })();
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
@@ -603,7 +597,8 @@ impl Focused {
             encoded
         } else {
             live.ok_or_else(|| {
-                FailureStage::HeaderMissing.wrap(io::Error::other("Native proof header unavailable"))
+                FailureStage::HeaderMissing
+                    .wrap(io::Error::other("Native proof header unavailable"))
             })?
         };
         let header: Header = serde_json::from_str(&encoded)
@@ -786,7 +781,12 @@ impl Focused {
         Ok(hash)
     }
 
-    fn qualify_legacy(&self, snapshot: &Connection, page: usize, canonical: &str) -> io::Result<()> {
+    fn qualify_legacy(
+        &self,
+        snapshot: &Connection,
+        page: usize,
+        canonical: &str,
+    ) -> io::Result<()> {
         let mut qualified = self.legacy_qualified.lock().map_err(|_| {
             FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof cache unavailable"))
         })?;
@@ -807,16 +807,28 @@ impl Focused {
             let mut db = super::focused_connection(&self.cache_path)?;
             let tx = db.transaction().map_err(io::Error::other)?;
             let marker: String = tx
-                .query_row(NATIVE_METADATA_VALUE, [repair_key(&self.prefix)], |r| r.get(0))
+                .query_row(NATIVE_METADATA_VALUE, [repair_key(&self.prefix)], |r| {
+                    r.get(0)
+                })
                 .map_err(io::Error::other)?;
             let marker: Repair = serde_json::from_str(&marker).map_err(io::Error::other)?;
             let header: String = tx
-                .query_row(NATIVE_METADATA_VALUE, [format!("{}header", self.prefix)], |r| r.get(0))
+                .query_row(
+                    NATIVE_METADATA_VALUE,
+                    [format!("{}header", self.prefix)],
+                    |r| r.get(0),
+                )
                 .map_err(io::Error::other)?;
             let witness: String = tx
-                .query_row(NATIVE_METADATA_VALUE, [format!("{}:{page:010}", repair_key(&self.prefix))], |r| r.get(0))
+                .query_row(
+                    NATIVE_METADATA_VALUE,
+                    [format!("{}:{page:010}", repair_key(&self.prefix))],
+                    |r| r.get(0),
+                )
                 .map_err(io::Error::other)?;
-            Ok(marker.complete && marker.header == self.header && header == self.header
+            Ok(marker.complete
+                && marker.header == self.header
+                && header == self.header
                 && witness == page_witness(canonical))
         })();
         if matches!(repaired, Ok(true)) {
@@ -830,14 +842,21 @@ impl Focused {
         let mut tail = self.ledger.offset.to_be_bytes().to_vec();
         for at in 0..self.count.div_ceil(PAGE) {
             let encoded: String = snapshot
-                .query_row(NATIVE_METADATA_VALUE, [format!("{}{:010}", self.prefix, at)], |r| r.get(0))
+                .query_row(
+                    NATIVE_METADATA_VALUE,
+                    [format!("{}{:010}", self.prefix, at)],
+                    |r| r.get(0),
+                )
                 .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
             let part: Page = serde_json::from_str(&encoded)
                 .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?;
-            if part.version != 1 || part.index != at
+            if part.version != 1
+                || part.index != at
                 || part.hashes.len() != (self.count - at * PAGE).min(PAGE)
             {
-                return Err(FailureStage::PageHash.wrap(io::Error::other("Native proof page changed")));
+                return Err(
+                    FailureStage::PageHash.wrap(io::Error::other("Native proof page changed"))
+                );
             }
             for hash in part.hashes {
                 tail.extend_from_slice(&hash);
@@ -847,7 +866,9 @@ impl Focused {
             tail = tail[full..].to_vec();
         }
         if state.finish(&tail) != self.fingerprint {
-            return Err(FailureStage::PageHash.wrap(io::Error::other("Native proof fingerprint changed")));
+            return Err(
+                FailureStage::PageHash.wrap(io::Error::other("Native proof fingerprint changed"))
+            );
         }
         *qualified = true;
         Ok(())
@@ -1368,7 +1389,8 @@ mod tests {
                 "ino":ledger.stat.ino,"size":ledger.stat.size,"modified_ns":ledger.stat.modified_ns,
                 "changed_ns":ledger.stat.changed_ns,"offset":ledger.offset,
                 "prefix_sha256":ledger.prefix,"tail_sha256":ledger.tail}]
-        }).to_string()
+        })
+        .to_string()
     }
 
     #[test]
@@ -1389,7 +1411,11 @@ mod tests {
             write(&tx, "original", &old, index.source_chunks.as_deref()).unwrap();
             tx.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('owner',0,'codex',?1)", [published_metadata(&old)]).unwrap();
             tx.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('owner','codex','owner','original')", []).unwrap();
-            tx.execute("INSERT INTO session_history_catalog(session_key,metadata) VALUES('owner',?1)", [published_metadata(&old)]).unwrap();
+            tx.execute(
+                "INSERT INTO session_history_catalog(session_key,metadata) VALUES('owner',?1)",
+                [published_metadata(&old)],
+            )
+            .unwrap();
             tx.commit().unwrap();
             if legacy {
                 let live = prefix("original");
@@ -1404,20 +1430,42 @@ mod tests {
                 let tx = store.connection.transaction().unwrap();
                 write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
                 tx.commit().unwrap();
-                let count: usize = store.connection.query_row("SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'", [], |r|r.get(0)).unwrap();
+                let count: i64 = store.connection.query_row("SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'", [], |r|r.get(0)).unwrap();
                 assert_eq!(count, 1, "unbounded retained versions at mutation {at}");
-                Focused::open(&path, "original", &old).unwrap().verify(PAGE, &bytes).unwrap();
+                Focused::open(&path, "original", &old)
+                    .unwrap()
+                    .verify(PAGE, &bytes)
+                    .unwrap();
             }
             let retained_reader = Focused::open(&path, "original", &old).unwrap();
-            assert!(retained_reader.prefix.starts_with("native_published_chunks:"));
+            assert!(
+                retained_reader
+                    .prefix
+                    .starts_with("native_published_chunks:")
+            );
             // Both current and history references count. Publishing a different
             // Current alone must not collect the original retained observation.
-            store.connection.execute("UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'", [published_metadata(&latest)]).unwrap();
+            store
+                .connection
+                .execute(
+                    "UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'",
+                    [published_metadata(&latest)],
+                )
+                .unwrap();
             let tx = store.connection.transaction().unwrap();
             write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
             tx.commit().unwrap();
-            Focused::open(&path, "original", &old).unwrap().verify(PAGE, &bytes).unwrap();
-            store.connection.execute("DELETE FROM session_history_catalog WHERE session_key='owner'", []).unwrap();
+            Focused::open(&path, "original", &old)
+                .unwrap()
+                .verify(PAGE, &bytes)
+                .unwrap();
+            store
+                .connection
+                .execute(
+                    "DELETE FROM session_history_catalog WHERE session_key='owner'",
+                    [],
+                )
+                .unwrap();
             latest.stat.modified_ns += 1;
             let tx = store.connection.transaction().unwrap();
             write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
@@ -1427,15 +1475,34 @@ mod tests {
             // been collected: its original fingerprint still qualifies it.
             live_reader.verify(PAGE, &bytes).unwrap();
             retained_reader.verify(PAGE, &bytes).unwrap();
-            let count: usize = store.connection.query_row("SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'", [], |r|r.get(0)).unwrap();
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(count, 1);
-            store.connection.busy_timeout(Duration::from_millis(10)).unwrap();
-            let checkpoint = |db: &Connection| db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r|r.get::<_,i64>(0)).unwrap();
+            store
+                .connection
+                .busy_timeout(Duration::from_millis(10))
+                .unwrap();
+            let checkpoint = |db: &Connection| {
+                db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+            };
             assert_eq!(checkpoint(&store.connection), 1, "request must pin WAL");
             drop(live_reader);
             assert!(owned_snapshot.upgrade().is_none());
             drop(retained_reader);
-            assert_eq!(checkpoint(&store.connection), 0, "last drop must release WAL");
+            assert_eq!(
+                checkpoint(&store.connection),
+                0,
+                "last drop must release WAL"
+            );
             drop(store);
             fs::remove_dir_all(root).unwrap();
         }
@@ -1447,7 +1514,8 @@ mod tests {
         let path = root.join("index.sqlite3");
         let mut store = cleanup_store(&root, "index.sqlite3");
         let (ledger, index) = cleanup_proof(1, 0);
-        let retained = published::prefix("original", &crate::source_carrier::ledger_digest(&ledger));
+        let retained =
+            published::prefix("original", &crate::source_carrier::ledger_digest(&ledger));
         let tx = store.connection.transaction().unwrap();
         write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
         let live = format!("{}header", prefix("original"));

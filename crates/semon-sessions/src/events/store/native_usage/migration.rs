@@ -1,10 +1,7 @@
 //! Additive, source-local conversion. Never infer an ID/event association from
 //! legacy sorted identities and insertion-ordered events.
 use super::*;
-use std::{
-    io::{BufRead, BufReader, Read},
-    sync::{Arc, Mutex},
-};
+use std::io::{BufRead, BufReader, Read};
 
 const DISCOVERY_ROWS: usize = 64;
 const RECORDS: usize = 512;
@@ -175,7 +172,7 @@ fn prepare(
     let db = Connection::open_with_flags(&store.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(sql_error)?;
     let proof =
-        chunk_proofs::Focused::with_db(Arc::new(Mutex::new(db)), &store.path, path, ledger)?;
+        chunk_proofs::Focused::with_db(chunk_proofs::Snapshot::new(db), &store.path, path, ledger)?;
     let mut reader = BufReader::new(Verified {
         file,
         proof,
