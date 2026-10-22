@@ -62,13 +62,14 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     for digest in saved.clone() {
         let retained = prefix(path, &digest);
         let header: Option<String> = tx
-            .query_row(NATIVE_METADATA_VALUE, [format!("{retained}header")], |r| r.get(0))
+            .query_row(NATIVE_METADATA_VALUE, [format!("{retained}header")], |r| {
+                r.get(0)
+            })
             .optional()?
             .flatten();
         let compatible = header.as_deref().is_some_and(|text| {
-            serde_json::from_str::<Header>(text).is_ok_and(|header| {
-                header.version == 1 && header.parser_version == CACHE_VERSION
-            })
+            serde_json::from_str::<Header>(text)
+                .is_ok_and(|header| header.version == 1 && header.parser_version == CACHE_VERSION)
         });
         if referenced.contains(&digest) && compatible {
             continue;
@@ -90,8 +91,10 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         .flatten();
     if let Some(header) = header.and_then(|text| serde_json::from_str::<Header>(&text).ok()) {
         let digest = crate::source_carrier::ledger_digest_value(&header.ledger);
-        if header.version == 1 && header.parser_version == CACHE_VERSION
-            && referenced.contains(&digest) && !saved.contains(&digest)
+        if header.version == 1
+            && header.parser_version == CACHE_VERSION
+            && referenced.contains(&digest)
+            && !saved.contains(&digest)
         {
             let retained = prefix(path, &digest);
             for (from, to) in namespaces(&live).iter().zip(namespaces(&retained)) {

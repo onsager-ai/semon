@@ -5426,9 +5426,12 @@ mod tests {
     #[test]
     fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
         for reader in ["web", "field", "mcp"] {
-            let (fixture, _) = local_only_codex_fixture();
+            let (fixture, path) = local_only_codex_fixture();
             let first = crate::session_transcript_range_with_mode(
-                &fixture.options, "source", "sid=local-proof&after=0&limit=1", None,
+                &fixture.options,
+                "source",
+                "sid=local-proof&after=0&limit=1",
+                None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
             );
             assert_eq!(first.status, 200);
@@ -5436,6 +5439,12 @@ mod tests {
             let generation = first["projection"]["generation"].as_str().unwrap();
             let cache = EventCache::path(&fixture.options.cache);
             let collect: Box<dyn FnOnce()> = Box::new(move || {
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2))
+                    .unwrap();
                 // Commit collection after recipe selection but before opening
                 // any lazy proof header. Only the request's WAL snapshot keeps
                 // this publication readable now.
@@ -5444,29 +5453,65 @@ mod tests {
                 ).unwrap();
             });
             if reader == "mcp" {
-                crate::query_source::BEFORE_FOCUSED_CAPTURE.with(|hook| *hook.borrow_mut() = Some(collect));
-                let mut query = crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
-                let result = query.call_selected(
-                    "source", "local-proof", "read_transcript", &json!({"id":"local-proof","after":0,"limit":1}),
-                    None, crate::SessionSourceReadMode::LocalOrPinnedProvider,
-                ).unwrap();
-                assert!(result.to_string().contains("local original prompt"), "{result}");
-                assert!(crate::query_source::BEFORE_FOCUSED_CAPTURE.with(|hook| hook.borrow().is_none()));
+                crate::query_source::BEFORE_FOCUSED_CAPTURE
+                    .with(|hook| *hook.borrow_mut() = Some(collect));
+                let mut query =
+                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                let result = query
+                    .call_selected(
+                        "source",
+                        "local-proof",
+                        "read_transcript",
+                        &json!({"id":"local-proof","after":0,"limit":1}),
+                        None,
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    )
+                    .unwrap();
+                assert!(
+                    result.to_string().contains("local original prompt"),
+                    "{result}"
+                );
+                assert!(
+                    crate::query_source::BEFORE_FOCUSED_CAPTURE
+                        .with(|hook| hook.borrow().is_none())
+                );
             } else {
-                crate::transcript_range::AFTER_SELECTION.with(|hook| *hook.borrow_mut() = Some(collect));
-                let request = format!("sid=local-proof&after=1&limit=1&generation={generation}{}", if reader == "field" { "&field_chunk=0" } else { "" });
+                crate::transcript_range::AFTER_SELECTION
+                    .with(|hook| *hook.borrow_mut() = Some(collect));
+                let request = format!(
+                    "sid=local-proof&after=1&limit=1&generation={generation}{}",
+                    if reader == "field" {
+                        "&field_chunk=0"
+                    } else {
+                        ""
+                    }
+                );
                 let reply = crate::session_transcript_range_with_mode(
-                    &fixture.options, "source", &request, None,
+                    &fixture.options,
+                    "source",
+                    &request,
+                    None,
                     crate::SessionSourceReadMode::LocalOrPinnedProvider,
                 );
-                assert_eq!(reply.status, 200, "{reader}: {}", String::from_utf8_lossy(&reply.body));
+                assert_eq!(
+                    reply.status,
+                    200,
+                    "{reader}: {}",
+                    String::from_utf8_lossy(&reply.body)
+                );
                 assert!(String::from_utf8_lossy(&reply.body).contains("local original answer"));
             }
             let fresh = crate::session_transcript_range_with_mode(
-                &fixture.options, "source", "sid=local-proof&after=0&limit=1", None,
+                &fixture.options,
+                "source",
+                "sid=local-proof&after=0&limit=1",
+                None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
             );
-            assert_eq!(fresh.status, 409, "a new request must not reuse the old snapshot");
+            assert_eq!(
+                fresh.status, 409,
+                "a new request must not reuse the old snapshot"
+            );
         }
     }
 
@@ -5540,23 +5585,35 @@ mod tests {
                     let expanded = crate::session_entry_field_with_mode(
                         &fixture.options,
                         "source",
-                        &format!("sid=local-proof&after={after}&limit=1&generation={generation}&field_chunk=0"),
+                        &format!(
+                            "sid=local-proof&after={after}&limit=1&generation={generation}&field_chunk=0"
+                        ),
                         None,
                         crate::SessionSourceReadMode::LocalOrPinnedProvider,
                     );
-                    assert_eq!(expanded.status, 200, "{mutation}: {}", String::from_utf8_lossy(&expanded.body));
+                    assert_eq!(
+                        expanded.status,
+                        200,
+                        "{mutation}: {}",
+                        String::from_utf8_lossy(&expanded.body)
+                    );
                     let expanded: Value = serde_json::from_slice(&expanded.body).unwrap();
                     assert_eq!(expanded["text"], text);
                 }
                 let mut query =
                     crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
                 for tool in ["get_session", "read_transcript"] {
+                    let args = if tool == "get_session" {
+                        json!({"id":"local-proof"})
+                    } else {
+                        json!({"id":"local-proof","after":0,"limit":1})
+                    };
                     let value = query
                         .call_selected(
                             "source",
                             "local-proof",
                             tool,
-                            &json!({"id":"local-proof","after":0,"limit":1}),
+                            &args,
                             None,
                             crate::SessionSourceReadMode::LocalOrPinnedProvider,
                         )
