@@ -71,7 +71,7 @@ No original log is modified, removed, sealed or renamed. Old receiver copies are
 retained by the existing protocol. The sender's existing state lock owns cache
 mutation and outlives outstanding upload/facts workers as before.
 
-## Upload audit and measurements
+## Reference receiver prototype
 
 Before and after this change, native `Client::post_wait` serializes JSON containing
 base64 file bytes and calls reqwest `body`; it sets no `Content-Encoding` and has
@@ -79,15 +79,18 @@ no request compressor. Hub's append route consumes bounded bytes as JSON. Hub's
 `CompressionLayer` applies to responses. Neither response gzip/Brotli nor sealed
 Zstd segments establish compressed uploads.
 
-`python3 scripts/benchmark-upload-compression.py --mib 16` compares identity,
-gzip level 1 and Zstd level 3 with actual HTTP/1.1 loopback requests, the native
-Append envelope, JSON/base64 decoding, append/fsync before acknowledgement, 100
-live appends and 100 subsequent 4 KiB reads. Each mode runs in a fresh process.
-The corpus comprises 34 checked-in, non-private compatibility JSONL fixtures,
-224,081 source bytes, repeated to 16 MiB; SHA-256 of the fixture concatenation:
-`3c52925bf994827cb8f5ee66a7721d11f135cfab092e5603464a09785d921d7d`.
-CI runs the same experiment at 1 MiB and emits JSON; timing thresholds are not
-used as flaky correctness gates.
+`scripts/benchmark-upload-compression.py` is a **reference receiver prototype**.
+It compares identity, gzip level 1 and Zstd level 3 with loopback HTTP/1.1,
+the native Append envelope, JSON/base64 decoding, append/fsync before
+acknowledgement, 100 synthetic appends and 100 subsequent 4 KiB reads. Each
+mode runs in a fresh process. It does not exercise the pusher process or Hub's
+PostgreSQL, authorization, quota, Index or sealed storage paths.
+
+The retained prototype snapshot used 34 checked-in compatibility JSONL files,
+224,081 source bytes, repeated to 16 MiB. Its concatenation hash and local
+numbers below describe only that older prototype run; they are not the current
+corpus fingerprint or product upload evidence. CI continues to run this small
+reference experiment as a labeled prototype, with no timing threshold.
 
 Five local trials on 2026-10-22, Python 3.12.3/Linux, median per metric:
 
@@ -97,25 +100,27 @@ Five local trials on 2026-10-22, Python 3.12.3/Linux, median per metric:
 | gzip-1 | 5,736,701 | 14.74 | 0.511 | 0.158 / 0.079 | 73,508 | 9.99 / 18.33 | 0.100 / 0.265 |
 | Zstd-3 | 4,034,838 | 12.62 | 0.505 | 0.081 / 0.111 | 84,940 | 11.66 / 20.60 | 0.078 / 0.161 |
 
-Wire counts include request headers and encoded bodies as actually sent through
-the socket API, before TCP/IP/TLS framing; the experiment uses loopback HTTP.
-CPU is the reference sender/server process combined, with per-thread codec CPU
-also measured. RSS includes Python and its bounded reference decode buffers, not
-native product memory. This is an experimental receiver, not Hub's PostgreSQL,
-authorization, quota, Index, sealed storage or production network path. The host
-also ran Rust checks and an original-home watch; latency/throughput varied with
-contention. Corpus repetition can favor compression. Subsequent reads load the
-same plain logical bytes in all modes and do not establish a storage speedup.
+These prototype wire counts include request headers and encoded bodies before
+TCP/IP/TLS framing. Its process CPU combines the reference sender and receiver;
+RSS is Python process memory. The results are sensitive to corpus repetition
+and host contention, and do not establish Hub or production throughput.
 
-Gzip and Zstd reduced measured upload wire bytes by 74.4% and 82.0% here. They
-increased CPU and did not establish a throughput or live-latency improvement on
-this host. Keep **identity as the supported/default upload encoding** in this
-change. No upload negotiation or retry with another encoding is introduced:
-existing receivers remain compatible, and an uncertain external write is never
-replayed merely to change codecs. A future compressed-upload option requires
-explicit receiver capability admission, independent encoded/decoded caps before
-body inflation, unchanged logical quota charging and measured deployed-network
-benefit. A response's `Accept-Encoding`/`Content-Encoding` is not that capability.
+The prototype reported lower encoded bytes and higher CPU on its local fixture
+snapshot. Those figures do not change the product protocol. **Identity remains
+the only supported upload encoding**; gzip and Zstd appear only as unsupported
+benchmark prototypes. No upload negotiation or retry with another encoding is
+introduced. A response's `Accept-Encoding`/`Content-Encoding` does not advertise
+upload support.
+
+## Product upload benchmark
+
+The paired Hub benchmark starts the built native `semon push --watch` child
+against real Hub HTTP and restricted-role PostgreSQL. Its current corpus,
+method, CI report and limits are documented in
+[Hub native archive ingestion](https://github.com/onsager-ai/semon-hub/blob/fix/native-zstd-archives/docs/native-archive-ingestion.md).
+That report is separate from the reference receiver prototype above. Identity
+remains the only supported upload encoding; the candidate gzip/Zstd paths are
+test-only shims and introduce no product negotiation or fallback.
 
 ## Validation
 
