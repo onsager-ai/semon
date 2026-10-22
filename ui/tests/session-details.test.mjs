@@ -121,7 +121,20 @@ test('malformed or unsupported turn lifecycle cannot be accepted as successful c
     { phase: 'future' },
     { phase: 1 },
   ])
-    assert.throws(() => parseSessionDetails({ ...details(), turn_lifecycle }));
+    {
+      const parsed = parseSessionDetails({ ...details(), turn_lifecycle });
+      assert.deepEqual(parsed.turn_lifecycle, { phase: 'unknown' });
+      assert.equal(parsed.turns, 2);
+      assert.equal(parsed.calls, 1);
+    }
+});
+test('Claude details without Codex lifecycle retain independently validated fields', () => {
+  for (const turn_lifecycle of [undefined, null]) {
+    const parsed = parseSessionDetails({ ...details(), turn_lifecycle });
+    assert.equal(parsed.state, 'idle');
+    assert.equal(parsed.turns, 2);
+    assert.equal(parsed.turn_lifecycle, undefined);
+  }
 });
 test('selected usage preserves unknown cost and copied usage while native resume identity stays distinct', () => {
   const metadata = parseSessionDetails(details());

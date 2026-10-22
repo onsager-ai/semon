@@ -1,7 +1,7 @@
 import type { RecordedStatus } from './sessionDetails';
 /** Validated data consumed by domain calculations; no document or JSON bag types. */
-export type SessionState = 'work' | 'wait' | 'idle' | 'done' | 'err';
-export type HandoffStatus = 'work' | 'wait' | 'done' | 'err' | 'new';
+export type SessionState = 'work' | 'wait' | 'idle' | 'done' | 'err' | 'off';
+export type HandoffStatus = 'work' | 'wait' | 'idle' | 'done' | 'err' | 'new' | 'off';
 export type TokenKind =
   | 'input'
   | 'output'
