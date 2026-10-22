@@ -130,6 +130,43 @@ Diagnostics are bounded observations, not a common database/Raw snapshot. Header
 
 Publication diagnostics hash each distinct candidate path once per attempt and log at most 64 sources, prioritizing the bounded recent failure-interest set. Before a source's first failure registers interest, a target outside that fallback sample can be absent; its next eligible publication attempt is covered after interest registration while it remains in that set. Interest expiry, eviction and sources absent from the candidate batch remain coverage limits. `invalidations_total=unavailable` means its independent count query failed, not that there are zero pending invalidations. Staged focused-query failures retain the `io` code and its JSON shape with only an additive `stage`; native Web fences retain their existing status and fence kind. Diagnostic availability does not establish HP Code 1 readability.
 
+## Published proof retention and request snapshots
+
+Before replacing or clearing a path's live proof, the Index writer preserves
+the outgoing proof namespace when a Current or retained-history Catalog source
+still references its exact ledger. The reference decision, namespace copy and
+Index mutation use the same SQLite transaction. The per-path manifest contains
+only those referenced ledgers; the next source mutation collects superseded
+metadata, including incompatible parser versions. This preserves content-free
+hash pages and their tree/legacy witnesses, never native source bytes. No schema
+version changes. A rebuilt exact live header takes precedence over obsolete
+retained headers left by parser reset.
+
+Web transcript, continuation and field reads retain the selection transaction
+through lazy proof I/O. Focused MCP transfers its selected recipe connection to
+the request-owned proof reader too; it no longer opens its initial proofs in a
+different snapshot. Later MCP metadata reads retain their publication rechecks.
+All covering proof pages come from the pinned snapshot even if a producer
+replaces or collects their namespaces. The final reader drop rolls back and
+closes the owned read connection on success, failure or cancellation, releasing
+its WAL pin. A new request sees the new committed proofs and still rejects a
+changed header, false page root, tampered prefix, truncation or replacement.
+
+Legacy checksum preparation still commits bounded metadata steps independently.
+A fresh read transaction qualifies its exact header, complete marker and selected
+page witness together. If replacement or GC removed that preparation, the old
+reader qualifies the original whole-vector fingerprint by streaming one hash
+page at a time from its pinned snapshot. It never reconstructs proofs from Raw.
+Modern rooted proofs continue reading only covering pages and tree witnesses.
+
+Retention protects publications present at a future Index mutation. An upgrade
+which starts with Catalog L1 already orphaned by Index L2 cannot recreate L1
+proofs: reads remain unavailable until normal authorized producer publication
+supplies a compatible projection. Bounded browser recovery makes three automatic
+retries with backoff, then displays a terminal failure and manual retry while
+retaining previously loaded text. Neither recovery nor these regression cases
+establishes original HP Code 1 acceptance under persistent push.
+
 ## Exact-path consumed-prefix proof
 
 `session_source_proof(options, root, relative_path)` resolves one configured

@@ -106,6 +106,87 @@ const list = (items) => ({
 });
 
 for (const width of [390, 1280])
+  for (const retained of [false, true])
+    test(`repeated stale projection stops automatically and manual retry recovers at ${width}px retained=${retained}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 900 } });
+        page.setDefaultTimeout(10000);
+        let failing = !retained,
+          reads = 0;
+        const errors = [];
+        page.on('pageerror', (error) => errors.push(String(error)));
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(true) });
+          if (url.pathname === '/api/session-identity')
+            return route.fulfill({ json: { api: 1, identity: identity('one') } });
+          if (url.pathname === '/api/sessions')
+            return route.fulfill({
+              json: list([
+                {
+                  ...meta('one'),
+                  transcript: {
+                    generation: (failing ? 'c' : 'b').repeat(64),
+                    errors_generation: (failing ? 'c' : 'b').repeat(64),
+                    total: 65,
+                  },
+                },
+              ]),
+            });
+          if (url.pathname === '/api/session-transcript') {
+            ++reads;
+            return failing
+              ? route.fulfill({ status: 409, json: { error: 'stale_projection' } })
+              : route.fulfill({ json: transcript('one', url.searchParams) });
+          }
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/sessions?machine=source');
+        await page.clock.install({ time: new Date('2026-10-22T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-22T00:00:00.001Z'));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
+        });
+        await page.locator('#page [data-id="one"]').click();
+        if (retained) {
+          await page.locator('#page [data-entry-key="one:5"]').waitFor();
+          failing = true;
+        }
+        // Let metadata observation and the three backoffs run, allowing each
+        // routed asynchronous response to settle before advancing again.
+        for (let at = 0; at < 20; ++at) {
+          await page.clock.runFor(1000);
+          await page.waitForTimeout(20);
+        }
+        await page.getByText('Recorded history could not be loaded. Retry to try again.', { exact: true }).first().waitFor();
+        const stopped = reads;
+        assert.equal(stopped, retained ? 9 : 8, 'each of four attempts has one bounded resynchronization');
+        await page.clock.runFor(60000);
+        await page.waitForTimeout(30);
+        assert.equal(reads, stopped, 'background observations bypassed the exhausted retry budget');
+        if (retained) await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        if (process.env.SEMON_CATALOG_OUT) {
+          await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
+          await page.screenshot({ path: `${process.env.SEMON_CATALOG_OUT}/stale-terminal-${width}-${retained}.png` });
+        }
+        failing = false;
+        await page.getByRole('button', { name: 'Retry selected transcript', exact: true }).click();
+        await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        await page.getByText('Recorded history could not be loaded. Retry to try again.', { exact: true }).waitFor({ state: 'detached' });
+        await page.evaluate(() => app.destroy());
+        const destroyed = reads;
+        await page.clock.runFor(60000);
+        assert.equal(reads, destroyed, 'retry survived document teardown');
+        assert.deepEqual(errors, []);
+      } finally {
+        await browser.close();
+      }
+    });
+
+for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
     for (const workspaceChrome of [false, true])
       test(`native host chrome preserves forms with workspace chrome=${workspaceChrome} at ${width}px ${colorScheme}`, async () => {
