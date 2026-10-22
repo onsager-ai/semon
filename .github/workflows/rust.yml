@@ -59,6 +59,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      - name: Measure bounded upload codecs on non-private native fixtures
+        run: python3 scripts/benchmark-upload-compression.py --mib 1 | tee "$RUNNER_TEMP/upload-compression.json"
+
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
 

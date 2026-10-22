@@ -11,9 +11,10 @@ workspace and native harness state required for independent recovery.
 
 ## What is sent
 
-- **The input set:** exactly the files the model builder reads, listed by `semon_sessions::inputs` and checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
+- **The input set:** supported native logs and sidecars listed by `semon_sessions::inputs`. Decoded mirror target paths are checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
   - `claude` root: `projects/**/*.jsonl`, `projects/**/subagents/agent-<id>.meta.json`, `sessions/<pid>.json`.
-  - `codex` root: `sessions/**/*.jsonl`, `archived_sessions/**/*.jsonl`. Compressed rollouts and native databases are excluded.
+  - `codex` root: `sessions/**/*.jsonl`, `archived_sessions/**/*.jsonl` and their native `.jsonl.zst` archive equivalents. Native databases are excluded.
+  - Native `.jsonl.zst` equivalents of supported Claude and Copilot logs are also transport sources. The sender decodes and verifies each archive internally, then sends complete redacted logical records under the corresponding `.jsonl` path. Encoded byte positions never enter append cursors, status targets, quota accounting or source proofs. Full Codex inventory uses those same logical target paths. This changes neither the receiver allowlist nor the wire forms.
 - **The facts** (`semon_sessions::Facts`): what the model takes from the machine rather than from the logs. That is the hostname, `$HOME`, the start time of each process a Claude pid file names, which Codex runs hold their writer lock (and the holder's pid), and the repository of each working directory the logs name. A receiver builds with these in place of its own `/proc`, hostname and disk.
 - Optional v2 facts `codex_rollouts` lists the sender's current plain Codex rollout paths, relative to its home and validated by the Codex input allowlist. It is a content-free collector inventory. A present empty list selects no current sources; an absent field means selection is unknown for an older snapshot. The receiver retains previously uploaded files, but model, tree and transcript lookup use only the explicitly selected paths when this inventory is present. Thus an active-to-archive move, or its reverse, does not duplicate work. A completed push sends facts after its file pass; a partial pass is not a complete snapshot. No deletion or inferred move is performed.
 - **Redaction.** Every byte is redacted on the sending machine before it leaves (`semon_push::redact`). Known secret shapes become `*`, byte for byte, so lengths and offsets are unchanged and JSON lines stay valid. It is best effort: a secret of an unknown shape is sent as it is.
@@ -21,6 +22,10 @@ workspace and native harness state required for independent recovery.
 ## Requests
 
 All requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL the user gives `--to`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
+
+Request bodies currently use identity encoding. Response gzip/Brotli and sealed
+storage are independent. See [native archive transport and codec measurements](native-archive-transport.md)
+for the bounded archive reader, coexistence/restart rules and upload experiment.
 
 ### `POST <url>/v1/mirror/append`
 
