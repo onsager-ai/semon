@@ -1150,7 +1150,10 @@ mod sqlite_tests {
                 &connection,
                 "SELECT name FROM sqlite_schema WHERE type='index' AND name IN ('session_search_current_order','session_search_history_order') ORDER BY name",
             ),
-            ["session_search_current_order", "session_search_history_order"]
+            [
+                "session_search_current_order",
+                "session_search_history_order"
+            ]
         );
         assert_eq!(
             connection

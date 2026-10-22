@@ -1114,7 +1114,10 @@ mod tests {
             };
             drop(EventCache::open_scoped(&options.cache).unwrap());
             let db = Connection::open(EventCache::path(&options.cache)).unwrap();
-            db.execute("INSERT INTO meta VALUES('catalog_completeness','complete')", [])
+            db.execute(
+                "INSERT INTO meta VALUES('catalog_completeness','complete')",
+                [],
+            )
             .unwrap();
             Self {
                 source: OverviewSource {

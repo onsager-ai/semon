@@ -252,9 +252,8 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        crate::events::store::require_current(&db).map_err(|error| {
-            crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
-        })?;
+        crate::events::store::require_current(&db)
+            .map_err(|error| crate::source_carrier::FailureStage::ProofOpenDb.wrap(error))?;
         let db = crate::events::store::chunk_proofs::Snapshot::new(db);
         #[cfg(test)]
         if let Some(hook) = BEFORE_FOCUSED_CAPTURE.with(|hook| hook.borrow_mut().take()) {

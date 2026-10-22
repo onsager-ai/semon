@@ -4270,7 +4270,11 @@ fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        for sibling_path in [path.to_owned(), sibling(path, "-wal"), sibling(path, "-shm")] {
+        for sibling_path in [
+            path.to_owned(),
+            sibling(path, "-wal"),
+            sibling(path, "-shm"),
+        ] {
             if let Ok(metadata) = fs::symlink_metadata(&sibling_path)
                 && metadata.is_file()
                 && metadata.permissions().mode() & 0o077 != 0
@@ -6723,7 +6727,8 @@ mod tests {
     }
 
     #[test]
-    fn public_selected_upgrade_ignores_unrelated_archive_and_refuses_selected_marker_without_writes() {
+    fn storage_public_selected_upgrade_ignores_unrelated_archive_and_refuses_selected_marker_without_writes()
+     {
         let root = scratch("selected-open-public-entry");
         let (options, rows, _) = catalog_native_fixture(&root, 2, true);
         let selected = &rows[1];
@@ -6737,7 +6742,10 @@ mod tests {
         .unwrap();
         db.execute(
             "INSERT INTO meta(key,value) VALUES(?1,?2)",
-            params![archive_index_key("/synthetic/unrelated.jsonl"), r#"{"version":1}"#],
+            params![
+                archive_index_key("/synthetic/unrelated.jsonl"),
+                r#"{"version":1}"#
+            ],
         )
         .unwrap();
         db.execute(
@@ -6758,13 +6766,14 @@ mod tests {
             .unwrap(),
             path
         );
-        assert!(db
-            .query_row(
+        assert!(
+            db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
                 [&path],
                 |row| row.get::<_, bool>(0),
             )
-            .unwrap());
+            .unwrap()
+        );
 
         db.execute(
             "INSERT INTO meta(key,value) VALUES(?1,?2)",
@@ -6772,8 +6781,9 @@ mod tests {
         )
         .unwrap();
         let snapshot = |connection: &Connection| {
-            let mut meta_statement =
-                connection.prepare("SELECT key,value FROM meta ORDER BY key").unwrap();
+            let mut meta_statement = connection
+                .prepare("SELECT key,value FROM meta ORDER BY key")
+                .unwrap();
             let meta = meta_statement
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -9405,7 +9415,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_repair_ignores_unrelated_archive_markers_and_refuses_selected_damage() {
+    fn storage_selected_repair_ignores_unrelated_archive_markers_and_refuses_selected_damage() {
         let root = scratch("selected-archive-marker");
         let (mut store, _) = opened(&root.join("index.sqlite3"));
         let unrelated_key = archive_index_key("unrelated.jsonl");
@@ -9472,9 +9482,11 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(store
-            .remove(&[("selected.jsonl".into(), Some(ledger(2)))])
-            .is_err());
+        assert!(
+            store
+                .remove(&[("selected.jsonl".into(), Some(ledger(2)))])
+                .is_err()
+        );
         let after = store
             .connection
             .query_row(
@@ -9493,7 +9505,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after, before);
-        assert_eq!(store.read_one("selected.jsonl").unwrap().unwrap().0, ledger(2));
+        assert_eq!(
+            store.read_one("selected.jsonl").unwrap().unwrap().0,
+            ledger(2)
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
