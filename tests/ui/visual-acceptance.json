@@ -6,7 +6,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -34,7 +34,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-harbor-thinking-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -62,7 +62,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-harbor-tools-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -90,7 +90,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-harbor-tool-output-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -118,7 +118,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -146,7 +146,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -174,7 +174,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-light-session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -202,7 +202,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -230,7 +230,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-harbor-thinking-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -258,7 +258,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-harbor-tools-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -286,7 +286,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-harbor-tool-output-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -314,7 +314,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -342,7 +342,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -370,7 +370,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "390-dark-session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -398,7 +398,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -426,7 +426,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-harbor-thinking-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -454,7 +454,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-harbor-tools-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -482,7 +482,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-harbor-tool-output-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -510,7 +510,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -538,7 +538,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -566,7 +566,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-light-session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -594,7 +594,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -622,7 +622,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-harbor-thinking-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -650,7 +650,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-harbor-tools-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -678,7 +678,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-harbor-tool-output-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -706,7 +706,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -734,7 +734,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -762,7 +762,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "820-dark-session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -790,7 +790,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -818,7 +818,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-harbor-thinking-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -846,7 +846,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-harbor-tools-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -874,7 +874,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-harbor-tool-output-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -902,7 +902,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -930,7 +930,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -958,7 +958,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-light-session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -986,7 +986,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1014,7 +1014,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-harbor-thinking-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1042,7 +1042,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-harbor-tools-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1070,7 +1070,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-harbor-tool-output-open",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1098,7 +1098,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1126,7 +1126,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1154,7 +1154,7 @@
       "scope": "required",
       "kind": "frame",
       "key": "1280-dark-session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1182,7 +1182,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-docs",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1210,7 +1210,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-index",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1238,7 +1238,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-parse",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1266,7 +1266,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-review",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1294,7 +1294,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-review-grep",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1322,7 +1322,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-scan",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1350,7 +1350,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-a-store",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1378,7 +1378,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-advisor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1406,7 +1406,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-atlas",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1434,7 +1434,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1462,7 +1462,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1490,7 +1490,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-h-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1518,7 +1518,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1546,7 +1546,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-h-review",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1574,7 +1574,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-h-review-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1602,7 +1602,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1630,7 +1630,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-l-sub",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1658,7 +1658,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-ledger",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1686,7 +1686,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-principal",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1714,7 +1714,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-q-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1742,7 +1742,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-q-plan",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1770,7 +1770,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-quill",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1798,7 +1798,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-light|session-sentinel",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1826,7 +1826,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-docs",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1854,7 +1854,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-index",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1882,7 +1882,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-parse",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1910,7 +1910,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-review",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1938,7 +1938,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-review-grep",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1966,7 +1966,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-scan",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -1994,7 +1994,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-a-store",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2022,7 +2022,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-advisor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2050,7 +2050,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-atlas",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2078,7 +2078,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2106,7 +2106,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2134,7 +2134,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-h-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2162,7 +2162,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2190,7 +2190,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-h-review",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2218,7 +2218,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-h-review-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2246,7 +2246,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2274,7 +2274,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-l-sub",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2302,7 +2302,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-ledger",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2330,7 +2330,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-principal",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2358,7 +2358,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-q-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2386,7 +2386,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-q-plan",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2414,7 +2414,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-quill",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2442,7 +2442,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "phone-dark|session-sentinel",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2470,7 +2470,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-docs",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2498,7 +2498,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-index",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2526,7 +2526,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-parse",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2554,7 +2554,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-review",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2582,7 +2582,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-review-grep",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2610,7 +2610,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-scan",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2638,7 +2638,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-a-store",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2666,7 +2666,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-advisor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2694,7 +2694,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-atlas",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2722,7 +2722,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-atlas-ingest",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2750,7 +2750,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-deps",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2778,7 +2778,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-h-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2806,7 +2806,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-h-failed",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2834,7 +2834,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-h-review",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2862,7 +2862,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-h-review-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2890,7 +2890,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-harbor",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2918,7 +2918,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-l-sub",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2946,7 +2946,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-ledger",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -2974,7 +2974,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-principal",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3002,7 +3002,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-q-codex",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3030,7 +3030,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-q-plan",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3058,7 +3058,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-quill",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3086,7 +3086,7 @@
       "scope": "main",
       "kind": "frame",
       "key": "desktop-light|session-sentinel",
-      "candidateFingerprint": "aee7ee3858764c365490a1fa7eb9ad78be14e24e7cc5d3b9771cc06d9d6c27ac",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3108,6 +3108,99 @@
       "reviewedBy": "Task owner (2026-10-19 notice-removal approval); Codex (CI image/evidence reinspection for account-menu SPA)",
       "reviewedAt": "2026-10-19T10:43:56+00:00",
       "rationale": "Previously owner-approved passive control notice/disclosure removal and resulting dock/full-page scroll geometry. CI run 39223065023 images re-inspected by change family, including phone tools, tablet Thinking, desktop output, failed/returned children, closed Atlas and long full-page clipping. Exact unchanged captures retain their prior image review; changed captures and bounded evidence show the same approved causes. See tests/ui/README.md. Exact artifacts only; raw findings and thresholds retained. Fingerprint-only rebind (2026-10-22): recipe-v6 bundle changed the runtime fingerprint. Gateway reports that all six artifact digests for all 111 pending states are unchanged in CI run 39713141191, artifact 12398066659 (https://github.com/onsager-ai/semon/actions/runs/39713141191/artifacts/12398066659). Gateway actual-image reinspection of desktop-light session-a-parse found only the previously owner-approved removal of \"Native session controls are unavailable.\". Original per-state image reviews, owner decisions, reference pins and exact artifact bindings remain in force; no new visual change is accepted. Fingerprint-only main integration rebind (2026-10-22): the fingerprint hashes the complete runtime binary; main634b5312 pricing and parser cache28 changed that binary. CI run39719244674 artifact12400668006 supplies the current reports. This procedure requires all666 artifact digests across111 pending states to equal their existing owner-reviewed bindings before writing. The earlier recipe-v6 attribution describes a whole-binary change that included the recipe-v6 bundle. Prior decisions, per-state reviews, reference pins and provenance remain unchanged; no new visual change is accepted."
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "phone-light|session-deps|menu",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
+      "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
+      "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
+      "artifactDigests": {
+        "candidate": {
+          "image": "e966a5fcdfd654186a496cdad0a4877127e3d53a09cde74983de413792ef6d13",
+          "evidence": "19cafa64ba7c598a09e4a1937cd8c589c4ecf643e156b317d7ef639be7f2afa6"
+        },
+        "reference": {
+          "image": "f17fda0419559bc4aad43282c34d43820c5f02f6112ea8ef09c697c2bd416110",
+          "evidence": "285bbcb2f9731169f5c653b5c942e88166fa593bc5f5cf63013ca4108387fb74"
+        },
+        "diff": {
+          "image": "0e1b5066924cede3ab6df745e8c7f1922cda39b2246ef5330802ded1c66e9e90",
+          "evidence": "b498a6f6ca41608778e0f298973e1447367ec715c330b0916eb108e68ef256ef"
+        }
+      },
+      "pixels": 6896,
+      "ratio": 0.005949546191807296,
+      "size": null,
+      "decision": "accepted",
+      "reviewedCandidate": "9dc88082ea630e542850d94e043ed9dc9ef52f21",
+      "reviewedBy": "Independent Claude acceptance acceptance-image-table-ea77 actual-image inspection; Manager exact-binding-proof-500a decision",
+      "reviewedAt": "2026-10-22T10:43:04+00:00",
+      "rationale": "Expected #430 P0 Last-turn row insertion with downstream menu shift, independently inspected in the reference/candidate/diff images. Exact same-run artifacts verified by CI run 39763385836, artifact 12418164659. Raw comparisons, thresholds, coverage and reference pins remain unchanged; no human appearance approval is claimed."
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "phone-dark|session-deps|menu",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
+      "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
+      "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
+      "artifactDigests": {
+        "candidate": {
+          "image": "7a0eb09e7aaadf1d385adc78de220f9955911a99a28e8bf9c1779af24b5f5af1",
+          "evidence": "893bec0db3474fbda7a685a4cf67a280d120b7733557091836b401421143f27f"
+        },
+        "reference": {
+          "image": "e1b926384c83effbdd2753c90759e7d2103f85ee8910f096d0a26a055bf363d8",
+          "evidence": "542ee5e71101c7854ab96e165e8f7afa96d9e3baeb5a5afacc012d154cee8ed8"
+        },
+        "diff": {
+          "image": "78f203697adcf4396d963bcd54d1389740c263a39ee007882f63f3cbc9461121",
+          "evidence": "bc7e65cfeae85c0575f95fd2a43fba87c2d6e8ca83afe319b18f8a4a3ec64b31"
+        }
+      },
+      "pixels": 6795,
+      "ratio": 0.005862408116782275,
+      "size": null,
+      "decision": "accepted",
+      "reviewedCandidate": "9dc88082ea630e542850d94e043ed9dc9ef52f21",
+      "reviewedBy": "Independent Claude acceptance acceptance-image-table-ea77 actual-image inspection; Manager exact-binding-proof-500a decision",
+      "reviewedAt": "2026-10-22T10:43:04+00:00",
+      "rationale": "Expected #430 P0 Last-turn row insertion with downstream menu shift, independently inspected in the reference/candidate/diff images. Exact same-run artifacts verified by CI run 39763385836, artifact 12418164659. Raw comparisons, thresholds, coverage and reference pins remain unchanged; no human appearance approval is claimed."
+    },
+    {
+      "comparator": "pixels",
+      "scope": "main",
+      "kind": "region",
+      "key": "desktop-light|session-deps|menu",
+      "candidateFingerprint": "650e29a34fba13e6f0d8e47cf73673471d0ba4e0495c6b85a2e2c0116c291729",
+      "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
+      "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
+      "artifactDigests": {
+        "candidate": {
+          "image": "80af7727c1b443b4f212416c615a3f38337d4e1ee042438e02e4623f5067507b",
+          "evidence": "1461d1f5403d39b20acd6f4ae698b6c1dc1d953d8afd35832c641c147c13c8ff"
+        },
+        "reference": {
+          "image": "8ccdd48bb20a9c71585a0d2559741f0def8d34ab878f18901450cf263ff88fbc",
+          "evidence": "de4636be65b604e5111cb587d97c02433b09461713f4efaf3f9a38d235efa83e"
+        },
+        "diff": {
+          "image": "505815948341710abcc8b70299ed293c4788ab0a1857ce82bedf079877220528",
+          "evidence": "f9448385c084cd1990821794057c1de0a5756aa044fa0b31b42996ac1ac915a8"
+        }
+      },
+      "pixels": 3956,
+      "ratio": 0.01267948717948718,
+      "size": null,
+      "decision": "accepted",
+      "reviewedCandidate": "9dc88082ea630e542850d94e043ed9dc9ef52f21",
+      "reviewedBy": "Independent Claude acceptance acceptance-image-table-ea77 actual-image inspection; Manager exact-binding-proof-500a decision",
+      "reviewedAt": "2026-10-22T10:43:04+00:00",
+      "rationale": "Expected #430 P0 Last-turn row insertion with downstream menu shift, independently inspected in the reference/candidate/diff images. Exact same-run artifacts verified by CI run 39763385836, artifact 12418164659. Raw comparisons, thresholds, coverage and reference pins remain unchanged; no human appearance approval is claimed."
     }
   ]
 }
