@@ -1019,6 +1019,7 @@ mod sqlite_tests {
             last: Some(1),
             tokens: [0.0; 3],
             cost: crate::pricing::Cost {
+                pricing_fingerprint: String::new(),
                 usd: None,
                 unpriced_models: Vec::new(),
                 split_unknown_messages: 0,
