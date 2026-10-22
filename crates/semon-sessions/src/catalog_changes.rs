@@ -99,7 +99,8 @@ pub fn compact_session_catalog_changes(
     connection
         .busy_timeout(Duration::from_millis(100))
         .map_err(|_| CatalogIdentityError::Unavailable)?;
-    crate::events::store::require_current(&connection).map_err(|_| CatalogIdentityError::Unavailable)?;
+    crate::events::store::require_current(&connection)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
     compact(
         &mut connection,
         scope,
@@ -224,7 +225,8 @@ pub fn session_catalog_changes(
     connection
         .busy_timeout(Duration::from_millis(100))
         .map_err(|_| CatalogIdentityError::Unavailable)?;
-    crate::events::store::require_current(&connection).map_err(|_| CatalogIdentityError::Unavailable)?;
+    crate::events::store::require_current(&connection)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
     read(
         &mut connection,
         source_key,
@@ -317,8 +319,13 @@ mod tests {
     fn initialize(db: &Connection) {
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
         db.execute_batch(SCHEMA).unwrap();
-        db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION).unwrap();
-        db.execute("INSERT INTO meta VALUES('cache_version',?1)", [crate::events::CACHE_VERSION.to_string()]).unwrap();
+        db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION)
+            .unwrap();
+        db.execute(
+            "INSERT INTO meta VALUES('cache_version',?1)",
+            [crate::events::CACHE_VERSION.to_string()],
+        )
+        .unwrap();
         db.execute(
             "INSERT INTO meta VALUES('catalog_version',?1)",
             [CATALOG_VERSION.to_string()],
