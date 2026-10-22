@@ -54,7 +54,7 @@ export function traceTokenText(total: number): string {
 const optionalText = (value: unknown) => (value == null ? undefined : text(value));
 const optionalNumber = (value: unknown) => (value == null ? undefined : number(value));
 function state(value: unknown): SessionState {
-  if (value === 'off') return 'idle';
+  if (value === 'off') return 'off';
   if (
     value !== 'work' &&
     value !== 'wait' &&
@@ -540,6 +540,8 @@ export function traceHandoffOutcome(edge: Handoff, readResults?: ReadonlySet<str
       new: undefined,
       work: 'working',
       wait: 'waiting on you',
+      idle: 'idle',
+      off: 'status unknown',
       err: 'failed',
       done: edge.kind === 'toyou' ? 'answered' : edge.result ? 'returned' : 'delivered',
     }[edge.status],
