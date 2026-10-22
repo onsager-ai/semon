@@ -2833,8 +2833,35 @@ fn assert_contract_reference(
         Ok(value) => json!({"ok":value}),
         Err(error) => json!({"err":error.to_json()}),
     };
+    // The frozen cx fixture has no durable start or terminal. The retired
+    // engine inferred `ended` from its absent writer; the lifecycle contract
+    // deliberately reports unknown instead. Keep the capture immutable and
+    // compare every other field against that independent oracle.
+    fn lifecycle_contract(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                if object.get("id") == Some(&json!("cx"))
+                    && object.get("harness") == Some(&json!("codex"))
+                    && object.get("state") == Some(&json!("ended"))
+                {
+                    object.insert("state".into(), json!("unknown"));
+                }
+                for child in object.values_mut() {
+                    lifecycle_contract(child);
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    lifecycle_contract(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut expected = rows[0]["response"].clone();
+    lifecycle_contract(&mut expected);
     assert_eq!(
-        actual, rows[0]["response"],
+        actual, expected,
         "{scope}: {scenario}, multiple={multiple}, {tool} {args}"
     );
 }
