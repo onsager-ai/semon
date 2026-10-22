@@ -2,7 +2,8 @@
 //! It keeps a receiver's copy of this machine's session logs in step with
 //! the originals, appending as they grow, and sends the machine's facts.
 //!
-//! - Only the builder's input files are read (`semon_sessions::inputs`).
+//! - Only native input sources are read (`semon_sessions::inputs`), including
+//!   compressed history prepared by the bounded private archive reader.
 //! - Every byte sent is redacted first ([`redact`]).
 //! - A JSONL log is sent in complete lines only; its last, incomplete line
 //!   waits until it is complete.
@@ -34,6 +35,7 @@ use std::{
 use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
+mod archives;
 mod lock;
 pub mod mirror;
 pub mod redact;
@@ -343,6 +345,12 @@ enum GenerationSupport {
     Supported,
 }
 
+struct Source {
+    path: PathBuf,
+    plain: Option<PathBuf>,
+    prepared: bool,
+}
+
 pub struct Client {
     url: String,
     token: Token,
@@ -357,6 +365,9 @@ pub struct Client {
     progress: Arc<Mutex<status::Progress>>,
     completed_inventory: Option<BTreeSet<String>>,
     committed_inventory: Option<BTreeSet<String>>,
+    archives: archives::Cache,
+    sources: BTreeMap<String, Source>,
+    catchup_pending: bool,
 }
 
 impl Client {
@@ -391,6 +402,9 @@ impl Client {
             progress: Arc::new(Mutex::new(status::Progress::new(wire::new_generation()?))),
             completed_inventory: None,
             committed_inventory: None,
+            archives: archives::Cache::new(&options.state),
+            sources: BTreeMap::new(),
+            catchup_pending: false,
         })
     }
 
@@ -580,6 +594,7 @@ impl Client {
     }
 
     fn pass_limited(&mut self, sessions: &Options, batch_limit: Option<usize>) -> Result<Report> {
+        self.catchup_pending = false;
         self.completed_inventory = None;
         {
             let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -623,8 +638,44 @@ impl Client {
                 foreground_turns = 0;
                 history.pop_front().expect("history")
             };
-            let (input, target, rank) = selected.get(&key).expect("selected");
-            let path = input.full_path(sessions);
+            let (input, target, rank) = selected.get_mut(&key).expect("selected");
+            let source = self.sources.get_mut(&key).expect("discovered source");
+            let path = if source.path.extension().is_some_and(|ext| ext == "zst") {
+                match self.archives.step(&source.path, source.plain.as_deref()) {
+                    Ok(Some(path)) => {
+                        if !source.prepared {
+                            *target = FileStat::from_metadata(
+                                &fs::metadata(&path).map_err(|e| e.to_string())?,
+                            );
+                            source.prepared = true;
+                        }
+                        path
+                    }
+                    Ok(None) => {
+                        if use_foreground {
+                            foreground.push_back(key);
+                        } else {
+                            history.push_back(key);
+                        }
+                        // Waiting for an admission slot cannot exhaust the
+                        // budget before active archive jobs get another turn.
+                        if self.archives.active(&source.path) {
+                            batches += 1;
+                        }
+                        if batch_limit.is_some_and(|limit| batches >= limit) {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        local_failure = true;
+                        eprintln!("semon push: {key}: {error}");
+                        continue;
+                    }
+                }
+            } else {
+                source.path.clone()
+            };
             let log = input.path.ends_with(".jsonl");
             let outcome = if log {
                 self.sync_log(input, &path, target.len)
@@ -676,6 +727,7 @@ impl Client {
             }
         }
         report.files = touched.len();
+        self.catchup_pending = !foreground.is_empty() || !history.is_empty();
         self.save()?;
         if complete && !local_failure && !self.stop.is_stopped() {
             self.completed_inventory = Some(
@@ -717,8 +769,51 @@ impl Client {
     ) -> Result<()> {
         let runtime = semon_sessions::local_runtime_facts(sessions).map_err(|e| e.to_string())?;
         let mut fresh = Vec::new();
-        let inputs = semon_sessions::inputs(sessions).map_err(|e| e.to_string())?;
-        let present = inputs.iter().map(Self::key).collect::<BTreeSet<_>>();
+        let discovered = semon_sessions::inputs(sessions).map_err(|e| e.to_string())?;
+        // Both encodings name one logical mirror path. Coexisting sources
+        // must agree over their common prefix before selecting the longer one.
+        let mut inputs = BTreeMap::<String, (Input, Source)>::new();
+        for source in discovered {
+            let mut input = source.clone();
+            let archive = input.path.ends_with(".jsonl.zst");
+            if archive {
+                input.path.truncate(input.path.len() - 4);
+            }
+            let key = Self::key(&input);
+            let path = source.full_path(sessions);
+            if let Some((_, found)) = inputs.get_mut(&key) {
+                if archive {
+                    found.plain = Some(found.path.clone());
+                    found.path = path;
+                } else {
+                    found.plain = Some(path);
+                }
+            } else {
+                inputs.insert(
+                    key,
+                    (
+                        input,
+                        Source {
+                            path,
+                            plain: None,
+                            prepared: false,
+                        },
+                    ),
+                );
+            }
+        }
+        let inputs = inputs.into_values().collect::<Vec<_>>();
+        let present = inputs
+            .iter()
+            .map(|(input, _)| Self::key(input))
+            .collect::<BTreeSet<_>>();
+        self.sources.retain(|key, _| present.contains(key));
+        self.archives.retain(
+            &inputs
+                .iter()
+                .map(|(_, source)| source.path.clone())
+                .collect(),
+        );
         selected.retain(|key, _| present.contains(key));
         foreground.retain(|key| present.contains(key));
         history.retain(|key| present.contains(key));
@@ -726,20 +821,20 @@ impl Client {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .prune_targets(&present);
-        for input in inputs {
+        for (input, source) in inputs {
             let key = Self::key(&input);
             if selected.contains_key(&key) {
                 continue;
             }
-            let stat = FileStat::from_metadata(
-                &fs::metadata(input.full_path(sessions)).map_err(|e| e.to_string())?,
-            );
+            let stat =
+                FileStat::from_metadata(&fs::metadata(&source.path).map_err(|e| e.to_string())?);
             let live = input.root == semon_sessions::InputRoot::Codex
                 && !runtime.codex_locks.is_empty()
                 && semon_sessions::codex_native_id_prefix(&input.full_path(sessions), stat.len)
                     .ok()
                     .flatten()
                     .is_some_and(|id| runtime.codex_locks.contains_key(&id));
+            self.sources.insert(key, source);
             fresh.push((input, stat, live));
         }
         // Recent files first, deterministic ties; small files win equal time.
@@ -776,7 +871,13 @@ impl Client {
             } else {
                 history.push_back(key.clone());
             }
-            self.update_target(&input, stat.len, rank, Some(stat));
+            if !self.sources[&key]
+                .path
+                .extension()
+                .is_some_and(|ext| ext == "zst")
+            {
+                self.update_target(&input, stat.len, rank, Some(stat));
+            }
             selected.insert(key, (input, stat, rank));
         }
         // Refill vacancies after deletion/moves without rescanning files or
@@ -788,7 +889,12 @@ impl Client {
                 .unwrap_or_else(|e| e.into_inner())
                 .targets
                 .contains_key(&Self::key(input));
-            if missing {
+            if missing
+                && !self.sources[&Self::key(input)]
+                    .path
+                    .extension()
+                    .is_some_and(|ext| ext == "zst")
+            {
                 self.update_target(input, stat.len, *rank, Some(*stat));
             }
         }
@@ -1214,8 +1320,8 @@ fn local(error: io::Error) -> Failure {
     Failure::Local(error.to_string())
 }
 
-fn open_input(path: &Path) -> io::Result<fs::File> {
-    let file = semon_sessions::open_read_only_input(path)?;
+fn open_input(path: &Path) -> io::Result<semon_sessions::sealed::LogFile> {
+    let file = semon_sessions::sealed::LogFile::open(path)?;
     #[cfg(test)]
     INPUT_OPENS.with(|opens| {
         *opens.borrow_mut().entry(path.to_owned()).or_default() += 1;
@@ -1485,6 +1591,7 @@ fn push_running(
         // An idle pass made no request, so it cannot prove the receiver
         // resumed accepting appends. Keep the restriction until a real ack.
         let idle = matches!(&pass, Ok(report) if report.files == 0);
+        let catchup_pending = pass.is_ok() && client.catchup_pending;
         let messages = if idle && backoff.state.is_some() {
             Vec::new()
         } else {
@@ -1554,7 +1661,12 @@ fn push_running(
             }
             last_facts = Instant::now();
         }
-        let deadline = Instant::now() + backoff.delay();
+        let delay = if catchup_pending && backoff.state.is_none() {
+            Duration::ZERO
+        } else {
+            backoff.delay()
+        };
+        let deadline = Instant::now() + delay;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1899,6 +2011,51 @@ mod tests {
             upgraded,
             reference,
         )
+    }
+
+    #[test]
+    fn newer_archives_cannot_starve_the_decoders_already_admitted_across_watch_passes() {
+        let fixture = Fixture::new();
+        let receiver = receiver();
+        let raw = b"{}\n".repeat(1_000_000);
+        let encoded = zstd::stream::encode_all(raw.as_slice(), 3).unwrap();
+        for n in 0..4 {
+            fixture.write(
+                &format!("codex/archived_sessions/old-{n}.jsonl.zst"),
+                &encoded,
+            );
+        }
+        let mut client = Client::new(&fixture.push_options(&receiver.url)).unwrap();
+        client.watch_pass(&fixture.options).unwrap();
+        assert_eq!(client.archives.jobs_len_for_test(), 4);
+        assert!(client.catchup_pending);
+        for n in 0..4 {
+            let path = fixture.write(
+                &format!("codex/archived_sessions/new-{n}.jsonl.zst"),
+                &encoded,
+            );
+            fs::File::open(path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(1))
+                .unwrap();
+        }
+        for _ in 0..200 {
+            client.watch_pass(&fixture.options).unwrap();
+            if client.completed_inventory.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            client.completed_inventory.as_ref().map(BTreeSet::len),
+            Some(8)
+        );
+        assert!(!client.catchup_pending);
+        for n in 0..4 {
+            for prefix in ["old", "new"] {
+                let key = format!("codex/archived_sessions/{prefix}-{n}.jsonl");
+                assert_eq!(client.state.files[&key].sent, raw.len() as u64);
+            }
+        }
     }
 
     #[test]
