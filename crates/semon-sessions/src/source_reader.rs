@@ -265,6 +265,42 @@ fn read_bounded(
     record_max: usize,
     bytes_left: &mut usize,
 ) -> io::Result<(Option<serde_json::Value>, u64)> {
+    let bytes = read_bounded_bytes(reader, source, expected, offset, record_max, bytes_left)?;
+    Ok((
+        if bytes.len() > record_max {
+            None
+        } else {
+            crate::tx::parse_native_record(&bytes)
+        },
+        bytes.len() as u64,
+    ))
+}
+
+pub(crate) fn read_record_bytes_bounded(
+    reader: &dyn SessionSourceReader,
+    source: &SessionSourceRef,
+    offset: u64,
+    record_max: usize,
+    bytes_left: &mut usize,
+) -> io::Result<Vec<u8>> {
+    let bytes = read_bounded_bytes(reader, source, None, offset, record_max, bytes_left)?;
+    if bytes.len() > record_max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Native record exceeds its bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_bounded_bytes(
+    reader: &dyn SessionSourceReader,
+    source: &SessionSourceRef,
+    expected: Option<&str>,
+    offset: u64,
+    record_max: usize,
+    bytes_left: &mut usize,
+) -> io::Result<Vec<u8>> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -313,10 +349,10 @@ fn read_bounded(
         bytes.extend_from_slice(&part.bytes[..take]);
         at += take as u64;
         if bytes.len() > record_max {
-            return Ok((None, bytes.len() as u64));
+            return Ok(bytes);
         }
         if end.is_some() {
-            return Ok((crate::tx::parse_native_record(&bytes), bytes.len() as u64));
+            return Ok(bytes);
         }
         if at == source.offset {
             return Err(invalid());

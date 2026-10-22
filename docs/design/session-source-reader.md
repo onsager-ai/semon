@@ -92,6 +92,16 @@ JSON-RPC tool-result envelope. A host may retry an unanchored first page for a
 Catalog publication conflict, but must return a byte-read fence without
 rebinding it to a newly stable local carrier.
 
+Hosted selected observation also requires the selected transcript header's
+current recipe version and source generation. Before returning `ready`, Hub
+reads one bounded transcript page through the same authorized reader and source
+witness fence. This establishes that page's readability at that observation;
+later pages retain their own generation and byte-proof checks. A stale selected
+owner requests priority on the ordinary producer queue without acknowledging an
+existing invalidation revision. Selected synchronous repair can regenerate its
+recipes under the same Catalog/source CAS as Home/Trace; over-budget preparation
+leaves the ordinary producer responsible for completing the upgrade.
+
 Complete selected native preparation also accepts `SelectedReadControl` through `Query::call_selected_with_control` and `repair_session_overview_with_control`. Hosts pass the existing whole-request deadline and cancellation flag, retaining their async guard until blocking work exits. Existing entrypoints use a 20-second default. The request checks cancellation during SQLite work, row decoding and native derivation; cancellation or exhausted preparation limits never trigger source-body replay or partial publication. Nested preparation shares its original accounting budget.
 
 The complete selected fallback admits at most 131,072 decoded rows and 64 MiB of preparation accounting, charging fixed row representation plus eight times dynamic cell bytes before decoding. Individual SQLite rows are limited to 32 MiB. These are explicit work/availability limits, not measured whole-process or allocator peak bounds; the native body fallback retains its separate existing 64 MiB/1,024-request bounds and shares preparation accounting. An over-limit selection returns unavailable with a narrower-selection recommendation rather than truncated success. Successful admitted requests retain complete native semantics and may load complete selected Indexes; this path is not history-independent. The replay path charges raw body bytes eightfold before buffering and parsed line bytes eightfold again, plus fixed event/catalog costs, against that same 64 MiB budget. Its effective raw-body replay ceiling is therefore about 4 MiB before those other costs, often less; the separate 64 MiB raw I/O ceiling is not an availability promise for replay. A long selected owner can return unavailable during complete preparation even when its requested transcript page is small. Narrowing turns or page size, or a time window that still includes the same complete source, does not reduce complete Index preparation; excluding source files can. The normal generation-bound native paged transcript/tool path remains available for long sessions and does not become complete-history replay.
@@ -129,6 +139,48 @@ Phase A preserves these read decisions while adding closed failure stages and a 
 Diagnostics are bounded observations, not a common database/Raw snapshot. Header failures use a per-source transition limiter with at most 256 retained sources. An MCP observation without Raw may be upgraded once by a Web observation with `raw_before`/`raw_after`; later MCP/Web repeats of that transition are suppressed. Web stat, mode, observation and recheck failures use the same limiter. Eviction can allow a transition to be logged again. `proof_offset=None` is expected for proof headers written before this build, which did not persist the optional consumed-offset diagnostic.
 
 Publication diagnostics hash each distinct candidate path once per attempt and log at most 64 sources, prioritizing the bounded recent failure-interest set. Before a source's first failure registers interest, a target outside that fallback sample can be absent; its next eligible publication attempt is covered after interest registration while it remains in that set. Interest expiry, eviction and sources absent from the candidate batch remain coverage limits. `invalidations_total=unavailable` means its independent count query failed, not that there are zero pending invalidations. Staged focused-query failures retain the `io` code and its JSON shape with only an additive `stage`; native Web fences retain their existing status and fence kind. Diagnostic availability does not establish HP Code 1 readability.
+
+## Published proof retention and request snapshots
+
+Before replacing or clearing a path's live proof, the Index writer preserves
+the outgoing proof namespace when a Current or retained-history Catalog source
+still references its exact ledger. The reference decision, namespace copy and
+Index mutation use the same SQLite transaction. The per-path manifest contains
+only those referenced ledgers; the next source mutation collects superseded
+metadata, including incompatible parser versions. This preserves content-free
+hash pages and their tree/legacy witnesses, never native source bytes. No schema
+version changes. A rebuilt exact live header takes precedence over obsolete
+retained headers left by parser reset.
+
+Web transcript, continuation and field reads retain the selection transaction
+through lazy proof I/O. Focused MCP transfers its selected recipe connection to
+the request-owned proof reader too; it no longer opens its initial proofs in a
+different snapshot. Later MCP metadata reads retain their publication rechecks.
+All covering proof pages come from the pinned snapshot even if a producer
+replaces or collects their namespaces. The final reader drop rolls back and
+closes the owned read connection on success, failure or cancellation, releasing
+its WAL pin. A new request sees the new committed proofs and still rejects a
+changed header, false page root, tampered prefix, truncation or replacement.
+
+Legacy checksum preparation still commits bounded metadata steps independently.
+A fresh read transaction qualifies its exact header, complete marker and selected
+page witness together. If replacement or GC removed that preparation, the old
+reader qualifies the original whole-vector fingerprint by streaming one hash
+page at a time from its pinned snapshot. It never reconstructs proofs from Raw.
+Modern rooted proofs continue reading only covering pages and tree witnesses.
+
+Retention protects publications present at a future Index mutation. An upgrade
+which starts with Catalog L1 already orphaned by Index L2 cannot recreate L1
+proofs: reads remain unavailable until normal authorized producer publication
+supplies a compatible projection. With unchanged selected publications, bounded
+browser recovery retries after 1, 2 and 4 seconds, then displays a terminal failure
+and manual retry while retaining previously loaded text. Changed selected-history
+source or Catalog publications can resume recovery inside a fixed 45-second
+budget measured from the first failure; repeated metadata polls cannot extend it.
+Current control identity and global Catalog epochs do not renew recovery.
+Identity notes cannot replace the terminal recovery explanation.
+Neither recovery nor these regression cases
+establishes original HP Code 1 acceptance under persistent push.
 
 ## Exact-path consumed-prefix proof
 
