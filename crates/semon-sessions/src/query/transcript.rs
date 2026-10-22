@@ -753,9 +753,13 @@ fn read_inner(
     if !observation.valid(total) {
         return Err(unavailable("Native transcript observation is invalid"));
     }
-    if version != VERSION
-        || source_generation.as_deref()
-            != Some(&crate::retention::source_generation(&row.sources).map_err(unavailable)?)
+    if version != VERSION {
+        let mut error = unavailable("Native transcript projection upgrade required");
+        error.stage = Some("header-version");
+        return Err(error);
+    }
+    if source_generation.as_deref()
+        != Some(&crate::retention::source_generation(&row.sources).map_err(unavailable)?)
     {
         return Err(unavailable("Native transcript source generation changed"));
     }

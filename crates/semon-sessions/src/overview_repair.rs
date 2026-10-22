@@ -208,6 +208,9 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         return Ok(false);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    if !projection_ready(db, row)? {
+        return Ok(false);
+    }
     if row
         .query
         .as_ref()
@@ -216,6 +219,42 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         return Ok(false);
     }
     db.query_row("SELECT EXISTS(SELECT 1 FROM session_overview o JOIN session_trace_headers t USING(session_key) WHERE o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
+}
+
+fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
+    let exists = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_slot_projections')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(failure)?;
+    if !exists {
+        return Ok(false);
+    }
+    if crate::history_projection::catalog(db, &row.key)
+        .map_err(failure)?
+        .is_some()
+    {
+        return crate::history_projection::qualified(db, row).map_err(failure);
+    }
+    let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    db.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
+}
+
+/// Demand an ordinary producer upgrade for an exact selected owner. This only
+/// schedules work; publication still requires the producer's source proofs.
+pub fn request_session_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
+    let db = connection(options)?;
+    let Some(row) = catalog(&db, key)? else {
+        return Ok(false);
+    };
+    if projection_ready(&db, &row)? {
+        return Ok(false);
+    }
+    source_refs(options, std::slice::from_ref(&row))?;
+    crate::events::store::prioritize_projection_sources(options, &row.sources)?;
+    Ok(true)
 }
 
 struct Selection {
@@ -692,7 +731,7 @@ pub(crate) fn candidates_after(
 
 /// Complete one selected original source closure under a catalog generation
 /// CAS. Bounds: 64 sources, 64 MiB native input, 1,024 provider requests. Bodies
-/// die with this call; only the existing Home/Trace metadata tables change.
+/// die with this call; only derived Home/Trace and transcript recipes change.
 /// The embedding host owns publication/custody fences and authorization checks.
 pub fn repair_session_overview(
     options: &Options,
@@ -755,6 +794,7 @@ pub fn repair_session_overview_with_control(
         tx.commit().map_err(failure)?;
         return Ok(false);
     }
+    let upgrade = !projection_ready(&tx, &rows[0])?;
     let generation: String = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_generation'",
@@ -772,6 +812,7 @@ pub fn repair_session_overview_with_control(
     let prepared = with_records(options, &rows, provider, mode, tx, |native| {
         crate::model::prepare_history(&producer_options, &rows, native, crate::model::now_ms())
     })?;
+    let transcripts = prepared.transcripts;
     let mut repaired = Vec::new();
     // Related inputs qualify the selected owner's relationships. They cannot
     // replace another owner's publication with this selected, partial closure.
@@ -873,15 +914,72 @@ pub fn repair_session_overview_with_control(
             };
             tx.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
         }
+        if upgrade {
+            let projection = transcripts
+                .iter()
+                .find(|projection| projection.key == row.key)
+                .ok_or_else(|| failure("Selected transcript recipes unavailable"))?;
+            if selection.incomplete {
+                return Err(failure("Selected transcript closure incomplete"));
+            }
+            publish_projection(&tx, row, projection)?;
+        }
         tx.execute(
             "DELETE FROM meta WHERE key=?1",
             [format!("overview_needed:{}", row.key)],
         )
         .map_err(failure)?;
     }
+    if upgrade && !ready(&tx, &repaired[0])? {
+        return Err(failure("Selected transcript is not ready"));
+    }
     crate::selected_read::checkpoint("selected_publication")?;
     tx.commit().map_err(failure)?;
     Ok(true)
+}
+
+fn publish_projection(
+    tx: &rusqlite::Transaction<'_>,
+    row: &CatalogRow,
+    projection: &crate::slot_projection::Projection,
+) -> io::Result<()> {
+    let texts = projection
+        .slots
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    let generation = crate::slot_projection::generation(&texts, &row.sources).map_err(failure)?;
+    let history = crate::history_projection::catalog(tx, &row.key)
+        .map_err(failure)?
+        .is_some();
+    let slots = if history {
+        "session_history_slots"
+    } else {
+        "session_slots"
+    };
+    if history {
+        tx.execute("INSERT OR REPLACE INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,0)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+    } else {
+        tx.execute("INSERT OR REPLACE INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES(?1,?2,?3,?4,?5)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+    }
+    tx.execute(
+        &format!("DELETE FROM {slots} WHERE session_key=?1"),
+        [&row.key],
+    )
+    .map_err(failure)?;
+    let mut put = tx
+        .prepare(&format!(
+            "INSERT INTO {slots}(session_key,slot,metadata) VALUES(?1,?2,?3)"
+        ))
+        .map_err(failure)?;
+    for (slot, text) in texts.iter().enumerate() {
+        crate::selected_read::check()?;
+        put.execute(rusqlite::params![row.key, slot as i64, text])
+            .map_err(failure)?;
+    }
+    Ok(())
 }
 
 fn publication_changed() -> io::Error {

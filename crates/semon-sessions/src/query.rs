@@ -1290,7 +1290,13 @@ impl Query {
                 Ok(answer)
             },
         )
-        .map_err(|error| selected_error(&error))?;
+        .map_err(|error| {
+            let mut error = selected_error(&error);
+            if error.stage.is_none() {
+                error.stage = Some("observation");
+            }
+            error
+        })?;
         let mut answer: Value = result?;
         crate::selected_read::check().map_err(|error| selected_error(&error))?;
         answer["window_start"] = json!(self.start);
