@@ -4280,23 +4280,36 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     // Current storage is already WAL: merely read its mode. Repeating the
     // setter could mutate a concurrently replaced unsupported database.
     let mode: String = connection.query_row(
-        if initialized { "PRAGMA journal_mode = WAL" } else { "PRAGMA journal_mode" },
+        if initialized {
+            "PRAGMA journal_mode = WAL"
+        } else {
+            "PRAGMA journal_mode"
+        },
         [],
         |row| row.get(0),
     )?;
     if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(if fresh { Init::NoWal } else {
+        return Ok(if fresh {
+            Init::NoWal
+        } else {
             Init::Unsupported("unsupported session index: journal mode")
         });
     }
-    if fresh && let Some(path) = connection.path().filter(|path| !path.is_empty()).map(PathBuf::from) {
+    if fresh
+        && let Some(path) = connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    {
         // A connection entering WAL with EXCLUSIVE locking keeps that mode.
         // Reopen with normal locking and requalify before configuring/using it.
         let old = std::mem::replace(connection, Connection::open_in_memory()?);
         drop(old);
         *connection = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         return init(connection);
     }
@@ -9059,6 +9072,21 @@ mod tests {
 
     #[test]
     fn unsupported_contracts_refuse_every_open_without_mutating_originals() {
+        let snapshot = |db: &Connection| {
+            let version: i64 = db
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            let schema = db
+                .prepare("SELECT name,sql FROM sqlite_schema ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (version, schema, catalog_state(db))
+        };
         for (name, change, reason) in [
             (
                 "nonempty-zero",
@@ -9126,8 +9154,28 @@ mod tests {
                 )
                 .unwrap();
             store.connection.execute_batch(change).unwrap();
+            let original_state = snapshot(&store.connection);
+            // Finish fixture writes before snapshotting the original file.
+            let checkpoint: (i64, i64, i64) = store
+                .connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(checkpoint, (0, 0, 0), "{name} fixture checkpoint");
             drop(store);
             let original = fs::read(&path).unwrap();
+            let unchanged = || {
+                assert_eq!(fs::read(&path).unwrap(), original, "{name} database bytes");
+                // A read-only WAL connection can create coordination sidecars.
+                // No WAL bytes means no frames or commits were written.
+                match fs::read(sibling(&path, "-wal")) {
+                    Ok(bytes) => assert!(bytes.is_empty(), "{name} wrote WAL bytes"),
+                    Err(error) => assert_eq!(error.kind(), io::ErrorKind::NotFound),
+                }
+                assert!(!sibling(&path, ".corrupt").exists());
+            };
+            unchanged();
             let fail = |result: Result<(SqliteStore, Loaded), Unopened>| match result {
                 Err(Unopened::Unsupported(error)) => {
                     assert!(error.contains(reason), "{name}: {error}")
@@ -9135,25 +9183,23 @@ mod tests {
                 _ => panic!("{name} must be explicitly unsupported"),
             };
             fail(SqliteStore::attempt(&path));
+            unchanged();
             fail(SqliteStore::attempt_scoped(&path, true));
+            unchanged();
             if name != "archive" {
                 assert!(focused_connection(&path).is_err(), "focused {name}");
             } else {
                 let db = focused_connection(&path).unwrap();
                 assert!(archived_index(&db, "original").is_err());
             }
+            unchanged();
             match super::super::EventCache::open(&v1) {
                 Err(error) => assert!(error.contains(reason), "{error}"),
                 Ok(_) => panic!("unsupported {name} became valid in-memory history"),
             }
-            assert_eq!(
-                fs::read(&path).unwrap(),
-                original,
-                "{name} changed original bytes"
-            );
-            assert!(!sibling(&path, ".corrupt").exists());
-            assert!(!sibling(&path, "-wal").exists());
+            unchanged();
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(snapshot(&db), original_state, "{name} schema and rows");
             assert_eq!(
                 db.query_row("SELECT count(*) FROM reported_runs", [], |r| r
                     .get::<_, i64>(0))
@@ -9168,6 +9214,7 @@ mod tests {
                 "{\"custody\":\"retain exact bytes\"}"
             );
             drop(db);
+            unchanged();
             fs::remove_dir_all(root).unwrap();
         }
     }
@@ -9181,12 +9228,17 @@ mod tests {
             *slot.borrow_mut() = Some(Box::new(move || {
                 let other = Connection::open(&other_path).unwrap();
                 other.busy_timeout(Duration::ZERO).unwrap();
-                let error = other.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap_err();
+                let error = other
+                    .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                    .unwrap_err();
                 assert_eq!(error.sqlite_error_code(), Some(ErrorCode::DatabaseBusy));
             }));
         });
         let (store, _) = opened(&path);
-        let mode: String = store.connection.query_row("PRAGMA locking_mode", [], |r| r.get(0)).unwrap();
+        let mode: String = store
+            .connection
+            .query_row("PRAGMA locking_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(mode, "normal");
         assert!(current(&store.connection).unwrap());
         drop(store);
@@ -9200,24 +9252,35 @@ mod tests {
         let (mut store, _) = opened(&path);
         store.write_runs(&[run()], &stamp()).unwrap();
         drop(store);
+        let original = fs::read(&path).unwrap();
         let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let saved = captured.clone();
+        let wal = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let saved_wal = wal.clone();
+        let writer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let live_writer = writer.clone();
         let changed = path.clone();
         BEFORE_STORAGE_INIT.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
                 let db = Connection::open(&changed).unwrap();
                 db.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
                     .unwrap();
-                drop(db);
                 *saved.borrow_mut() = fs::read(&changed).unwrap();
+                *saved_wal.borrow_mut() = fs::read(sibling(&changed, "-wal")).unwrap();
+                // Keep the unsupported version committed only in the live WAL.
+                *live_writer.borrow_mut() = Some(db);
             }));
         });
-        assert!(matches!(
-            SqliteStore::attempt(&path),
-            Err(Unopened::Unsupported(_))
-        ));
+        match SqliteStore::attempt(&path) {
+            Err(Unopened::Unsupported(error)) => assert!(error.contains("newer schema")),
+            _ => panic!("the concurrently committed WAL version must be refused"),
+        }
+        assert_eq!(*captured.borrow(), original);
         assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
-        assert!(!sibling(&path, "-wal").exists());
+        assert!(!wal.borrow().is_empty());
+        assert_eq!(fs::read(sibling(&path, "-wal")).unwrap(), *wal.borrow());
+        assert!(!sibling(&path, ".corrupt").exists());
+        drop(writer.borrow_mut().take());
         fs::remove_dir_all(root).unwrap();
     }
 
