@@ -10883,7 +10883,7 @@ fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
             |record| record.get(0),
         )
         .unwrap();
-    assert_eq!(cache_version, "28");
+    assert_eq!(cache_version, crate::events::CACHE_VERSION.to_string());
     let (reply_flags, state): (i64, Option<String>) = connection
         .query_row(
             "SELECT reply_f,y FROM events JOIN files USING(file_id) WHERE files.path=?1 AND events.id='direct-cache' AND events.reply=1",

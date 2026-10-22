@@ -730,7 +730,10 @@ impl Context {
                     session.busy = endpoint.busy;
                     session.waiting = endpoint.waiting;
                     session.out.state = static_state(&endpoint.state)?;
-                    session.out.turn_lifecycle.clone_from(&endpoint.turn_lifecycle);
+                    session
+                        .out
+                        .turn_lifecycle
+                        .clone_from(&endpoint.turn_lifecycle);
                     session.out.lane = endpoint.lane;
                     session.out.role = endpoint.role;
                     session

@@ -1938,10 +1938,16 @@ mod tests {
             staged.retire();
             let (status, body) = fixture.body("scope=retained_history&limit=60");
             assert_eq!(status, 200);
-            let owner = body["items"].as_array().unwrap().iter()
-                .find(|row| row["key"] == "usage-history").unwrap();
-            assert_eq!(owner["status"]["state"], "off",
-                "native usage records cannot prove turn completion during staged repair");
+            let owner = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == "usage-history")
+                .unwrap();
+            assert_eq!(
+                owner["status"]["state"], "off",
+                "native usage records cannot prove turn completion during staged repair"
+            );
             eprintln!(
                 "usage-projection count={count} root_bytes={root_bytes} semantic_phases={phases:?} stable_epoch={epoch} revision_before={before} revision_after={}",
                 revision()

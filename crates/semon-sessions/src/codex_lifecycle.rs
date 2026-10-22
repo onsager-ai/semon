@@ -38,7 +38,8 @@ impl TurnLifecycle {
     pub(crate) fn with_generation(mut self, prefix: &[u8; 32]) -> Self {
         self.source_generation.clear();
         for byte in prefix {
-            write!(&mut self.source_generation, "{byte:02x}").expect("writing a String cannot fail");
+            write!(&mut self.source_generation, "{byte:02x}")
+                .expect("writing a String cannot fail");
         }
         self
     }
@@ -332,7 +333,10 @@ mod tests {
     fn replay_memory_is_bounded_and_exhaustion_cannot_accept_old_turns() {
         let mut state = root();
         for number in 0..MAX_TURNS {
-            state.observe(&event("task_started", Some(&format!("turn-{number}"))), number as u64 + 1);
+            state.observe(
+                &event("task_started", Some(&format!("turn-{number}"))),
+                number as u64 + 1,
+            );
         }
         assert_eq!(state.seen.len(), MAX_TURNS);
         state.observe(&event("task_started", Some("one-more")), 10000);
@@ -352,7 +356,10 @@ mod tests {
         assert!(state.last.is_none(), "missing ordinal invalidates carrier");
         let mut state = root();
         state.observe(&event("turn_started", Some("a")), 100);
-        state.observe(&json!({"type":"session_meta","payload":{"id":"another"}}), 200);
+        state.observe(
+            &json!({"type":"session_meta","payload":{"id":"another"}}),
+            200,
+        );
         state.observe(&event("turn_complete", Some("a")), 300);
         assert!(state.last.is_none());
     }
@@ -570,8 +577,12 @@ mod tests {
         let observed = home.query();
         assert_eq!(observed["alive"], true);
         let relative = "sessions/2026/09/24/rollout-owner.jsonl";
-        let proof = crate::session_source_proof(&home.options, "codex", relative).unwrap().unwrap();
-        let ready = crate::source_projection_ready(&home.options, "codex", relative).unwrap().unwrap();
+        let proof = crate::session_source_proof(&home.options, "codex", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&home.options, "codex", relative)
+            .unwrap()
+            .unwrap();
         crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
         fs::remove_file(&home.path).unwrap();
         let retained = home.query();
