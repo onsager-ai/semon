@@ -40,10 +40,10 @@ impl ProofChunks {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Sources {
     proofs: BTreeMap<PathBuf, Proof>,
     paths: BTreeMap<(String, String), PathBuf>,
+    diagnostic_scope: PathBuf,
     #[cfg(feature = "test-hooks")]
     cache: PathBuf,
 }
@@ -53,6 +53,14 @@ fn unavailable() -> io::Error {
         io::ErrorKind::InvalidData,
         "native query source generation unavailable",
     )
+}
+
+fn note_focused_source_interest(scope: &Path, source: &CatalogSource) {
+    crate::source_carrier::note_diagnostic_interest(
+        scope,
+        &source.path.to_string_lossy(),
+        &crate::source_carrier::ledger(source),
+    );
 }
 
 // Cold checkpoints describe a complete prefix of a larger, unchanged physical
@@ -70,6 +78,16 @@ fn same_physical_generation(ledger: &Ledger, physical: &Stat) -> bool {
 }
 
 impl Sources {
+    pub(crate) fn new(options: &Options) -> Self {
+        Self {
+            proofs: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            diagnostic_scope: crate::events::EventCache::path(&options.cache),
+            #[cfg(feature = "test-hooks")]
+            cache: options.cache.clone(),
+        }
+    }
+
     pub(crate) fn capture(
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
@@ -130,11 +148,7 @@ impl Sources {
         sources: impl Iterator<Item = (CatalogSource, Option<ProofChunks>)>,
         require_references: bool,
     ) -> io::Result<Self> {
-        let mut captured = Self {
-            #[cfg(feature = "test-hooks")]
-            cache: options.cache.clone(),
-            ..Self::default()
-        };
+        let mut captured = Self::new(options);
         for (source, chunks) in sources {
             let chunks = chunks
                 .filter(|chunks| match chunks {
@@ -212,9 +226,16 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let db = crate::events::store::focused_connection(&cache_path)?;
+        let db = crate::events::store::focused_connection(&cache_path).map_err(|error| {
+            for source in sources.iter().take(16) {
+                note_focused_source_interest(&cache_path, source);
+            }
+            crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
+        })?;
         db.busy_timeout(std::time::Duration::from_millis(100))
-            .map_err(io::Error::other)?;
+            .map_err(|error| {
+                crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
+            })?;
         let db = Arc::new(Mutex::new(db));
         let proofs = sources
             .iter()
@@ -236,7 +257,12 @@ impl Sources {
                     &cache_path,
                     source.path.to_str().ok_or_else(unavailable)?,
                     &ledger,
-                )?;
+                )
+                .inspect_err(|error| {
+                    if crate::source_carrier::FailureStage::of(error).is_some() {
+                        note_focused_source_interest(&cache_path, source);
+                    }
+                })?;
                 Ok((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))))
             })
             .collect::<io::Result<Vec<_>>>()?;
@@ -275,6 +301,7 @@ impl Sources {
             prepared: Mutex::default(),
             failed: Mutex::new(false),
             revision: Mutex::new(None),
+            failure_stage: Mutex::new(None),
         }
     }
 }
@@ -294,6 +321,7 @@ pub(crate) struct Records<'a> {
     prepared: Mutex<Option<PreparedBlock>>,
     failed: Mutex<bool>,
     revision: Mutex<Option<crate::source_carrier::RevisionReason>>,
+    failure_stage: Mutex<Option<crate::source_carrier::FailureStage>>,
 }
 
 struct PreparedBlock {
@@ -328,7 +356,26 @@ impl Records<'_> {
         })
     }
 
+    fn proof_failure(&self, path: &Path, error: io::Error) -> io::Error {
+        if let Some(stage) = crate::source_carrier::FailureStage::of(&error) {
+            if let Ok(mut first) = self.failure_stage.lock() {
+                first.get_or_insert(stage);
+            }
+            if let Some(proof) = self.sources.proofs.get(path) {
+                crate::source_carrier::note_diagnostic_interest(
+                    &self.sources.diagnostic_scope,
+                    &path.to_string_lossy(),
+                    &proof.ledger,
+                );
+            }
+        }
+        error
+    }
+
     pub(crate) fn query_error(&self, error: impl std::fmt::Display) -> crate::QueryError {
+        if let Some(stage) = self.failure_stage.lock().ok().and_then(|stage| *stage) {
+            return crate::QueryError::source_failure(stage);
+        }
         match self.revision.lock().ok().and_then(|revision| *revision) {
             Some(reason) => crate::QueryError::local_revision(reason),
             None => crate::QueryError::new("io", error.to_string()),
@@ -595,7 +642,10 @@ impl Records<'_> {
                 return Err(self.reject_revision(crate::source_carrier::RevisionReason::SizeShrank));
             }
             if !unchanged && proof.ledger.offset != 0 {
-                proof.chunks.read(&mut file, 0)?;
+                proof
+                    .chunks
+                    .read(&mut file, 0)
+                    .map_err(|error| self.proof_failure(path, error))?;
                 self.checked_chunks
                     .lock()
                     .map_err(|_| unavailable())?
@@ -662,9 +712,11 @@ impl Records<'_> {
         if *self.failed.lock().map_err(|_| unavailable())? {
             return Err(unavailable());
         }
-        for proof in self.sources.proofs.values() {
+        for (path, proof) in &self.sources.proofs {
             if let ProofChunks::Focused(chunks) = &proof.chunks {
-                chunks.clear_cache()?;
+                chunks
+                    .clear_cache()
+                    .map_err(|error| self.proof_failure(path, error))?;
             }
         }
         let paths: Vec<_> = self
@@ -712,7 +764,10 @@ impl Records<'_> {
                 return Err(unavailable());
             }
             for index in indices {
-                proof.chunks.read(&mut file, *index)?;
+                proof
+                    .chunks
+                    .read(&mut file, *index)
+                    .map_err(|error| self.proof_failure(path, error))?;
             }
             if qualified {
                 self.recheck(path, &file, &before)?;
@@ -875,7 +930,12 @@ impl Records<'_> {
             {
                 block.bytes.clone()
             } else {
-                let part: Arc<[u8]> = Arc::from(proof.chunks.read(&mut file, index)?);
+                let part: Arc<[u8]> = Arc::from(
+                    proof
+                        .chunks
+                        .read(&mut file, index)
+                        .map_err(|error| self.proof_failure(path, error))?,
+                );
                 if let Some(prepared) = prepared.as_deref_mut() {
                     *prepared = Some(PreparedBlock {
                         path: path.to_owned(),
@@ -972,7 +1032,10 @@ impl Records<'_> {
             remote.insert(path.to_owned(), (part.generation, part.length));
             bytes.extend_from_slice(&part.bytes);
         }
-        proof.chunks.verify(index, &bytes)?;
+        proof
+            .chunks
+            .verify(index, &bytes)
+            .map_err(|error| self.proof_failure(path, error))?;
         self.checked_chunks
             .lock()
             .map_err(|_| unavailable())?
@@ -1041,7 +1104,13 @@ impl SessionSourceReader for Records<'_> {
         max: usize,
     ) -> io::Result<SessionSourceRange> {
         let result = self.range(source, expected, offset, max, false);
-        if result.is_err() {
+        if let Err(error) = &result {
+            if let Some(stage) = crate::source_carrier::FailureStage::of(error) {
+                self.failure_stage
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .get_or_insert(stage);
+            }
             *self.failed.lock().map_err(|_| unavailable())? = true;
         }
         result
@@ -1106,6 +1175,7 @@ impl Seek for RangeFile<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::fs;
 
     struct Fixture {
@@ -1143,7 +1213,10 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
-            let mut sources = Sources::default();
+            let mut sources = Sources::new(&Options {
+                cache: self.root.join("index.json"),
+                ..Options::default()
+            });
             sources.paths.insert(
                 (reference.root.clone(), reference.path.clone()),
                 self.path.clone(),
@@ -1181,6 +1254,228 @@ mod tests {
             );
             after
         }
+    }
+
+    #[test]
+    fn index_l2_with_selected_l1_and_stable_raw_reports_header_ledger() {
+        use std::io::Write;
+        let fixture = Fixture::new("index-leading-catalog");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"original\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let l1_offset = selected.offset;
+        let captured = Sources::capture_focused(&options, std::slice::from_ref(&selected)).unwrap();
+        let publish_scope = crate::events::EventCache::path(&options.cache);
+        assert_eq!(captured.diagnostic_scope, publish_scope);
+        let selected_digest =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&selected));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(b"{\"type\":\"user\",\"message\":{\"content\":\"append\"}}\n")
+            .unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let l2_offset = cache.source(&fixture.path, "lead").unwrap().offset;
+        assert!(l2_offset > l1_offset);
+        let before = Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap();
+        let error = match Sources::capture_focused(&options, &[selected]) {
+            Ok(_) => panic!("L2 must expose the pre-repair proof lifetime gap"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::HeaderLedger)
+        );
+        let reply = crate::QueryError::io(&error).to_json();
+        assert_eq!(reply["stage"], "header_ledger");
+        let interests = crate::source_carrier::diagnostic_publish_interests(&publish_scope);
+        let interest = interests
+            .iter()
+            .find(|interest| interest.path.as_str() == fixture.path.to_string_lossy().as_ref())
+            .expect("focused failure must register an interest for the publish scope");
+        assert_eq!(
+            interest.scope.as_str(),
+            publish_scope.to_string_lossy().as_ref()
+        );
+        assert_eq!(interest.catalog_ledger_digest, selected_digest);
+        assert_eq!(interest.catalog_offset, l1_offset);
+        assert_eq!(
+            before,
+            Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn focused_proof_store_schema_mismatch_has_its_own_stage() {
+        let fixture = Fixture::new("proof-store-schema-stage");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let selected_digest =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&selected));
+        let selected_offset = selected.offset;
+        let publish_scope = crate::events::EventCache::path(&options.cache);
+        drop(cache);
+
+        crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow_mut().clear());
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.pragma_update(None, "user_version", 0).unwrap();
+        drop(db);
+        let error = match Sources::capture_focused(&options, &[selected]) {
+            Ok(_) => panic!("a schema-mismatched proof store must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::ProofOpenDb)
+        );
+        let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow().clone());
+        assert!(logs.is_empty(), "the proof header was never opened");
+        assert!(
+            !error
+                .to_string()
+                .contains(fixture.path.to_string_lossy().as_ref())
+        );
+        let interests = crate::source_carrier::diagnostic_publish_interests(&publish_scope);
+        let interest = interests
+            .iter()
+            .find(|interest| interest.path.as_str() == fixture.path.to_string_lossy().as_ref())
+            .expect("a database-open failure must retain the selected source interest");
+        assert_eq!(
+            interest.scope.as_str(),
+            publish_scope.to_string_lossy().as_ref()
+        );
+        assert_eq!(interest.catalog_ledger_digest, selected_digest);
+        assert_eq!(interest.catalog_offset, selected_offset);
+    }
+
+    #[test]
+    fn focused_header_parse_rejection_logs_independent_raw_stats() {
+        let fixture = Fixture::new("proof-header-parse-diagnostic");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let ledger = crate::source_carrier::ledger(&selected);
+        let before = fs::metadata(&fixture.path).unwrap().len();
+        drop(cache);
+
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.execute(
+            "UPDATE meta SET value='{' WHERE key GLOB 'native_source_chunks:*:header'",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow_mut().clear());
+        // MCP opens without touching Raw; Web later opens the same selected
+        // ledger/cache with Raw observations. That upgrade must not be deduped.
+        let mcp_error = match Sources::capture_focused(&options, std::slice::from_ref(&selected)) {
+            Ok(_) => panic!("a malformed proof header must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&mcp_error),
+            Some(crate::source_carrier::FailureStage::HeaderVersion)
+        );
+        let result = crate::events::store::chunk_proofs::Focused::open_with_raw(
+            &crate::events::EventCache::path(&options.cache),
+            fixture.path.to_str().unwrap(),
+            &ledger,
+            Some(before),
+        );
+        let error = match result {
+            Ok(_) => panic!("a malformed proof header must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::HeaderVersion)
+        );
+        let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow().clone());
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].contains("raw=not_collected"));
+        assert!(logs[1].contains("stage=header_version"));
+        assert!(logs[1].contains(&format!("raw_before={before}")));
+        assert!(logs[1].contains(&format!("raw_after=Some({before})")));
+        assert!(logs[1].contains("sample=independent_statements"));
+        for line in &logs {
+            assert!(!line.contains(fixture.path.to_string_lossy().as_ref()));
+        }
+        // Neither another MCP open nor another Web open emits a downgrade or
+        // a second upgrade for the same failure transition.
+        assert!(Sources::capture_focused(&options, std::slice::from_ref(&selected)).is_err());
+        assert!(
+            crate::events::store::chunk_proofs::Focused::open_with_raw(
+                &crate::events::EventCache::path(&options.cache),
+                fixture.path.to_str().unwrap(),
+                &ledger,
+                Some(before),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+                .with(|lines| lines.borrow().len()),
+            2
+        );
+    }
+
+    #[test]
+    fn records_query_error_keeps_unstaged_messages_and_sanitizes_staged_failures() {
+        let sources = Sources::new(&Options::default());
+        let records = sources.reader();
+        assert_eq!(
+            records.query_error("original caller message").to_json(),
+            serde_json::json!({"error":{"code":"io","message":"original caller message"}})
+        );
+        let original = crate::source_carrier::FailureStage::PageHash
+            .wrap(io::Error::other("private provider cause"));
+        let error = records.proof_failure(Path::new("synthetic-source"), original);
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::PageHash)
+        );
+        assert_eq!(
+            records.query_error("private caller message").to_json(),
+            serde_json::json!({"error":{"code":"io","message":"Original native transcript proofs are unavailable"},
+                "stage":"page_hash"})
+        );
     }
 
     #[test]
