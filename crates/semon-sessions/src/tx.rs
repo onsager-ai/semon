@@ -311,44 +311,12 @@ pub(crate) enum Source {
     Collected,
 }
 
-/// Unified exec's frame around an output: `Chunk ID: …`, `Wall time: N
-/// seconds`, then `Process exited with code N` or `Process running with
-/// session ID N`, `Original token count: N`, and `Output:` on a line of its
-/// own (codex-rs `core/src/tools/context.rs`, `ExecCommandToolOutput`). Codex's
-/// warning header and cut come after it. Returns the text after the frame,
-/// whether there was one, and the frame's `Original token count` if it has
-/// one. A frame needs its `Wall time:` line.
+/// Display/cut handling uses the shared borrowed response-header decoder.
 fn strip_frame(text: &str) -> (&str, bool, Option<u64>) {
-    let mut rest = text;
-    let mut timed = false;
-    let mut count = None;
-    while let Some((line, after)) = rest.split_once('\n') {
-        if line == "Output:" {
-            return if timed {
-                (after, true, count)
-            } else {
-                (text, false, None)
-            };
-        }
-        if let Some(number) = line.strip_prefix("Original token count: ") {
-            count = digits(number)
-                .filter(|(_, rest)| rest.is_empty())
-                .map(|(n, _)| n);
-        } else if line.starts_with("Wall time: ") && line.ends_with(" seconds") {
-            timed = true;
-        } else if ![
-            "Chunk ID: ",
-            "Process exited with code ",
-            "Process running with session ID ",
-        ]
-        .iter()
-        .any(|prefix| line.starts_with(prefix))
-        {
-            break;
-        }
-        rest = after;
+    match crate::exec_response::decode_exec_response(text) {
+        Some(frame) => (frame.body, true, frame.original_token_count),
+        None => (text, false, None),
     }
-    (text, false, None)
 }
 
 /// The gaps Codex left in `body`, in order, by the forms it writes them in:
@@ -619,6 +587,7 @@ fn put_out(
     }
 }
 
+#[cfg(test)]
 fn text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
     let (plain, cut) = split_cut(text, source);
     let (shown, truncated) = clip(&plain, limit);
@@ -628,6 +597,91 @@ fn text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Val
         // is `truncated`'s to say, from the text as a whole.
         let (cut, _) = cut.json(limit * 2);
         fields["cut"] = cut;
+    }
+    fields["truncated"] = json!(truncated || cut_before);
+    fields
+}
+
+fn clip_within(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text.to_owned(), false);
+    }
+    let marker = "…";
+    if limit < marker.len() {
+        return (String::new(), true);
+    }
+    let mut end = limit - marker.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}{}", text[..end].trim_end(), marker), true)
+}
+
+fn selected_cut_metadata_bytes(cut: &Cut) -> usize {
+    "codex".len()
+        + cut
+            .parts
+            .iter()
+            .map(|part| match part {
+                Part::Gap(gap) => gap.unit.len(),
+                Part::Text(_) => 0,
+            })
+            .sum::<usize>()
+}
+
+fn selected_cut(cut: &Cut, limit: usize) -> (Value, bool) {
+    let mut value = json!({"by": "codex"});
+    if let Some(tokens) = cut.original_tokens {
+        value["original_tokens"] = json!(tokens);
+    }
+    if let Some(lines) = cut.lines {
+        value["lines"] = json!(lines);
+    }
+    let mut remaining = limit.saturating_sub(selected_cut_metadata_bytes(cut));
+    let mut truncated = false;
+    let mut texts_left = cut
+        .parts
+        .iter()
+        .filter(|part| matches!(part, Part::Text(_)))
+        .count();
+    let mut parts = Vec::new();
+    for part in &cut.parts {
+        match part {
+            Part::Text(text) => {
+                let share = remaining / texts_left.max(1);
+                let (text, clipped) = clip_within(text, share);
+                truncated |= clipped;
+                remaining = remaining.saturating_sub(text.len());
+                texts_left = texts_left.saturating_sub(1);
+                parts.push(json!({"text": text}));
+            }
+            Part::Gap(gap) => {
+                let mut fields = json!({"n": gap.n, "unit": gap.unit});
+                if let Some(of) = gap.of {
+                    fields["of"] = json!(of);
+                }
+                parts.push(json!({"gap": fields}));
+            }
+        }
+    }
+    if !parts.is_empty() {
+        value["parts"] = Value::Array(parts);
+    }
+    (value, truncated)
+}
+
+fn selected_text_value(text: &str, source: Source, cut_before: bool, limit: usize) -> Value {
+    let (plain, cut) = split_cut(text, source);
+    // Preserve native gap evidence while reserving its string metadata inside
+    // the same budget as flat text and duplicated structured text parts.
+    let flat_limit = limit.saturating_sub(cut.as_ref().map_or(0, selected_cut_metadata_bytes));
+    let (shown, mut truncated) = clip_within(&plain, flat_limit);
+    let mut fields = json!({"text": shown});
+    if let Some(cut) = cut {
+        let remaining = limit.saturating_sub(string_value_bytes(&fields));
+        let (cut, clipped) = selected_cut(&cut, remaining);
+        fields["cut"] = cut;
+        truncated |= clipped;
     }
     fields["truncated"] = json!(truncated || cut_before);
     fields
@@ -801,7 +855,11 @@ pub(crate) fn diff_rows(name: &str, input: &Value, budget: usize) -> Option<(Val
 
 /// A tool result's text: a Claude `tool_result` block, or a Codex call's
 /// output (its `output` field when the output is structured).
-pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
+pub(crate) fn result_text(
+    record: &Value,
+    block: usize,
+    code_result_source: bool,
+) -> Option<String> {
     if field(record, "type") == Some("tool.execution_complete") {
         let data = record.get("data")?;
         return data
@@ -849,23 +907,27 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
         if field(payload, "type") == Some("tool_search_output") {
             return serde_json::to_string_pretty(output).ok();
         }
-        let structured = match output {
-            Value::String(text) => serde_json::from_str::<Value>(text).ok(),
-            other => Some(other.clone()),
-        };
-        if let Some(text) = structured.as_ref().and_then(|value| field(value, "output")) {
-            return Some(text.to_owned());
+        let custom_output = field(payload, "type") == Some("custom_tool_call_output");
+        if !custom_output || code_result_source {
+            let structured = match output {
+                Value::String(text) => serde_json::from_str::<Value>(text).ok(),
+                other => Some(other.clone()),
+            };
+            if let Some(text) = structured.as_ref().and_then(|value| field(value, "output")) {
+                return Some(text.to_owned());
+            }
         }
         return Some(match output {
             Value::String(text) => text.clone(),
-            Value::Array(parts) => {
+            Value::Array(_) => {
                 // One exec result a script printed: its command's output.
-                if let Some(value) = events::yield_json(Some(output))
+                if code_result_source
+                    && let Some(value) = events::yield_json(Some(output))
                     && let Some(text) = field(&value, "output")
                 {
                     return Some(text.to_owned());
                 }
-                script_text(parts)
+                script_text(output)
             }
             other => serde_json::to_string_pretty(other).unwrap_or_default(),
         });
@@ -876,24 +938,26 @@ pub(crate) fn result_text(record: &Value, block: usize) -> Option<String> {
 /// A code-mode script's output parts as text: what the script printed,
 /// after the harness's "Script completed" header. A failure's header stays,
 /// as it says what failed.
-fn script_text(parts: &[Value]) -> String {
-    let mut texts: Vec<String> = parts
-        .iter()
-        .filter_map(|part| match field(part, "type") {
-            None | Some("text" | "input_text" | "output_text") => {
-                field(part, "text").map(str::to_owned)
-            }
-            Some("image" | "input_image") => Some("[image]".to_owned()),
-            _ => None,
-        })
-        .collect();
-    if texts
-        .first()
-        .is_some_and(|header| header.trim_start().starts_with("Script completed"))
-    {
-        texts.remove(0);
+fn script_text(output: &Value) -> String {
+    match events::output_content_view(output) {
+        Some(events::OutputContentView::Text(text)) => text.to_owned(),
+        Some(events::OutputContentView::Blocks(blocks)) => blocks
+            .iter()
+            .filter_map(|block| match block.content {
+                events::OutputBlockContent::Text { header: true, .. } => None,
+                events::OutputBlockContent::Text {
+                    text,
+                    header: false,
+                } => Some(text.to_owned()),
+                events::OutputBlockContent::Image => Some("[image]".to_owned()),
+                events::OutputBlockContent::Unknown => {
+                    Some("[unsupported output block]".to_owned())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => serde_json::to_string_pretty(output).unwrap_or_default(),
     }
-    texts.join("\n")
 }
 
 /// The output chunk a yielded command's script or poll printed.
@@ -1003,9 +1067,12 @@ pub(crate) fn selected_script(lines: &mut Lines, slot: &Slot) -> Option<(String,
 pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
     let file = slot.file.as_ref()?;
     let (text, source) = match &slot.kind {
-        SlotKind::Tool { reply, item, .. } => {
-            tool_output(lines, &file.path, reply.as_ref(), *item)?
-        }
+        SlotKind::Tool {
+            reply,
+            item,
+            result_source,
+            ..
+        } => tool_output(lines, &file.path, reply.as_ref(), *item, *result_source)?,
         SlotKind::Operation { kind, .. } if kind == "CommandExecution" => {
             let record = lines.get(&file.path, slot.offset)?;
             let output = record
@@ -1015,7 +1082,101 @@ pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
         }
         _ => return None,
     };
-    Some(text_value(&text, source, false, 64 * 1024))
+    let mut selected = selected_text_value(&text, source, false, SELECTED_OUTPUT_MAX);
+    if let SlotKind::Tool {
+        reply: Some(reply), ..
+    } = &slot.kind
+        && let Some(record) = lines.get(&file.path, reply.o)
+        && let Some(payload) = record.get("payload")
+        && field(payload, "type") == Some("custom_tool_call_output")
+        && let Some(output) = record.pointer("/payload/output")
+        && let Some((blocks, truncated, omitted)) = selected_output_blocks(
+            output,
+            SELECTED_OUTPUT_MAX.saturating_sub(string_value_bytes(&selected)),
+        )
+    {
+        selected["blocks"] = blocks;
+        if truncated {
+            selected["blocks_truncated"] = json!(true);
+        }
+        if omitted > 0 {
+            selected["blocks_omitted"] = json!(omitted);
+        }
+    }
+    Some(selected)
+}
+
+const SELECTED_OUTPUT_MAX: usize = 64 * 1024;
+const OUTPUT_BLOCKS_MAX: usize = 128;
+const OUTPUT_BLOCK_TYPE_MAX: usize = 128;
+
+fn string_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        Value::Array(values) => values.iter().map(string_value_bytes).sum(),
+        Value::Object(values) => values.values().map(string_value_bytes).sum(),
+        _ => 0,
+    }
+}
+
+fn selected_output_blocks(output: &Value, budget: usize) -> Option<(Value, bool, usize)> {
+    let events::OutputContentView::Blocks(parts) = events::output_content_view(output)? else {
+        return None;
+    };
+    let omitted = parts.len().saturating_sub(OUTPUT_BLOCKS_MAX);
+    let mut remaining = budget;
+    let mut truncated = omitted > 0;
+    let blocks = parts
+        .iter()
+        .take(OUTPUT_BLOCKS_MAX)
+        .map(|part| {
+            let (kind, kind_truncated) = part
+                .kind
+                .map(|kind| clip(kind, OUTPUT_BLOCK_TYPE_MAX))
+                .unwrap_or_default();
+            let mut block = json!({
+                "ordinal": part.ordinal,
+                "type": if part.kind.is_some() { json!(kind) } else { Value::Null },
+            });
+            if kind_truncated {
+                block["type_truncated"] = json!(true);
+                truncated = true;
+            }
+            match part.content {
+                events::OutputBlockContent::Text { text, header } => {
+                    block["role"] = json!(if header { "header" } else { "body" });
+                    let (shown, cut) = if remaining == 0 {
+                        (String::new(), !text.is_empty())
+                    } else if text.len() > remaining {
+                        let marker = "…";
+                        if remaining < marker.len() {
+                            (String::new(), true)
+                        } else {
+                            clip(text, remaining - marker.len())
+                        }
+                    } else {
+                        clip(text, remaining)
+                    };
+                    remaining = remaining.saturating_sub(shown.len());
+                    block["text"] = json!(shown);
+                    if cut {
+                        block["truncated"] = json!(true);
+                        truncated = true;
+                    }
+                }
+                events::OutputBlockContent::Image => {
+                    block["role"] = json!("nontext");
+                    block["fallback"] = json!("[image]");
+                }
+                events::OutputBlockContent::Unknown => {
+                    block["role"] = json!("unknown");
+                    block["fallback"] = json!("[unsupported output block]");
+                }
+            }
+            block
+        })
+        .collect();
+    Some((Value::Array(blocks), truncated, omitted))
 }
 
 /// A yielded command's line: from the item that completed it, else from
@@ -1268,7 +1429,17 @@ fn sent_entry(
     state_fields(&mut entry, shown, took, slot.t, now);
     if let Some(output) = reply
         .and_then(|reply| lines.get(&file.path, reply.o))
-        .and_then(|record| chunk_of(&record).or_else(|| result_text(&record, 0)))
+        .and_then(|record| {
+            let result_source = matches!(
+                &slot.kind,
+                SlotKind::Sent {
+                    result_source: true,
+                    ..
+                }
+            );
+            (result_source.then(|| chunk_of(&record)).flatten())
+                .or_else(|| result_text(&record, 0, result_source))
+        })
         .filter(|output| !output.trim().is_empty())
     {
         put_out(&mut entry, &mut more, &output, Source::Model);
@@ -1289,6 +1460,7 @@ fn tool_output(
     path: &Path,
     reply: Option<&Reply>,
     item: Option<u64>,
+    code_result_source: bool,
 ) -> Option<(String, Source)> {
     if let Some(output) = item
         .and_then(|item| lines.get(path, item))
@@ -1313,7 +1485,10 @@ fn tool_output(
     } else {
         Source::Plain
     };
-    Some((result_text(&record, reply.b as usize)?, source))
+    Some((
+        result_text(&record, reply.b as usize, code_result_source)?,
+        source,
+    ))
 }
 
 fn think_text(record: &Value, block: usize) -> Option<String> {
@@ -1425,8 +1600,20 @@ fn tool_entry(
                 if cut {
                     more.push("diff");
                 }
-            } else if let Some((text, source)) = tool_output(lines, &file.path, reply, item)
-                .filter(|(text, _)| !text.trim().is_empty())
+            } else if let Some((text, source)) = tool_output(
+                lines,
+                &file.path,
+                reply,
+                item,
+                matches!(
+                    &slot.kind,
+                    SlotKind::Tool {
+                        result_source: true,
+                        ..
+                    }
+                ),
+            )
+            .filter(|(text, _)| !text.trim().is_empty())
             {
                 put_out(&mut entry, &mut more, &text, source);
             }
@@ -1744,6 +1931,7 @@ pub(crate) fn render_at(
             reply,
             item,
             bg,
+            ..
         } => {
             let mut entry = tool_entry(
                 lines,
@@ -1791,6 +1979,7 @@ pub(crate) fn render_at(
             reply,
             start,
             done,
+            ..
         } => sent_entry(
             lines,
             file?,
@@ -1925,6 +2114,13 @@ pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, S
             .get(&file.path, slot.offset)
             .and_then(|record| think_text(&record, block)),
         SlotKind::Tool { reply, item, .. } => {
+            let code_result_source = matches!(
+                &slot.kind,
+                SlotKind::Tool {
+                    result_source: true,
+                    ..
+                }
+            );
             if let Some(input) = lines
                 .get(&file.path, slot.offset)
                 .and_then(|record| tool_input(&record, block))
@@ -1933,7 +2129,9 @@ pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, S
                 strings(&input, &mut text);
                 texts.push(("in", text));
             }
-            if let Some((text, _)) = tool_output(lines, &file.path, reply.as_ref(), *item) {
+            if let Some((text, _)) =
+                tool_output(lines, &file.path, reply.as_ref(), *item, code_result_source)
+            {
                 texts.push(("out", text));
             }
             None
