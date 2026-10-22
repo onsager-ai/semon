@@ -141,7 +141,10 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
     assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
     row.query = Some(json!({"runtime":"unsupported-runtime"}));
     assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
-    assert_ne!(reader.expected(&row).as_deref(), Some("unsupported-runtime"));
+    assert_ne!(
+        reader.expected(&row).as_deref(),
+        Some("unsupported-runtime")
+    );
 }
 
 #[test]
