@@ -64,10 +64,7 @@ test('metadata progress after the total wall-clock cap cannot restart recovery',
   recovery.observeProgress({ source: 'source-a' }, start);
   for (let attempt = 0; attempt < 4; ++attempt) recovery.fail(start);
   assert.equal(
-    recovery.observeProgress(
-      { source: 'source-b' },
-      start + CATALOG_RECOVERY_WALL_BUDGET_MS + 1,
-    ),
+    recovery.observeProgress({ source: 'source-b' }, start + CATALOG_RECOVERY_WALL_BUDGET_MS + 1),
     false,
   );
   assert.equal(recovery.stopped, true);

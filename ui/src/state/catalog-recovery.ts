@@ -1,9 +1,7 @@
 /** One selected reader's automatic retry budget. Manual retry starts a new budget. */
 export const CATALOG_RECOVERY_WALL_BUDGET_MS = 45_000;
 
-export type CatalogRecoveryProgress = Partial<
-  Record<'source' | 'catalog' | 'identity', string>
->;
+export type CatalogRecoveryProgress = Partial<Record<'source' | 'catalog' | 'identity', string>>;
 
 export class CatalogRecovery {
   private failures = 0;
