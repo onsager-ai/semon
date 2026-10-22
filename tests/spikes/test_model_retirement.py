@@ -46,11 +46,14 @@ class ModelRetirement(unittest.TestCase):
     def test_independent_reference_bytes_and_capture_provenance(self):
         expected = {
             "query/contract-reference.json": "19c05ca78463bdc64dc8f54696994bdda108078d036cca80c5c648b7016cbe7c",
-            "model/golden/answers.json": "8bf4d678a05a5b27e09d677cf1a86b5a28764262ff37e23603aa0c5553076841",
-            "model/golden/lineage.json": "beee9b2d205961c3982a17f63c6f4b33f7ee7b1918f398c1f8edbfb7723be94e",
-            "model/golden/relays.json": "d8e6f1fc18fcf02b169f48ea77704d77969086a039d26e661e98cc2812a8ecc6",
-            "model/golden/spawns.json": "83c1b93a501b8231fa08ea877ffc3714dedba5e873a7f8c39b0339c7061dc259",
-            "model/golden/turns.json": "7768c61e55ba81dd3cb3909d513c8c13840be26acd8e350fab9930f580d916a1",
+            # Independent #466 pricing-only refresh, before this cleanup:
+            # 634b5312f9359dae1a9ab1c6979ae4878539e5bc. Native semantic fields
+            # still match the original 5f346070 Model capture; see the design doc.
+            "model/golden/answers.json": "dfaea17d3c32d5b8052957dc8854ff6115ff4ec8388868a13f4cd8577143312a",
+            "model/golden/lineage.json": "b6fcebdab482f037d13c1897131cbf58deb3f0300e8e696d946355c533b5616c",
+            "model/golden/relays.json": "8b48fd581ec5c254b759d9a1fce23440fef9cccf99e68ded1f33b30bdf0bcf6e",
+            "model/golden/spawns.json": "69037bf44b4654bcbf68818c3c26bcc95f1982eb695190c6177bf273f3ce0972",
+            "model/golden/turns.json": "ae0d3a4a529400fff361d21674b01a81ffd039e110a4a3038489988c7cb83781",
             "model/retirement-reference.json": "cc72b196dec3d9a97f16c45d41af55ce2adf88234e2c8fb03c24ba8719d55972",
         }
         for path, digest in expected.items():
