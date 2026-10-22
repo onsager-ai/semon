@@ -1818,7 +1818,7 @@ mod tests {
             .unwrap(),
             facts
         );
-        assert_eq!(versions(&c).unwrap().1, Some(27));
+        assert_eq!(versions(&c).unwrap().1, Some(CACHE_VERSION));
         drop(c);
         fs::remove_dir_all(root).unwrap();
     }
