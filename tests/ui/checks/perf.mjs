@@ -238,11 +238,7 @@ async function paintFailureDiagnostics(
       summary.pendingAtPaintTimeout = true;
       summary.failure = 'selected transcript request was still pending at the paint timeout';
     }
-    if (
-      !(summary.status >= 400) &&
-      summary.state !== 'failed' &&
-      summary.state !== 'pending'
-    )
+    if (!(summary.status >= 400) && summary.state !== 'failed' && summary.state !== 'pending')
       continue;
     if (response && summary.status >= 400) {
       const hasContentLength =
@@ -760,16 +756,13 @@ async function runScreen(browser, screen, server, fixture) {
           selectedTranscriptRequests.push(record);
           if (selectedTranscriptRequests.length > 8) {
             const evictedTranscript = selectedTranscriptRequests.shift();
-          if (evictedTranscript?.request && !apiRequests.includes(evictedTranscript))
+            if (evictedTranscript?.request && !apiRequests.includes(evictedTranscript))
               apiByRequest.delete(evictedTranscript.request);
           }
         }
         if (apiRequests.length > 24) {
           const evicted = apiRequests.shift();
-          if (
-            evicted?.request &&
-            !selectedTranscriptRequests.includes(evicted)
-          )
+          if (evicted?.request && !selectedTranscriptRequests.includes(evicted))
             apiByRequest.delete(evicted.request);
         }
         apiByRequest.set(request, record);

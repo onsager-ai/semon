@@ -250,8 +250,7 @@ for (const width of [390, 1280])
           return route.fulfill({ json: capabilities(true) });
         if (url.pathname === '/api/session-identity')
           return route.fulfill({ json: currentIdentity });
-        if (url.pathname === '/api/sessions')
-          return route.fulfill({ json: list([currentMeta]) });
+        if (url.pathname === '/api/sessions') return route.fulfill({ json: list([currentMeta]) });
         if (url.pathname === '/api/session-transcript') {
           ++reads;
           return failing
@@ -277,7 +276,11 @@ for (const width of [390, 1280])
       }
       await terminal.waitFor();
       const stoppedReads = reads;
-      assert.equal(stoppedReads, 8, 'four failed reads and their bounded resynchronizations exhaust');
+      assert.equal(
+        stoppedReads,
+        8,
+        'four failed reads and their bounded resynchronizations exhaust',
+      );
 
       provisional = true;
       for (let attempt = 0; attempt < 4; ++attempt) {

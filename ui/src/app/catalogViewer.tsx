@@ -29,10 +29,7 @@ import {
 import { CatalogSelectionStore, type CatalogSelectionRequest } from '../state/catalog-selection';
 import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catalog-annotations';
 import { CatalogTranscriptStore } from '../state/catalog-transcript';
-import {
-  CatalogRecovery,
-  type CatalogRecoveryProgress,
-} from '../state/catalog-recovery';
+import { CatalogRecovery, type CatalogRecoveryProgress } from '../state/catalog-recovery';
 import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
 import { createRecentRenderer } from '../lib/recent';
@@ -184,11 +181,7 @@ function catalogRecoveryProgress(value: CatalogSession): CatalogRecoveryProgress
     ),
     catalog: JSON.stringify(
       value.transcript
-        ? [
-            value.transcript.generation,
-            value.transcript.errorsGeneration,
-            value.transcript.total,
-          ]
+        ? [value.transcript.generation, value.transcript.errorsGeneration, value.transcript.total]
         : null,
     ),
   };
@@ -2662,18 +2655,20 @@ export function createCatalogViewer(
       recoveryNote = view.recovery.stopped
         ? 'Recorded history could not be loaded. Retry to try again.'
         : undefined,
-      observationNote = recoveryNote ?? [
-        view.anchorNote,
-        view.note,
-        view.observationFailure?.text,
-        view.meta?.source_refs.some(
-          (reference) => reference.state === 'unavailable' || reference.state === 'incomplete',
-        )
-          ? 'History is incomplete. Previously loaded text is retained.'
-          : undefined,
-      ]
-        .filter(Boolean)
-        .join(' ');
+      observationNote =
+        recoveryNote ??
+        [
+          view.anchorNote,
+          view.note,
+          view.observationFailure?.text,
+          view.meta?.source_refs.some(
+            (reference) => reference.state === 'unavailable' || reference.state === 'incomplete',
+          )
+            ? 'History is incomplete. Previously loaded text is retained.'
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join(' ');
     if (!current) {
       renderSessionScreen(
         view.root,
