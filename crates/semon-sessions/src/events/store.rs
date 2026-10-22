@@ -9186,7 +9186,7 @@ mod tests {
             ),
             (
                 "missing-event-column",
-                "ALTER TABLE events DROP COLUMN reply_m",
+                "DROP INDEX semantic_index_send; ALTER TABLE events DROP COLUMN reply_m",
                 "malformed persistent state",
             ),
             (
