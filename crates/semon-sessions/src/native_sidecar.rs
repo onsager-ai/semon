@@ -602,7 +602,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        let mut marker: Value = serde_json::from_str(&encoded).unwrap();
+        let marker: Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(marker["version"], 6);
         fs::write(&home.meta, metadata().to_string() + " ").unwrap();
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
@@ -610,16 +610,22 @@ mod tests {
         home.query();
         let ready = home.ready();
         crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
-        let mut record = home.encoded().unwrap();
-        record.push(' ');
+        let encoded: String = home
+            .connection()
+            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut marker: Value = serde_json::from_str(&encoded).unwrap();
+        let record = home.encoded().unwrap();
         home.connection()
             .execute(
                 "UPDATE meta SET value=?2 WHERE key=?1",
-                rusqlite::params![home.key(), record],
+                rusqlite::params![home.key(), format!("{record} ")],
             )
             .unwrap();
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
-        // Prior v1 markers retain already evicted rows even without sidecar proof.
+        // Unsupported markers refuse without changing the already retained rows.
         marker["version"] = json!(1);
         marker
             .as_object_mut()
@@ -647,6 +653,34 @@ mod tests {
             .execute("DELETE FROM meta WHERE key=?1", [home.key()])
             .unwrap();
         fs::remove_file(&home.path).unwrap();
+        let connection = home.connection();
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert!(crate::events::EventCache::open_scoped(&home.options.cache).is_err());
+        assert_eq!(
+            crate::source_event_index_retained(&home.options, &proof, &ready),
+            Err(crate::CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::retain_source_event_index(&home.options, &proof, &ready),
+            Err(crate::CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
+        );
+        // The current marker binds the portable sidecar across disappearance.
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![key, encoded],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![home.key(), record],
+            )
+            .unwrap();
         let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
         crate::model::observe_catalog(
             &home.options,
@@ -666,6 +700,6 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
+        assert!(crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
     }
 }

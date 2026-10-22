@@ -2306,7 +2306,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_eviction_binds_parent_marker_metadata_and_preserves_prior_v4_rows() {
+    fn archive_eviction_binds_parent_marker_metadata_and_preserves_prior_rows() {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
@@ -2369,7 +2369,28 @@ mod tests {
                 rusqlite::params![archive_key, marker.to_string()],
             )
             .unwrap();
-        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert_eq!(
+            crate::source_event_index_retained(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
+        );
+        // Restore the current fixture to exercise ordinary retained custody.
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![archive_key, encoded],
+            )
+            .unwrap();
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         let before = indexed_rows(&connection, path.to_str().unwrap());
         fs::remove_file(&path).unwrap();
         for _ in 0..2 {
@@ -2378,10 +2399,7 @@ mod tests {
             let count: i64 = connection
                 .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(
-                count, 1,
-                "old v4 custody still preserves the existing index"
-            );
+            assert_eq!(count, 1, "current custody preserves the existing index");
         }
     }
 
@@ -2424,7 +2442,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_eviction_binds_native_launch_metadata_and_preserves_prior_v5_rows() {
+    fn archive_eviction_binds_native_launch_metadata_and_preserves_prior_rows() {
         use sha2::{Digest, Sha256};
         let fixture = Fixture::new();
         fixture.publish(1);
@@ -2487,7 +2505,27 @@ mod tests {
                 rusqlite::params![archive_key, marker.to_string()],
             )
             .unwrap();
-        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert_eq!(
+            crate::source_event_index_retained(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
+        );
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![archive_key, encoded],
+            )
+            .unwrap();
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         let before = indexed_rows(&connection, path.to_str().unwrap());
         fs::remove_file(&path).unwrap();
         for _ in 0..2 {
@@ -2564,9 +2602,18 @@ mod tests {
         connection
             .execute("UPDATE files SET pending='{}'", [])
             .unwrap();
+        connection
+            .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
+            .unwrap();
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
         assert_eq!(
             crate::retain_source_event_index(&fixture.options, &proof, &ready),
-            Err(CatalogIdentityError::ScopeChanged)
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
         );
         let count: i64 = connection
             .query_row(

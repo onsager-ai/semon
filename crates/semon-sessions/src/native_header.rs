@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_header_retention_fences_metadata_and_preserves_prior_archive_markers() {
+    fn codex_header_retention_fences_metadata_and_preserves_prior_rows() {
         let home = Home::new(&records());
         home.query();
         let proof = home.proof();
@@ -327,30 +327,26 @@ mod tests {
         crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
         assert!(crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         let archive_key = format!("archive_event_index:{}", home.path.display());
+        let header_key = format!("native_codex_header:{}", home.path.display());
         let connection = home.connection();
-        let mut marker: Value = serde_json::from_str(
-            &connection
-                .query_row::<String, _, _>(
-                    "SELECT value FROM meta WHERE key=?1",
-                    [&archive_key],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-        )
-        .unwrap();
+        let encoded: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [&archive_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut marker: Value = serde_json::from_str(&encoded).unwrap();
+        let header = home.header_text();
         assert_eq!(marker["version"], 6);
         connection
-            .execute(
-                "UPDATE meta SET value=value || ' ' WHERE key=?1",
-                [format!("native_codex_header:{}", home.path.display())],
-            )
+            .execute("UPDATE meta SET value=value || ' ' WHERE key=?1", [&header_key])
             .unwrap();
         assert!(
             !crate::source_event_index_retained(&home.options, &proof, &ready).unwrap(),
             "even decodable header changes require another verified marker"
         );
-        // Earlier markers retain their native index rows even without portable
-        // headers. They cannot qualify another eviction in the new binary.
+        // Earlier markers are refused without changing their original custody.
         marker["version"] = json!(1);
         marker
             .as_object_mut()
@@ -375,12 +371,41 @@ mod tests {
             )
             .unwrap();
         connection
-            .execute(
-                "DELETE FROM meta WHERE key=?1",
-                [format!("native_codex_header:{}", home.path.display())],
-            )
+            .execute("DELETE FROM meta WHERE key=?1", [&header_key])
             .unwrap();
         fs::remove_file(&home.path).unwrap();
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert!(crate::events::EventCache::open_scoped(&home.options.cache).is_err());
+        assert!(
+            Query::new(home.options.clone())
+                .call_at("list_sessions", &json!({}), NOW)
+                .is_err()
+        );
+        assert_eq!(
+            crate::source_event_index_retained(&home.options, &proof, &ready),
+            Err(crate::CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::retain_source_event_index(&home.options, &proof, &ready),
+            Err(crate::CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
+        );
+        // Current markers and portable headers preserve readable prior rows.
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![archive_key, encoded],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![header_key, header],
+            )
+            .unwrap();
         home.query();
         assert_eq!(
             connection
@@ -396,6 +421,6 @@ mod tests {
                 .source,
             proof.source
         );
-        assert!(!crate::source_event_index_retained(&home.options, &proof, &home.ready()).unwrap());
+        assert!(crate::source_event_index_retained(&home.options, &proof, &home.ready()).unwrap());
     }
 }

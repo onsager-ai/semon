@@ -1112,10 +1112,10 @@ mod tests {
                 cache: root.join("index.json"),
                 ..Options::default()
             };
+            drop(EventCache::open_scoped(&options.cache).unwrap());
             let db = Connection::open(EventCache::path(&options.cache)).unwrap();
-            db.execute_batch(SCHEMA).unwrap();
-            db.execute_batch(crate::causal_trace::SCHEMA).unwrap();
-            db.execute_batch("CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,lifecycle TEXT NOT NULL,last_ms INTEGER NOT NULL,metadata TEXT NOT NULL);CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);INSERT INTO meta VALUES('catalog_completeness','complete');").unwrap();
+            db.execute("INSERT INTO meta VALUES('catalog_completeness','complete')", [])
+            .unwrap();
             Self {
                 source: OverviewSource {
                     key: key.into(),
@@ -1130,7 +1130,7 @@ mod tests {
             let mut db = Connection::open(EventCache::path(&self.source.options.cache)).unwrap();
             let tx = db.transaction().unwrap();
             tx.execute(
-                "INSERT OR REPLACE INTO session_catalog VALUES(?1,?2,1000,'{}')",
+                "INSERT OR REPLACE INTO session_catalog(session_key,lifecycle,last_ms,harness,metadata) VALUES(?1,?2,1000,'codex','{}')",
                 params![key, lifecycle],
             )
             .unwrap();
