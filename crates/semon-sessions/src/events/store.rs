@@ -55,6 +55,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
 std::thread_local! {
+    static BEFORE_FRESH_WAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_STORAGE_INIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -4237,7 +4238,12 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     if matches!(found, Init::Unsupported(_)) {
         return Ok(found);
     }
-    if matches!(found, Init::Fresh) {
+    let fresh = matches!(found, Init::Fresh);
+    let mut initialized = false;
+    if fresh {
+        // Retain the initialization lock across COMMIT and the first WAL switch.
+        // Another version must not change the qualified store in that gap.
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         match qualify(&transaction)? {
             Init::Fresh => {
@@ -4260,15 +4266,39 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     [CACHE_VERSION.to_string()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                initialized = true;
             }
             Init::Ready => {}
             unsupported => return Ok(unsupported),
         }
         transaction.commit()?;
     }
-    let mode: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    #[cfg(test)]
+    if initialized && let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+    // Current storage is already WAL: merely read its mode. Repeating the
+    // setter could mutate a concurrently replaced unsupported database.
+    let mode: String = connection.query_row(
+        if initialized { "PRAGMA journal_mode = WAL" } else { "PRAGMA journal_mode" },
+        [],
+        |row| row.get(0),
+    )?;
     if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(Init::NoWal);
+        return Ok(if fresh { Init::NoWal } else {
+            Init::Unsupported("unsupported session index: journal mode")
+        });
+    }
+    if fresh && let Some(path) = connection.path().filter(|path| !path.is_empty()).map(PathBuf::from) {
+        // A connection entering WAL with EXCLUSIVE locking keeps that mode.
+        // Reopen with normal locking and requalify before configuring/using it.
+        let old = std::mem::replace(connection, Connection::open_in_memory()?);
+        drop(old);
+        *connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        return init(connection);
     }
     let _: i64 = connection.query_row(
         &format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
@@ -9140,6 +9170,27 @@ mod tests {
             drop(db);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn storage_initialization_holds_its_lock_through_the_first_wal_switch() {
+        let root = scratch("first-wal-lock");
+        let path = root.join("index.sqlite3");
+        let other_path = path.clone();
+        BEFORE_FRESH_WAL.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let other = Connection::open(&other_path).unwrap();
+                other.busy_timeout(Duration::ZERO).unwrap();
+                let error = other.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap_err();
+                assert_eq!(error.sqlite_error_code(), Some(ErrorCode::DatabaseBusy));
+            }));
+        });
+        let (store, _) = opened(&path);
+        let mode: String = store.connection.query_row("PRAGMA locking_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, "normal");
+        assert!(current(&store.connection).unwrap());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
