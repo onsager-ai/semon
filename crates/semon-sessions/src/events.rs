@@ -8682,7 +8682,9 @@ mod tests {
         }
         let output_text = |id: &str| {
             let call = &reopened_index.events[by_id(&reopened_index, id)];
-            let record = Lines::default().get(&log, call.r.as_ref().unwrap().o).unwrap();
+            let record = Lines::default()
+                .get(&log, call.r.as_ref().unwrap().o)
+                .unwrap();
             record["payload"]["output"].as_str().unwrap().to_owned()
         };
         let running_text = output_text("direct-session-only");
@@ -8898,7 +8900,9 @@ mod tests {
                 }
                 "formatted_terminal" => {
                     assert_eq!(edge["semon_supported"], false);
-                    let output = Lines::default().get(&log, direct.r.as_ref().unwrap().o).unwrap();
+                    let output = Lines::default()
+                        .get(&log, direct.r.as_ref().unwrap().o)
+                        .unwrap();
                     assert!(
                         output["payload"]["output"]
                             .as_str()

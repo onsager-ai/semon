@@ -176,7 +176,7 @@ impl<'a> Lines<'a> {
             .map(str::to_owned)
     }
 
-    fn get(&mut self, path: &Path, offset: u64) -> Option<Rc<Value>> {
+    pub(crate) fn get(&mut self, path: &Path, offset: u64) -> Option<Rc<Value>> {
         if let Some((_, record)) = self
             .recent
             .iter()
