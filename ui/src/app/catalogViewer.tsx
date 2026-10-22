@@ -3350,6 +3350,7 @@ export function createCatalogViewer(
         current = view.store.selectedPage();
       if (!metadata || metadata.key !== view.key || next.machine !== source)
         throw Error('Selected observation changed');
+      const recoveryReopened = view.recovery.observeProgress(catalogRecoveryProgress(metadata));
       const recovered = !!view.observationFailure;
       view.observationFailure = undefined;
       const labelChanged = view.sourceLabel !== next.machine_info.label;
@@ -3359,7 +3360,7 @@ export function createCatalogViewer(
         (metadata.transcript.generation !== current?.projection.generation ||
           metadata.transcript.total !== current?.projection.total ||
           metadata.transcript.errorsGeneration !== current?.projection.errorsGeneration);
-      if (projectionChanged) await loadSelected(view);
+      if (projectionChanged || recoveryReopened) await loadSelected(view);
       else if (
         labelChanged ||
         JSON.stringify(metadata) !== JSON.stringify(view.meta) ||
