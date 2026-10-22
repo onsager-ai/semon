@@ -1,7 +1,11 @@
 //! Paged content-free byte proofs, owned by the existing native ledger CAS.
 use super::*;
+use crate::source_carrier::FailureStage;
 use crate::source_chunks::Chunks;
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 const PAGE: usize = 1024;
 
@@ -12,6 +16,8 @@ struct Header {
     parser_version: u32,
     ledger: String,
     count: usize,
+    #[serde(default, skip_serializing)]
+    consumed_offset: Option<u64>,
     fingerprint: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pages_root: Option<[u8; 32]>,
@@ -36,6 +42,147 @@ fn prefix(path: &str) -> String {
         "native_source_chunks:{:x}:",
         Sha256::digest(path.as_bytes())
     )
+}
+
+#[derive(Default)]
+struct HeaderMismatchLimiter {
+    last: BTreeMap<String, HeaderMismatchEntry>,
+    next_order: u64,
+}
+
+#[derive(PartialEq, Eq)]
+struct HeaderMismatchEvent {
+    catalog: String,
+    proof: String,
+    stage: &'static str,
+    raw_collected: bool,
+}
+
+impl HeaderMismatchEvent {
+    fn covers(&self, next: &Self) -> bool {
+        self.catalog == next.catalog
+            && self.proof == next.proof
+            && self.stage == next.stage
+            && (self.raw_collected || !next.raw_collected)
+    }
+}
+
+struct HeaderMismatchEntry {
+    event: HeaderMismatchEvent,
+    order: u64,
+}
+
+impl HeaderMismatchLimiter {
+    fn allow(
+        &mut self,
+        source: &str,
+        catalog: &str,
+        proof: &str,
+        stage: &'static str,
+        raw_collected: bool,
+    ) -> bool {
+        let event = HeaderMismatchEvent {
+            catalog: catalog.to_owned(),
+            proof: proof.to_owned(),
+            stage,
+            raw_collected,
+        };
+        if self
+            .last
+            .get(source)
+            .is_some_and(|prior| prior.event.covers(&event))
+        {
+            return false;
+        }
+        if self.last.len() >= 256 && !self.last.contains_key(source) {
+            let oldest = self
+                .last
+                .iter()
+                .min_by_key(|(_, entry)| entry.order)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.last.remove(&oldest);
+            }
+        }
+        self.next_order = self.next_order.wrapping_add(1);
+        self.last.insert(
+            source.to_owned(),
+            HeaderMismatchEntry {
+                event,
+                order: self.next_order,
+            },
+        );
+        true
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct HeaderOpenDiagnostic {
+    pub(super) proof_ledger_digest: Option<String>,
+    pub(super) index_ledger_digest: Option<String>,
+    pub(super) proof_offset: Option<u64>,
+    pub(super) index_offset: Option<u64>,
+    pub(super) parser_version: Option<u32>,
+}
+
+fn fresh_raw_size(path: &str) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+pub(crate) fn log_header_rejection(
+    path: &str,
+    stage: FailureStage,
+    ledger: &Ledger,
+    diagnostic: &HeaderOpenDiagnostic,
+    raw_before: Option<u64>,
+    raw_after: Option<u64>,
+) {
+    static LAST: OnceLock<Mutex<HeaderMismatchLimiter>> = OnceLock::new();
+    let source_hash = crate::source_carrier::source_hash(path);
+    let catalog_hash = crate::source_carrier::ledger_digest(ledger);
+    let proof_hash = diagnostic
+        .proof_ledger_digest
+        .as_deref()
+        .unwrap_or("missing");
+    let allowed = LAST
+        .get_or_init(|| Mutex::new(HeaderMismatchLimiter::default()))
+        .lock()
+        .is_ok_and(|mut limiter| {
+            limiter.allow(
+                &source_hash,
+                &catalog_hash,
+                proof_hash,
+                stage.name(),
+                raw_before.is_some(),
+            )
+        });
+    if allowed {
+        let raw = match raw_before {
+            Some(before) => format!("raw_before={before} raw_after={raw_after:?}"),
+            None => "raw=not_collected".to_owned(),
+        };
+        let line = format!(
+            "semon native proof: source_hash={} stage={} ledger_digest_domain=ledger-v1 catalog_ledger_digest={} proof_ledger_digest={} index_ledger_digest={} catalog_offset={} proof_offset={:?} index_offset={:?} proof_parser={:?} {raw} sample=independent_statements",
+            &source_hash[..12],
+            stage.name(),
+            &catalog_hash[..12],
+            diagnostic
+                .proof_ledger_digest
+                .as_deref()
+                .map_or("missing", |hash| &hash[..12]),
+            diagnostic
+                .index_ledger_digest
+                .as_deref()
+                .map_or("missing", |hash| &hash[..12]),
+            ledger.offset,
+            diagnostic.proof_offset,
+            diagnostic.index_offset,
+            diagnostic.parser_version
+        );
+        eprintln!("{line}");
+        #[cfg(test)]
+        HEADER_DIAGNOSTICS.with(|lines| lines.borrow_mut().push(line));
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +438,7 @@ pub(crate) struct Focused {
     prefix: String,
     header: String,
     ledger: Ledger,
+    path: String,
     count: usize,
     pages_root: Option<[u8; 32]>,
     cached: std::sync::Mutex<Option<(usize, Page)>>,
@@ -300,14 +448,52 @@ pub(crate) struct Focused {
 thread_local! {
     pub(crate) static FOCUSED_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static FOCUSED_METADATA_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static HEADER_DIAGNOSTICS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn proof_db_error(missing: FailureStage, error: rusqlite::Error) -> io::Error {
+    let stage = if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+        missing
+    } else {
+        FailureStage::ProofOpenDb
+    };
+    stage.wrap(io::Error::other(error))
 }
 
 impl Focused {
+    #[cfg(test)]
     pub(crate) fn open(cache: &Path, path: &str, ledger: &Ledger) -> io::Result<Self> {
-        let db = super::focused_connection(cache)?;
-        db.busy_timeout(Duration::from_millis(100))
-            .map_err(io::Error::other)?;
-        Self::with_db(Arc::new(std::sync::Mutex::new(db)), cache, path, ledger)
+        Self::open_with_raw(cache, path, ledger, None)
+    }
+
+    pub(crate) fn open_with_raw(
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        raw_before: Option<u64>,
+    ) -> io::Result<Self> {
+        let mut diagnostic = HeaderOpenDiagnostic::default();
+        let result = (|| {
+            let db = super::focused_connection(cache)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
+            db.busy_timeout(Duration::from_millis(100))
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
+            Self::with_db_inner(
+                Arc::new(std::sync::Mutex::new(db)),
+                cache,
+                path,
+                ledger,
+                &mut diagnostic,
+            )
+        })();
+        if let Err(error) = &result
+            && let Some(stage) = FailureStage::of(error)
+        {
+            crate::source_carrier::note_diagnostic_interest(cache, path, ledger);
+            let raw_after = raw_before.and_then(|_| fresh_raw_size(path));
+            log_header_rejection(path, stage, ledger, &diagnostic, raw_before, raw_after);
+        }
+        result
     }
 
     pub(crate) fn with_db(
@@ -316,26 +502,72 @@ impl Focused {
         path: &str,
         ledger: &Ledger,
     ) -> io::Result<Self> {
-        let connection = db
-            .lock()
-            .map_err(|_| io::Error::other("Native proof reader unavailable"))?;
-        if !super::current(&connection).map_err(io::Error::other)? {
-            return Err(io::Error::other("Native proof store changed"));
+        let mut diagnostic = HeaderOpenDiagnostic::default();
+        let result = Self::with_db_inner(db, cache, path, ledger, &mut diagnostic);
+        if let Err(error) = &result
+            && let Some(stage) = FailureStage::of(error)
+        {
+            crate::source_carrier::note_diagnostic_interest(cache, path, ledger);
+            log_header_rejection(path, stage, ledger, &diagnostic, None, None);
+        }
+        result
+    }
+
+    fn with_db_inner(
+        db: Arc<std::sync::Mutex<Connection>>,
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        diagnostic: &mut HeaderOpenDiagnostic,
+    ) -> io::Result<Self> {
+        let connection = db.lock().map_err(|_| {
+            FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof reader unavailable"))
+        })?;
+        if !super::current(&connection)
+            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
+        {
+            return Err(
+                FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
+            );
+        }
+        if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
+            diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
+            diagnostic.index_offset = Some(index.offset);
         }
         let prefix = prefix(path);
         let encoded: String = connection
             .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
                 row.get(0)
             })
-            .map_err(io::Error::other)?;
-        let header: Header = serde_json::from_str(&encoded).map_err(io::Error::other)?;
-        if header.version != 1
-            || header.parser_version != CACHE_VERSION
-            || header.ledger != header_ledger(ledger)
-            || usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64))
-                != Ok(header.count)
+            .map_err(|error| {
+                let stage = if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    FailureStage::HeaderMissing
+                } else {
+                    FailureStage::ProofOpenDb
+                };
+                stage.wrap(io::Error::other(error))
+            })?;
+        let header: Header = serde_json::from_str(&encoded)
+            .map_err(|error| FailureStage::HeaderVersion.wrap(io::Error::other(error)))?;
+        diagnostic.proof_ledger_digest =
+            Some(crate::source_carrier::ledger_digest_value(&header.ledger));
+        diagnostic.proof_offset = header.consumed_offset;
+        diagnostic.parser_version = Some(header.parser_version);
+        let stage = if header.version != 1 {
+            Some(FailureStage::HeaderVersion)
+        } else if header.parser_version != CACHE_VERSION {
+            Some(FailureStage::HeaderParser)
+        } else if header.ledger != header_ledger(ledger) {
+            Some(FailureStage::HeaderLedger)
+        } else if usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64))
+            != Ok(header.count)
         {
-            return Err(io::Error::other("Native proof header changed"));
+            Some(FailureStage::HeaderCount)
+        } else {
+            None
+        };
+        if let Some(stage) = stage {
+            return Err(stage.wrap(io::Error::other("Native proof header changed")));
         }
         #[cfg(test)]
         FOCUSED_METADATA_BYTES.with(|n| n.set(n.get() + encoded.len()));
@@ -346,6 +578,7 @@ impl Focused {
             prefix,
             header: encoded,
             ledger: ledger.clone(),
+            path: path.to_owned(),
             count: header.count,
             pages_root: header.pages_root,
             cached: std::sync::Mutex::new(None),
@@ -353,29 +586,47 @@ impl Focused {
     }
 
     fn hash(&self, index: usize) -> io::Result<[u8; 32]> {
-        if index >= self.count {
-            return Err(io::Error::other("Native proof block unavailable"));
+        let result = self.hash_inner(index);
+        if result
+            .as_ref()
+            .is_err_and(|error| FailureStage::of(error).is_some())
+        {
+            crate::source_carrier::note_diagnostic_interest(
+                &self.cache_path,
+                &self.path,
+                &self.ledger,
+            );
         }
-        let mut db = self
-            .db
-            .lock()
-            .map_err(|_| io::Error::other("Native proof reader unavailable"))?;
-        let tx = db.transaction().map_err(io::Error::other)?;
+        result
+    }
+
+    fn hash_inner(&self, index: usize) -> io::Result<[u8; 32]> {
+        if index >= self.count {
+            return Err(
+                FailureStage::PageMissing.wrap(io::Error::other("Native proof block unavailable"))
+            );
+        }
+        let mut db = self.db.lock().map_err(|_| {
+            FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof reader unavailable"))
+        })?;
+        let tx = db
+            .transaction()
+            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         let header: String = tx
             .query_row(
                 NATIVE_METADATA_VALUE,
                 [format!("{}header", self.prefix)],
                 |row| row.get(0),
             )
-            .map_err(io::Error::other)?;
+            .map_err(|error| proof_db_error(FailureStage::HeaderMissing, error))?;
         if header != self.header {
-            return Err(io::Error::other("Native proof publication changed"));
+            return Err(FailureStage::ProofChanged
+                .wrap(io::Error::other("Native proof publication changed")));
         }
         let page = index / PAGE;
-        let mut cache = self
-            .cached
-            .lock()
-            .map_err(|_| io::Error::other("Native proof cache unavailable"))?;
+        let mut cache = self.cached.lock().map_err(|_| {
+            FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof cache unavailable"))
+        })?;
         if let Some((cached_page, part)) = cache.as_ref()
             && *cached_page == page
         {
@@ -385,9 +636,11 @@ impl Focused {
                     [format!("{}{page:010}", self.prefix)],
                     |r| r.get(0),
                 )
-                .map_err(io::Error::other)?;
+                .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
             if part.sha256 != witness {
-                return Err(io::Error::other("Native proof page changed"));
+                return Err(
+                    FailureStage::PageHash.wrap(io::Error::other("Native proof page changed"))
+                );
             }
             #[cfg(test)]
             FOCUSED_METADATA_BYTES
@@ -400,15 +653,17 @@ impl Focused {
                 [format!("{}{page:010}", self.prefix)],
                 |row| row.get(0),
             )
-            .map_err(io::Error::other)?;
-        let part: Page = serde_json::from_str(&encoded).map_err(io::Error::other)?;
+            .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
+        let part: Page = serde_json::from_str(&encoded)
+            .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?;
         let original = Page {
             version: part.version,
             index: part.index,
             hashes: part.hashes.clone(),
             sha256: None,
         };
-        let canonical = json(&original).map_err(io::Error::other)?;
+        let canonical = json(&original)
+            .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?;
         if part.sha256.is_none() {
             let marker = repair_key(&self.prefix);
             let repair: Option<String> = tx
@@ -439,12 +694,14 @@ impl Focused {
                     [format!("{marker}:{page:010}")],
                     |r| r.get(0),
                 )
-                .map_err(io::Error::other)?;
+                .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
             if witness != page_witness(&canonical) {
-                return Err(io::Error::other("Native proof page changed"));
+                return Err(
+                    FailureStage::PageHash.wrap(io::Error::other("Native proof page changed"))
+                );
             }
         } else if part.sha256.as_deref() != Some(&page_witness(&canonical)) {
-            return Err(io::Error::other("Native proof page changed"));
+            return Err(FailureStage::PageHash.wrap(io::Error::other("Native proof page changed")));
         }
         if let Some(root) = self.pages_root {
             let mut node: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
@@ -465,10 +722,11 @@ impl Focused {
                             )],
                             |r| r.get(0),
                         )
-                        .map_err(io::Error::other)?;
+                        .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
                     #[cfg(test)]
                     FOCUSED_METADATA_BYTES.with(|n| n.set(n.get() + encoded.len()));
-                    serde_json::from_str::<[u8; 32]>(&encoded).map_err(io::Error::other)?
+                    serde_json::from_str::<[u8; 32]>(&encoded)
+                        .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?
                 };
                 node = if at.is_multiple_of(2) {
                     tree_parent(&node, &sibling)
@@ -480,14 +738,18 @@ impl Focused {
                 level += 1;
             }
             if node != root {
-                return Err(io::Error::other("Native proof root changed"));
+                return Err(
+                    FailureStage::PageHash.wrap(io::Error::other("Native proof root changed"))
+                );
             }
         }
         if part.version != 1
             || part.index != page
             || part.hashes.len() != (self.count - page * PAGE).min(PAGE)
         {
-            return Err(io::Error::other("Native proof page is incomplete"));
+            return Err(
+                FailureStage::PageMissing.wrap(io::Error::other("Native proof page is incomplete"))
+            );
         }
         #[cfg(test)]
         {
@@ -500,10 +762,9 @@ impl Focused {
     }
 
     pub(crate) fn clear_cache(&self) -> io::Result<()> {
-        *self
-            .cached
-            .lock()
-            .map_err(|_| io::Error::other("Native proof cache unavailable"))? = None;
+        *self.cached.lock().map_err(|_| {
+            FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof cache unavailable"))
+        })? = None;
         Ok(())
     }
 
@@ -512,14 +773,16 @@ impl Focused {
         let start = (index as u64)
             .checked_mul(crate::source_chunks::SIZE as u64)
             .filter(|start| *start < self.ledger.offset)
-            .ok_or_else(|| io::Error::other("Native proof block unavailable"))?;
+            .ok_or_else(|| {
+                FailureStage::PageMissing.wrap(io::Error::other("Native proof block unavailable"))
+            })?;
         let length = (self.ledger.offset - start).min(crate::source_chunks::SIZE as u64) as usize;
         #[cfg(test)]
         crate::events::SOURCE_HASHED_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
         if bytes.len() != length || <[u8; 32]>::from(Sha256::digest(bytes)) != hash {
-            return Err(io::Error::other(
+            return Err(FailureStage::PageHash.wrap(io::Error::other(
                 "Native source block generation unavailable",
-            ));
+            )));
         }
         Ok(())
     }
@@ -533,11 +796,15 @@ impl Focused {
         let start = (index as u64)
             .checked_mul(crate::source_chunks::SIZE as u64)
             .filter(|start| *start < self.ledger.offset)
-            .ok_or_else(|| io::Error::other("Native proof block unavailable"))?;
+            .ok_or_else(|| {
+                FailureStage::PageMissing.wrap(io::Error::other("Native proof block unavailable"))
+            })?;
         let mut bytes =
             vec![0; (self.ledger.offset - start).min(crate::source_chunks::SIZE as u64) as usize];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut bytes)?;
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| FailureStage::PageHash.wrap_preserving_kind(error))?;
+        file.read_exact(&mut bytes)
+            .map_err(|error| FailureStage::PageHash.wrap_preserving_kind(error))?;
         #[cfg(test)]
         {
             crate::source_chunks::READ_BYTES.with(|n| n.set(n.get() + bytes.len() as u64));
@@ -689,6 +956,7 @@ pub(super) fn write_measured(
             value
         },
         count: chunks.hashes.len(),
+        consumed_offset: Some(ledger.offset),
         fingerprint: {
             let started = measurements.start();
             let value = chunks.fingerprint();
@@ -711,6 +979,125 @@ pub(super) fn write_measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_header_writes_remain_readable_by_legacy_readers() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyHeader {
+            version: u32,
+            parser_version: u32,
+            ledger: String,
+            count: usize,
+            fingerprint: [u8; 32],
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pages_root: Option<[u8; 32]>,
+            #[serde(default)]
+            resume: Option<crate::source_chunks::PrefixState>,
+        }
+
+        let header = Header {
+            version: 1,
+            parser_version: CACHE_VERSION,
+            ledger: "synthetic-ledger".into(),
+            count: 1,
+            consumed_offset: Some(128),
+            fingerprint: [7; 32],
+            pages_root: Some([8; 32]),
+            resume: None,
+        };
+        let encoded = json(&header).unwrap();
+        let legacy: LegacyHeader = serde_json::from_str(&encoded).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert!(value.get("consumed_offset").is_none());
+        assert_eq!(serde_json::to_value(legacy).unwrap(), value);
+        let current: Header = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(current.consumed_offset, None);
+
+        value["consumed_offset"] = serde_json::json!(128);
+        assert!(serde_json::from_value::<LegacyHeader>(value.clone()).is_err());
+        let current: Header = serde_json::from_value(value).unwrap();
+        assert_eq!(current.consumed_offset, Some(128));
+    }
+
+    #[test]
+    fn header_mismatch_logging_is_limited_to_source_transitions() {
+        let mut limiter = HeaderMismatchLimiter::default();
+        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", false));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", false));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", true));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", false));
+        assert!(!limiter.allow("source", "catalog-l1", "proof-l2", "header_ledger", true));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_ledger", false));
+        assert!(limiter.allow("source", "catalog-l1", "proof-l3", "header_parser", false));
+        assert!(limiter.allow(
+            "other-source",
+            "catalog-l1",
+            "proof-l3",
+            "header_parser",
+            false
+        ));
+    }
+
+    #[test]
+    fn header_mismatch_limiter_evicts_oldest_insertion_not_smallest_hash() {
+        let mut limiter = HeaderMismatchLimiter::default();
+        for index in 0..256 {
+            let source = format!("source-{index:03}");
+            assert!(limiter.allow(&source, "catalog", "proof", "header_ledger", false));
+        }
+        assert!(limiter.allow("source-new", "catalog", "proof", "header_ledger", false));
+        assert!(!limiter.last.contains_key("source-000"));
+        assert!(limiter.last.contains_key("source-255"));
+        assert!(limiter.last.contains_key("source-new"));
+    }
+
+    #[test]
+    fn focused_byte_io_failures_preserve_original_kind_and_add_safe_stage() {
+        struct FailingIo {
+            seek: bool,
+        }
+        impl io::Read for FailingIo {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "private read cause",
+                ))
+            }
+        }
+        impl io::Seek for FailingIo {
+            fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
+                if self.seek {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private seek cause",
+                    ))
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+        let root = cleanup_root();
+        let cache = root.join("index.sqlite3");
+        let mut store = cleanup_store(&root, "index.sqlite3");
+        let (ledger, index) = cleanup_proof(1, 0);
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "synthetic", &ledger, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        let focused = Focused::open(&cache, "synthetic", &ledger).unwrap();
+        for (seek, expected) in [
+            (true, io::ErrorKind::PermissionDenied),
+            (false, io::ErrorKind::UnexpectedEof),
+        ] {
+            let error = focused.read(&mut FailingIo { seek }, 0).unwrap_err();
+            assert_eq!(error.kind(), expected);
+            assert_eq!(FailureStage::of(&error), Some(FailureStage::PageHash));
+            assert!(!error.to_string().contains("private"));
+        }
+        drop(focused);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn focused_proof_work_is_independent_of_the_complete_vector_and_rechecks_pages() {
