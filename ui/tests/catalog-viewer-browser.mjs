@@ -904,8 +904,10 @@ for (const width of [390, 1280])
           ['active', 'work', 'Terminal not recorded'],
           [null, 'off', 'Unknown'],
         ]) {
-          const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme });
-          const nativeSource = { ...source('turn'), root: 'codex' };
+          const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme,
+            isMobile: width === 390, hasTouch: width === 390 });
+          const nativeSource = { ...source('turn'), root: 'codex',
+            path: 'sessions/2026/10/22/rollout-native-turn.jsonl' };
           const references = [{ source: nativeSource, state: 'cached' }];
           const details = {
             state,
@@ -940,19 +942,23 @@ for (const width of [390, 1280])
             ...identity('turn'),
             harness: 'codex',
             source_refs: references,
-            read_scope: 'retained_history',
+            read_scope: 'current',
           };
           await page.route('http://catalog.test/**', async (route) => {
             const url = new URL(route.request().url());
+            const machine = url.searchParams.get('machine') ?? 'source';
             if (url.pathname === '/api/session-capabilities')
-              return route.fulfill({ json: capabilities(true) });
-            if (url.pathname === '/api/sessions') return route.fulfill({ json: list([selected]) });
+              return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
+            if (url.pathname === '/api/sessions') return route.fulfill({ json: {
+              ...list([selected]), machine,
+              machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
+            } });
             if (url.pathname === '/api/session-identity')
-              return route.fulfill({ json: { api: 1, identity: nativeIdentity } });
+              return route.fulfill({ json: { api: 1, identity: { ...nativeIdentity, source_key: machine } } });
             if (url.pathname === '/api/session-transcript') {
               const value = transcript('turn', url.searchParams, 1);
               value.session = selected;
-              value.identity = nativeIdentity;
+              value.identity = { ...nativeIdentity, source_key: machine, read_scope: 'retained_history' };
               value.entries[0].provenance.source = nativeSource;
               return route.fulfill({ json: value });
             }
@@ -964,11 +970,15 @@ for (const width of [390, 1280])
           await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
           await page.locator('#page [data-id="turn"]').click();
           await page.locator('#page [data-entry-key="turn:0"]').waitFor();
+          assert.doesNotMatch(await page.locator('body').innerText(), /invalid history view/i);
           const tooltip = page.locator('#topbar [data-tip*="Last turn:"]:visible').first();
           assert.match(await tooltip.getAttribute('data-tip'), new RegExp(outcome));
+          if (width === 390) await tooltip.tap();
+          else await tooltip.hover();
+          await page.getByRole('tooltip').waitFor({ state: 'visible' });
+          assert.match(await page.getByRole('tooltip').innerText(), new RegExp(outcome));
           if (process.env.SEMON_CATALOG_OUT) {
             await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
-            if (width === 1280) await tooltip.hover();
             await page.screenshot({
               path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-tooltip.png`,
             });
