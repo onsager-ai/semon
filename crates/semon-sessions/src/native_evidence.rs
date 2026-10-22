@@ -2122,7 +2122,7 @@ mod catalog_owner_tests {
     }
 
     #[test]
-    fn unsupported_publication_with_active_subset_refuses_without_rebinding_history() {
+    fn unsupported_semantic_recipe_with_active_subset_refuses_without_rebinding_history() {
         let (root, options, input) = audit_fixture();
         let unrelated = crate::Input {
             root: crate::InputRoot::Codex,
@@ -2147,14 +2147,12 @@ mod catalog_owner_tests {
         }
         let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
         let unrelated_key: String = db.query_row("SELECT session_key FROM session_catalog_sources WHERE native_id='unrelated' LIMIT 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
         db.execute(
-            "UPDATE meta SET value=?1 WHERE key='catalog_version'",
-            [(model::summary::CATALOG_VERSION - 1).to_string()],
+            "UPDATE meta SET value=?1 WHERE key='catalog_semantic_recipe'",
+            ["unsupported-semantic-recipe"],
         )
         .unwrap();
-        assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
-        db.execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
-            .unwrap();
         let before = crate::native_timing::cleanup_tests::snapshot(&db);
         let path = EventCache::path(&options.cache);
         let wal = path.with_extension("sqlite3-wal");

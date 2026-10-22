@@ -5363,6 +5363,226 @@ mod tests {
     }
 
     #[test]
+    fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
+        for reader in ["web", "field", "mcp"] {
+            let (fixture, path) = local_only_codex_fixture();
+            let first = crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "source",
+                "sid=local-proof&after=0&limit=1",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            assert_eq!(first.status, 200);
+            let first: Value = serde_json::from_slice(&first.body).unwrap();
+            let generation = first["projection"]["generation"].as_str().unwrap();
+            let cache = EventCache::path(&fixture.options.cache);
+            let collect: Box<dyn FnOnce()> = Box::new(move || {
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2))
+                    .unwrap();
+                // Commit collection after recipe selection but before opening
+                // any lazy proof header. Only the request's WAL snapshot keeps
+                // this publication readable now.
+                Connection::open(cache).unwrap().execute(
+                    "DELETE FROM meta WHERE key LIKE 'native_source_chunks:%' OR key LIKE 'native_published_chunks:%' OR key LIKE 'native_proof_tree:%' OR key LIKE 'native_proof_repair:%'", []
+                ).unwrap();
+            });
+            if reader == "mcp" {
+                crate::query_source::BEFORE_FOCUSED_CAPTURE
+                    .with(|hook| *hook.borrow_mut() = Some(collect));
+                let mut query =
+                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                let result = query
+                    .call_selected(
+                        "source",
+                        "local-proof",
+                        "read_transcript",
+                        &json!({"id":"local-proof","after":0,"limit":1}),
+                        None,
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    )
+                    .unwrap();
+                assert!(
+                    result.to_string().contains("local original prompt"),
+                    "{result}"
+                );
+                assert!(
+                    crate::query_source::BEFORE_FOCUSED_CAPTURE
+                        .with(|hook| hook.borrow().is_none())
+                );
+            } else {
+                crate::transcript_range::AFTER_SELECTION
+                    .with(|hook| *hook.borrow_mut() = Some(collect));
+                let request = format!(
+                    "sid=local-proof&after=1&limit=1&generation={generation}{}",
+                    if reader == "field" {
+                        "&field_chunk=0"
+                    } else {
+                        ""
+                    }
+                );
+                let reply = crate::session_transcript_range_with_mode(
+                    &fixture.options,
+                    "source",
+                    &request,
+                    None,
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                );
+                assert_eq!(
+                    reply.status,
+                    200,
+                    "{reader}: {}",
+                    String::from_utf8_lossy(&reply.body)
+                );
+                assert!(String::from_utf8_lossy(&reply.body).contains("local original answer"));
+            }
+            let fresh = crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "source",
+                "sid=local-proof&after=0&limit=1",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            assert_eq!(
+                fresh.status, 409,
+                "a new request must not reuse the old snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
+        use std::io::Write;
+        for mutation in ["append", "copy"] {
+            let (fixture, path) = local_only_codex_fixture();
+            let get = |after: usize, generation: Option<&str>| {
+                crate::session_transcript_range_with_mode(
+                    &fixture.options,
+                    "source",
+                    &format!(
+                        "sid=local-proof&after={after}&limit=1{}",
+                        generation
+                            .map(|g| format!("&generation={g}"))
+                            .unwrap_or_default()
+                    ),
+                    None,
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                )
+            };
+            let before = get(0, None);
+            assert_eq!(before.status, 200);
+            let before: Value = serde_json::from_slice(&before.body).unwrap();
+            let generation = before["projection"]["generation"].as_str().unwrap();
+            for append in 0..3 {
+                if mutation == "copy" && append == 0 {
+                    fs::rename(&path, path.with_extension("saved")).unwrap();
+                    fs::copy(path.with_extension("saved"), &path).unwrap();
+                }
+                writeln!(
+                    fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                    "{}",
+                    json!({"type":"synthetic_append","iteration":append})
+                )
+                .unwrap();
+                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                // Commit Index/proofs and deliberately defer Catalog publication.
+                let _prepared = crate::model::prepare_sources(
+                    &fixture.options,
+                    &mut cache,
+                    &[crate::Input {
+                        root: crate::InputRoot::Codex,
+                        path: path
+                            .strip_prefix(&fixture.options.codex_home)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .into(),
+                    }],
+                    crate::model::now_ms(),
+                )
+                .unwrap();
+                drop(cache);
+                crate::events::FILE_READS.with(|n| n.set(0));
+                crate::events::HASHED_BYTES.with(|n| n.set(0));
+                crate::source_chunks::READ_BYTES.with(|n| n.set(0));
+                for (after, text) in [(0, "local original prompt"), (1, "local original answer")] {
+                    let page = get(after, Some(generation));
+                    assert_eq!(
+                        page.status,
+                        200,
+                        "{mutation}/{append}: {}",
+                        String::from_utf8_lossy(&page.body)
+                    );
+                    let body: Value = serde_json::from_slice(&page.body).unwrap();
+                    assert_eq!(body["entries"][0]["text"], text);
+                    // Native message scalars support the same generation-bound
+                    // field expansion as the initially rendered preview.
+                    let expanded = crate::session_entry_field_with_mode(
+                        &fixture.options,
+                        "source",
+                        &format!(
+                            "sid=local-proof&after={after}&limit=1&generation={generation}&field_chunk=0"
+                        ),
+                        None,
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    );
+                    assert_eq!(
+                        expanded.status,
+                        200,
+                        "{mutation}: {}",
+                        String::from_utf8_lossy(&expanded.body)
+                    );
+                    let expanded: Value = serde_json::from_slice(&expanded.body).unwrap();
+                    assert_eq!(expanded["text"], text);
+                }
+                let mut query =
+                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                for tool in ["get_session", "read_transcript"] {
+                    let args = if tool == "get_session" {
+                        json!({"id":"local-proof"})
+                    } else {
+                        json!({"id":"local-proof","after":0,"limit":1})
+                    };
+                    let value = query
+                        .call_selected(
+                            "source",
+                            "local-proof",
+                            tool,
+                            &args,
+                            None,
+                            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                        )
+                        .unwrap();
+                    assert!(value.get("error").is_none(), "{tool}: {value}");
+                    assert!(
+                        value.to_string().contains("local original prompt"),
+                        "{tool}: {value}"
+                    );
+                }
+                assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
+                assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
+                assert!(
+                    crate::source_chunks::READ_BYTES.with(std::cell::Cell::get)
+                        < 32 * crate::source_chunks::SIZE as u64
+                );
+            }
+            // Preserved proofs still reject changed original bytes.
+            let mut bytes = fs::read(&path).unwrap();
+            let at = bytes
+                .windows(b"local original prompt".len())
+                .position(|s| s == b"local original prompt")
+                .unwrap();
+            bytes[at] = b'X';
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(get(0, Some(generation)).status, 409);
+        }
+    }
+
+    #[test]
     fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
         use std::io::Write;
         for mutation in ["append", "copy", "touch", "legacy"] {
@@ -6888,17 +7108,21 @@ mod tests {
     #[test]
     fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
         use crate::{Input, InputRoot, SessionFactsWrite};
-        use std::collections::BTreeSet;
+        use std::{collections::BTreeSet, io::Write};
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
-            let active = "sessions/2026/10/01/rollout-native-session.jsonl";
+            let active = fixture.codex_source("native-session", None, 1);
             let archived = "archived_sessions/2026/10/01/rollout-native-session.jsonl";
-            let path = fixture.options.codex_home.join(active);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path,format!("{}\n{}\n",json!({"type":"session_meta","payload":{"id":"native-session","cwd":"/synthetic/project"}}),json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}))).unwrap();
+            let path = fixture.options.codex_home.join(&active);
+            writeln!(
+                fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                "{}",
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}})
+            )
+            .unwrap();
             let facts_path = fixture.options.facts.as_ref().unwrap();
             let mut facts = crate::read_facts(facts_path).unwrap();
-            facts.codex_rollouts = Some(BTreeSet::from([active.to_owned()]));
+            facts.codex_rollouts = Some(BTreeSet::from([active.clone()]));
             crate::write_facts(facts_path, &facts).unwrap();
             for id in 0..unrelated {
                 fixture.source(&format!("unrelated-{id:05}"));
@@ -6912,7 +7136,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            for (from, to, append) in [(active, archived, false), (archived, active, true)] {
+            for (from, to, append) in [
+                (active.as_str(), archived, false),
+                (archived, active.as_str(), true),
+            ] {
                 let old = fixture.options.codex_home.join(from);
                 let new = fixture.options.codex_home.join(to);
                 fs::create_dir_all(new.parent().unwrap()).unwrap();
@@ -7159,15 +7386,19 @@ mod tests {
         use crate::{Input, InputRoot, SessionFactsWrite, SessionSourceWrite};
         use std::{collections::BTreeSet, io::Write};
         let fixture = Fixture::new();
-        let active = "sessions/2026/10/01/rollout-replay.jsonl";
+        let active = fixture.codex_source("replay", None, 1);
         let archived = "archived_sessions/2026/10/01/rollout-replay.jsonl";
-        let old = fixture.options.codex_home.join(active);
+        let old = fixture.options.codex_home.join(&active);
         let new = fixture.options.codex_home.join(archived);
-        fs::create_dir_all(old.parent().unwrap()).unwrap();
-        fs::write(&old, format!("{}\n{}\n",json!({"type":"session_meta","payload":{"id":"move-replay","cwd":"/synthetic/project"}}),json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}}))).unwrap();
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&old).unwrap(),
+            "{}",
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}})
+        )
+        .unwrap();
         let facts_path = fixture.options.facts.as_ref().unwrap();
         let mut facts = crate::read_facts(facts_path).unwrap();
-        facts.codex_rollouts = Some(BTreeSet::from([active.to_owned()]));
+        facts.codex_rollouts = Some(BTreeSet::from([active.clone()]));
         crate::write_facts(facts_path, &facts).unwrap();
         fixture.publish_existing();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();

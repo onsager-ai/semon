@@ -52,8 +52,22 @@ Concurrent atomic publication therefore cannot pair an old selected identity
 with new recipes or spuriously reject a fresh first page merely because an
 unrelated owner changed. Current and retained-history still choose their own
 source cohorts and recipe tables. Explicit slot/error generations still reject
-stale continuation requests; native/provider generation checks retain their
-before/after I/O fences after the metadata transaction ends.
+stale continuation requests. Web reads now retain this metadata snapshot through
+lazy byte-proof rendering, including continuation and native field expansion;
+native/provider generation checks keep their before/after I/O fences. Focused
+MCP transfers its selection snapshot to the request-owned proof readers and
+retains its later metadata publication checks. The last proof reader drop
+rolls back and closes the connection, releasing its WAL pin on every exit path.
+
+Index mutation preserves the outgoing path proof only while Current or
+retained-history source vectors reference its exact ledger. The reference
+decision, copy and replacement are one transaction. The next path mutation
+collects unreferenced proof metadata; existing request snapshots can still read
+collected pages. The version manifest is bounded by published ledger references,
+rather than the number of appends. This stores no native content, grants no
+archive authority and does not change the schema. Rebuilt live proofs take
+precedence over obsolete retained headers from parser reset. A previously
+orphaned publication cannot be repaired by inventing proofs in a reader.
 
 Selected Home/Trace repair acknowledges an unchanged ready observation or a
 committed publication only. Losing its Catalog/source compare-and-swap returns

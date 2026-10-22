@@ -444,6 +444,7 @@ pub(crate) fn observation(
 }
 
 struct Selection {
+    proof_db: Arc<crate::events::store::chunk_proofs::Snapshot>,
     identity: CatalogSessionIdentity,
     session: Value,
     generation: String,
@@ -548,7 +549,8 @@ fn read(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
-    let transaction = connection.transaction()?;
+    let mut transaction = connection.transaction()?;
+    crate::events::store::require_current(&transaction)?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "transcript_before_snapshot");
     let selected = catalog::catalog_selection_in_snapshot(
@@ -702,8 +704,12 @@ fn read(
         .into_iter()
         .map(|source| (source.path.clone(), source))
         .collect();
-    transaction.commit()?;
+    // The selected recipes and their byte proofs share one WAL snapshot until
+    // rendering finishes, including lazy field/attachment proof reads.
+    transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    drop(transaction);
     let selection = Selection {
+        proof_db: crate::events::store::chunk_proofs::Snapshot::new(connection),
         identity,
         session,
         generation,
@@ -957,6 +963,7 @@ impl SessionSourceReader for Composite<'_> {
 type LocalBlock = (PathBuf, usize, Arc<[u8]>);
 
 struct Local<'a> {
+    proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     options: &'a Options,
     sources: &'a BTreeMap<PathBuf, CatalogSource>,
     references: &'a BTreeMap<PathBuf, SessionSourceRef>,
@@ -1080,12 +1087,21 @@ impl SessionSourceReader for Local<'_> {
             // opened and hashed; no complete-prefix resume or parser replay.
             let mut proofs = self.proofs.lock().map_err(|_| invalid())?;
             if let std::collections::btree_map::Entry::Vacant(entry) = proofs.entry(path.clone()) {
-                let proof = crate::events::store::chunk_proofs::Focused::open_with_raw(
-                    &EventCache::path(&self.options.cache),
-                    path.to_str().ok_or_else(invalid)?,
-                    &ledger,
-                    Some(before.size),
-                )
+                let proof = if let Some(db) = &self.proof_db {
+                    crate::events::store::chunk_proofs::Focused::with_db(
+                        db.clone(),
+                        &EventCache::path(&self.options.cache),
+                        path.to_str().ok_or_else(invalid)?,
+                        &ledger,
+                    )
+                } else {
+                    crate::events::store::chunk_proofs::Focused::open_with_raw(
+                        &EventCache::path(&self.options.cache),
+                        path.to_str().ok_or_else(invalid)?,
+                        &ledger,
+                        Some(before.size),
+                    )
+                }
                 .map_err(|error| {
                     rejected(
                         reason,
@@ -1250,6 +1266,7 @@ pub(crate) fn with_source_reader<T>(
         );
     }
     let local = Local {
+        proof_db: None,
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -1302,6 +1319,7 @@ fn render(
         })
         .collect();
     let local = Local {
+        proof_db: Some(selection.proof_db.clone()),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -1885,6 +1903,7 @@ fn render_field(
         })
         .collect();
     let local = Local {
+        proof_db: Some(selection.proof_db.clone()),
         options,
         mode,
         observed: std::sync::Mutex::default(),

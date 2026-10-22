@@ -301,7 +301,8 @@ fn virtual_read(
     .map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
-    let tx = db.transaction().map_err(unavailable)?;
+    let mut tx = db.transaction().map_err(unavailable)?;
+    crate::events::store::require_current(&tx).map_err(unavailable)?;
     let context = match crate::overview_repair::query_context(&tx, key) {
         Ok(context) => context,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -394,12 +395,23 @@ fn virtual_read(
             return Err(unavailable("Virtual source generations disagree"));
         }
     }
-    let sources = crate::query_source::Sources::capture_focused(
+    // Transfer the selection's WAL snapshot to the lazy byte-proof readers.
+    // Later metadata reads retain their existing publication rechecks.
+    tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    drop(tx);
+    let sources = crate::query_source::Sources::capture_focused_snapshot(
         options,
         &sources.into_values().collect::<Vec<_>>(),
+        db,
     )
     .map_err(|error| proof_unavailable(&error))?;
-    tx.commit().map_err(unavailable)?;
+    let mut db = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(unavailable)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "query_transcript_before_read");
@@ -652,7 +664,8 @@ fn read_inner(
     .map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
-    let tx = db.transaction().map_err(unavailable)?;
+    let mut tx = db.transaction().map_err(unavailable)?;
+    crate::events::store::require_current(&tx).map_err(unavailable)?;
     let catalog_generation = generation(&tx)?;
     let projection_generation: Option<String> = tx
         .query_row(
@@ -742,9 +755,13 @@ fn read_inner(
     if !observation.valid(total) {
         return Err(unavailable("Native transcript observation is invalid"));
     }
-    if version != VERSION
-        || source_generation.as_deref()
-            != Some(&crate::retention::source_generation(&row.sources).map_err(unavailable)?)
+    if version != VERSION {
+        let mut error = unavailable("Native transcript projection upgrade required");
+        error.stage = Some("header-version");
+        return Err(error);
+    }
+    if source_generation.as_deref()
+        != Some(&crate::retention::source_generation(&row.sources).map_err(unavailable)?)
     {
         return Err(unavailable("Native transcript source generation changed"));
     }
@@ -821,8 +838,6 @@ fn read_inner(
         }
     }
     let selected_sources: Vec<_> = selected_sources.into_values().collect();
-    let sources = crate::query_source::Sources::capture_focused(options, &selected_sources)
-        .map_err(|error| proof_unavailable(&error))?;
     let incomplete: bool = if history.is_some() {
         tx.query_row(
             "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
@@ -836,7 +851,18 @@ fn read_inner(
     if incomplete {
         return Ok(None);
     }
-    tx.commit().map_err(unavailable)?;
+    tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    drop(tx);
+    let sources =
+        crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db)
+            .map_err(|error| proof_unavailable(&error))?;
+    let mut db = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(unavailable)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(unavailable)?;
     let records = sources.reader_with_mode(provider, mode);
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "query_transcript_before_read");
