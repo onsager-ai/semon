@@ -130,6 +130,7 @@ jobs:
         env:
           SEMON_BUILD_TIMING: "0"
         run: |
+          cargo test -p semon-sessions --locked selected_record_windows_reuse_qualified_bytes_and_reject_rebinding -- --nocapture
           cargo test -p semon-sessions --locked recovery_tests:: -- --test-threads=1 --nocapture
           cargo test -p semon-sessions --locked selected_transcript_tail_scope_measurement -- --ignored --test-threads=1 --nocapture
           cargo test -p semon-sessions --locked focused_query_keeps_cross_harness_and_literal_native_identity_collision_context -- --test-threads=1 --nocapture
