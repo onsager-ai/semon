@@ -446,7 +446,9 @@ mod tests {
             let mut facts = crate::facts::Facts {
                 version: crate::facts::FACTS_VERSION,
                 hostname: "synthetic".into(),
-                codex_rollouts: Some(BTreeSet::from(["sessions/2026/09/24/rollout-owner.jsonl".into()])),
+                codex_rollouts: Some(BTreeSet::from([
+                    "sessions/2026/09/24/rollout-owner.jsonl".into()
+                ])),
                 ..Default::default()
             };
             if live {
