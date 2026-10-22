@@ -6,6 +6,26 @@ and Canonical Trace Store are retired pre-release experiments. Their historical
 migration/export compatibility is outside product scope. Code retirement never
 authorizes deletion of user data or live operational cleanup.
 
+## Pre-release compatibility policy
+
+Semon has not had its first public release. Do not maintain backward or forward
+compatibility with older Semon versions. Evolve Semon-owned APIs, protocols,
+configuration, persisted formats and internal contracts directly; update affected
+producers, consumers, tests and documentation together around one current contract.
+Do not add or retain migration/import layers, dual read/write paths, deprecated
+aliases or compatibility-only tests solely to support an older Semon version.
+An exception requires an explicit user requirement for that specific boundary.
+Historical design documents do not establish such an exception. Revisit this
+policy explicitly when planning the first public release.
+
+This policy concerns Semon's own versions. Preserve supported upstream harness
+formats and native session semantics, current-format validation, source integrity,
+authorization and custody. Unsupported Semon state may be refused explicitly;
+rebuilding derived caches must respect source availability and data ownership.
+Removing compatibility code does not authorize deleting user data or live cleanup.
+Use the [Semon evolution skill](.agents/skills/semon-evolution/SKILL.md) when
+changing Semon-owned contracts or reviewing compatibility code.
+
 ## Repository invariants
 
 - Preserve native session identity, lineage and provenance semantics. An identity
