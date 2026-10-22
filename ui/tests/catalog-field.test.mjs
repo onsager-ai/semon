@@ -43,7 +43,7 @@ function body() {
       observed_at: null,
       freshness: { state: 'cached' },
     },
-    projection: { version: 5, generation: request.generation },
+    projection: { version: 6, generation: request.generation },
     slot: 2,
     field: { name: 'out', chunk: 0, next: 1, complete: false },
     text: 'First native result chunk',
@@ -52,6 +52,16 @@ function body() {
     observation: { source_bytes: 25 },
   };
 }
+test('native field chunks accept recipe 6 and reject retired and future versions', () => {
+  const raw = body();
+  assert.equal(raw.api, 1);
+  assert.equal(parseCatalogField(raw, request).text, raw.text);
+  for (const version of [5, 7, 0, null, '6']) {
+    const raw = body();
+    raw.projection.version = version;
+    assert.throws(() => parseCatalogField(raw, request), /selected source projection/);
+  }
+});
 test('native field chunks bind source, canonical session, projection, slot, field and provenance', () => {
   assert.deepEqual(parseCatalogField(body(), request), {
     text: 'First native result chunk',
@@ -79,7 +89,7 @@ test('native field chunks bind source, canonical session, projection, slot, fiel
     (p) => (p.identity.catalog_key = 'other'),
     (p) => (p.identity.read_scope = 'current'),
     (p) => (p.projection.version = 1),
-    (p) => (p.projection.version = 6),
+    (p) => (p.projection.version = 5),
     (p) => (p.projection.generation = 'c'.repeat(64)),
     (p) => (p.slot = 3),
     (p) => (p.field.name = 'text'),

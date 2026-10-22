@@ -1077,6 +1077,7 @@ name = "semon-sessions"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "reqwest",
  "rusqlite",
  "semon-control",
  "serde",

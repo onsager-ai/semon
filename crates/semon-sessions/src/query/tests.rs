@@ -422,20 +422,18 @@ fn source_backed_prompt_briefs_preserve_native_caps_and_completion_fences() {
     let home = Home::new("prompt-brief-integrity");
     home.top("lead", &[human("lead", ts(1, 0), &"é".repeat(50_000))]);
     let sources = admitted(home.options.clone());
-    let model = crate::model::reference_json(&home.options, crate::model::now_ms());
+    // Explicit native cap, independently asserted before the oracle was removed.
+    let expected_brief = format!("{}\n…(truncated)", "é".repeat(2048));
     let mut query = Query::from_sources(sources.clone());
     let selected = query
         .call_at("get_session", &json!({"id":"lead"}), NOW)
         .unwrap();
-    assert_eq!(
-        selected["session"]["handoffs"][0]["brief"],
-        model["handoffs"][0]["brief"]
-    );
+    assert_eq!(selected["session"]["handoffs"][0]["brief"], expected_brief);
     sources.close();
     let data = &query.evidence().parts[0].data;
     let records = data.sources.reader();
     let brief = data.ask_briefs.values().next().unwrap();
-    assert_eq!(brief.read(&records).unwrap(), model["handoffs"][0]["brief"]);
+    assert_eq!(brief.read(&records).unwrap(), expected_brief);
     let path = home
         .options
         .claude_home
@@ -764,15 +762,10 @@ fn query_source_paging_preserves_large_prompts_and_cached_image_ranges() {
         ],"turn":"images:images:0"}],"window_start":null});
     assert_eq!(expected["entries"][0]["img"].as_array().unwrap().len(), 2);
     let mut query = Query::from_sources(sources);
-    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
     let actual = query
         .call_at("read_transcript", &json!({"id":"images"}), NOW)
         .unwrap();
     assert_eq!(actual, expected);
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(|count| count.get()),
-        before
-    );
     let data = &query.evidence().parts[0].data;
     let slot = data.tx["images"]
         .slots
@@ -2424,13 +2417,8 @@ fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
         "unknown_tool"
     );
     assert!(!home.options.cache.with_extension("sqlite3").exists());
-    let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
     let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
     assert_eq!(answer["window_start"], NOW - 86_400_000);
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-        builds
-    );
     let snapshot = first.native.as_ref().unwrap().parts[0].data.clone();
     let parsed = crate::events::PARSED.with(std::cell::Cell::get);
     let core = ViewerCore::from_sources(sources.clone());
@@ -2550,15 +2538,10 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                 ("stalls", json!({"idle_minutes":1})),
             ];
             let mut native = Query::from_sources(sources.clone());
-            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
             let actual: Vec<_> = calls
                 .iter()
                 .map(|(tool, args)| native.call_optional_at(tool, args, NOW))
                 .collect();
-            assert_eq!(
-                crate::model::COMPAT_BUILDS.with(|count| count.get()),
-                before
-            );
             let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
             assert_eq!(snapshot.window_start, Some(NOW - seconds as i64 * 1000));
             let mut second = Query::from_sources(sources.clone());
@@ -2587,10 +2570,6 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                     admitted.call_optional_at(tool, args, NOW),
                 );
             }
-            assert_eq!(
-                crate::model::COMPAT_BUILDS.with(|count| count.get()),
-                before
-            );
             sources.close();
             independent_sources.close();
         }
@@ -2677,15 +2656,10 @@ fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
                 ("find", json!({"text":"cargo", "max_bytes":1})),
                 ("stalls", json!({"idle_minutes":1})),
             ];
-            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
             let actual: Vec<_> = calls
                 .iter()
                 .map(|(tool, args)| native.call_optional_at(tool, args, NOW))
                 .collect();
-            assert_eq!(
-                crate::model::COMPAT_BUILDS.with(|count| count.get()),
-                before
-            );
             let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
             native.call_at("list_sessions", &json!({}), NOW).unwrap();
             assert!(Arc::ptr_eq(
@@ -2717,7 +2691,6 @@ fn local_query_conflicts_and_source_removal_use_native_snapshots() {
         ("a".into(), first.options.clone()),
         ("b".into(), second.options.clone()),
     ]);
-    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
     for tool in ["list_sessions", "get_session", "read_transcript"] {
         let args = if tool == "list_sessions" {
             json!({})
@@ -2743,10 +2716,6 @@ fn local_query_conflicts_and_source_removal_use_native_snapshots() {
         native
             .call_at("read_transcript", &json!({"id":"duplicate"}), NOW)
             .is_ok()
-    );
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(|count| count.get()),
-        before
     );
 }
 
@@ -6003,7 +5972,6 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
     let mut query = Query::from_sources(admitted(home.options.clone()));
     let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
     let cache_reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
-    let models = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
     let factory = |_: &str, _: &str| -> io::Result<Box<dyn crate::SessionSourceReader>> {
         panic!("paused find admitted a provider")
     };
@@ -6092,10 +6060,6 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
     assert_eq!(
         crate::events::CACHE_READS.with(std::cell::Cell::get),
         cache_reads
-    );
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-        models
     );
     assert!(!home.options.cache.exists());
     assert!(!crate::events::EventCache::path(&home.options.cache).exists());

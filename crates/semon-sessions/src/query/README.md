@@ -146,8 +146,10 @@ session reads resolve their requested briefs through the cohort's verified reade
 search resolves a brief only when its slot is visited, preserving native caps,
 ordering, stopping and response fields. Completion rechecks the used source bytes.
 Catalog observation and scoped preparation retain only the ask relationships.
-The test-only semantic golden Model still obtains its reference brief contents;
-production has no compatibility model owner or read fallback.
+Semantic tests now use the same native Query producer and source-backed recipes.
+The retired full-workspace Model oracle, JSON/version envelope and transport
+preparation are deleted from both product and test graphs. See the
+[retirement inventory](../../../../docs/design/model-oracle-retirement.md).
 
 Native preparation also reuses existing scalar recipes only when their catalog
 and complete source generations, version, row count and projection digest agree.
@@ -181,7 +183,8 @@ Responses contain synthetic identities/content and no checkout paths or secrets.
 No compatibility engine or reference generator is retained in the product.
 
 Current tests compare complete result values and error bodies against these
-records, while checking zero compatibility builds and shared native cohorts.
+records and shared native cohorts. The structural retirement gate rejects the
+removed Model target/entry points instead of retaining a vacuous build counter.
 The surrounding semantic fixtures still test identity, relationships, facts,
 current/retained windows, closed-source retirement and source-backed
 reads. Do not regenerate the reference from the current implementation merely

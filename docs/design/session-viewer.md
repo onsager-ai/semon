@@ -5,7 +5,11 @@ Status: draft for review, 2026-09-26. Part of #40. It supersedes #47's UI and ke
 Historical Viewer plan. The Canonical Trace Store described at the original
 baseline is retired; current multi-machine browsing uses native source mirrors.
 See [the current Session foundation](session-foundation-retirement.md) for the
-retained Event Index/Catalog and staged compatibility consumer migration.
+supported Event Index/Catalog ownership and the
+[Model retirement inventory](model-oracle-retirement.md). The Model, warming and
+`/api/model`, `/api/tx`, `/api/transcript`, `/api/entry`, `/api/analytics` transports
+described below are historical and unavailable, including in the test graph.
+Native semantic golden data remains independent regression evidence.
 
 ## Goal
 
