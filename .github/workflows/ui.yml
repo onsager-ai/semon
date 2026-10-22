@@ -219,6 +219,8 @@ jobs:
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
+        env:
+          SEMON_CATALOG_OUT: ${{ github.workspace }}/tests/ui/out/catalog-recovery
         run: |
           node --test tests/ui/text-audit.test.mjs
           node tests/ui/gallery.mjs
