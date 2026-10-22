@@ -32,7 +32,13 @@ compressed input grants no extra inode-based relocation authority.
 
 An archive's logical target freezes when its verified view first becomes ready
 in a sweep. Re-preparation during later batches cannot advance that target;
-growth is transferred in the next sweep, just as with plain native logs.
+growth is revalidated in the next sweep. A changed archive or invalidated view
+is conservatively rebuilt. Its new filesystem identity can make the existing
+custody rules start a new receiver generation and retransmit the logical history
+in bounded batches, even when its prefix is equal. This is not incremental
+compressed-tail decoding. Native session identity and lineage still come from
+the same logical records; receiver generations retain their existing proof and
+pagination rules. An unchanged, proved view reuses its cursor across restart.
 
 Preparation runs inside the existing foreground/history scheduler, with at most
 1 MiB of encoded input, 1 MiB of decoded output and 256 decoder operations per
@@ -63,7 +69,8 @@ views have no completion proof and are rebuilt, in bounded turns, after restart.
 Rewrites or changed cached bytes invalidate the view. Dropping/withdrawing an
 unfinished source closes its descriptors and releases its cache reservation.
 Completed views are retained within the cap; deleting the optional cache while
-the pusher is stopped only requires bounded re-preparation on its next run.
+the pusher is stopped requires bounded re-preparation on its next run and may
+also start a new receiver generation.
 Filesystem change-time witnesses are required (Unix); unsupported filesystems
 fail explicitly rather than repeatedly regenerating unprovable cache entries.
 
