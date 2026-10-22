@@ -11,7 +11,11 @@ const BYTES: u64 = 1024 * 1024;
 const RECORD_MAX: u64 = 32 * 1024 * 1024;
 
 pub(in crate::events::store) fn pending(c: &Connection) -> rusqlite::Result<bool> {
-    c.query_row("SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE state IN ('ready','running'))", [], |r| r.get(0))
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE state IN ('ready','running'))",
+        [],
+        |r| r.get(0),
+    )
 }
 
 struct Verified {
@@ -48,12 +52,7 @@ struct Batch {
     bytes: u64,
 }
 
-fn prepare(
-    store: &SqliteStore,
-    path: &str,
-    ledger: &Ledger,
-    resume: Resume,
-) -> io::Result<Batch> {
+fn prepare(store: &SqliteStore, path: &str, ledger: &Ledger, resume: Resume) -> io::Result<Batch> {
     let Resume {
         cursor,
         model,
@@ -238,9 +237,7 @@ pub(in crate::events::store) fn advance(
 ) -> io::Result<(bool, Option<String>)> {
     let sql_error = io::Error::other;
     let selected: Option<PendingSource> = store.connection.query_row("SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
-    let Some((path, receipt, id, cursor, model, tree, projection_id)) =
-        selected
-    else {
+    let Some((path, receipt, id, cursor, model, tree, projection_id)) = selected else {
         return Ok((pending(&store.connection).map_err(sql_error)?, None));
     };
     let _source_lock = crate::source_change::SourceLock::acquire(options, &path, false)?;
@@ -255,9 +252,9 @@ pub(in crate::events::store) fn advance(
             },
             |tx| {
                 tx.execute(
-                "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1",
-                [&path],
-            )?;
+                    "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1",
+                    [&path],
+                )?;
                 Ok(())
             },
         )
@@ -280,8 +277,7 @@ pub(in crate::events::store) fn advance(
         }).map_err(sql_error)?;
         return Ok((true, None));
     }
-    if tree_state::ready(&store.connection, &path, &ledger).map_err(sql_error)?
-    {
+    if tree_state::ready(&store.connection, &path, &ledger).map_err(sql_error)? {
         progress(
             &mut store.connection,
             Checkpoint {
@@ -313,9 +309,9 @@ pub(in crate::events::store) fn advance(
             },
             |tx| {
                 tx.execute(
-                "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1",
-                [&path],
-            )?;
+                    "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1",
+                    [&path],
+                )?;
                 Ok(())
             },
         )
@@ -342,7 +338,12 @@ pub(in crate::events::store) fn advance(
         }
         let id = match id {
             Some(id) => id,
-            None => source(&tx, &path).map_err(sql_error)?.ok_or_else(|| io::Error::other("missing current source generation"))?.0,
+            None => {
+                source(&tx, &path)
+                    .map_err(sql_error)?
+                    .ok_or_else(|| io::Error::other("missing current source generation"))?
+                    .0
+            }
         };
         let projection_id = match projection_id {
             Some(id) => id,

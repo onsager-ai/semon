@@ -156,7 +156,7 @@ pub fn local_facts(options: &Options) -> io::Result<Facts> {
 /// The index commits each file's change as it reads it.
 pub struct FactsSource {
     options: crate::Options,
-    cache: EventCache,
+    cache: Result<EventCache, String>,
     dirty: bool,
 }
 
@@ -172,12 +172,13 @@ impl FactsSource {
 
     /// Reads this machine's current facts, using the in-memory event cache.
     pub fn facts(&mut self) -> io::Result<Facts> {
-        self.cache.refresh_reported_runs(
+        let cache = self.cache.as_mut().map_err(|error| io::Error::other(error.clone()))?;
+        cache.refresh_reported_runs(
             &self.options.claude_json,
             model::now_ms(),
             &mut self.dirty,
         );
-        collect_facts(&self.options, &mut self.cache, &mut self.dirty)
+        collect_facts(&self.options, cache, &mut self.dirty)
     }
 
     /// Nothing is left to save: the event index commits each file's change

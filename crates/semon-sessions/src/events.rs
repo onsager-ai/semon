@@ -2195,10 +2195,7 @@ impl EventCache {
         self.files.keys().map(String::as_str)
     }
 
-    pub(crate) fn advance_tree_repair(
-        &mut self,
-        options: &crate::Options,
-    ) -> io::Result<bool> {
+    pub(crate) fn advance_tree_repair(&mut self, options: &crate::Options) -> io::Result<bool> {
         let Some(store) = self.store.as_mut() else {
             return Ok(false);
         };

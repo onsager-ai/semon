@@ -370,7 +370,11 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
     collect(&home.options).unwrap();
     let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
-    db.execute("DELETE FROM meta WHERE key LIKE 'native_tree_summary:%'",[]).unwrap();
+    db.execute(
+        "DELETE FROM meta WHERE key LIKE 'native_tree_summary:%'",
+        [],
+    )
+    .unwrap();
     let revision: String = db
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_source_revision'",
@@ -383,15 +387,10 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     let mut steps = 0;
     let mut previous = 0;
     loop {
-        let pending = home
-            .cache()
-            .advance_tree_repair(&home.options)
-            .unwrap();
+        let pending = home.cache().advance_tree_repair(&home.options).unwrap();
         steps += 1;
         let cursor: i64 = db
-            .query_row("SELECT cursor FROM native_tree_repairs", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT cursor FROM native_tree_repairs", [], |r| r.get(0))
             .unwrap();
         assert!(cursor - previous <= 1024 * 1024 + 32 * 1024 * 1024);
         previous = cursor;

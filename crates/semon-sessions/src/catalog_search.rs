@@ -80,8 +80,11 @@ fn validate_key(connection: &Connection, key: &str) -> rusqlite::Result<()> {
     }
     for scope in ["current", "retained_history"] {
         let (column, _) = membership(scope)?;
-        let sql = format!("SELECT COUNT(*) FROM (SELECT 1 FROM session_search_memberships WHERE session_key=?1 AND {column} IS NOT NULL LIMIT ?2)");
-        let count: i64 = connection.prepare_cached(&sql)?
+        let sql = format!(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM session_search_memberships WHERE session_key=?1 AND {column} IS NOT NULL LIMIT ?2)"
+        );
+        let count: i64 = connection
+            .prepare_cached(&sql)?
             .query_row(params![key, (MAX_GRAMS + 1) as i64], |row| row.get(0))?;
         if count > MAX_GRAMS as i64 {
             return Err(rusqlite::Error::InvalidQuery);
@@ -408,7 +411,11 @@ pub(crate) fn backfill_catalog_row(
     if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
         return backfill_row(transaction, crate::CatalogReadScope::RetainedHistory, row);
     }
-    if transaction.query_row("SELECT EXISTS(SELECT 1 FROM session_search_memberships WHERE session_key=?1)", [&row.key], |r| r.get::<_, bool>(0))? {
+    if transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_search_memberships WHERE session_key=?1)",
+        [&row.key],
+        |r| r.get::<_, bool>(0),
+    )? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let (encoded, grams, complete) = prepared_fields(row)?;

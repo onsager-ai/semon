@@ -143,8 +143,7 @@ fn step_inner(
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     connection.busy_timeout(Duration::from_millis(50))?;
-    let (schema, parser) = versions(&connection)?;
-    if schema != SCHEMA_VERSION || parser != Some(CACHE_VERSION) {
+    if !current(&connection)? {
         return Ok(false);
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1709,7 +1708,7 @@ mod tests {
             .unwrap(),
             before
         );
-        assert_eq!(versions(&c).unwrap().1, Some(CACHE_VERSION));
+        assert_eq!(parser_version(&c).unwrap(), Some(CACHE_VERSION));
         assert_eq!(CACHE_VERSION, 28);
         drop(c);
         let second = table("anthropic", "claude-opus-5-5", 12.0, 2);
@@ -1818,7 +1817,7 @@ mod tests {
             .unwrap(),
             facts
         );
-        assert_eq!(versions(&c).unwrap().1, Some(CACHE_VERSION));
+        assert_eq!(parser_version(&c).unwrap(), Some(CACHE_VERSION));
         drop(c);
         fs::remove_dir_all(root).unwrap();
     }
