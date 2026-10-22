@@ -1,5 +1,10 @@
 # The viewer in TSX components: bundler and runtime compared
 
+> Historical implementation comparisons below retain their original API names.
+> Current consumers use native Catalog/Transcript/Entry; the full Model and its
+> test oracle are removed. See [current ownership](viewer-ownership.md) and the
+> [retirement inventory](model-oracle-retirement.md).
+
 ## Typed application and native ownership — 2026-10-03
 
 The handwritten viewer, native shell and internal application bridge are removed.
