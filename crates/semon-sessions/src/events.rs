@@ -83,7 +83,9 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v25: agent messages carry their direction; coordinator messages and unknown origin kinds are indexed; relay tags count only at the start of a prompt.
 /// v26: a subagent's non-final send (`senderTaskId`, no `handback`) is an up agent message flagged [`AGM_PROGRESS`], not a relay; relay tags nested in another relay block are not their own events.
 /// v27: rebuild derived billing usage after a pricing-table restoration.
-const CACHE_VERSION: u32 = 27;
+/// v28: source-qualified code-mode output/terminal attribution and direct formatter
+/// outcomes; event-state envelopes preserve bounded selected output evidence.
+const CACHE_VERSION: u32 = 28;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3302,6 +3304,13 @@ pub(crate) const AGM_FINAL: u8 = 128;
 /// this nor [`AGM_FINAL`] is a legacy `<agent-message>` tag: which it is, the
 /// log doesn't say.
 pub(crate) const AGM_PROGRESS: u8 = 1;
+/// A code-mode script calls `tools.exec_command`.
+const EXEC_COMMAND: u8 = 16;
+/// The source contains multiple or mixed command operations whose outputs
+/// have no exact nested call identity.
+const AMBIGUOUS_COMMANDS: u8 = 32;
+/// A code-mode poll names its target with a literal session id.
+const LITERAL_SESSION: u8 = 64;
 
 /// Open yielded commands kept per file; past this the oldest is dropped.
 const YIELDS_MAX: usize = 64;
@@ -3359,6 +3368,10 @@ pub(crate) struct Event {
     /// A Codex `custom_tool_call` named `exec`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode: bool,
+    /// An unnamespaced Codex `function_call` named `exec_command` or
+    /// `write_stdin`, eligible for direct formatter outcome evidence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) native_direct_call: bool,
     /// Still open for operation attribution within the current turn.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode_open: bool,
@@ -3366,13 +3379,21 @@ pub(crate) struct Event {
     /// code-mode call, the only one open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
-    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), a Claude Bash
-    /// call launched in the [`BACKGROUND`], a task notification with a
-    /// [`BACKGROUND_FAILED`] outcome, or Agm direction/finality
-    /// ([`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`],
-    /// [`AGM_PROGRESS`]).
+    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`],
+    /// [`EXEC_COMMAND`], [`AMBIGUOUS_COMMANDS`], [`LITERAL_SESSION`]), or a
+    /// Claude Bash call launched in the [`BACKGROUND`], or a task notification
+    /// with a [`BACKGROUND_FAILED`] outcome; Agm direction/finality uses
+    /// [`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`] and [`AGM_PROGRESS`].
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
+    /// A bounded literal code-mode `write_stdin` target. Retained so an
+    /// output arriving after the terminal event can still be checked exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) poll_target: Option<String>,
+    /// The one awaited command result is printed directly in a recognized
+    /// straight-line form; arbitrary text output cannot claim its identity.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) result_source: bool,
     /// Code-mode call: a command it started outlived its yield.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) y: Option<Box<Yield>>,
@@ -4158,9 +4179,107 @@ pub(crate) enum ScriptArg {
     Absent,
     /// A plain string literal, unescaped.
     Literal(String),
+    /// A nonnegative integer literal, as used by numeric exec session ids.
+    Number(u64),
     /// Anything else: a variable, an expression, a template with `${…}`, or
     /// a call whose argument isn't an object literal this reader can follow.
     Other,
+}
+
+/// One native text block, with its source-array ordinal and type retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutputBlock<'a> {
+    pub(crate) ordinal: usize,
+    pub(crate) kind: Option<&'a str>,
+    pub(crate) content: OutputBlockContent<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputBlockContent<'a> {
+    Text { text: &'a str, header: bool },
+    Image,
+    Unknown,
+}
+
+/// The native output's original scalar or ordered content blocks. It keeps
+/// boundaries until a caller explicitly needs a text rendering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OutputContentView<'a> {
+    Text(&'a str),
+    Blocks(Vec<OutputBlock<'a>>),
+}
+
+fn text_content_type(kind: Option<&str>) -> bool {
+    matches!(kind, Some("text" | "input_text" | "output_text"))
+}
+
+fn successful_script_header(text: &str) -> bool {
+    let text = text.trim_start();
+    if text == "Script completed" {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix("Script completed\n") else {
+        return false;
+    };
+    let Some((wall_time, rest)) = rest.split_once('\n') else {
+        return false;
+    };
+    let Some(wall_time) = wall_time.strip_prefix("Wall time ") else {
+        return false;
+    };
+    let success_header = if let Some(seconds) = wall_time.strip_suffix(" seconds") {
+        finite_seconds(seconds, true)
+    } else if let Some((total, timings)) = wall_time.split_once(" seconds (code-mode ") {
+        let Some((host, overhead)) = timings.split_once(" seconds; overhead ") else {
+            return false;
+        };
+        let Some(overhead) = overhead.strip_suffix(" seconds)") else {
+            return false;
+        };
+        finite_seconds(total, true) && finite_seconds(host, true) && finite_seconds(overhead, false)
+    } else {
+        false
+    };
+    success_header && (rest == "Output:" || rest == "Output:\n")
+}
+
+fn finite_seconds(text: &str, nonnegative: bool) -> bool {
+    text.parse::<f64>()
+        .is_ok_and(|seconds| seconds.is_finite() && (!nonnegative || seconds >= 0.0))
+}
+
+pub(crate) fn output_content_view(output: &Value) -> Option<OutputContentView<'_>> {
+    match output {
+        Value::String(text) => Some(OutputContentView::Text(text)),
+        Value::Array(parts) => Some(OutputContentView::Blocks(
+            parts
+                .iter()
+                .enumerate()
+                .map(|(ordinal, part)| {
+                    let kind = field(part, "type");
+                    let content = if text_content_type(kind) {
+                        match field(part, "text") {
+                            Some(text) => OutputBlockContent::Text {
+                                text,
+                                header: ordinal == 0 && successful_script_header(text),
+                            },
+                            None => OutputBlockContent::Unknown,
+                        }
+                    } else if matches!(kind, Some("image" | "input_image")) {
+                        OutputBlockContent::Image
+                    } else {
+                        OutputBlockContent::Unknown
+                    };
+                    OutputBlock {
+                        ordinal,
+                        kind,
+                        content,
+                    }
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
 }
 
 fn ident_char(c: char) -> bool {
@@ -4249,6 +4368,17 @@ fn read_literal(text: &str, start: usize) -> (Option<String>, usize) {
 fn script_value(text: &str, start: usize) -> ScriptArg {
     let rest = text[start..].trim_start();
     if !rest.starts_with(['"', '\'', '`']) {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let boundary = rest[digits..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '}' | ']'));
+        if digits > 0
+            && boundary
+            && let Ok(number) = rest[..digits].parse::<u64>()
+        {
+            return ScriptArg::Number(number);
+        }
         return ScriptArg::Other;
     }
     match read_literal(text, text.len() - rest.len()).0 {
@@ -4257,12 +4387,19 @@ fn script_value(text: &str, start: usize) -> ScriptArg {
     }
 }
 
-/// Where the source's first call to `tool` opens its arguments: `tool` as a
-/// whole identifier followed by `(`, outside comments and string literals.
-fn call_open(script: &str, tool: &str) -> Option<usize> {
+#[derive(Default)]
+struct CallMatches {
+    first: Option<usize>,
+    multiple: bool,
+}
+
+/// The first one or two source calls to `tool`, outside comments and string
+/// literals. The scanner only distinguishes zero, one and multiple calls.
+fn call_matches(script: &str, tool: &str) -> CallMatches {
     if tool.is_empty() {
-        return None;
+        return CallMatches::default();
     }
+    let mut found = CallMatches::default();
     let mut at = 0;
     while let Some(c) = script[at..].chars().next() {
         match c {
@@ -4288,7 +4425,11 @@ fn call_open(script: &str, tool: &str) -> Option<usize> {
                 at = end;
                 let rest = script[at..].trim_start();
                 if word == tool && rest.starts_with('(') {
-                    return Some(script.len() - rest.len() + 1);
+                    if found.first.is_some() {
+                        found.multiple = true;
+                        return found;
+                    }
+                    found.first = Some(script.len() - rest.len() + 1);
                 }
                 continue;
             }
@@ -4296,7 +4437,13 @@ fn call_open(script: &str, tool: &str) -> Option<usize> {
         }
         at += c.len_utf8();
     }
-    None
+    found
+}
+
+/// Where the source's first call to `tool` opens its arguments: `tool` as a
+/// whole identifier followed by `(`, outside comments and string literals.
+fn call_open(script: &str, tool: &str) -> Option<usize> {
+    call_matches(script, tool).first
 }
 
 /// What a code-mode script gives `key` in its first call to `tool`
@@ -4384,40 +4531,427 @@ pub(crate) fn script_command(script: &str) -> Option<String> {
     }
 }
 
-/// [`STDIN`] and [`SENDS`] for a code-mode script's source. `chars` that
-/// can't be read count as input sent, so a poll is never hidden on a guess.
-/// A script that starts a command is never a poll, even one that goes on to
-/// poll what it started.
-fn script_flags(script: &str) -> u8 {
-    if script_arg(script, "exec_command", "cmd").is_some() {
-        return 0;
-    }
-    match script_arg(script, "write_stdin", "chars") {
-        None => 0,
-        Some(ScriptArg::Absent) => STDIN,
-        Some(ScriptArg::Literal(chars)) if chars.is_empty() => STDIN,
-        Some(_) => STDIN | SENDS,
+fn script_session_target(script: &str) -> Option<String> {
+    match script_arg(script, "write_stdin", "session_id")? {
+        ScriptArg::Literal(session) if !session.is_empty() && session.len() <= 64 => Some(session),
+        ScriptArg::Number(session) => Some(session.to_string()),
+        _ => None,
     }
 }
 
-/// A code-mode script's output that is one exec result: the harness header
-/// and the script's text, a JSON object with the command's `output` and
-/// `wall_time_seconds`, as `text(JSON.stringify(r))` prints it.
-pub(crate) fn yield_json(output: Option<&Value>) -> Option<Value> {
-    let text = match output? {
-        Value::String(text) => text.as_str(),
-        Value::Array(parts) => {
-            let texts: Vec<&str> = parts
-                .iter()
-                .filter_map(|part| field(part, "text"))
-                .collect();
-            match texts.as_slice() {
-                [header, body] if header.trim_start().starts_with("Script completed") => *body,
-                [body] => *body,
-                _ => return None,
+/// Code-mode command operations visible in a script. Poll links require one
+/// literal `write_stdin` target; mixed or multiple operations stay unowned.
+fn script_flags(script: &str) -> u8 {
+    let exec = call_matches(script, "exec_command");
+    let stdin = call_matches(script, "write_stdin");
+    let mut flags = 0;
+    if exec.first.is_some() {
+        flags |= EXEC_COMMAND;
+    }
+    if stdin.first.is_some() {
+        flags |= STDIN;
+    }
+    if exec.multiple || stdin.multiple || (exec.first.is_some() && stdin.first.is_some()) {
+        flags |= AMBIGUOUS_COMMANDS;
+    }
+    if stdin.first.is_some() {
+        match script_arg(script, "write_stdin", "chars") {
+            Some(ScriptArg::Absent) => {}
+            Some(ScriptArg::Literal(chars)) if chars.is_empty() => {}
+            _ => flags |= SENDS,
+        }
+        if matches!(
+            script_arg(script, "write_stdin", "session_id"),
+            Some(ScriptArg::Literal(_) | ScriptArg::Number(_))
+        ) {
+            flags |= LITERAL_SESSION;
+        }
+    }
+    flags
+}
+
+const RESULT_SOURCE_BYTES_MAX: usize = 64 * 1024;
+const RESULT_SOURCE_TOKENS_MAX: usize = 4096;
+
+fn source_tokens(script: &str) -> Option<Vec<String>> {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return None;
+    }
+    let bytes = script.as_bytes();
+    let mut at = 0;
+    let mut tokens = Vec::new();
+    while at < bytes.len() {
+        let c = script[at..].chars().next()?;
+        if c.is_whitespace() {
+            at += c.len_utf8();
+            continue;
+        }
+        if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'/') {
+            at += 2;
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
+            let end = script[at + 2..].find("*/")?;
+            at += end + 4;
+            continue;
+        }
+        if matches!(bytes[at], b'\'' | b'"') {
+            let quote = bytes[at];
+            at += 1;
+            let mut closed = false;
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'\\' => at = (at + 2).min(bytes.len()),
+                    byte if byte == quote => {
+                        at += 1;
+                        closed = true;
+                        break;
+                    }
+                    _ => at += 1,
+                }
+            }
+            if !closed {
+                return None;
+            }
+            push_source_token(&mut tokens, "s".to_owned(), RESULT_SOURCE_TOKENS_MAX)?;
+            continue;
+        }
+        if bytes[at] == b'`' {
+            // Template literals may interpolate arbitrary code; this narrow
+            // source recognizer does not try to model them.
+            return None;
+        }
+        if c.is_alphabetic() || matches!(c, '_' | '$') {
+            let start = at;
+            at += c.len_utf8();
+            while at < bytes.len() {
+                let next = script[at..].chars().next()?;
+                if !ident_char(next) {
+                    break;
+                }
+                at += next.len_utf8();
+            }
+            push_source_token(
+                &mut tokens,
+                format!("i:{}", &script[start..at]),
+                RESULT_SOURCE_TOKENS_MAX,
+            )?;
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let start = at;
+            at += c.len_utf8();
+            while at < bytes.len() && bytes[at].is_ascii_digit() {
+                at += 1;
+            }
+            push_source_token(
+                &mut tokens,
+                format!("n:{}", &script[start..at]),
+                RESULT_SOURCE_TOKENS_MAX,
+            )?;
+            continue;
+        }
+        push_source_token(&mut tokens, format!("p:{c}"), RESULT_SOURCE_TOKENS_MAX)?;
+        at += c.len_utf8();
+    }
+    Some(tokens)
+}
+
+fn push_source_token(tokens: &mut Vec<String>, token: String, max: usize) -> Option<()> {
+    if tokens.len() >= max {
+        return None;
+    }
+    tokens.push(token);
+    Some(())
+}
+
+fn matching_call_end(tokens: &[String], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.as_str() {
+            "p:(" => depth += 1,
+            "p:)" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn exact_statement(tokens: &[String], mut at: usize) -> bool {
+    if tokens.get(at).is_some_and(|token| token == "p:;") {
+        at += 1;
+    }
+    at == tokens.len()
+}
+
+/// A literal value in the narrow call-source grammar. Identifiers, calls,
+/// spreads and operators are rejected; only JSON-like scalar/object/array
+/// data can be shown to have no evaluation side effects.
+fn literal_value(tokens: &[String], at: &mut usize, depth: usize) -> bool {
+    if depth > 24 {
+        return false;
+    }
+    match tokens.get(*at).map(String::as_str) {
+        Some("s") | Some("i:true" | "i:false" | "i:null") => {
+            *at += 1;
+            true
+        }
+        Some(token) if token.starts_with("n:") => {
+            *at += 1;
+            true
+        }
+        Some("p:{") => {
+            *at += 1;
+            if tokens.get(*at).map(String::as_str) == Some("p:}") {
+                *at += 1;
+                return true;
+            }
+            let mut keys = BTreeSet::new();
+            loop {
+                // Quoted, escaped and computed keys are outside this source
+                // grammar; duplicate unquoted keys are rejected because JS
+                // evaluates the last value while the lexical scanner sees the
+                // first one.
+                let Some(key) = tokens
+                    .get(*at)
+                    .and_then(|key| key.strip_prefix("i:"))
+                    .filter(|key| !key.is_empty())
+                else {
+                    return false;
+                };
+                if !keys.insert(key.to_owned()) {
+                    return false;
+                }
+                *at += 1;
+                if tokens.get(*at).map(String::as_str) != Some("p::") {
+                    return false;
+                }
+                *at += 1;
+                if !literal_value(tokens, at, depth + 1) {
+                    return false;
+                }
+                match tokens.get(*at).map(String::as_str) {
+                    Some("p:}") => {
+                        *at += 1;
+                        return true;
+                    }
+                    Some("p:,") => {
+                        *at += 1;
+                        if tokens.get(*at).map(String::as_str) == Some("p:}") {
+                            *at += 1;
+                            return true;
+                        }
+                    }
+                    _ => return false,
+                }
             }
         }
-        _ => return None,
+        Some("p:[") => {
+            *at += 1;
+            if tokens.get(*at).map(String::as_str) == Some("p:]") {
+                *at += 1;
+                return true;
+            }
+            loop {
+                if !literal_value(tokens, at, depth + 1) {
+                    return false;
+                }
+                match tokens.get(*at).map(String::as_str) {
+                    Some("p:]") => {
+                        *at += 1;
+                        return true;
+                    }
+                    Some("p:,") => {
+                        *at += 1;
+                        if tokens.get(*at).map(String::as_str) == Some("p:]") {
+                            *at += 1;
+                            return true;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The call receives one statically literal object, with no argument
+/// expression that can print or replace the awaited result.
+fn literal_call_arguments(tokens: &[String], open: usize) -> bool {
+    if tokens.get(open).map(String::as_str) != Some("p:(") {
+        return false;
+    }
+    let Some(close) = matching_call_end(tokens, open) else {
+        return false;
+    };
+    let mut at = open + 1;
+    literal_value(tokens, &mut at, 0) && at == close
+}
+
+fn directly_prints_call(tokens: &[String], operation: &str, stringify: bool) -> bool {
+    let mut prefix = vec!["i:text", "p:("];
+    if stringify {
+        prefix.extend(["i:JSON", "p:.", "i:stringify", "p:("]);
+    }
+    prefix.extend(["i:await", "i:tools", "p:."]);
+    if tokens.len() < prefix.len() + 2 {
+        return false;
+    }
+    if tokens[..prefix.len()]
+        .iter()
+        .map(String::as_str)
+        .ne(prefix.iter().copied())
+    {
+        return false;
+    }
+    let operation_at = prefix.len();
+    if tokens[operation_at] != format!("i:{operation}")
+        || tokens.get(operation_at + 1).map(String::as_str) != Some("p:(")
+        || !literal_call_arguments(tokens, operation_at + 1)
+    {
+        return false;
+    }
+    let Some(close) = matching_call_end(tokens, operation_at + 1) else {
+        return false;
+    };
+    let suffix = if stringify { 2 } else { 1 };
+    let end = close + 1 + suffix;
+    if end > tokens.len() {
+        return false;
+    }
+    (0..suffix).all(|index| tokens[close + 1 + index] == "p:)") && exact_statement(tokens, end)
+}
+
+fn assigned_result_is_printed(tokens: &[String], operation: &str, stringify: bool) -> bool {
+    if tokens.len() < 10
+        || !matches!(tokens[0].as_str(), "i:const" | "i:let")
+        || !tokens[1].starts_with("i:")
+        || ["p:=", "i:await", "i:tools", "p:."]
+            .iter()
+            .enumerate()
+            .any(|(offset, expected)| tokens.get(offset + 2).map(String::as_str) != Some(*expected))
+    {
+        return false;
+    }
+    let variable = &tokens[1];
+    let operation_at = 6;
+    if tokens[operation_at] != format!("i:{operation}")
+        || tokens.get(operation_at + 1).map(String::as_str) != Some("p:(")
+        || !literal_call_arguments(tokens, operation_at + 1)
+    {
+        return false;
+    }
+    let Some(close) = matching_call_end(tokens, operation_at + 1) else {
+        return false;
+    };
+    let mut at = close + 1;
+    if tokens.get(at).map(String::as_str) != Some("p:;") {
+        return false;
+    }
+    at += 1;
+    if tokens.get(at).map(String::as_str) != Some("i:text")
+        || tokens.get(at + 1).map(String::as_str) != Some("p:(")
+    {
+        return false;
+    }
+    at += 2;
+    if stringify {
+        if tokens.get(at).map(String::as_str) != Some("i:JSON")
+            || tokens.get(at + 1).map(String::as_str) != Some("p:.")
+            || tokens.get(at + 2).map(String::as_str) != Some("i:stringify")
+            || tokens.get(at + 3).map(String::as_str) != Some("p:(")
+        {
+            return false;
+        }
+        at += 4;
+    }
+    if tokens.get(at) != Some(variable) {
+        return false;
+    }
+    at += 1;
+    let closes = if stringify { 2 } else { 1 };
+    for _ in 0..closes {
+        if tokens.get(at).map(String::as_str) != Some("p:)") {
+            return false;
+        }
+        at += 1;
+    }
+    exact_statement(tokens, at)
+}
+
+fn result_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return false;
+    }
+    let flags = script_flags(script);
+    if flags & AMBIGUOUS_COMMANDS != 0 {
+        return false;
+    }
+    let operation = match flags & (EXEC_COMMAND | STDIN) {
+        EXEC_COMMAND => {
+            if script_command(script).is_none() {
+                return false;
+            }
+            "exec_command"
+        }
+        STDIN => {
+            if script_session_target(script).is_none() {
+                return false;
+            }
+            "write_stdin"
+        }
+        _ => return false,
+    };
+    let Some(tokens) = source_tokens(script) else {
+        return false;
+    };
+    directly_prints_call(&tokens, operation, false)
+        || directly_prints_call(&tokens, operation, true)
+        || assigned_result_is_printed(&tokens, operation, false)
+        || assigned_result_is_printed(&tokens, operation, true)
+}
+
+/// A code-mode script's output that is one exec result. Unknown and non-text
+/// blocks make the result ambiguous instead of disappearing from the parse.
+pub(crate) fn yield_json(output: Option<&Value>) -> Option<Value> {
+    let text = match output_content_view(output?)? {
+        OutputContentView::Text(text) => text,
+        OutputContentView::Blocks(parts) => match parts.as_slice() {
+            [
+                OutputBlock {
+                    content:
+                        OutputBlockContent::Text {
+                            text,
+                            header: false,
+                        },
+                    ..
+                },
+            ] => *text,
+            [
+                OutputBlock {
+                    content: OutputBlockContent::Text { header: true, .. },
+                    ..
+                },
+                OutputBlock {
+                    content:
+                        OutputBlockContent::Text {
+                            text,
+                            header: false,
+                        },
+                    ..
+                },
+            ] => *text,
+            _ => return None,
+        },
     };
     let value: Value = serde_json::from_str(text.trim()).ok()?;
     (value.get("output").is_some_and(Value::is_string)
@@ -4437,6 +4971,7 @@ fn exec_session(value: Option<&Value>) -> Option<String> {
 
 /// The exec session a code-mode script's output leaves running: the
 /// command outlived its yield, so there is a session id and no exit code.
+#[cfg(test)]
 fn yielded_session(output: Option<&Value>) -> Option<String> {
     let value = yield_json(output)?;
     if value.get("exit_code").is_some_and(|code| !code.is_null()) {
@@ -4445,29 +4980,64 @@ fn yielded_session(output: Option<&Value>) -> Option<String> {
     exec_session(value.get("session_id"))
 }
 
-/// Links a code-mode call whose output just arrived to a yielded command:
-/// as the script that started it, or as one of its polls. A script with
-/// operations of its own, or one that failed, stays a step of its own, but
-/// the chunk it printed of an open command is still that command's output.
+/// Links one source-qualified code-mode command result to a yielded command.
+/// Mixed/multiple operations and printed output without a matching source
+/// operation stay visible and unowned.
 fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, offset: u64) {
     let Some(event) = summary.events.get(index) else {
         return;
     };
-    let (call_offset, flags, linked) = (event.o, event.script, event.poll);
+    let (call_offset, flags, linked, result_source) =
+        (event.o, event.script, event.poll, event.result_source);
     let failed = event.r.as_ref().is_some_and(|reply| reply.e);
+    let starts_command = result_source && flags & EXEC_COMMAND != 0 && flags & STDIN == 0;
+    let polls_command = flags & STDIN != 0
+        && flags & (EXEC_COMMAND | AMBIGUOUS_COMMANDS | LITERAL_SESSION) == LITERAL_SESSION
+        && result_source;
+    if flags & AMBIGUOUS_COMMANDS != 0 || (!starts_command && !polls_command) {
+        summary.event_mut(index).expect("event exists").poll = None;
+        return;
+    }
     let operations = summary
         .extras
         .iter()
         .rev()
         .take_while(|extra| extra.o > call_offset)
         .any(|extra| extra.k == Kind::Operation && extra.parent == Some(index));
-    let session = yielded_session(output);
-    // A poll of an open command, by the session id its output names.
-    let known = session
+    let decoded = yield_json(output);
+    let output_session = decoded
         .as_ref()
-        .filter(|_| flags & STDIN != 0)
+        .and_then(|value| exec_session(value.get("session_id")));
+    let session = decoded.as_ref().and_then(|value| {
+        (!value.get("exit_code").is_some_and(|code| !code.is_null()))
+            .then(|| exec_session(value.get("session_id")))
+            .flatten()
+    });
+    if polls_command {
+        // A completed poll can end a previously matched command, but only a
+        // single qualifying result block may join to that command. Opaque or
+        // multi-body output stays on its wrapper, even if a terminal item
+        // arrived while it ran.
+        if decoded.is_none() {
+            summary.event_mut(index).expect("event exists").poll = None;
+            return;
+        }
+        if output_session
+            .as_deref()
+            .is_some_and(|session| Some(session) != summary.events[index].poll_target.as_deref())
+        {
+            summary.event_mut(index).expect("event exists").poll = None;
+            return;
+        }
+    }
+    // A poll is owned only when the literal source target and the exact
+    // output session id resolve to the same previously observed command.
+    let known_session = session
+        .as_ref()
+        .filter(|_| polls_command)
         .and_then(|session| summary.yields.get(session).copied())
         .filter(|start| *start < index);
+    let known = linked.filter(|start| Some(*start) == known_session);
     if operations || failed {
         summary.event_mut(index).expect("event exists").poll = None;
         if let Some(start) = known {
@@ -4488,9 +5058,9 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         None => ended_here,
         Some(_) if known.is_some() => known,
         Some(_) if ended_here.is_some() => ended_here,
+        Some(_) if polls_command => None,
         // A command these logs haven't seen yet: a new start, whether this
-        // script started it or polls one started where these logs can't
-        // see.
+        // single source call started it.
         Some(session) => {
             if summary.yields.len() >= YIELDS_MAX
                 && !summary.yields.contains_key(&session)
@@ -4530,13 +5100,21 @@ fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
     }
 }
 
-/// The yielded command a poll that hasn't answered yet is taken to poll:
-/// the only one still open. Its output settles it.
-fn open_poll(summary: &FileIndex, flags: u8) -> Option<usize> {
-    if flags & STDIN == 0 || summary.yields.len() != 1 {
+/// A poll's literal source target can narrow the open set, but never create
+/// an identity or choose the only unrelated session by elimination.
+fn open_poll(
+    summary: &FileIndex,
+    flags: u8,
+    target: Option<String>,
+    result_source: bool,
+) -> Option<usize> {
+    if !result_source
+        || flags & STDIN == 0
+        || flags & (EXEC_COMMAND | AMBIGUOUS_COMMANDS | LITERAL_SESSION) != LITERAL_SESSION
+    {
         return None;
     }
-    summary.yields.values().next().copied()
+    summary.yields.get(&target?).copied()
 }
 
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
@@ -5049,6 +5627,37 @@ fn codex_exit(output: Option<&Value>) -> Option<i64> {
     value.get("metadata")?.get("exit_code")?.as_i64()
 }
 
+/// A formatted direct-exec exit is evidence only for the exact native
+/// function-call pair that owns this output. The shared formatter decoder
+/// qualifies the header; a session ID by itself never establishes a result.
+fn codex_direct_exec_exit(index: &FileIndex, call_id: &str, output: Option<&Value>) -> Option<i64> {
+    // A repeated source ID has no unique owner, even if `pending` currently
+    // points at one of its calls. Keep this guard scoped to formatter evidence;
+    // legacy structured exit metadata retains its existing matching behavior.
+    if !index
+        .tool_ids
+        .get(call_id)
+        .is_some_and(|indices| indices.len() == 1)
+    {
+        return None;
+    }
+    let call = index
+        .pending
+        .get(call_id)
+        .and_then(|at| index.events.get(*at))?;
+    if call.k != Kind::Tool
+        || !call.native_direct_call
+        || !matches!(call.n.as_deref(), Some("exec_command" | "write_stdin"))
+    {
+        return None;
+    }
+    match crate::exec_response::decode_exec_response(output?.as_str()?)?.native_outcome()? {
+        crate::exec_response::ExecResponseOutcome::Exited(code) => Some(i64::from(code)),
+        crate::exec_response::ExecResponseOutcome::SessionOnly
+        | crate::exec_response::ExecResponseOutcome::NoExit => None,
+    }
+}
+
 /// Text Codex adds before a prompt, by its tag. Any other text is a prompt,
 /// even one that starts with `<`.
 const HARNESS_TAGS: [&str; 5] = [
@@ -5171,39 +5780,27 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 || field(item, "status") == Some("failed")
                 || field(item, "type") == Some("FileChange");
             // A yielded command's end: its `process_id` is the session id
-            // the starting script answered with. It arrives inside a poll,
-            // or while no script runs. Inside a script that isn't a poll the
-            // id was used again: that script's own command, and the old
-            // process is gone.
+            // the starting script answered with. A startup source and an open
+            // exec wrapper do not identify a new native invocation: the old
+            // startup's exit watcher can finish during a different wrapper.
+            // Preserve the exact process-id join without guessing reuse.
             let yielded = if field(item, "type") == Some("CommandExecution") && !legacy_tool {
-                exec_session(item.get("process_id")).and_then(|session| {
-                    let start = summary.yields.remove(&session)?;
-                    let own = open.is_some_and(|open| {
-                        summary
-                            .events
-                            .get(open)
-                            .is_some_and(|event| event.script & STDIN == 0)
-                    });
-                    (!own).then_some(start)
-                })
+                exec_session(item.get("process_id"))
+                    .and_then(|session| summary.yields.remove(&session))
             } else {
                 None
             };
-            if let Some(start) = yielded {
-                if let Some(found) = summary.event_mut(start)
-                    && let Some(started) = found.y.as_mut()
-                {
-                    started.done = Some(Reply {
-                        o: offset,
-                        t: time,
-                        e: failed,
-                        f: if known { 0 } else { UNKNOWN },
-                        ..Reply::default()
-                    });
-                }
-                if let Some(poll) = open.and_then(|open| summary.event_mut(open)) {
-                    poll.poll = Some(start);
-                }
+            if let Some(start) = yielded
+                && let Some(found) = summary.event_mut(start)
+                && let Some(started) = found.y.as_mut()
+            {
+                started.done = Some(Reply {
+                    o: offset,
+                    t: time,
+                    e: failed,
+                    f: if known { 0 } else { UNKNOWN },
+                    ..Reply::default()
+                });
             }
             // An item is a step of its own only when exactly one code-mode
             // call is open to own it. Otherwise it is a plain call's item, or
@@ -5347,12 +5944,15 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             ) => {
                 let code_mode = field(payload, "type") == Some("custom_tool_call")
                     && field(payload, "name") == Some("exec");
-                let script = if code_mode {
-                    field(payload, "input").map_or(0, script_flags)
+                let script_text = if code_mode {
+                    field(payload, "input")
                 } else {
-                    0
+                    None
                 };
-                let poll = open_poll(summary, script);
+                let script = script_text.map_or(0, script_flags);
+                let poll_target = script_text.and_then(script_session_target);
+                let printed_result = script_text.is_some_and(result_source);
+                let poll = open_poll(summary, script, poll_target.clone(), printed_result);
                 tool_event(
                     summary,
                     Event {
@@ -5372,8 +5972,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                                 .to_owned(),
                         ),
                         code_mode,
+                        native_direct_call: field(payload, "type") == Some("function_call")
+                            && field(payload, "call_id").is_some()
+                            && matches!(
+                                field(payload, "name"),
+                                Some("exec_command" | "write_stdin")
+                            )
+                            && payload.get("namespace").is_none_or(Value::is_null),
                         code_mode_open: code_mode,
                         script,
+                        poll_target,
+                        result_source: printed_result,
                         poll,
                         ..Event::default()
                     },
@@ -5382,7 +5991,12 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             Some("function_call_output" | "custom_tool_call_output" | "tool_search_output") => {
                 if let Some(id) = field(payload, "call_id") {
                     let output = payload.get("output").or_else(|| payload.get("tools"));
-                    let code = codex_exit(output);
+                    let direct_code = if field(payload, "type") == Some("function_call_output") {
+                        codex_direct_exec_exit(summary, id, output)
+                    } else {
+                        None
+                    };
+                    let code = codex_exit(output).or(direct_code);
                     let mut flags = if code.is_none() { UNKNOWN } else { 0 };
                     if acknowledgement(output) {
                         flags |= ACK;
@@ -5790,6 +6404,22 @@ mod tests {
         serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":id,"arguments":"{}"}})
     }
 
+    fn direct_call(id: &str, name: &str) -> Value {
+        let arguments = match name {
+            "exec_command" => serde_json::json!({"cmd":"printf fixture"}).to_string(),
+            "write_stdin" => {
+                let session_id = match id {
+                    "negative" => 5151,
+                    "running" => 6151,
+                    _ => 1,
+                };
+                serde_json::json!({"session_id":session_id,"chars":""}).to_string()
+            }
+            _ => "{}".to_owned(),
+        };
+        serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":arguments}})
+    }
+
     fn output(id: &str, output: Value) -> Value {
         serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":output}})
     }
@@ -5819,6 +6449,110 @@ mod tests {
             serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"item","exit_code":1}}}),
         ]);
         assert_eq!(replies, [Some(false), None, Some(true), Some(true)]);
+    }
+
+    #[test]
+    fn direct_formatter_outcomes_need_a_qualified_matching_native_call() {
+        let valid_zero = "Chunk ID: a\nWall time: 0.1000 seconds\nProcess exited with code 0\nOriginal token count: 7\nOutput:\nfinished";
+        let valid_nonzero =
+            "Wall time: 0.2000 seconds\nProcess exited with code 3\nOutput:\nfailed";
+        let valid_negative_and_running = "Chunk ID: b\nWall time: 0.3000 seconds\nProcess exited with code -7\nProcess running with session ID 5151\nOutput:\nfailed";
+        let running_only =
+            "Wall time: 0.4000 seconds\nProcess running with session ID 6151\nOutput:\nrunning";
+        let no_process_fields =
+            "Wall time: 0.4500 seconds\nOriginal token count: 2\nOutput:\nunknown";
+        let both_optionals = "Wall time: 0.5000 seconds\nProcess exited with code 0\nProcess running with session ID 6161\nOutput:\nfinished";
+        let body_headers = "Wall time: 0.6000 seconds\nProcess exited with code 0\nOutput:\nbody\nProcess exited with code 99\nProcess running with session ID 8888\nWall time: 9.0000 seconds\nOutput:\nopaque";
+        let malformed = [
+            "Wall time: 0.7000 seconds\nOriginal token count: 8\nProcess exited with code 0\nOutput:\nignored",
+            "Wall time: 0.8000 seconds\nProcess exited with code 0\nProcess exited with code 1\nOutput:\nignored",
+            "Wall time: 0.9000 seconds\nProcess exited with code nope\nOutput:\nignored",
+            "Wall time: NaN seconds\nProcess exited with code 0\nOutput:\nignored",
+            "Wall time: 1.0000 seconds\nProcess exited with code 0\nmissing boundary",
+            "Wall time: 1.1000 seconds\nProcess exited with code 2147483648\nOutput:\nignored",
+            "Process exited with code 0\nOutput:\nignored",
+        ];
+        let mut records = Vec::new();
+        for (id, name, formatted) in [
+            ("zero", "exec_command", valid_zero),
+            ("nonzero", "exec_command", valid_nonzero),
+            ("negative", "write_stdin", valid_negative_and_running),
+            ("running", "write_stdin", running_only),
+            ("no-fields", "exec_command", no_process_fields),
+            ("both", "exec_command", both_optionals),
+            ("opaque", "exec_command", body_headers),
+        ] {
+            records.push(direct_call(id, name));
+            records.push(output(id, serde_json::json!(formatted)));
+        }
+        let mut null_namespace = direct_call("null-namespace", "exec_command");
+        null_namespace["payload"]["namespace"] = serde_json::Value::Null;
+        records.push(null_namespace);
+        records.push(output("null-namespace", serde_json::json!(valid_zero)));
+        for (ordinal, formatted) in malformed.iter().enumerate() {
+            let id = format!("malformed-{ordinal}");
+            records.push(direct_call(&id, "exec_command"));
+            records.push(output(&id, serde_json::json!(formatted)));
+        }
+        let oversized_prefix = format!(
+            "Chunk ID: {}\nWall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\nignored",
+            "x".repeat(2048)
+        );
+        records.push(direct_call("oversized-prefix", "exec_command"));
+        records.push(output(
+            "oversized-prefix",
+            serde_json::json!(oversized_prefix),
+        ));
+        records.push(direct_call("unrelated", "shell"));
+        records.push(output("unrelated", serde_json::json!(valid_nonzero)));
+        records.push(direct_call("wrong-carrier", "exec_command"));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"wrong-carrier","output":valid_nonzero}}));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"code-mode","input":"text('fixture')"}}));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"code-mode","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":valid_nonzero}]}}));
+        let mut namespaced = direct_call("namespaced", "exec_command");
+        namespaced["payload"]["namespace"] = serde_json::json!("mcp__fixture__exec");
+        records.push(namespaced);
+        records.push(output("namespaced", serde_json::json!(valid_zero)));
+
+        let mut expected = vec![
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+        ];
+        expected.extend(std::iter::repeat_n(None, malformed.len() + 5));
+        assert_eq!(codex_reply(&records), expected);
+    }
+
+    #[test]
+    fn direct_formatter_refuses_a_reused_pending_call_id() {
+        let mut index = FileIndex::default();
+        let records = [
+            direct_call("reused", "exec_command"),
+            direct_call("reused", "exec_command"),
+            output(
+                "reused",
+                serde_json::json!(
+                    "Wall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\nfinished"
+                ),
+            ),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            codex(&mut index, record, offset as u64);
+        }
+        assert_eq!(index.events.len(), 2);
+        assert!(index.events.iter().all(|event| event.native_direct_call));
+        assert!(index.events[0].r.is_none());
+        let reply = index.events[1]
+            .r
+            .as_ref()
+            .expect("the output resolves the latest call");
+        assert_eq!(reply.o, 2);
+        assert_ne!(reply.f & UNKNOWN, 0, "the duplicate ID has no unique owner");
     }
 
     #[test]
@@ -7135,6 +7869,12 @@ mod tests {
                 literal("y\n"),
             ),
             (
+                "tools.write_stdin({session_id: 26789, chars: \"\"})",
+                "write_stdin",
+                "session_id",
+                Some(ScriptArg::Number(26789)),
+            ),
+            (
                 "tools.write_stdin({session_id:1})",
                 "write_stdin",
                 "chars",
@@ -7228,28 +7968,95 @@ mod tests {
         }
         assert_eq!(
             script_flags("tools.write_stdin({session_id:1,chars:\"\"})"),
-            STDIN
+            STDIN | LITERAL_SESSION
         );
         assert_eq!(
             script_flags("tools.write_stdin({session_id:1,chars:\"q\"})"),
-            STDIN | SENDS
+            STDIN | SENDS | LITERAL_SESSION
         );
         assert_eq!(
             script_flags("tools.write_stdin({session_id:1,chars:keys})"),
-            STDIN | SENDS
+            STDIN | SENDS | LITERAL_SESSION
         );
-        assert_eq!(script_flags("tools.exec_command({cmd:\"ls\"})"), 0);
-        // A script that starts a command and then polls it starts it.
+        assert_eq!(
+            script_flags("tools.exec_command({cmd:\"ls\"})"),
+            EXEC_COMMAND
+        );
+        // Mixed operations are both classified and left ambiguous.
         assert_eq!(
             script_flags(
                 "let r = await tools.exec_command({cmd:\"ls\"}); r = await tools.write_stdin({session_id: r.session_id, chars: \"\"});"
             ),
-            0
+            STDIN | EXEC_COMMAND | AMBIGUOUS_COMMANDS
         );
     }
 
+    #[test]
+    fn command_result_sources_must_print_the_direct_single_result() {
+        assert!(result_source("text(await tools.exec_command({cmd:'ls'}));"));
+        assert!(result_source(
+            "text(JSON.stringify(await tools.write_stdin({session_id:26789,chars:''})));"
+        ));
+        assert!(result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); text(JSON.stringify(result));"
+        ));
+        assert!(result_source(
+            "let result = await tools.write_stdin({session_id:26789,chars:''}); text(result);"
+        ));
+        assert!(result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); /* print it */ text(JSON.stringify(result));"
+        ));
+
+        assert!(!result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); text(JSON.stringify({wall_time_seconds:1,session_id:99999,output:'fake'}));"
+        ));
+        assert!(!result_source(
+            "const result = await tools.write_stdin({session_id:26789,chars:''}); text(JSON.stringify({wall_time_seconds:1,session_id:26789,output:'fake'}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.exec_command({cmd:(text=()=>{},'ls')}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({session_id:26789,chars:'',extra:text('fake')}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({session_id:26789,session_id:95583,chars:''}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({'session_id':26789,session_id:95583,chars:''}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({session_id:26789,'chars':''}));"
+        ));
+        let oversized = format!(
+            "{}text(await tools.exec_command({{cmd:'ls'}}));",
+            " ".repeat(64 * 1024)
+        );
+        assert!(!result_source(&oversized));
+        let over_token_limit = format!(
+            "text(await tools.exec_command({{cmd:'ls',extra:[{}]}}));",
+            vec!["0"; 4100].join(",")
+        );
+        assert!(!result_source(&over_token_limit));
+        assert!(!result_source(
+            "let result = await tools.exec_command({cmd:'ls'}); while (result.session_id) { result = await tools.write_stdin({session_id:result.session_id,chars:''}); } text(JSON.stringify(result));"
+        ));
+        assert!(!result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); text(JSON.stringify(result)); text('extra');"
+        ));
+    }
+
     fn exec_line(id: &str, script: &str) -> Value {
-        serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":id,"name":"exec","input":script}})
+        let script = script.trim();
+        let input = if (script.starts_with("await tools.exec_command(")
+            || script.starts_with("await tools.write_stdin("))
+            && !script.contains(';')
+        {
+            format!("const result = {script}; text(JSON.stringify(result));")
+        } else {
+            script.to_owned()
+        };
+        serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":id,"name":"exec","input":input}})
     }
 
     fn yielded_line(id: &str, session: u64) -> Value {
@@ -7320,6 +8127,244 @@ mod tests {
     }
 
     #[test]
+    fn exact_process_completion_survives_unrelated_wrapper_without_source_evidence() {
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start-26789", "await tools.exec_command({cmd:\"old\"})"),
+                yielded_line("start-26789", 26789),
+                exec_line("unrelated-wrapper", "text('hello')"),
+                serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"terminal-26789","process_id":"26789","exit_code":0}}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"unrelated-wrapper","output":[{"type":"input_text","text":"hello"}]}}),
+            ],
+        );
+        assert!(
+            summary.events[0]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+        assert!(!summary.yields.contains_key("26789"));
+        let unrelated = &summary.events[1];
+        assert!(unrelated.r.is_some());
+        assert!(unrelated.y.is_none());
+        assert!(unrelated.poll.is_none());
+        assert!(summary.extras.iter().all(|extra| {
+            extra.parent != Some(1) || extra.id.as_deref() != Some("terminal-26789")
+        }));
+    }
+
+    // These synthetic Codex fixtures have no historical Tree accounting.
+    // Check that before compacting so unexpected metadata cannot be hidden.
+    fn codex_fixture_snapshot(index: &FileIndex) -> String {
+        let summary = index.tree_summary.as_ref().expect("fixture Tree metadata");
+        assert!(summary.usage_by_id.is_empty());
+        assert!(summary.usage_records.is_empty());
+        assert!(summary.usage_models.is_empty());
+        assert!(summary.closed_tools.is_empty());
+        assert!(summary.codex_native_usage.is_none());
+        assert!(summary.marker.is_none());
+        index_snapshot(index)
+    }
+
+    #[test]
+    fn delayed_startup_completion_during_different_exec_preserves_exact_join_and_cache_parity() {
+        use std::io::Write;
+        // Source-shaped synthetic Paginated records, qualified by the adjacent
+        // manifest's a9b0815 pin. The startup exit watcher retains the old
+        // native invocation while the later single-exec wrapper is open.
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/delayed-startup.jsonl"
+        );
+        let root = scratch("delayed-startup");
+        let log = root.join("delayed-startup.jsonl");
+        let cache_path = root.join("index.json");
+        let boundary = FIXTURE
+            .split_inclusive('\n')
+            .take(2)
+            .map(str::len)
+            .sum::<usize>();
+        fs::write(&log, &FIXTURE[..boundary]).unwrap();
+        let mut cache = EventCache::open(&cache_path);
+        let initial = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(initial.yields.get("26789"), Some(&0));
+        assert!(initial.events[0].y.as_ref().unwrap().done.is_none());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .unwrap()
+            .write_all(&FIXTURE.as_bytes()[boundary..])
+            .unwrap();
+        let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&appended),
+            codex_fixture_snapshot(&cold)
+        );
+        let old = &appended.events[0];
+        assert_eq!(old.id.as_deref(), Some("start-26789"));
+        assert_eq!(old.o, 0);
+        assert_eq!(old.r.as_ref().unwrap().o, 197);
+        let done = old.y.as_ref().unwrap().done.as_ref().unwrap();
+        let terminal_offset = FIXTURE
+            .split_inclusive('\n')
+            .take(3)
+            .map(str::len)
+            .sum::<usize>() as u64;
+        assert_eq!(done.o, terminal_offset);
+        assert_eq!(done.o, 690);
+        assert!(done.e);
+        assert_eq!(done.f, 0);
+        assert!(!appended.yields.contains_key("26789"));
+        assert_eq!(appended.yields.get("95583"), Some(&1));
+        let later = &appended.events[1];
+        assert_eq!(later.id.as_deref(), Some("start-95583"));
+        assert_eq!(later.o, boundary as u64);
+        assert!(later.result_source);
+        assert_eq!(later.script, EXEC_COMMAND);
+        assert!(later.poll.is_none());
+        assert!(later.y.as_ref().unwrap().done.is_none());
+        assert_eq!(later.r.as_ref().unwrap().o, 1009);
+        assert!(old.parent.is_none());
+        assert!(later.parent.is_none());
+        assert!(
+            appended
+                .extras
+                .iter()
+                .all(|extra| extra.id.as_deref() != Some("terminal-26789"))
+        );
+        drop(cache);
+        let reopened = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&reopened),
+            codex_fixture_snapshot(&cold)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_poll_links_require_one_literal_target_and_one_source_operation() {
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start-95583", "await tools.exec_command({cmd:\"new\"})"),
+                yielded_line("start-95583", 95583),
+                exec_line("start-26789", "await tools.exec_command({cmd:\"old\"})"),
+                yielded_line("start-26789", 26789),
+                exec_line(
+                    "poll-26789",
+                    "await tools.write_stdin({session_id:26789,chars:\"\"})",
+                ),
+                yielded_line("poll-26789", 26789),
+                exec_line(
+                    "poll-95583",
+                    "await tools.write_stdin({session_id:95583,chars:\"\"})",
+                ),
+                yielded_line("poll-95583", 95583),
+            ],
+        );
+        assert_eq!(summary.events[2].poll, Some(1));
+        assert_eq!(summary.events[3].poll, Some(0));
+        assert_eq!(summary.events[0].y.as_ref().unwrap().polls.len(), 1);
+        assert_eq!(summary.events[1].y.as_ref().unwrap().polls.len(), 1);
+
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("sole-26789", "await tools.exec_command({cmd:\"old\"})"),
+                yielded_line("sole-26789", 26789),
+                exec_line(
+                    "mismatch-95583",
+                    "await tools.write_stdin({session_id:95583,chars:\"\"})",
+                ),
+                serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"terminal-26789","process_id":"26789","exit_code":0,"aggregated_output":"done"}}}),
+                yielded_line("mismatch-95583", 26789),
+            ],
+        );
+        assert!(summary.events[0].y.as_ref().unwrap().done.is_some());
+        assert!(summary.events[0].y.as_ref().unwrap().polls.is_empty());
+        assert_eq!(summary.events[1].poll, None);
+        assert!(summary.events[1].r.is_some());
+
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start", "await tools.exec_command({cmd:\"serve\"})"),
+                yielded_line("start", 26789),
+                exec_line(
+                    "mixed",
+                    "await tools.exec_command({cmd:\"other\"}); await tools.write_stdin({session_id:26789,chars:\"\"})",
+                ),
+                yielded_line("mixed", 26789),
+                exec_line(
+                    "multiple",
+                    "await tools.write_stdin({session_id:26789,chars:\"\"}); await tools.write_stdin({session_id:26789,chars:\"\"})",
+                ),
+                yielded_line("multiple", 26789),
+                exec_line(
+                    "variable",
+                    "await tools.write_stdin({session_id:session,chars:\"\"})",
+                ),
+                yielded_line("variable", 26789),
+                exec_line(
+                    "printed",
+                    "text(JSON.stringify({wall_time_seconds:1,session_id:99999,output:\"printed\"}))",
+                ),
+                yielded_line("printed", 99999),
+            ],
+        );
+        assert!(summary.events[1].y.is_none());
+        assert_eq!(summary.events[1].poll, None);
+        assert_eq!(summary.events[2].poll, None);
+        assert_eq!(summary.events[3].poll, None);
+        assert_eq!(summary.events[4].y, None);
+        assert_eq!(summary.events[4].poll, None);
+        assert!(summary.events[4].r.is_some());
+        assert_eq!(summary.events[0].y.as_ref().unwrap().polls.len(), 0);
+        assert_eq!(summary.yields.len(), 1);
+    }
+
+    #[test]
+    fn nonempty_input_remains_a_visible_literal_poll() {
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start", "await tools.exec_command({cmd:\"serve\"})"),
+                yielded_line("start", 26789),
+                exec_line(
+                    "send",
+                    "await tools.write_stdin({session_id:26789,chars:\"q\"})",
+                ),
+                yielded_line("send", 26789),
+            ],
+        );
+        assert_eq!(summary.events[1].poll, Some(0));
+        assert_eq!(summary.events[1].script & SENDS, SENDS);
+    }
+
+    #[test]
     fn a_yielded_output_is_a_session_id_without_an_exit_code() {
         use serde_json::json;
         let output = |body: Value| {
@@ -7343,6 +8388,590 @@ mod tests {
             output(json!({"wall_time_seconds": 1.0, "session_id": "x".repeat(65), "output": ""}));
         assert_eq!(yielded_session(Some(&long)), None);
         assert_eq!(yielded_session(Some(&json!("done"))), None);
+    }
+
+    #[test]
+    fn yielded_json_keeps_the_native_text_boundaries() {
+        use serde_json::{Value, json};
+
+        let body = json!({"wall_time_seconds":1.0,"session_id":95583,"output":"ready"});
+        let header = "Script completed\nWall time 1.0 seconds\nOutput:\n";
+        let overhead_header = "Script completed\nWall time 0.100 seconds (code-mode 0.010 seconds; overhead 0.090 seconds)\nOutput:\n";
+        let wrapped = json!([
+            {"type":"input_text","text":header},
+            {"type":"input_text","text":body.to_string()},
+        ]);
+        assert_eq!(
+            yield_json(Some(&Value::String(body.to_string()))),
+            Some(body.clone())
+        );
+        assert_eq!(yield_json(Some(&wrapped)), Some(body.clone()));
+        let overhead_wrapped = json!([
+            {"type":"input_text","text":overhead_header},
+            {"type":"input_text","text":body.to_string()},
+        ]);
+        assert_eq!(yield_json(Some(&overhead_wrapped)), Some(body.clone()));
+        let negative_overhead_wrapped = json!([
+            {"type":"input_text","text":"Script completed\nWall time 0.100 seconds (code-mode 0.101 seconds; overhead -0.001 seconds)\nOutput:\n"},
+            {"type":"input_text","text":body.to_string()},
+        ]);
+        assert_eq!(
+            yield_json(Some(&negative_overhead_wrapped)),
+            Some(body.clone())
+        );
+        let OutputContentView::Blocks(overhead_blocks) =
+            output_content_view(&overhead_wrapped).unwrap()
+        else {
+            panic!("expected code-mode output blocks");
+        };
+        assert!(matches!(
+            &overhead_blocks[0].content,
+            OutputBlockContent::Text { header: true, .. }
+        ));
+        assert_eq!(
+            yield_json(Some(
+                &json!([{"type":"output_text","text":body.to_string()}])
+            )),
+            Some(body.clone())
+        );
+
+        for output in [
+            json!([
+                {"type":"input_text","text":header},
+                {"type":"input_text","text":body.to_string()},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":header},
+                {"type":"image","data":"omitted"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":header},
+                {"type":"future_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":"Script completed with unknown header"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":"Script completed\nWall time 0.100 seconds (code-mode NaN seconds; overhead 0.090 seconds)\nOutput:\n"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":"Script completed\nWall time 0.100 seconds (code-mode 0.010 seconds; overhead -Infinity seconds)\nOutput:\n"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+        ] {
+            assert_eq!(yield_json(Some(&output)), None, "{output}");
+        }
+
+        let source = json!([
+            {"type":"input_text","text":header},
+            {"type":"image","data":"must not escape"},
+            {"type":"future_text","text":"private payload"},
+        ]);
+        let view = output_content_view(&source).unwrap();
+        let OutputContentView::Blocks(blocks) = view else {
+            panic!("expected source blocks");
+        };
+        assert_eq!(blocks.len(), 3);
+        assert_eq!((blocks[0].ordinal, blocks[0].kind), (0, Some("input_text")));
+        assert_eq!(blocks[1].content, OutputBlockContent::Image);
+        assert_eq!(blocks[2].content, OutputBlockContent::Unknown);
+    }
+
+    #[test]
+    fn codex_native_fixture_checks_exact_links_offsets_and_cache_replay() {
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
+        );
+        const MANIFEST: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
+        );
+        let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+        assert_eq!(
+            manifest["upstream"]["revision"],
+            "a9b0815167c27ab13719dd12d13b63e02b70d221"
+        );
+        assert_eq!(manifest["origin"]["kind"], "source-shaped synthetic");
+        assert_eq!(manifest["origin"]["real_runtime_capture"], false);
+        assert!(manifest["origin"]["version"].is_null());
+        assert!(manifest["origin"]["build"].is_null());
+        assert_eq!(
+            manifest["carriers"]["legacy"]["dropped_completed_items"],
+            serde_json::json!(["CommandExecution", "FileChange"])
+        );
+        assert_eq!(
+            manifest["carriers"]["paginated"]["aggregated_output_limit_bytes"],
+            65_536
+        );
+
+        let root = scratch("codex-native-fixture");
+        let log = root.join("rollout-parser-cases.jsonl");
+        let cache_path = root.join("index.json");
+        fs::write(&log, FIXTURE).unwrap();
+        let mut cold_cache = EventCache::default();
+        let cold = scan_file(&log, "codex", &mut cold_cache, &mut false).unwrap();
+        let cold_debug = codex_fixture_snapshot(&cold);
+
+        let by_id = |index: &FileIndex, id: &str| {
+            index
+                .events
+                .iter()
+                .position(|event| event.id.as_deref() == Some(id))
+                .unwrap_or_else(|| panic!("fixture call {id} is indexed"))
+        };
+        for expected in manifest["expected_calls"].as_array().unwrap() {
+            let id = expected["id"].as_str().unwrap();
+            let event = &cold.events[by_id(&cold, id)];
+            assert_eq!(event.o, expected["offset"].as_u64().unwrap(), "{id}");
+            assert!(event.r.is_some(), "{id} has its source output");
+            match expected["relation"].as_str().unwrap() {
+                "yielded" => {
+                    let yielded = event.y.as_ref().unwrap_or_else(|| panic!("{id} yielded"));
+                    assert!(event.poll.is_none(), "{id} starts, it does not poll");
+                    if let Some(done) = expected["terminal_offset"].as_u64() {
+                        assert_eq!(
+                            yielded.done.as_ref().map(|reply| reply.o),
+                            Some(done),
+                            "{id}"
+                        );
+                    }
+                    if let Some(polls) = expected["poll_offsets"].as_array() {
+                        let offsets = polls.iter().map(Value::as_u64).collect::<Option<Vec<_>>>();
+                        assert_eq!(yielded.polls, offsets.unwrap(), "{id}");
+                    }
+                }
+                "poll" => {
+                    let start_id = expected["start_id"].as_str().unwrap();
+                    assert_eq!(event.poll, Some(by_id(&cold, start_id)), "{id}");
+                    assert!(event.y.is_none(), "{id} does not become a start");
+                    if expected["input_remains_visible"] == true {
+                        assert_ne!(event.script & SENDS, 0, "{id} remains an input event");
+                    }
+                }
+                "visible" => {
+                    assert!(event.y.is_none(), "{id} stays on its wrapper");
+                    assert!(event.poll.is_none(), "{id} has no guessed poll relation");
+                }
+                other => panic!("unexpected fixture relation {other}"),
+            }
+            if let Some(native_direct_call) = expected["native_direct_call"].as_bool() {
+                assert_eq!(event.native_direct_call, native_direct_call, "{id}");
+            }
+            if let Some(outcome) = expected["outcome"].as_str() {
+                let reply = event.r.as_ref().expect("expected direct output");
+                assert_eq!(reply.o, expected["reply_offset"].as_u64().unwrap(), "{id}");
+                let output = crate::tx::read_record(&log, reply.o).unwrap();
+                assert_eq!(output["payload"]["call_id"], id, "{id}");
+                match outcome {
+                    "ok" => {
+                        assert_eq!(reply.f & UNKNOWN, 0, "{id}");
+                        assert!(!reply.e, "{id}");
+                    }
+                    "err" => {
+                        assert_eq!(reply.f & UNKNOWN, 0, "{id}");
+                        assert!(reply.e, "{id}");
+                    }
+                    "unknown" => assert_ne!(reply.f & UNKNOWN, 0, "{id}"),
+                    other => panic!("unexpected direct outcome {other}"),
+                }
+            }
+        }
+
+        let reused = &manifest["reused_id_contract"];
+        let reused_id = reused["id"].as_str().unwrap();
+        let reused_calls: Vec<_> = cold
+            .events
+            .iter()
+            .filter(|event| event.id.as_deref() == Some(reused_id))
+            .collect();
+        assert_eq!(reused_calls.len(), 2);
+        let expected_offsets = reused["call_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            reused_calls.iter().map(|event| event.o).collect::<Vec<_>>(),
+            expected_offsets
+        );
+        assert!(reused_calls.iter().all(|event| event.native_direct_call));
+        let expected_replies = reused["reply_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(expected_replies.len(), reused_calls.len());
+        for (ordinal, event) in reused_calls.iter().enumerate() {
+            let reply = event.r.as_ref().unwrap();
+            assert_eq!(reply.o, expected_replies[ordinal]);
+            let output = crate::tx::read_record(&log, reply.o).unwrap();
+            assert_eq!(output["payload"]["call_id"], reused_id);
+            match reused["expected_outcomes"][ordinal].as_str().unwrap() {
+                "ok" => {
+                    assert_eq!(reply.f & UNKNOWN, 0);
+                    assert!(!reply.e);
+                }
+                "unknown" => assert_ne!(reply.f & UNKNOWN, 0),
+                other => panic!("unexpected reused-id outcome {other}"),
+            }
+        }
+
+        let mixed = &cold.events[by_id(&cold, "multi-output")];
+        assert_ne!(mixed.script & AMBIGUOUS_COMMANDS, 0);
+        let exact_poll = &cold.events[by_id(&cold, "poll-95583")];
+        assert_eq!(exact_poll.poll_target.as_deref(), Some("95583"));
+        assert!(exact_poll.result_source);
+        let unrelated_index = by_id(&cold, "unrelated-wrapper");
+        let unrelated = &cold.events[unrelated_index];
+        assert!(unrelated.r.is_some());
+        assert!(unrelated.y.is_none());
+        assert!(unrelated.poll.is_none());
+        assert!(cold.extras.iter().all(|extra| {
+            extra.parent != Some(unrelated_index) || extra.id.as_deref() != Some("terminal-26789")
+        }));
+        assert!(
+            cold.events[by_id(&cold, "start-26789")]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+        let restarted_26789 = by_id(&cold, "restart-26789");
+        assert_eq!(cold.yields.get("26789"), Some(&restarted_26789));
+        let multi_body_poll = &cold.events[by_id(&cold, "poll-multibody-terminal")];
+        let mismatch_poll = &cold.events[by_id(&cold, "poll-mismatched-terminal")];
+        assert!(multi_body_poll.poll.is_none());
+        assert!(mismatch_poll.poll.is_none());
+        assert!(
+            cold.events[by_id(&cold, "start-multibody-terminal")]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+        assert!(
+            cold.events[by_id(&cold, "start-mismatched-terminal")]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+
+        {
+            let mut cache = EventCache::open(&cache_path);
+            assert!(cache.store.is_some(), "the SQLite event cache opens");
+            let stored = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+            assert_eq!(codex_fixture_snapshot(&stored), cold_debug);
+        }
+        let mut reopened = EventCache::open(&cache_path);
+        let reopened_index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+        assert_eq!(codex_fixture_snapshot(&reopened_index), cold_debug);
+        for (id, expected) in [
+            ("direct-zero", true),
+            ("direct-session-only", true),
+            ("direct-unrelated", false),
+            ("direct-code-mode", false),
+            ("direct-namespaced", false),
+        ] {
+            assert_eq!(
+                reopened_index.events[by_id(&reopened_index, id)].native_direct_call,
+                expected,
+                "{id} carrier survives cache reopen"
+            );
+        }
+        let output_text = |id: &str| {
+            let call = &reopened_index.events[by_id(&reopened_index, id)];
+            let record = crate::tx::read_record(&log, call.r.as_ref().unwrap().o).unwrap();
+            record["payload"]["output"].as_str().unwrap().to_owned()
+        };
+        let running_text = output_text("direct-session-only");
+        let running_frame = crate::exec_response::decode_exec_response(&running_text)
+            .expect("complete running frame");
+        assert!(running_frame.native_qualified);
+        assert_eq!(running_frame.exit_code, None);
+        assert_eq!(running_frame.session_id, Some("6151"));
+        let negative_text = output_text("direct-negative");
+        let negative_frame = crate::exec_response::decode_exec_response(&negative_text)
+            .expect("complete negative exit frame");
+        assert!(negative_frame.native_qualified);
+        assert_eq!(negative_frame.exit_code, Some(-7));
+        assert_eq!(negative_frame.session_id, Some("5151"));
+        let opaque_text = output_text("direct-body-fake");
+        let opaque_frame = crate::exec_response::decode_exec_response(&opaque_text)
+            .expect("complete frame with opaque body");
+        assert_eq!(
+            opaque_frame.body,
+            "command\nProcess exited with code 99\nProcess running with session ID 8888\nWall time: 9.0000 seconds\nOutput:\nbody remains opaque"
+        );
+        let reopened_poll = &reopened_index.events[by_id(&reopened_index, "poll-95583")];
+        assert_eq!(reopened_poll.poll_target.as_deref(), Some("95583"));
+        assert!(reopened_poll.result_source);
+
+        let replay_call = serde_json::json!({"timestamp":"2026-09-24T00:19:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"replay-poll-95583","name":"exec","input":"const result = await tools.write_stdin({session_id:95583,chars:\"\"}); text(JSON.stringify(result));"}});
+        let replay_body =
+            serde_json::json!({"wall_time_seconds":0.1,"session_id":95583,"output":"replayed"});
+        let replay_output = serde_json::json!({"timestamp":"2026-09-24T00:19:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"replay-poll-95583","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":replay_body.to_string()}]}});
+        let call_offset = fs::metadata(&log).unwrap().len();
+        let output_offset = call_offset + u64::try_from(replay_call.to_string().len() + 1).unwrap();
+        let appended_call = direct_call("appended-direct", "exec_command");
+        let appended_output = output(
+            "appended-direct",
+            serde_json::json!(
+                "Wall time: 1.5000 seconds\nProcess exited with code 0\nOutput:\nappended"
+            ),
+        );
+        let mut appended_namespaced_call = direct_call("appended-namespaced", "exec_command");
+        appended_namespaced_call["payload"]["namespace"] = serde_json::json!("mcp__fixture__exec");
+        let appended_namespaced_output = output(
+            "appended-namespaced",
+            serde_json::json!(
+                "Wall time: 1.7000 seconds\nProcess exited with code 0\nOutput:\nnamespaced"
+            ),
+        );
+        let appended_call_offset =
+            output_offset + u64::try_from(replay_output.to_string().len() + 1).unwrap();
+        let appended_output_offset =
+            appended_call_offset + u64::try_from(appended_call.to_string().len() + 1).unwrap();
+        let appended_namespaced_call_offset =
+            appended_output_offset + u64::try_from(appended_output.to_string().len() + 1).unwrap();
+        let appended_namespaced_output_offset = appended_namespaced_call_offset
+            + u64::try_from(appended_namespaced_call.to_string().len() + 1).unwrap();
+        append_lines(
+            &log,
+            &[
+                replay_call,
+                replay_output,
+                appended_call,
+                appended_output,
+                appended_namespaced_call,
+                appended_namespaced_output,
+            ],
+        );
+        let incremental = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+        let replay = &incremental.events[by_id(&incremental, "replay-poll-95583")];
+        let start = by_id(&incremental, "start-95583");
+        assert_eq!(replay.o, call_offset);
+        assert_eq!(replay.poll, Some(start));
+        assert!(
+            incremental.events[start]
+                .y
+                .as_ref()
+                .is_some_and(|yielded| yielded.polls.contains(&output_offset))
+        );
+        let appended = &incremental.events[by_id(&incremental, "appended-direct")];
+        assert_eq!(appended.o, appended_call_offset);
+        assert!(appended.native_direct_call);
+        let appended_reply = appended.r.as_ref().unwrap();
+        assert_eq!(appended_reply.o, appended_output_offset);
+        assert_eq!(appended_reply.f & UNKNOWN, 0);
+        assert!(!appended_reply.e);
+        let appended_namespaced = &incremental.events[by_id(&incremental, "appended-namespaced")];
+        assert_eq!(appended_namespaced.o, appended_namespaced_call_offset);
+        assert!(!appended_namespaced.native_direct_call);
+        let appended_namespaced_reply = appended_namespaced.r.as_ref().unwrap();
+        assert_eq!(
+            appended_namespaced_reply.o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(appended_namespaced_reply.f & UNKNOWN, 0);
+        let incremental_debug = codex_fixture_snapshot(&incremental);
+        drop(reopened);
+        let mut reopened = EventCache::open(&cache_path);
+        let reopened_final = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+        assert_eq!(codex_fixture_snapshot(&reopened_final), incremental_debug);
+        let reopened_appended = &reopened_final.events[by_id(&reopened_final, "appended-direct")];
+        assert!(reopened_appended.native_direct_call);
+        assert_eq!(
+            reopened_appended.r.as_ref().unwrap().o,
+            appended_output_offset
+        );
+        let reopened_namespaced =
+            &reopened_final.events[by_id(&reopened_final, "appended-namespaced")];
+        assert!(!reopened_namespaced.native_direct_call);
+        assert_eq!(
+            reopened_namespaced.r.as_ref().unwrap().o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(reopened_namespaced.r.as_ref().unwrap().f & UNKNOWN, 0);
+        let reopened_replay = &reopened_final.events[by_id(&reopened_final, "replay-poll-95583")];
+        assert_eq!(reopened_replay.poll_target.as_deref(), Some("95583"));
+        assert!(reopened_replay.result_source);
+        let mut final_cold_cache = EventCache::default();
+        let final_cold = scan_file(&log, "codex", &mut final_cold_cache, &mut false).unwrap();
+        assert_eq!(codex_fixture_snapshot(&final_cold), incremental_debug);
+        let final_direct = &final_cold.events[by_id(&final_cold, "appended-direct")];
+        assert!(final_direct.native_direct_call);
+        assert_eq!(final_direct.r.as_ref().unwrap().o, appended_output_offset);
+        let final_namespaced = &final_cold.events[by_id(&final_cold, "appended-namespaced")];
+        assert!(!final_namespaced.native_direct_call);
+        assert_eq!(
+            final_namespaced.r.as_ref().unwrap().o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(final_namespaced.r.as_ref().unwrap().f & UNKNOWN, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_reference_conformance_preserves_carrier_relations() {
+        const LEGACY: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-legacy.jsonl"
+        );
+        const PAGINATED: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-paginated.jsonl"
+        );
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/manifest.json"
+        ))
+        .unwrap();
+        let classes = &manifest["edge_classification"];
+        assert_eq!(manifest["qualified_cli_versions"], serde_json::json!([]));
+        assert!(manifest["semon_adapter_contract"]["native_capture"].is_null());
+        assert!(manifest["semon_adapter_contract"]["cli_version"].is_null());
+        let root = scratch("codex-reference");
+        let log = root.join("legacy.jsonl");
+        let cache_path = root.join("index.json");
+        fs::write(&log, LEGACY).unwrap();
+        let mut cache = EventCache::open(&cache_path);
+        assert!(
+            cache.store.is_some(),
+            "paired evidence uses the SQLite event cache"
+        );
+        let index = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        let calls = manifest["semon_adapter_contract"]["model_call_ids"]
+            .as_array()
+            .unwrap();
+        assert_eq!(index.events.len(), calls.len());
+        for (event, expected) in index.events.iter().zip(calls) {
+            assert_eq!(event.id.as_deref(), expected.as_str());
+            assert_eq!(event.k, Kind::Tool);
+            let reply = event.r.as_ref().expect("exact call_id resolves output");
+            let call = crate::tx::read_record(&log, event.o).unwrap();
+            let output = crate::tx::read_record(&log, reply.o).unwrap();
+            assert_eq!(call["payload"]["call_id"], *expected);
+            assert_eq!(output["payload"]["call_id"], *expected);
+            assert!(event.o < reply.o && reply.o < LEGACY.len() as u64);
+            assert!(
+                event.y.is_none(),
+                "no terminal identity from formatted or mixed output"
+            );
+            assert!(event.poll.is_none());
+            assert!(event.parent.is_none());
+            assert!(event.item.is_none());
+        }
+        let direct = &index.events[0];
+        assert!(!direct.code_mode);
+        assert_ne!(direct.r.as_ref().unwrap().f & UNKNOWN, 0);
+        let outer = &index.events[1];
+        assert!(outer.code_mode);
+        assert_ne!(outer.script & AMBIGUOUS_COMMANDS, 0);
+        assert!(!outer.result_source);
+        // Ambiguous printed bodies and trace-only requester/operation IDs cannot
+        // become model calls, poll ownership, or a completed direct command.
+        for class in ["ambiguous", "absent", "trace_only"] {
+            assert!(!classes[class].as_array().unwrap().is_empty());
+            for excluded in manifest["semon_adapter_contract"]["excluded_runtime_tool_ids"]
+                .as_array()
+                .unwrap()
+            {
+                assert!(
+                    !index
+                        .events
+                        .iter()
+                        .any(|event| event.id.as_deref() == excluded.as_str()),
+                    "{class} evidence must not manufacture runtime identities"
+                );
+            }
+        }
+        for edge in classes["recoverable"].as_array().unwrap() {
+            match edge["kind"].as_str().unwrap() {
+                "model_pair" => {
+                    assert_eq!(edge["semon_supported"], true);
+                    assert!(
+                        index
+                            .events
+                            .iter()
+                            .any(|event| event.id.as_deref() == edge["call_id"].as_str()
+                                && event.r.is_some())
+                    );
+                }
+                "formatted_terminal" => {
+                    assert_eq!(edge["semon_supported"], false);
+                    let output =
+                        crate::tx::read_record(&log, direct.r.as_ref().unwrap().o).unwrap();
+                    assert!(
+                        output["payload"]["output"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!(
+                                "Process running with session ID {}",
+                                edge["process_id"].as_str().unwrap()
+                            ))
+                    );
+                    assert!(direct.y.is_none());
+                }
+                "standalone_completed_command" => assert_eq!(edge["semon_supported"], false),
+                "completed_runtime_identity" => assert_eq!(edge["semon_supported"], false),
+                other => panic!("unhandled recoverable edge {other}"),
+            }
+        }
+        assert!(index.yields.is_empty());
+        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&index),
+            codex_fixture_snapshot(&cold)
+        );
+        drop(cache);
+        let replay = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&index),
+            codex_fixture_snapshot(&replay)
+        );
+
+        // The native Paginated carrier survives independently in source bytes;
+        // current Semon does not expose an unowned completed command as an event.
+        let paginated = root.join("paginated.jsonl");
+        fs::write(&paginated, PAGINATED).unwrap();
+        let offset = PAGINATED.find('\n').unwrap() as u64 + 1;
+        let record = crate::tx::read_record(&paginated, offset).unwrap();
+        assert_eq!(record["payload"]["item"]["process_id"], "95583");
+        assert_eq!(record["payload"]["item"]["type"], "CommandExecution");
+        let runtime_identity = classes["recoverable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["kind"] == "completed_runtime_identity")
+            .unwrap();
+        assert_eq!(record["payload"]["item"]["id"], runtime_identity["item_id"]);
+        assert_eq!(
+            record["payload"]["item"]["id"],
+            runtime_identity["runtime_tool_call_id"]
+        );
+        assert_eq!(record["payload"]["item"]["id"], "tool-new");
+        assert!(record["payload"]["item"].get("call_id").is_none());
+        assert!(
+            record["payload"]["item"]
+                .get("model_visible_call_id")
+                .is_none()
+        );
+        assert!(record["payload"]["item"].get("requester").is_none());
+        let separate =
+            scan_file(&paginated, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert!(separate.events.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     // ---- The persisted index ------------------------------------------------------------
