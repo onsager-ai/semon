@@ -7108,21 +7108,17 @@ mod tests {
     #[test]
     fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
         use crate::{Input, InputRoot, SessionFactsWrite};
-        use std::{collections::BTreeSet, io::Write};
+        use std::collections::BTreeSet;
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
-            let active = fixture.codex_source("native-session", None, 1);
+            let active = "sessions/2026/10/01/rollout-native-session.jsonl";
             let archived = "archived_sessions/2026/10/01/rollout-native-session.jsonl";
-            let path = fixture.options.codex_home.join(&active);
-            writeln!(
-                fs::OpenOptions::new().append(true).open(&path).unwrap(),
-                "{}",
-                json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}})
-            )
-            .unwrap();
+            let path = fixture.options.codex_home.join(active);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path,format!("{}\n{}\n",json!({"type":"session_meta","payload":{"id":"native-session","cwd":"/synthetic/project"}}),json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}))).unwrap();
             let facts_path = fixture.options.facts.as_ref().unwrap();
             let mut facts = crate::read_facts(facts_path).unwrap();
-            facts.codex_rollouts = Some(BTreeSet::from([active.clone()]));
+            facts.codex_rollouts = Some(BTreeSet::from([active.to_owned()]));
             crate::write_facts(facts_path, &facts).unwrap();
             for id in 0..unrelated {
                 fixture.source(&format!("unrelated-{id:05}"));
@@ -7136,10 +7132,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            for (from, to, append) in [
-                (active.as_str(), archived, false),
-                (archived, active.as_str(), true),
-            ] {
+            for (from, to, append) in [(active, archived, false), (archived, active, true)] {
                 let old = fixture.options.codex_home.join(from);
                 let new = fixture.options.codex_home.join(to);
                 fs::create_dir_all(new.parent().unwrap()).unwrap();
@@ -7386,19 +7379,15 @@ mod tests {
         use crate::{Input, InputRoot, SessionFactsWrite, SessionSourceWrite};
         use std::{collections::BTreeSet, io::Write};
         let fixture = Fixture::new();
-        let active = fixture.codex_source("replay", None, 1);
+        let active = "sessions/2026/10/01/rollout-replay.jsonl";
         let archived = "archived_sessions/2026/10/01/rollout-replay.jsonl";
-        let old = fixture.options.codex_home.join(&active);
+        let old = fixture.options.codex_home.join(active);
         let new = fixture.options.codex_home.join(archived);
-        writeln!(
-            fs::OpenOptions::new().append(true).open(&old).unwrap(),
-            "{}",
-            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}})
-        )
-        .unwrap();
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, format!("{}\n{}\n",json!({"type":"session_meta","payload":{"id":"move-replay","cwd":"/synthetic/project"}}),json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}}))).unwrap();
         let facts_path = fixture.options.facts.as_ref().unwrap();
         let mut facts = crate::read_facts(facts_path).unwrap();
-        facts.codex_rollouts = Some(BTreeSet::from([active.clone()]));
+        facts.codex_rollouts = Some(BTreeSet::from([active.to_owned()]));
         crate::write_facts(facts_path, &facts).unwrap();
         fixture.publish_existing();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();

@@ -340,7 +340,10 @@ mod tests {
         let header = home.header_text();
         assert_eq!(marker["version"], 6);
         connection
-            .execute("UPDATE meta SET value=value || ' ' WHERE key=?1", [&header_key])
+            .execute(
+                "UPDATE meta SET value=value || ' ' WHERE key=?1",
+                [&header_key],
+            )
             .unwrap();
         assert!(
             !crate::source_event_index_retained(&home.options, &proof, &ready).unwrap(),

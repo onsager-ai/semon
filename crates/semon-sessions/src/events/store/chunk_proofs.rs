@@ -386,8 +386,7 @@ fn repair_step(
     expected: &str,
     offset: u64,
 ) -> io::Result<bool> {
-    let store =
-        super::SqliteStore::attempt_selected(cache).map_err(selected_open_error)?;
+    let store = super::SqliteStore::attempt_selected(cache).map_err(selected_open_error)?;
     let mut db = store.connection;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(repair_sql_error)?;
@@ -1430,11 +1429,9 @@ mod tests {
         let prefix = prefix("original");
         let header: String = store
             .connection
-            .query_row(
-                NATIVE_METADATA_VALUE,
-                [format!("{prefix}header")],
-                |row| row.get(0),
-            )
+            .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
+                row.get(0)
+            })
             .unwrap();
         store
             .connection
@@ -1444,7 +1441,9 @@ mod tests {
             connection
                 .prepare("SELECT key,value FROM meta ORDER BY key")
                 .unwrap()
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap()

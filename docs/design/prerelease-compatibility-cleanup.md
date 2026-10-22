@@ -6,6 +6,13 @@ compatibility. This change does not merge policy PR #476 or repeat #470.
 Current schema is 32; older stores, including schema 31, are explicitly
 unsupported. No operator data is deleted, reset or upgraded by this change.
 
+Main `644885090fc5e3a84a85dab47cca48c3824e3333` is integrated with its current
+proof snapshots, selected field recovery and Viewer progress behavior. Selected
+repair opens qualify an existing current WAL database without initialization or
+unrelated archive traversal. Custody writers validate the selected marker;
+ordinary producer opens qualify all retained markers. Both paths use the same
+schema and parser contract.
+
 | Branch / historical Semon contract | Live callers | Data category | Disposition |
 | --- | --- | --- | --- |
 | Schema 1–31 ALTER/additive upgrades, usage-identity bootstrap, schema-10 source hashes, schema-17/18 outbox bootstrap, overview/search promotion | ordinary/scoped store opens; focused reader | mixed derived rows, reported facts, retained recipes and proofs | Removed; one coherent fresh DDL; older/newer/nonempty-zero refused |
