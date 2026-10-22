@@ -250,8 +250,14 @@ pub(super) fn restore_labels(
             "cwd" => summary.cwd = value,
             "branch" => summary.branch = value,
             "codex_turn" => {
-                summary.codex_turn = serde_json::from_str(value.as_deref().unwrap_or(""))
-                    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?;
+                summary.codex_turn =
+                    serde_json::from_str(value.as_deref().unwrap_or("")).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
             }
             _ => return Err(rusqlite::Error::InvalidQuery),
         }

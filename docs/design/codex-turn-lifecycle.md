@@ -19,8 +19,9 @@ The fact lives in the existing ledger-qualified Tree summary and normalized
 Event Index labels. Source replacement resets it; append resumes the same
 reducer. Catalog's existing source-vector and runtime fences qualify the
 published Query, MCP and Viewer observations. CLI tree collection consumes the
-same fact. Home receives the same state and lifecycle; existing Viewer
-`work`/`idle`/`err`/`off` presentation needs no generated UI change. Retained
+same fact. Home receives the same state and lifecycle. The focused Viewer retains
+the existing `work`/`idle`/`err`/`off` status presentation and shows the last turn
+outcome in its existing Session menu and status tooltip. Retained
 observations preserve last known lifecycle without inheriting live authority.
 
 ## Source contract and support matrix
@@ -29,7 +30,7 @@ Public source pin:
 [`openai/codex@c22a06c18070c3e33bd2648c7210a00a2a9f6f80`](https://github.com/openai/codex/tree/c22a06c18070c3e33bd2648c7210a00a2a9f6f80).
 The protocol defines `TurnStartedEvent`, `TurnCompleteEvent`, `TurnAbortedEvent`,
 `SessionMeta` and `HistoryPosition` in `codex-rs/protocol/src/protocol.rs`.
-`codex-rs/core/src/rollout/policy.rs` persists all three lifecycle markers in
+`codex-rs/rollout/src/policy.rs` persists all three lifecycle markers in
 both history modes; standalone `Error` is transient. The recorder's flattened
 `RolloutLineRef` contains timestamp, optional ordinal and the rollout item.
 `ordinal.rs` documents the paginated ordinal and inherited-subagent boundary.

@@ -959,7 +959,7 @@ fn codex_line(time: String, kind: &str, payload: Value) -> Value {
 
 /// One session per state: `lead` works (and its subagent `scan` with it),
 /// `asker` waits on a question, `crashed`'s process died while its pid file
-/// said busy, `done` ended, and the Codex run `cx` ended.
+/// said busy, `done` ended, and Codex `cx` has no qualified turn lifecycle.
 fn fixture() -> Home {
     let home = Home::new("testbox");
     home.top(
@@ -1119,7 +1119,7 @@ fn summary(id: &str, question: &str) -> Value {
         }
         "cx" => {
             json!({"harness": "codex", "kind": "codex-run", "name": "Codex run", "model": "codex",
-            "state": "ended", "start": at(5, 0), "last_activity": at(5, 2),
+            "state": "unknown", "start": at(5, 0), "last_activity": at(5, 2),
             "tokens": {"input": 0, "cached": 0, "output": 0}})
         }
         _ => panic!("no session {id}"),
@@ -1171,7 +1171,8 @@ fn list_sessions_summarizes_every_session_newest_first() {
     };
     assert_eq!(ids(json!({"state": "working"})), ["scan", "lead"]);
     assert_eq!(ids(json!({"state": "waiting-question"})), ["asker"]);
-    assert_eq!(ids(json!({"state": "ended"})), ["cx", "done", "crashed"]);
+    assert_eq!(ids(json!({"state": "ended"})), ["done", "crashed"]);
+    assert_eq!(ids(json!({"state": "unknown"})), ["cx"]);
     assert!(ids(json!({"state": "idle"})).is_empty());
     assert_eq!(ids(json!({"harness": "codex"})), ["cx"]);
     assert_eq!(ids(json!({"parent": "lead"})), ["scan"]);

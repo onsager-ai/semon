@@ -40,6 +40,49 @@ const details = () => ({
   reported_runs: [],
   cost_check: [],
 });
+test('Codex turn outcomes stay separate from current writer and remote observations', () => {
+  const session = {
+    key: 'selected', name: 'Selected', harness: 'codex', kind: 'codex-run',
+    native_ids: ['resume-native'], model: 'model', start: 0, last: 1000,
+    cost: details().cost,
+  };
+  for (const [phase, state, label] of [
+    ['completed', 'idle', 'Completed'],
+    ['aborted', 'idle', 'Aborted'],
+    ['errored', 'err', 'Errored'],
+    ['active', 'work', 'Terminal not recorded'],
+    ['unknown', 'off', 'Unknown'],
+  ]) {
+    const raw = { ...details(), state, live_observation: true,
+      turn_lifecycle: { phase, thread_id: 'PRIVATE-THREAD', turn_id: 'PRIVATE-TURN', offset: 987654321, source_generation: 'PRIVATE-GENERATION' },
+    };
+    session.details = parseSessionDetails(raw);
+    assert.deepEqual(session.details.turn_lifecycle, { phase });
+    assert.equal(selectedSessionState(session), state);
+    const menu = selectedSessionMenu(session, 'machine', false, false);
+    assert.equal(menu.details.find(({ label }) => label === 'Last turn').value, label);
+    assert.match(selectedSessionLabels(session).find(({ key }) => key === 'state').tip, new RegExp(label));
+    const rendered = JSON.stringify([menu, selectedSessionLabels(session)]);
+    assert.doesNotMatch(rendered, /PRIVATE-|987654321/);
+    session.details.live_observation = false;
+    assert.equal(selectedSessionState(session), state === 'work' ? 'off' : state);
+    assert.equal(selectedSessionMenu(session, 'machine', false, false).details.find(({ label }) => label === 'Last turn').value, label);
+  }
+  for (const phase of [undefined, null]) {
+    session.details = parseSessionDetails({ ...details(), state: 'done', turn_lifecycle: phase });
+    assert.equal(selectedSessionState(session), 'off', 'absence cannot imply completion');
+    assert.equal(selectedSessionMenu(session, 'machine', false, false).details.find(({ label }) => label === 'Last turn').value, 'Unknown');
+  }
+  // A later producer-qualified start reactivates only with a live observation.
+  session.details = parseSessionDetails({ ...details(), state: 'work', live_observation: true, turn_lifecycle: { phase: 'active' } });
+  assert.equal(selectedSessionState(session), 'work');
+  session.details.live_observation = false;
+  assert.equal(selectedSessionState(session), 'off');
+});
+test('malformed or unsupported turn lifecycle cannot be accepted as successful completion', () => {
+  for (const turn_lifecycle of [{}, [], 'completed', { phase: null }, { phase: 'future' }, { phase: 1 }])
+    assert.throws(() => parseSessionDetails({ ...details(), turn_lifecycle }));
+});
 test('selected usage preserves unknown cost and copied usage while native resume identity stays distinct', () => {
   const metadata = parseSessionDetails(details());
   const menu = selectedSessionMenu(
