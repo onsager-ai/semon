@@ -2751,7 +2751,10 @@ mod tests {
         );
         assert_eq!(read.status, 200, "{}", String::from_utf8_lossy(&read.body));
         let details: Value = serde_json::from_slice(&read.body).unwrap();
-        assert_eq!(details["events"][question_id]["brief"], "NATIVE_PRIVATE_QUESTION");
+        assert_eq!(
+            details["events"][question_id]["brief"],
+            "NATIVE_PRIVATE_QUESTION"
+        );
         assert_eq!(
             details["events"][question_id]["answer"],
             json!(["NATIVE_PRIVATE_ANSWER"])
@@ -8122,11 +8125,14 @@ mod tests {
             .unwrap();
         assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
         assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
-        assert_eq!(page, json!({
-            "sid": "session-00000", "from": 0, "to": 1, "total": 1,
-            "calls": 0, "errors": 0, "window_start": null,
-            "entries": [{"k": "u", "text": "synthetic prompt", "turn": "session-00000:session-00000:0"}]
-        }));
+        assert_eq!(
+            page,
+            json!({
+                "sid": "session-00000", "from": 0, "to": 1, "total": 1,
+                "calls": 0, "errors": 0, "window_start": null,
+                "entries": [{"k": "u", "text": "synthetic prompt", "turn": "session-00000:session-00000:0"}]
+            })
+        );
         let full = crate::model::build_query(
             &fixture.options,
             &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
