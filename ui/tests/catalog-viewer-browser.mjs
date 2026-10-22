@@ -129,8 +129,8 @@ for (const width of [390, 1280])
                 {
                   ...meta('one'),
                   transcript: {
-                    generation: (failing ? 'c' : 'b').repeat(64),
-                    errors_generation: (failing ? 'c' : 'b').repeat(64),
+                    generation: 'b'.repeat(64),
+                    errors_generation: 'b'.repeat(64),
                     total: 65,
                   },
                 },
@@ -207,6 +207,122 @@ for (const width of [390, 1280])
         await browser.close();
       }
     });
+
+for (const width of [390, 1280])
+  test(`published progress reopens bounded cold recovery and preserves terminal state at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      page.setDefaultTimeout(10000);
+      let failing = true,
+        provisional = false,
+        publishedGeneration = 'a'.repeat(64),
+        publishedOffset = 100,
+        reads = 0;
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      await page.route('http://catalog.test/**', async (route) => {
+        const url = new URL(route.request().url()),
+          currentMeta = {
+            ...meta('one'),
+            transcript: {
+              generation: publishedGeneration,
+              errors_generation: publishedGeneration,
+              total: 65,
+            },
+            source_refs: [
+              {
+                state: 'cached',
+                source: { ...source('one'), offset: publishedOffset },
+              },
+            ],
+          },
+          currentIdentity = {
+            api: 1,
+            identity: {
+              ...identity('one'),
+              generation: publishedGeneration,
+              owner_qualification: provisional ? 'provisional' : 'qualified',
+              source_refs: currentMeta.source_refs,
+            },
+          };
+        if (url.pathname === '/api/session-capabilities')
+          return route.fulfill({ json: capabilities(true) });
+        if (url.pathname === '/api/session-identity')
+          return route.fulfill({ json: currentIdentity });
+        if (url.pathname === '/api/sessions')
+          return route.fulfill({ json: list([currentMeta]) });
+        if (url.pathname === '/api/session-transcript') {
+          ++reads;
+          return failing
+            ? route.fulfill({ status: 409, json: { error: 'stale_projection' } })
+            : route.fulfill({ json: transcript('one', url.searchParams) });
+        }
+        return fulfillCatalogStatic(route, url);
+      });
+      await page.goto('http://catalog.test/sessions?machine=source');
+      await page.clock.install({ time: new Date('2026-10-22T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2026-10-22T00:00:00.001Z'));
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
+      });
+      await page.locator('#page [data-id="one"]').click();
+      const terminalText = 'Recorded history could not be loaded. Retry to try again.';
+      const terminal = page.locator('#page .empty').filter({ hasText: terminalText });
+      for (let attempt = 0; attempt < 16; ++attempt) {
+        await page.clock.runFor(1000);
+        await page.waitForTimeout(20);
+        if (await terminal.count()) break;
+      }
+      await terminal.waitFor();
+      const stoppedReads = reads;
+      assert.equal(stoppedReads, 8, 'four failed reads and their bounded resynchronizations exhaust');
+
+      provisional = true;
+      for (let attempt = 0; attempt < 4; ++attempt) {
+        await page.clock.runFor(1000);
+        await page.waitForTimeout(20);
+      }
+      await terminal.waitFor();
+      assert.equal(
+        await page.getByText('Loading recorded session…', { exact: true }).count(),
+        0,
+        'identity publication cannot replace terminal recovery with a loading state',
+      );
+      assert.equal(
+        await page
+          .getByText('Session identity is provisional while history is being discovered.', {
+            exact: true,
+          })
+          .count(),
+        0,
+        'identity notes cannot overwrite the recovery-owned terminal explanation',
+      );
+      assert.equal(
+        await page.getByRole('button', { name: 'Retry selected transcript', exact: true }).count(),
+        1,
+      );
+      assert.equal(reads, stoppedReads, 'unchanged metadata keeps the hard stop in effect');
+
+      provisional = false;
+      failing = false;
+      publishedGeneration = 'b'.repeat(64);
+      publishedOffset = 200;
+      for (let attempt = 0; attempt < 12; ++attempt) {
+        await page.clock.runFor(1000);
+        await page.waitForTimeout(20);
+        if (await page.locator('#page [data-entry-key="one:5"]').count()) break;
+      }
+      await page.locator('#page [data-entry-key="one:5"]').waitFor();
+      assert.ok(reads > stoppedReads, 'published source/catalog progress reopens bounded recovery');
+      assert.equal(await terminal.count(), 0);
+      await page.evaluate(() => app.destroy());
+      assert.deepEqual(errors, []);
+    } finally {
+      await browser.close();
+    }
+  });
 
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
