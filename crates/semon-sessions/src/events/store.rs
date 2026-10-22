@@ -4240,7 +4240,9 @@ fn malformed_schema(error: rusqlite::Error) -> rusqlite::Result<Init> {
 /// the other prepares cover the conditional normalized usage/tree restorers.
 fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
     let _readers = Readers::new(connection)?;
-    connection.prepare(&format!("SELECT {FILE_COLUMNS} FROM files ORDER BY file_id LIMIT 0"))?;
+    connection.prepare(&format!(
+        "SELECT {FILE_COLUMNS} FROM files ORDER BY file_id LIMIT 0"
+    ))?;
     connection.prepare(&format!(
         "SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start LIMIT 0"
     ))?;
@@ -9175,7 +9177,7 @@ mod tests {
             (
                 "missing-reported-column",
                 "ALTER TABLE reported_runs DROP COLUMN capture_at",
-                "malformed schema",
+                "malformed persistent state",
             ),
             (
                 "missing-file-column",
