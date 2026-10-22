@@ -70,7 +70,7 @@ jobs:
         run: |
           npm --prefix ui run format
           npm --prefix ui run build
-          git diff --binary -- ui crates/semon-sessions/src > "$RUNNER_TEMP/ui-generated-review.patch"
+          git diff --binary -- ui tests/ui crates/semon-sessions/src > "$RUNNER_TEMP/ui-generated-review.patch"
       - name: Retain generated changes without bypassing freshness
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

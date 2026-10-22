@@ -502,6 +502,13 @@ test('a user-directed turn waits only for a handoff recorded as waiting', () => 
   }
 });
 
+test('Codex child handoff outcomes retain idle and unknown observations', () => {
+  for (const [status, text] of [['idle', 'idle'], ['off', 'status unknown']]) {
+    const edge = relationship('child', 'spawn', 'claude-parent', 'codex-child', { status });
+    assert.deepEqual(traceHandoffOutcome(edge), { state: status, text });
+  }
+});
+
 test('trace cost labels keep the original precision and mark unpriced totals', () => {
   assert.equal(traceCostText({ usd: 6.51 }), '$6.51');
   assert.equal(traceCostText({ usd: 6.51, unpriced_models: ['unknown-model'] }), '—');
