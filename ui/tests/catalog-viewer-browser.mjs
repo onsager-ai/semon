@@ -174,8 +174,7 @@ for (const width of [390, 1280])
           'each of four attempts has one bounded resynchronization',
         );
         const attempts = readAt.filter(
-          (_, index) =>
-            index >= (retained ? 1 : 0) && (index - (retained ? 1 : 0)) % 2 === 0,
+          (_, index) => index >= (retained ? 1 : 0) && (index - (retained ? 1 : 0)) % 2 === 0,
         );
         for (let index = 1; index < attempts.length; ++index)
           assert.ok(
