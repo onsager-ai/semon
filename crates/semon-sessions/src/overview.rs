@@ -256,6 +256,7 @@ fn read(
         .busy_timeout(std::time::Duration::from_secs(1))
         .map_err(failed)?;
     let db = connection.transaction().map_err(failed)?;
+    crate::events::store::require_current(&db)?;
     let complete = db.query_row("SELECT value FROM meta WHERE key='catalog_completeness'",[],|row|row.get::<_,String>(0)).optional().map_err(failed)?.as_deref()==Some("complete")
         && !db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c LEFT JOIN session_overview o USING(session_key) WHERE c.last_ms>=?1 AND (o.session_key IS NULL OR EXISTS(SELECT 1 FROM meta WHERE key='overview_needed:'||c.session_key)) LIMIT 1)",[since],|row|row.get::<_,bool>(0)).map_err(failed)?;
     let mut generation = db
@@ -472,6 +473,7 @@ pub(crate) fn session_home_details_inner(
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(failed)?;
         let tx = db.transaction().map_err(failed)?;
+        crate::events::store::require_current(&tx)?;
         let generation: String = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='catalog_generation'",
@@ -1336,7 +1338,10 @@ mod tests {
             2
         );
         assert_eq!(
-            home(&[first.source.clone_for_test()], &format!("seen={unscoped}"))["totals"]["waiting"],
+            home(
+                &[first.source.clone_for_test()],
+                &format!("seen={unscoped}")
+            )["totals"]["waiting"],
             1
         );
         assert!(

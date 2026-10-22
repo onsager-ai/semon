@@ -1,5 +1,4 @@
-//! The event index persisted in SQLite: `sessions-index.sqlite3`, beside the
-//! V1 metadata cache (step a1 of `docs/design/derived-store.md`).
+//! The native event index persisted in SQLite: `sessions-index.sqlite3`.
 //!
 //! It holds the metadata represented by [`FileIndex`], versioned stable session
 //! descriptions and a focused-read catalog: kinds, offsets, ids, counts, flags
@@ -582,7 +581,7 @@ struct SqliteStore {
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Any other failure
 /// (a read-only directory, a lock held past the timeout, a store a newer
-/// Semon wrote) is returned for the caller to run in memory.
+/// Semon wrote) is returned. Unsupported contracts never run in memory.
 pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
     let (store, loaded) = match SqliteStore::attempt(path) {
         Err(Unopened::Corrupt(error)) => {
@@ -1663,7 +1662,7 @@ pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(io::Error::other)?;
     let read = db.unchecked_transaction().map_err(io::Error::other)?;
-    match qualify(&read).map_err(io::Error::other)? {
+    match qualify_contract(&read).map_err(io::Error::other)? {
         Init::Ready => {}
         Init::Unsupported(reason) => return Err(io::Error::other(reason)),
         _ => return Err(io::Error::other("session index is not initialized")),
@@ -4105,12 +4104,12 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
 }
 
 /// Classify in a read snapshot, before journal, schema or recovery writes.
-/// Version zero is fresh only when there are no application schema objects.
-fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
+/// Version zero is fresh only when there are no schema objects.
+fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if schema == 0 {
         let nonempty: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema)",
             [],
             |row| row.get(0),
         )?;
@@ -4138,7 +4137,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     }
     let parser = match connection
         .query_row(
-            "SELECT value FROM meta WHERE key='cache_version'",
+            "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE key='cache_version'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -4180,7 +4179,9 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
         if connection.prepare(sql).is_err() {
-            return Ok(Init::Unsupported("unsupported session index: malformed schema"));
+            return Ok(Init::Unsupported(
+                "unsupported session index: malformed schema",
+            ));
         }
     }
     let publication: bool = connection.query_row(
@@ -4192,6 +4193,26 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Unsupported(
             "unsupported session index: publication version",
         ));
+    }
+    Ok(Init::Ready)
+}
+
+/// Bounded selected reads qualify the storage contract in their own snapshot.
+/// Archive marker consumers additionally validate the exact selected marker;
+/// unrelated archive history is never traversed by a focused request.
+pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
+    match qualify_contract(connection).map_err(io::Error::other)? {
+        Init::Ready => Ok(()),
+        Init::Unsupported(reason) => Err(io::Error::other(reason)),
+        _ => Err(io::Error::other("session index is not initialized")),
+    }
+}
+
+/// Writers also qualify retained marker formats before any mutation.
+fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
+    let found = qualify_contract(connection)?;
+    if !matches!(found, Init::Ready) {
+        return Ok(found);
     }
     let unsupported_archive: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
@@ -4269,8 +4290,8 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 }
 
 /// The store still has this binary's schema and parser: no other version
-/// rebuilt it since it was opened.
-fn current(connection: &Connection) -> rusqlite::Result<bool> {
+/// replaced it since it was opened.
+pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
@@ -9086,7 +9107,12 @@ mod tests {
             };
             fail(SqliteStore::attempt(&path));
             fail(SqliteStore::attempt_scoped(&path, true));
-            assert!(focused_connection(&path).is_err(), "focused {name}");
+            if name != "archive" {
+                assert!(focused_connection(&path).is_err(), "focused {name}");
+            } else {
+                let db = focused_connection(&path).unwrap();
+                assert!(archived_index(&db, "original").is_err());
+            }
             match super::super::EventCache::open(&v1) {
                 Err(error) => assert!(error.contains(reason), "{error}"),
                 Ok(_) => panic!("unsupported {name} became valid in-memory history"),
@@ -9130,12 +9156,16 @@ mod tests {
         BEFORE_STORAGE_INIT.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
                 let db = Connection::open(&changed).unwrap();
-                db.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+                db.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                    .unwrap();
                 drop(db);
                 *saved.borrow_mut() = fs::read(&changed).unwrap();
             }));
         });
-        assert!(matches!(SqliteStore::attempt(&path), Err(Unopened::Unsupported(_))));
+        assert!(matches!(
+            SqliteStore::attempt(&path),
+            Err(Unopened::Unsupported(_))
+        ));
         assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
         assert!(!sibling(&path, "-wal").exists());
         fs::remove_dir_all(root).unwrap();

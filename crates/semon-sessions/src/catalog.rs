@@ -99,6 +99,7 @@ pub fn session_source_proof(
         )?;
         connection.busy_timeout(Duration::from_millis(100))?;
         let transaction = connection.transaction()?;
+        crate::events::store::require_current(&transaction)?;
         let encoded: Option<(String, Option<String>)> = transaction.query_row(
             "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
             [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -977,6 +978,7 @@ fn read_page_snapshot(
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    crate::events::store::require_current(transaction)?;
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
             || cursor.machine != machine
@@ -1090,14 +1092,14 @@ fn read_page_snapshot(
     };
     let mut partial_history = std::collections::BTreeSet::new();
     for row in &selected {
-            if transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
-                [&row.key],
-                |row| row.get::<_, bool>(0),
-            )? {
-                partial_history.insert(row.key.clone());
-            }
+        if transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+            [&row.key],
+            |row| row.get::<_, bool>(0),
+        )? {
+            partial_history.insert(row.key.clone());
         }
+    }
 
     if request.scope == CatalogReadScope::RetainedHistory {
         for current in &mut selected {
@@ -4642,17 +4644,55 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_storage_is_observable_at_product_read_entrypoints() {
+        for change in [
+            "PRAGMA user_version=1",
+            "PRAGMA user_version=2147483647",
+            "DELETE FROM meta WHERE key='cache_version'",
+            "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+        ] {
+            let fixture = Fixture::new();
+            fixture.publish(1);
+            let path = EventCache::path(&fixture.options.cache);
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(change).unwrap();
+            drop(db);
+            let original = fs::read(&path).unwrap();
+            assert!(crate::collect(&fixture.options).is_err());
+            assert!(crate::local_facts(&fixture.options).is_err());
+            assert_eq!(fixture.body("").0, 503);
+            assert_eq!(crate::session_transcript_range(&fixture.options, "source", "sid=session-00000&after=0&limit=1", None).status, 503);
+            let mut query = crate::Query::new(fixture.options.clone());
+            assert!(query.call("list_sessions", &json!({})).is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn unsupported_recipe_stays_unavailable_without_implicit_upgrade() {
         let fixture = Fixture::new();
         fixture.publish(1);
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        connection.execute("UPDATE session_slot_projections SET version=3 WHERE session_key='session-00000'", []).unwrap();
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET version=3 WHERE session_key='session-00000'",
+                [],
+            )
+            .unwrap();
         let before = crate::native_timing::cleanup_tests::snapshot(&connection);
         let cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
         assert!(cache.qualified_catalog().unwrap());
-        let unavailable = crate::session_transcript_range(&fixture.options, "source", "sid=session-00000&after=0&limit=1", None);
+        let unavailable = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&after=0&limit=1",
+            None,
+        );
         assert_eq!(unavailable.status, 503);
-        assert_eq!(crate::native_timing::cleanup_tests::snapshot(&connection), before);
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            before
+        );
     }
 
     #[test]

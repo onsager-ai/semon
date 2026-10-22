@@ -189,6 +189,7 @@ fn connection(options: &Options) -> io::Result<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(failure)?;
+    crate::events::store::require_current(&db)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(failure)?;
     crate::selected_read::install(&db)?;
@@ -740,6 +741,7 @@ pub fn repair_session_overview_with_control(
         let tx = writable
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(failure)?;
+        crate::events::store::require_current(&tx)?;
         let Some(current) = catalog(&tx, key)? else {
             return Err(publication_changed());
         };
@@ -821,7 +823,7 @@ pub fn repair_session_overview_with_control(
             "Native migration owner unavailable",
         ));
     }
-    // Initialize through the owning schema migration. It preserves independent
+    // Qualify through the current schema owner. It preserves independent
     // current/history membership; the publication below does not touch either.
     let _schema = EventCache::open_scoped(&options.cache).map_err(failure)?;
     crate::selected_read::check()?;
@@ -835,6 +837,7 @@ pub fn repair_session_overview_with_control(
     let tx = writable
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failure)?;
+    crate::events::store::require_current(&tx)?;
     let current: String = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_generation'",
