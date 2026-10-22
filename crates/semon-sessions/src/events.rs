@@ -6313,6 +6313,7 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tx::Lines;
 
     #[test]
     fn busy_clusters_within_five_minutes_in_any_order() {
@@ -8556,7 +8557,7 @@ mod tests {
             if let Some(outcome) = expected["outcome"].as_str() {
                 let reply = event.r.as_ref().expect("expected direct output");
                 assert_eq!(reply.o, expected["reply_offset"].as_u64().unwrap(), "{id}");
-                let output = crate::tx::read_record(&log, reply.o).unwrap();
+                let output = Lines::default().get(&log, reply.o).unwrap();
                 assert_eq!(output["payload"]["call_id"], id, "{id}");
                 match outcome {
                     "ok" => {
@@ -8604,7 +8605,7 @@ mod tests {
         for (ordinal, event) in reused_calls.iter().enumerate() {
             let reply = event.r.as_ref().unwrap();
             assert_eq!(reply.o, expected_replies[ordinal]);
-            let output = crate::tx::read_record(&log, reply.o).unwrap();
+            let output = Lines::default().get(&log, reply.o).unwrap();
             assert_eq!(output["payload"]["call_id"], reused_id);
             match reused["expected_outcomes"][ordinal].as_str().unwrap() {
                 "ok" => {
@@ -8681,7 +8682,7 @@ mod tests {
         }
         let output_text = |id: &str| {
             let call = &reopened_index.events[by_id(&reopened_index, id)];
-            let record = crate::tx::read_record(&log, call.r.as_ref().unwrap().o).unwrap();
+            let record = Lines::default().get(&log, call.r.as_ref().unwrap().o).unwrap();
             record["payload"]["output"].as_str().unwrap().to_owned()
         };
         let running_text = output_text("direct-session-only");
@@ -8846,8 +8847,8 @@ mod tests {
             assert_eq!(event.id.as_deref(), expected.as_str());
             assert_eq!(event.k, Kind::Tool);
             let reply = event.r.as_ref().expect("exact call_id resolves output");
-            let call = crate::tx::read_record(&log, event.o).unwrap();
-            let output = crate::tx::read_record(&log, reply.o).unwrap();
+            let call = Lines::default().get(&log, event.o).unwrap();
+            let output = Lines::default().get(&log, reply.o).unwrap();
             assert_eq!(call["payload"]["call_id"], *expected);
             assert_eq!(output["payload"]["call_id"], *expected);
             assert!(event.o < reply.o && reply.o < LEGACY.len() as u64);
@@ -8897,8 +8898,7 @@ mod tests {
                 }
                 "formatted_terminal" => {
                     assert_eq!(edge["semon_supported"], false);
-                    let output =
-                        crate::tx::read_record(&log, direct.r.as_ref().unwrap().o).unwrap();
+                    let output = Lines::default().get(&log, direct.r.as_ref().unwrap().o).unwrap();
                     assert!(
                         output["payload"]["output"]
                             .as_str()
@@ -8939,7 +8939,7 @@ mod tests {
         let paginated = root.join("paginated.jsonl");
         fs::write(&paginated, PAGINATED).unwrap();
         let offset = PAGINATED.find('\n').unwrap() as u64 + 1;
-        let record = crate::tx::read_record(&paginated, offset).unwrap();
+        let record = Lines::default().get(&paginated, offset).unwrap();
         assert_eq!(record["payload"]["item"]["process_id"], "95583");
         assert_eq!(record["payload"]["item"]["type"], "CommandExecution");
         let runtime_identity = classes["recoverable"]

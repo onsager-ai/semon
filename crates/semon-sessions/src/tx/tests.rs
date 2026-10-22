@@ -1692,7 +1692,9 @@ fn a_code_mode_result_cut_in_its_json_falls_back_to_its_text_without_the_header(
         "{header}{{\"chunk_id\":\"c\",\"wall_time_seconds\":1.0,\"output\":\"line 1\\nline 2…19500 tokens truncated…lin"
     );
     let result = |call: &str, body: &str| json!({"type":"custom_tool_call_output","call_id":call,"output":[{"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},{"type":"input_text","text":body}]});
-    let fake = json!({"wall_time_seconds":1.0,"session_id":26789,"output":"printed, not a native result"}).to_string();
+    let fake =
+        json!({"wall_time_seconds":1.0,"session_id":26789,"output":"printed, not a native result"})
+            .to_string();
     home.lines(
         "codex/sessions/2026/09/24/rollout-code-cut.jsonl",
         &[
@@ -2613,10 +2615,10 @@ fn a_script_with_no_operations_shows_its_text_output() {
     assert_eq!(steps[1]["out"], "still running\n");
     let transcript = &built.tx["printed"];
     assert!(
-        transcript.slots.iter().all(|slot| !matches!(
-            &slot.kind,
-            SlotKind::Yielded { .. } | SlotKind::Sent { .. }
-        ))
+        transcript
+            .slots
+            .iter()
+            .all(|slot| !matches!(&slot.kind, SlotKind::Yielded { .. } | SlotKind::Sent { .. }))
     );
     let slot = &transcript.slots[steps[1]["slot"].as_u64().unwrap() as usize];
     assert!(matches!(&slot.kind, SlotKind::Tool { name, item: None, .. } if name == "exec"));
@@ -3108,9 +3110,13 @@ fn selected_output_preserves_claude_and_codex_results_without_optional_blocks() 
     home.lines(
         "claude/projects/-work-proj/selected-claude.jsonl",
         &[
-            said("selected-claude", ts(1, 0, 0), json!([{
-                "type":"tool_use","id":"plain-call","name":"Bash","input":{"command":"plain"}
-            }])),
+            said(
+                "selected-claude",
+                ts(1, 0, 0),
+                json!([{
+                    "type":"tool_use","id":"plain-call","name":"Bash","input":{"command":"plain"}
+                }]),
+            ),
             result("selected-claude", ts(1, 0, 500), "plain-call", &text, false),
         ],
     );
@@ -3144,9 +3150,8 @@ fn codex_native_fixture_selected_output_keeps_bounded_native_blocks() {
     const FIXTURE: &str = include_str!(
         "../../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
     );
-    const MANIFEST: &str = include_str!(
-        "../../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
-    );
+    const MANIFEST: &str =
+        include_str!("../../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json");
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
     let expected = manifest["expected_blocks"]
         .as_array()
@@ -3301,8 +3306,7 @@ fn codex_reference_conformance_selected_output_keeps_native_coordinates() {
                     blocks[0]["text"],
                     "Script completed\nWall time 0.1 seconds\nOutput:\n"
                 );
-                let new: Value =
-                    serde_json::from_str(blocks[1]["text"].as_str().unwrap()).unwrap();
+                let new: Value = serde_json::from_str(blocks[1]["text"].as_str().unwrap()).unwrap();
                 let poll: Value =
                     serde_json::from_str(blocks[2]["text"].as_str().unwrap()).unwrap();
                 assert_eq!(new["session_id"], 95583);
