@@ -56,6 +56,7 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
 std::thread_local! {
+    static BEFORE_STORAGE_INIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -2256,7 +2257,7 @@ impl IndexStore for SqliteStore {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         let repairs = {
-            let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE version<>?1 LIMIT 64) LIMIT 64").map_err(failure)?;
+            let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE version=?1 AND source_generation IS NULL LIMIT 64) LIMIT 64").map_err(failure)?;
             statement
                 .query_map([crate::slot_projection::VERSION], |row| {
                     row.get::<_, String>(0)
@@ -3650,6 +3651,10 @@ impl SqliteStore {
             }
             read.commit().map_err(classify)?;
         }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_STORAGE_INIT.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         create_private(path, &crate::state_dir())
             .map_err(|error| Unopened::Other(error.to_string()))?;
         // Never through a symlink: the path is checked above, and SQLite
@@ -4140,8 +4145,8 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         .optional()
     {
         Ok(Some(value)) => match value.parse::<u32>() {
-            Ok(version) => version,
-            Err(_) => {
+            Ok(version) if value == version.to_string() => version,
+            _ => {
                 return Ok(Init::Unsupported(
                     "unsupported session index: malformed metadata",
                 ));
@@ -4163,9 +4168,24 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
             "unsupported session index: parser version mismatch",
         ));
     }
+    // A current version label cannot make an incomplete/old table shape valid.
+    // Preparing these statements is read-only; no fallback may hide malformed DDL.
+    for sql in [
+        "SELECT codex_pricing_fingerprint,ctime_ns,copilot FROM files LIMIT 0",
+        "SELECT pricing_fingerprint,lifecycle,parent_key FROM session_catalog LIMIT 0",
+        "SELECT usage_ready FROM native_usage_sources LIMIT 0",
+        "SELECT tree_root FROM native_tree_repairs LIMIT 0",
+        "SELECT source_generation FROM session_slot_projections LIMIT 0",
+        "SELECT metadata FROM session_history_catalog LIMIT 0",
+        "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
+    ] {
+        if connection.prepare(sql).is_err() {
+            return Ok(Init::Unsupported("unsupported session index: malformed schema"));
+        }
+    }
     let publication: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2)",
-        params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION],
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_recipe' AND value<>?3)",
+        params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION, semantic_stage::RECIPE],
         |row| row.get(0),
     )?;
     if publication {
@@ -4174,8 +4194,8 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         ));
     }
     let unsupported_archive: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN json_valid(value) THEN COALESCE(json_extract(value,'$.version')<>6,1) ELSE 1 END)",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
+        [CACHE_VERSION],
         |row| row.get(0),
     )?;
     if unsupported_archive {
@@ -9095,6 +9115,30 @@ mod tests {
             drop(db);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn storage_open_rechecks_a_concurrent_version_change_before_writes() {
+        let root = scratch("concurrent-open-version");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        drop(store);
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let saved = captured.clone();
+        let changed = path.clone();
+        BEFORE_STORAGE_INIT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let db = Connection::open(&changed).unwrap();
+                db.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+                drop(db);
+                *saved.borrow_mut() = fs::read(&changed).unwrap();
+            }));
+        });
+        assert!(matches!(SqliteStore::attempt(&path), Err(Unopened::Unsupported(_))));
+        assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
+        assert!(!sibling(&path, "-wal").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1014,8 +1014,7 @@ pub fn session_overview_reply(
             let mut value = selected.clone();
             value["event"] = event.clone();
             let seen_result = event["ask"] == "result"
-                && ((sources.len() == 1 && seen.contains(event["id"].as_str().unwrap_or("")))
-                    || seen.contains(&json!([row.source, event["id"]]).to_string()));
+                && seen.contains(&json!([row.source, event["id"]]).to_string());
             if !seen_result && (event["status"] == "wait" || event["ask"] == "result") {
                 has_wait |= event["status"] == "wait";
                 waiting.push(value.clone());
@@ -1325,20 +1324,20 @@ mod tests {
         assert_eq!(output["totals"]["waiting"], 1);
         assert_eq!(output["inbox"][0]["source_key"], "second");
         assert_eq!(output["totals"]["answered"], 2);
-        let legacy = crate::viewer::percent_encode(r#"["answer"]"#);
+        let unscoped = crate::viewer::percent_encode(r#"["answer"]"#);
         assert_eq!(
             home(
                 &[
                     first.source.clone_for_test(),
                     second.source.clone_for_test()
                 ],
-                &format!("seen={legacy}")
+                &format!("seen={unscoped}")
             )["totals"]["waiting"],
             2
         );
         assert_eq!(
-            home(&[first.source.clone_for_test()], &format!("seen={legacy}"))["totals"]["waiting"],
-            0
+            home(&[first.source.clone_for_test()], &format!("seen={unscoped}"))["totals"]["waiting"],
+            1
         );
         assert!(
             session_overview_reply(
