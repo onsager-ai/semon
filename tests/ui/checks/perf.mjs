@@ -265,10 +265,12 @@ async function waitPaint(page, marker, apiRequests = [], server = null) {
       { timeout: 60_000, polling: 'raf' },
     );
   } catch (error) {
-    error.message += `\npaint failure diagnostics: ${JSON.stringify(
-      await paintFailureDiagnostics(page, marker, apiRequests, server),
-    )}`;
-    throw error;
+    throw new Error(
+      `${error.message}\npaint failure diagnostics: ${JSON.stringify(
+        await paintFailureDiagnostics(page, marker, apiRequests, server),
+      )}`,
+      { cause: error },
+    );
   }
 }
 
