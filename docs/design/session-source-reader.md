@@ -164,9 +164,10 @@ which starts with Catalog L1 already orphaned by Index L2 cannot recreate L1
 proofs: reads remain unavailable until normal authorized producer publication
 supplies a compatible projection. With unchanged selected publications, bounded
 browser recovery retries after 1, 2 and 4 seconds, then displays a terminal failure
-and manual retry while retaining previously loaded text. Changed selected source,
-Catalog or identity publications can resume recovery inside a fixed 45-second
+and manual retry while retaining previously loaded text. Changed selected-history
+source or Catalog publications can resume recovery inside a fixed 45-second
 budget measured from the first failure; repeated metadata polls cannot extend it.
+Current control identity and global Catalog epochs do not renew recovery.
 Identity notes cannot replace the terminal recovery explanation.
 Neither recovery nor these regression cases
 establishes original HP Code 1 acceptance under persistent push.

@@ -20,7 +20,6 @@ import {
   type CatalogPage,
   type CatalogSession,
 } from '../state/catalog-wire';
-import type { CatalogSessionIdentity } from '../domain/catalog';
 import {
   catalogCountWitness,
   completeCatalogCount,
@@ -187,19 +186,6 @@ function catalogRecoveryProgress(value: CatalogSession): CatalogRecoveryProgress
   };
 }
 
-function identityRecoveryProgress(value: CatalogSessionIdentity): CatalogRecoveryProgress {
-  return {
-    source: JSON.stringify(
-      value.source_refs.map(({ state, source }) => [
-        state,
-        source.offset,
-        source.prefix_sha256,
-        source.tail_sha256,
-      ]),
-    ),
-    identity: value.generation,
-  };
-}
 /** The advertised bounded reader has no complete ModelStore or global content poller. */
 export function createCatalogViewer(
   initialCapabilities: CatalogCapabilities | null,
@@ -3531,7 +3517,6 @@ export function createCatalogViewer(
       const previousLabel = sourceLabel(view.sourceKey);
       if (active === view && selection.accept(ticket, reply.identity)) {
         const accepted = selection.selectedIdentity();
-        if (accepted) observeSelectedProgress(view, identityRecoveryProgress(accepted));
         if (!view.recovery.stopped) {
           if (accepted?.owner_qualification === 'provisional')
             view.note = 'Session identity is provisional while history is being discovered.';
