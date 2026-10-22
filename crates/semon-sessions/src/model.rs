@@ -1,7 +1,7 @@
 //! Shared native session semantic derivation over the generation-bound Event Index.
 //! Catalog publications and focused Query reads share identity, relationships,
-//! transcript slots and runtime facts. The complete serialization oracle is
-//! compiled only for semantic equivalence tests, never the product Viewer.
+//! transcript slots and runtime facts. Full-workspace Model transport is retired;
+//! tests exercise these same native producers and source-backed readers.
 //!
 //! Semon never guesses a link. Every join below is on a logged id: a
 //! `toolUseId`, a `msg_id`, a `session_id`, a `continued-in` or
@@ -41,21 +41,13 @@ use crate::{
     field, file_list, handoff,
 };
 
-/// Version of the `/api/model` JSON shape. Embedders and clients compare it;
-/// bump it only for a breaking change to that shape.
-#[cfg(test)]
-pub const MODEL_API: u32 = 1;
-
 /// Briefs and results are capped as in the mockup data.
 pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
-/// A tool call without a result counts as running for this long.
-#[cfg(test)]
-const LIVE_MS: i64 = 30 * 60 * 1000;
 /// A single source line read back for text is bounded by this.
 pub(crate) const MAX_LINE: u64 = 64 * 1024 * 1024;
 
-// ---- Output shapes: the mockup's field names ---------------------------------------------
+// ---- Shared native semantic records ---------------------------------------------
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Session {
@@ -106,8 +98,8 @@ pub(crate) struct Session {
     pub(crate) last: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// A running tool: `[name, argument, age in seconds when served, start
-    /// in epoch ms]`. A client that keeps a model across 304s computes the
-    /// age from `activity[3]`.
+    /// in epoch ms]`. Native metadata retains the recorded start; current reads
+    /// qualify liveness independently.
     pub(crate) activity: Option<(String, String, i64, i64)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) waiting_for: Option<String>,
@@ -115,7 +107,7 @@ pub(crate) struct Session {
     pub(crate) waiting_since: Option<i64>,
     pub(crate) busy: Vec<(i64, i64)>,
     /// The transcript's tool calls, and those that failed or never
-    /// finished: the same numbers `/api/tx` reports, so a page needn't fetch
+    /// finished, counted from the native transcript slots so a page needn't fetch
     /// a transcript to count. Absent for a session with no transcript.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) calls: Option<usize>,
@@ -298,17 +290,6 @@ pub(crate) struct Turn {
     pub(crate) last: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[cfg(test)]
-pub(crate) struct Machine {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) up: bool,
-    /// When an offline machine was last seen (epoch ms).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last: Option<i64>,
-}
-
 /// Native Query facts beyond the Viewer session metadata, derived from
 /// qualified native evidence and current process observations.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -342,61 +323,8 @@ pub(crate) struct SessionFacts {
     pub(crate) turns_truncated: bool,
 }
 
-#[derive(Serialize)]
-#[cfg(test)]
-struct Rest<'a> {
-    pricing: &'a crate::pricing::Pricing,
-    handoffs: &'a [Handoff],
-    turns: &'a [Turn],
-    busy: &'a BTreeMap<String, Vec<(i64, i64)>>,
-    /// Each transcript's growth mark, `<entries>.<bytes>.<running>`: its slot
-    /// count, the length of the files its slots come from, and how many of
-    /// its calls are running. The page tails a loaded transcript only when
-    /// its mark moved.
-    tx: &'a BTreeMap<&'a str, String>,
-}
-
-/// A built model. Everything but the sessions' running-tool age is
-/// serialized once; `version` hashes the build and every source file's
-/// length, so it changes when, and only when, the logs do.
-#[cfg(test)]
-pub(crate) struct Built {
-    pub(crate) version: String,
-    /// Milliseconds spent in each model build phase, in order.
-    pub(crate) timings: Vec<(&'static str, u32)>,
-    machine: String,
-    /// `activity[2]` holds the running tool's start (epoch ms) until served.
-    pub(crate) sessions: BTreeMap<String, Session>,
-    /// `"handoffs":…,"turns":…,"busy":…,"tx":…}`
-    rest: String,
-    /// `$HOME` of the machine the logs come from, for shortening paths.
-    pub(crate) home: Option<String>,
-    /// This machine's id, as sessions name it.
-    pub(crate) machine_id: String,
-    /// Each session's transcript index, for `/api/tx`: metadata and offsets
-    /// only, the text is read back per page.
-    pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
-    /// Native facts observed by incremental-index equivalence tests.
-    /// Production query readers retain these in QueryData, not Built.
-    #[cfg(test)]
-    pub(crate) facts: BTreeMap<String, SessionFacts>,
-    /// What `/api/analytics` reads of each session active in the last
-    /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
-    /// its window. Never served by `/api/model`: its JSON and version don't
-    /// change with it.
-    pub(crate) activity: BTreeMap<String, crate::analytics::Activity>,
-    #[cfg(test)]
-    pub(crate) handoffs: Vec<Handoff>,
-    #[cfg(test)]
-    pub(crate) turns: Vec<Turn>,
-    /// Each session's assistant texts by turn: (turn number, offset, block).
-    #[cfg(test)]
-    pub(crate) texts: BTreeMap<String, Vec<(usize, u64, u32)>>,
-}
-
-/// Native query evidence and source offsets, without compatibility transport,
-/// growth marks or workspace analytics. The producer applies the same native
-/// relationships and window rules as the legacy model.
+/// Native Query evidence and source offsets. Catalog and selected producers
+/// share these relationships and window rules; bodies remain source-backed.
 pub(crate) struct QueryData {
     pub(crate) sessions: BTreeMap<String, Session>,
     pub(crate) handoffs: Vec<Handoff>,
@@ -452,28 +380,6 @@ impl PromptBrief {
     }
 }
 
-#[cfg(test)]
-impl Built {
-    /// The model as served at `now`: a running tool's `activity[2]` is its
-    /// age in seconds, and a tool without a result for [`LIVE_MS`] is no
-    /// longer shown as running.
-    pub(crate) fn json(&self, now: i64) -> String {
-        let mut sessions = self.sessions.clone();
-        for session in sessions.values_mut() {
-            session.activity = session
-                .activity
-                .take()
-                .filter(|(_, _, _, start)| now - start < LIVE_MS)
-                .map(|(name, arg, _, start)| (name, arg, (now - start).max(0) / 1000, start));
-        }
-        let sessions = serde_json::to_string(&sessions).expect("serializable sessions");
-        format!(
-            "{{\"api\":{},\"version\":\"{}\",\"now\":{now},\"machine\":{},\"sessions\":{sessions},{}",
-            MODEL_API, self.version, self.machine, self.rest
-        )
-    }
-}
-
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -508,7 +414,7 @@ impl Handoff {
     }
 }
 
-/// The compatibility model and focused catalog use the same logged-parent rule.
+/// Native Query and Catalog share this logged-parent rule.
 fn session_parent(sid: &str, session: &Session, handoffs: &[Handoff]) -> Option<String> {
     handoffs
         .iter()
@@ -613,8 +519,6 @@ impl Texts {
 thread_local! {
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Full compatibility model preparation, excluding native catalog observation.
-    pub(crate) static COMPAT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Direct source body reads, excluding native discovery/index parsing.
     pub(crate) static DIRECT_SOURCE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
@@ -624,8 +528,6 @@ thread_local! {
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Races after native query derivation, before projection publication.
     pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    /// Races after model derivation, before its projection is published.
-    static AFTER_MODEL_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -4640,9 +4542,6 @@ impl<'a> Builder<'a> {
                 // The Catalog and slot recipes contain only the relationship.
                 // Query reads its brief from the same captured generation when
                 // a selected session or searched slot actually requests it.
-                let text = (target.reference_model())
-                    .then(|| self.text(at, "user", |record, _| prompt_text(record)))
-                    .flatten();
                 let file = &self.files[at.0];
                 let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
                 let id = stable_id(ASK_PREFIX, &source);
@@ -4663,7 +4562,7 @@ impl<'a> Builder<'a> {
                         .t
                         .unwrap_or(self.sessions[index].out.start),
                     "done",
-                    text.as_deref().unwrap_or(""),
+                    "",
                 );
                 let handoff = self.add_handoff(handoff, None, Some(index));
                 self.handoffs[handoff].previews = Some(BTreeMap::from([(
@@ -5040,8 +4939,8 @@ impl<'a> Builder<'a> {
             return;
         };
         let found = event(self.files, at).clone();
-        // The start time: the age and the 30-minute expiry are applied
-        // when the model is served, so they never freeze between builds.
+        // Preserve the recorded start; native readers determine current activity
+        // from their independently qualified runtime observation.
         let Some(time) = found.t else {
             return;
         };
@@ -5068,8 +4967,7 @@ impl<'a> Builder<'a> {
                 })
             })
             .unwrap_or_default();
-        // The age is filled when served, so `version` depends on the
-        // logs alone.
+        // Keep runtime age out of the persisted native observation.
         self.sessions[index].out.activity = Some((name, arg, 0, time));
     }
 
@@ -5387,33 +5285,6 @@ impl<'a> Builder<'a> {
             tx.slots.iter().rev().find(|slot|slot.call_name()==Some(name.as_str()) && slot.t==Some(*at)).and_then(|slot|slot.file.as_ref().and_then(|file|file.path.to_str().map(|path|serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"activity","tool":name,"cwd":file.cwd}))))
         });
         serde_json::json!({"events":events,"detail":current.and_then(origin),"detail_from":detail_from,"detail_from_name":detail_from_name,"activity":activity})
-    }
-
-    #[cfg(test)]
-    fn texts_by_turn(&self) -> BTreeMap<String, Vec<(usize, u64, u32)>> {
-        let mut result = BTreeMap::new();
-        for (index, session) in self.sessions.iter().enumerate() {
-            if session.kind == SessKind::Stub {
-                continue;
-            }
-            let entries = self.entries(index);
-            let texts: Vec<(usize, u64, u32)> = self
-                .groups(index, &entries)
-                .iter()
-                .enumerate()
-                .flat_map(|(number, turn)| {
-                    turn.entries
-                        .iter()
-                        .map(|position| &entries[*position])
-                        .filter(|entry| matches!(entry.kind, EntryKind::A))
-                        .filter_map(|entry| entry.at)
-                        .map(move |at| (number, event(self.files, at).o, event(self.files, at).b))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            result.insert(session.key.clone(), texts);
-        }
-        result
     }
 
     /// Every session's turns, and its transcript index: the entries the
@@ -6548,7 +6419,7 @@ enum EntryKind {
 }
 
 /// How a tool call is drawn: a pending call is live only in the last turn
-/// of a working session, as the model's turn ends and activity read it.
+/// of a working session, shared by native turn ends and activity derivation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Shown {
     Ok,
@@ -6664,7 +6535,7 @@ pub(crate) enum SlotKind {
     NoActivity,
 }
 
-/// Content-free signal metadata. Source event indices never leave the model.
+/// Content-free signal metadata. Physical event indices remain private.
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct SignalData {
     pub(crate) kind: events::SignalKind,
@@ -6706,7 +6577,7 @@ pub(crate) struct Slot {
     pub(crate) offset: u64,
     pub(crate) block: u32,
     pub(crate) t: Option<i64>,
-    /// The turn it belongs to, when that turn is in the model.
+    /// The native turn it belongs to, when one is observed.
     pub(crate) turn: Option<String>,
     /// The first entry of its turn.
     pub(crate) first: bool,
@@ -6733,7 +6604,7 @@ impl Slot {
 
     /// Whether this slot is a tool call and, if it is, whether it failed or
     /// never finished: exactly what a transcript's `calls` and `errors`
-    /// count, so the errors badge and `/api/tx?errors=1` agree.
+    /// count, so native call/error totals share this classification.
     pub(crate) fn failed_call(&self) -> Option<bool> {
         match &self.kind {
             SlotKind::Tool { shown, bg, .. } => Some(
@@ -7316,81 +7187,14 @@ pub(crate) fn arg_summary(
 
 // ---- Build -------------------------------------------------------------------------------
 
-/// Builds the model from the whole of `~/.claude` and `~/.codex`: links need
-/// both ends, so every file is indexed whatever the window, and the window
-/// only trims what is returned. With [`Options::scan_window`], files last
-/// modified before the window aren't read at all.
-/// Semantic fixture oracle only; never a Viewer owner, cache or read fallback.
-#[cfg(test)]
-pub(crate) fn reference_json(options: &Options, now: i64) -> serde_json::Value {
-    let mut cache = EventCache::open_scoped(&options.cache).unwrap();
-    let built = build(options, &mut cache, &mut false, &mut Texts::default(), now).unwrap();
-    serde_json::from_str(&built.json(now)).unwrap()
-}
-
-#[cfg(test)]
-pub(crate) fn build(
-    options: &Options,
-    cache: &mut EventCache,
-    dirty: &mut bool,
-    texts: &mut Texts,
-    now: i64,
-) -> io::Result<Built> {
-    build_sources(options, cache, dirty, texts, now, None)
-}
-
-/// Native projection over an explicit, authorized source closure. Request-local
-/// caches have no writable store. Discovery and publication remain separate;
-/// callers must not claim missing relationship context as a complete graph.
-#[cfg(test)]
-pub(crate) fn build_sources(
-    options: &Options,
-    cache: &mut EventCache,
-    dirty: &mut bool,
-    texts: &mut Texts,
-    now: i64,
-    selected: Option<&[crate::inputs::Input]>,
-) -> io::Result<Built> {
-    match build_sources_inner(
-        options,
-        cache,
-        dirty,
-        texts,
-        now,
-        BuildSelection::Current(selected),
-        BuildTarget::Model,
-    )? {
-        BuildOutput::Model(built) => Ok(*built),
-        _ => Err(io::Error::other("native producer did not build model")),
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildTarget {
-    #[cfg(test)]
-    Model,
     Query,
     Catalog,
     Sources,
 }
 
-impl BuildTarget {
-    fn reference_model(self) -> bool {
-        #[cfg(test)]
-        {
-            matches!(self, Self::Model)
-        }
-        #[cfg(not(test))]
-        {
-            let _ = self;
-            false
-        }
-    }
-}
-
 enum BuildOutput {
-    #[cfg(test)]
-    Model(Box<Built>),
     Query(Box<QueryData>),
     Catalog(BTreeSet<u32>, Option<String>),
     Sources(Box<PreparedSources>),
@@ -7422,8 +7226,8 @@ pub(crate) fn build_query(
     }
 }
 
-/// Reconcile native metadata and transcript slots without preparing legacy
-/// model analytics or transport. Complete observation still discovers all sources.
+/// Reconcile native metadata and transcript slots. Complete observation still
+/// discovers all sources.
 #[cfg(test)]
 pub(crate) fn observe_catalog(
     options: &Options,
@@ -7464,7 +7268,7 @@ pub(crate) fn observe_catalog_fenced(
     }
 }
 
-/// Native producer output captured before compatibility-window trimming.
+/// Native producer output captured before output-window trimming.
 /// Scoped preparation does not publish or prune unrelated source membership.
 pub(crate) struct PreparedSources {
     pub(crate) base_generation: Option<String>,
@@ -8165,7 +7969,7 @@ fn build_sources_inner(
             hook();
         }
     }
-    if !target.reference_model() && history_records.is_none() {
+    if history_records.is_none() {
         measured!("sidecars_before", files.len(), verify_sidecars(&files)?);
     }
     let started = measurements.start();
@@ -8194,8 +7998,6 @@ fn build_sources_inner(
     let held;
     let machine;
     let home;
-    #[cfg(test)]
-    let offline_since;
     let groups;
     timed!("facts", {
         pids = pid_files(options, &facts);
@@ -8206,10 +8008,6 @@ fn build_sources_inner(
             .collect::<BTreeSet<String>>();
         machine = facts.hostname(options);
         home = facts.home();
-        #[cfg(test)]
-        {
-            offline_since = facts.offline_since();
-        }
         groups = lineages(&files);
     });
     if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
@@ -8238,11 +8036,7 @@ fn build_sources_inner(
     let source_proofs = measured!(
         "source_capture",
         files.len(),
-        if target.reference_model() {
-            crate::query_source::Sources::capture_native(options, sources)?
-        } else {
-            crate::query_source::Sources::capture(options, sources)?
-        }
+        crate::query_source::Sources::capture(options, sources)?
     );
     let source_records = source_proofs.reader();
     if history_records.is_none() {
@@ -8433,8 +8227,7 @@ fn build_sources_inner(
             rows,
             Some(&source_records),
             history_records,
-            (!target.reference_model() && history_records.is_none())
-                .then_some((&*builder.cache, catalog_base.as_deref())),
+            (history_records.is_none()).then_some((&*builder.cache, catalog_base.as_deref())),
         )
     });
     measurements.record(
@@ -8513,8 +8306,8 @@ fn build_sources_inner(
                 .get(row.key.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            // The local model remains usable for native paths that cannot be
-            // represented by the portable catalog. Never publish a lossy alias.
+            // Portable Catalog records require exact native paths. Never publish
+            // a lossy alias; local native tree discovery has its own path support.
             if row
                 .sources
                 .iter()
@@ -8628,7 +8421,7 @@ fn build_sources_inner(
     }
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "runtime_checked");
-    if !target.reference_model() && history_records.is_none() {
+    if history_records.is_none() {
         measured!("sidecars_after", files.len(), verify_sidecars(&files)?);
     }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
@@ -8756,23 +8549,11 @@ fn build_sources_inner(
             ));
         }
         BuildTarget::Query => {}
-        #[cfg(test)]
-        BuildTarget::Model => {}
     }
-    #[cfg(test)]
-    if target.reference_model() {
-        COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
-    }
-    #[cfg(test)]
-    let texts = builder.texts_by_turn();
-    let session_facts = if target == BuildTarget::Query || cfg!(test) {
-        timed!(
-            "session_facts",
-            published_facts.take().unwrap_or_else(derive_query_facts)
-        )
-    } else {
-        BTreeMap::new()
-    };
+    let session_facts = timed!(
+        "session_facts",
+        published_facts.take().unwrap_or_else(derive_query_facts)
+    );
     let handoff_by_id: HashMap<&str, &Handoff> = builder
         .handoffs
         .iter()
@@ -8783,11 +8564,6 @@ fn build_sources_inner(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
-    // Analytics reads a month and the month before it, whatever the model's
-    // window: taken from every session before the window trims them.
-    #[cfg(test)]
-    let activity = (target.reference_model())
-        .then(|| crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now));
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
     if !options.all && !options.scan_window {
@@ -8844,9 +8620,9 @@ fn build_sources_inner(
         }
         tx.retain(|key, _| sessions.contains_key(key));
         // A stub's transcript is the handoffs that name it, so it lists only
-        // the ones served: the page draws a handoff from the model's list.
+        // the ones retained in this native output window.
         // A real session's transcript stays whole, and its pages before the
-        // window can name handoffs the window left out.
+        // output window can name earlier handoffs.
         for (key, transcript) in &mut tx {
             if sessions.get(key).is_some_and(|session| session.stub) {
                 Arc::make_mut(transcript)
@@ -8909,7 +8685,7 @@ fn build_sources_inner(
         tx.insert(key, Arc::new(Transcript::from_slots(slots)));
     }
     // Each session's totals come from its transcript index, built above from
-    // the same slots `/api/tx` counts.
+    // the same native transcript slots.
     for (key, session) in &mut sessions {
         if let Some(transcript) = tx.get(key) {
             session.calls = Some(transcript.calls);
@@ -8918,185 +8694,46 @@ fn build_sources_inner(
             session.tool_calls = transcript.tools.clone();
         }
     }
-    if target == BuildTarget::Query {
-        crate::selected_read::check()?;
-        let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
-        let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
-        ask_briefs.retain(|id, _| kept.contains(id));
-        #[cfg(test)]
-        if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        if history_records.is_none() {
-            verify_sidecars(&files)?;
-            source_records.finish()?;
-        }
-        drop(source_records);
-        if let Some(catalog) = catalog {
-            cache.publish_session_projection(
-                &crate::slot_projection::Publication {
-                    rows: &catalog,
-                    transcripts: slot_projections.as_deref(),
-                },
-                catalog_base.as_deref(),
-            );
-        }
-        cache.publish_session_descriptions();
-        return Ok(BuildOutput::Query(Box::new(QueryData {
-            sources: source_proofs,
-            sessions,
-            handoffs,
-            ask_briefs,
-            turns,
-            facts: session_facts,
-            tx,
-            home,
-            machine_id: machine,
-            pids: pids.iter().map(|pid| pid.pid).collect(),
-            window_start: window_start.or_else(|| {
-                (!options.all).then(|| {
-                    now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
-                })
-            }),
-        })));
-    }
-    #[cfg(not(test))]
-    unreachable!("native build targets return their evidence above");
+    crate::selected_read::check()?;
+    let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
+    let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
+    ask_briefs.retain(|id, _| kept.contains(id));
     #[cfg(test)]
-    {
-        let all_busy = events::busy_merge(
-            sessions
-                .values()
-                .flat_map(|session| session.busy.iter().copied())
-                .collect(),
-        );
-        let busy = BTreeMap::from([(machine.clone(), all_busy)]);
-        let file_sizes: HashMap<&Path, u64> = files
-            .iter()
-            .map(|file| (file.path.as_path(), file.stamp.size))
-            .collect();
-        let marks: BTreeMap<&str, String> = tx
-            .iter()
-            .map(|(sid, transcript)| {
-                let sources: BTreeSet<&Path> = transcript
-                    .slots
-                    .iter()
-                    .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
-                    .collect();
-                let bytes: u64 = sources
-                    .iter()
-                    .filter_map(|path| file_sizes.get(path).copied())
-                    .sum();
-                // A call stops running when its process dies, which writes no
-                // line: the running count moves the mark all the same.
-                let running = transcript
-                    .slots
-                    .iter()
-                    .filter(|slot| {
-                        matches!(
-                            &slot.kind,
-                            SlotKind::Tool {
-                                bg: Some(Background {
-                                    live: true,
-                                    end: None,
-                                    ..
-                                }),
-                                ..
-                            } | SlotKind::Tool {
-                                shown: Shown::Live,
-                                ..
-                            } | SlotKind::Yielded {
-                                shown: Shown::Live,
-                                ..
-                            } | SlotKind::Sent {
-                                shown: Shown::Live,
-                                ..
-                            }
-                        )
-                    })
-                    .count();
-                (
-                    sid.as_str(),
-                    format!("{}.{bytes}.{running}", transcript.slots.len()),
-                )
-            })
-            .collect();
-        let machine_id = machine.clone();
-        let machine = Machine {
-            id: machine.clone(),
-            name: machine,
-            up: offline_since.is_none(),
-            last: offline_since,
-        };
-        let machine = serde_json::to_string(&machine)?;
-        let pricing = crate::pricing::table();
-        let rest = serde_json::to_string(&Rest {
-            pricing: &pricing,
-            handoffs: &handoffs,
-            turns: &turns,
-            busy: &busy,
-            tx: &marks,
-        })?;
-        // The version also covers every source file's length, so any appended
-        // line gives a new version, even one whose entry changes nothing else in
-        // the model (the same timestamp as the line before it). Lengths, not
-        // paths or times, keep it the same for the same content.
-        let lengths: Vec<String> = files
-            .iter()
-            .map(|file| file.stamp.size.to_string())
-            .collect();
-        let version = format!(
-            "{:016x}",
-            fnv(&format!(
-                "{machine}{}{rest}|{}",
-                serde_json::to_string(&sessions)?,
-                lengths.join(",")
-            ))
-        );
-        let mut built = Built {
-            version,
-            machine,
-            sessions,
-            rest: rest[1..].to_owned(),
-            home,
-            machine_id,
-            tx,
-            #[cfg(test)]
-            facts: session_facts,
-            activity: activity.expect("model analytics prepared"),
-            #[cfg(test)]
-            handoffs,
-            #[cfg(test)]
-            turns,
-            #[cfg(test)]
-            texts,
-            timings,
-        };
-        built.timings.push((
-            "post",
-            u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
-        ));
-        #[cfg(test)]
-        if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        if history_records.is_none() {
-            source_records.finish()?;
-        }
-        if let Some(catalog) = catalog {
-            cache.publish_session_projection(
-                &crate::slot_projection::Publication {
-                    rows: &catalog,
-                    transcripts: slot_projections.as_deref(),
-                },
-                catalog_base.as_deref(),
-            );
-        }
-        if selected.is_none() {
-            cache.publish_session_descriptions();
-        }
-        Ok(BuildOutput::Model(Box::new(built)))
+    if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
     }
+    if history_records.is_none() {
+        verify_sidecars(&files)?;
+        source_records.finish()?;
+    }
+    drop(source_records);
+    if let Some(catalog) = catalog {
+        cache.publish_session_projection(
+            &crate::slot_projection::Publication {
+                rows: &catalog,
+                transcripts: slot_projections.as_deref(),
+            },
+            catalog_base.as_deref(),
+        );
+    }
+    cache.publish_session_descriptions();
+    Ok(BuildOutput::Query(Box::new(QueryData {
+        sources: source_proofs,
+        sessions,
+        handoffs,
+        ask_briefs,
+        turns,
+        facts: session_facts,
+        tx,
+        home,
+        machine_id: machine,
+        pids: pids.iter().map(|pid| pid.pid).collect(),
+        window_start: window_start.or_else(|| {
+            (!options.all).then(|| {
+                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+            })
+        }),
+    })))
 }
 
 #[cfg(test)]

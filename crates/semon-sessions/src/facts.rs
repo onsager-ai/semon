@@ -402,15 +402,6 @@ impl MachineFacts {
         }
     }
 
-    /// When the machine was last seen, if its facts say it's offline.
-    #[cfg(test)]
-    pub(crate) fn offline_since(&self) -> Option<i64> {
-        match self {
-            Self::Local => None,
-            Self::Recorded(facts) => facts.offline_since,
-        }
-    }
-
     pub(crate) fn home(&self) -> Option<String> {
         match self {
             Self::Local => env_home(),
@@ -773,13 +764,11 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Runs the JSON event cache captured before the SQLite index (a1) are
-    /// in the facts again once it is imported: `~/.claude.json` has since
-    /// overwritten them, so nothing else could give them back.
+    /// SQLite retains reported runs after the live source overwrites them.
     #[test]
-    fn reported_runs_from_before_the_index_show_again() {
+    fn reported_runs_persist_after_live_source_overwrite_and_reopen() {
         let root = env::temp_dir().join(format!(
-            "semon-facts-legacy-runs-{}-{}",
+            "semon-facts-reported-runs-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -801,38 +790,47 @@ mod tests {
         fs::write(options.proc_root.join("sys/kernel/hostname"), "fixture\n").unwrap();
         fs::create_dir_all(&options.claude_home).unwrap();
         fs::create_dir_all(&options.codex_home).unwrap();
-        // Today's `~/.claude.json` holds only the latest run.
+        // Collect the first live reported run.
         fs::write(
             &options.claude_json,
-            serde_json::json!({"projects":{"/p":{"lastSessionId":"latest-run","lastStartTime":2000}}})
+            serde_json::json!({"projects":{"/p":{"lastSessionId":"first-run","lastStartTime":1000,"lastCost":0.25}}})
                 .to_string(),
         )
         .unwrap();
-        // The JSON event cache still holds an earlier one.
-        fs::write(
-            crate::events::EventCache::legacy_path(&options.cache),
-            serde_json::json!({
-                "version": 14,
-                "files": {},
-                "reported_runs": {"earlier-run": {"1000": {
-                    "lastSessionId":"earlier-run","lastStartTime":1000,"lastCost":0.25,"captureAt":1500
-                }}}
-            })
-            .to_string(),
-        )
-        .unwrap();
-
         let facts = local_facts(&options).unwrap();
         let ids: BTreeSet<&str> = facts
             .reported_runs
             .iter()
             .map(|run| run.last_session_id.as_str())
             .collect();
-        assert_eq!(ids, BTreeSet::from(["earlier-run", "latest-run"]));
-        assert!(!crate::events::EventCache::legacy_path(&options.cache).exists());
-        // And they stay: the next process reads them from the index.
+        assert_eq!(ids, BTreeSet::from(["first-run"]));
+        // The collector reopens SQLite after the source advances to another run.
+        fs::write(
+            &options.claude_json,
+            serde_json::json!({"projects":{"/p":{"lastSessionId":"second-run","lastStartTime":2000,"lastCost":0.5}}}).to_string(),
+        )
+        .unwrap();
+        let next = local_facts(&options).unwrap();
+        assert_eq!(
+            next.reported_runs
+                .iter()
+                .map(|run| run.last_session_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["first-run", "second-run"])
+        );
+        // Neither run remains in the live file; both come from persisted snapshots.
+        fs::write(&options.claude_json, r#"{"projects":{}}"#).unwrap();
         let again = local_facts(&options).unwrap();
         assert_eq!(again.reported_runs.len(), 2);
+        for (id, start, cost) in [("first-run", 1000, 0.25), ("second-run", 2000, 0.5)] {
+            let run = again
+                .reported_runs
+                .iter()
+                .find(|run| run.last_session_id == id)
+                .unwrap();
+            assert_eq!(run.last_start_time, start);
+            assert_eq!(run.last_cost, Some(cost));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

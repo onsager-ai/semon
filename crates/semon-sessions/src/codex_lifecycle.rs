@@ -596,11 +596,24 @@ mod tests {
             .unwrap();
         crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
         fs::remove_file(&home.path).unwrap();
-        let retained = home.query();
-        assert_eq!(retained["turn_lifecycle"], observed["turn_lifecycle"]);
-        assert!(retained["alive"].is_null());
-        assert!(retained["run"].is_null());
-        assert_ne!(retained["state"], "working");
-        assert!(retained["exit"].is_null());
+        // The current Query list may expose a writer-only stub. Retained
+        // outcomes belong to the explicitly authorized history projection.
+        let current = home.query();
+        assert!(current.get("turn_lifecycle").is_none());
+        assert_ne!(current["state"], "working");
+        assert!(current["exit"].is_null());
+        let reply = crate::session_catalog_page(
+            &home.options,
+            "local",
+            "sid=owner&scope=retained_history",
+        );
+        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        let page: Value = serde_json::from_slice(&reply.body).unwrap();
+        let retained = &page["items"][0];
+        assert_eq!(retained["details"]["turn_lifecycle"], observed["turn_lifecycle"]);
+        assert_eq!(retained["details"]["live_observation"], false);
+        assert_ne!(retained["status"]["state"], "work");
+        assert!(retained.get("alive").is_none());
+        assert!(retained.get("run").is_none());
     }
 }
