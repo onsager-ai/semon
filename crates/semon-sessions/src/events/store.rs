@@ -6830,13 +6830,17 @@ mod tests {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("read SQLite WAL: {error}"),
         };
+        let database_before = fs::read(&cache_path).unwrap();
         let wal_before = read_wal();
-        drop(db);
+        // Keep this connection alive so closing the last writer cannot
+        // checkpoint the fixture between the baseline and the refusal.
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).is_err());
         let wal_after = read_wal();
-        let frame_bytes = |wal: &[u8]| wal.get(32..).unwrap_or_default().to_vec();
-        assert_eq!(frame_bytes(&wal_after), frame_bytes(&wal_before));
-        let db = Connection::open(&cache_path).unwrap();
+        assert!(wal_after == wal_before, "selected refusal changed WAL bytes");
+        assert!(
+            fs::read(&cache_path).unwrap() == database_before,
+            "selected refusal changed database bytes"
+        );
         assert_eq!(snapshot(&db), before);
         drop(db);
         fs::remove_dir_all(root).unwrap();

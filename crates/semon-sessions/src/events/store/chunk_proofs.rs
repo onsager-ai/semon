@@ -598,6 +598,13 @@ impl Focused {
                 .execute_batch("BEGIN DEFERRED")
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
         }
+        if !super::current(&connection)
+            .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
+        {
+            return Err(
+                FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
+            );
+        }
         super::require_current(&connection)
             .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
@@ -612,8 +619,9 @@ impl Focused {
             .optional()
             .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
             .flatten();
-        // Parser reset can leave retained headers from an older parser. An
-        // exact live header takes precedence over that obsolete namespace.
+        // Retained headers belong to immutable published generations. Prefer
+        // an exact current live header; otherwise select this ledger's retained
+        // generation, which still has to pass the current header checks.
         let live_matches = live.as_deref().is_some_and(|text| {
             serde_json::from_str::<Header>(text).is_ok_and(|header| {
                 header.version == 1
