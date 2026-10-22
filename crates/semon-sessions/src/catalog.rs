@@ -8157,11 +8157,7 @@ mod tests {
             .unwrap()
             .remove("pricing_fingerprint")
             .unwrap();
-        assert!(
-            fingerprint
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
+        assert!(fingerprint.as_str().is_some_and(|value| !value.is_empty()));
         assert_eq!(
             fingerprint,
             Value::String(crate::pricing::snapshot().fingerprint.clone())
