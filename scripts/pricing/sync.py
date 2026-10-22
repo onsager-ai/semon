@@ -703,9 +703,8 @@ def build_prices(anthropic_html: str, openai_html: str, current: dict[str, objec
         raise PricingParseError(f"model ids appeared on both source pages: {', '.join(sorted(overlap))}")
     fetched.update(openai)
 
-    # Preserve the two legacy OpenAI rows that the official page does not
-    # price. They stay visible in the compatibility table, but the price
-    # calculation deliberately has no rates for them.
+    # Preserve explicit pinned exceptions to the weekly HTML sources,
+    # including temporary restoration rows with independently verified rates.
     current_models = current["models"]
     assert isinstance(current_models, dict)
     for model, row in current_models.items():

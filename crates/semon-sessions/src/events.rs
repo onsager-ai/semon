@@ -82,7 +82,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
 /// v25: agent messages carry their direction; coordinator messages and unknown origin kinds are indexed; relay tags count only at the start of a prompt.
 /// v26: a subagent's non-final send (`senderTaskId`, no `handback`) is an up agent message flagged [`AGM_PROGRESS`], not a relay; relay tags nested in another relay block are not their own events.
-const CACHE_VERSION: u32 = 26;
+/// v27: rebuild derived billing usage after a pricing-table restoration.
+const CACHE_VERSION: u32 = 27;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1416,7 +1417,9 @@ impl EventCache {
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
-        v1_cache.with_extension("sqlite3")
+        let path = v1_cache.with_extension("sqlite3");
+        crate::pricing::runtime::register_index(path.clone());
+        path
     }
 
     /// The retired JSON event cache, `sessions-index.events.json`: its
@@ -1434,6 +1437,7 @@ impl EventCache {
         let path = Self::path(v1_cache);
         let mut cache = match store::open(&path, &Self::legacy_path(v1_cache)) {
             Ok((store, loaded)) => {
+                crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
                 cache
@@ -2436,9 +2440,20 @@ impl EventCache {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
             && let Some(index) = &entry.index
+            && index
+                .codex_native_usage
+                .as_ref()
+                .and_then(|native| native.cost.as_ref())
+                .is_none_or(|cost| {
+                    cost.pricing_fingerprint == crate::pricing::snapshot().fingerprint
+                })
         {
             return Base::Found(Arc::clone(index));
         }
+        // A pricing-only fingerprint mismatch falls through to the committed
+        // SQLite index below. `load_file` restores retained facts/dimensions;
+        // it does not open the native log body. Ordinary ledger movement still
+        // follows the existing bounded append/rebuild path.
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
         match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),

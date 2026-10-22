@@ -50,10 +50,10 @@ CREATE INDEX IF NOT EXISTS native_usage_migration_queue ON native_usage_migratio
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Payload {
     // Option preserves the existing model consumer's unavailable-model rule.
-    model: Option<String>,
-    timestamp: Option<i64>,
+    pub(super) model: Option<String>,
+    pub(super) timestamp: Option<i64>,
     tokens: Tokens,
-    model_tokens: ModelTokens,
+    pub(super) model_tokens: ModelTokens,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
