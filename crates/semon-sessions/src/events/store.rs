@@ -21,13 +21,7 @@
 //! ```
 
 pub(crate) mod chunk_proofs;
-mod json_migration;
 mod launch_calls;
-use json_migration::import_legacy;
-#[cfg(test)]
-use json_migration::set_aside_legacy;
-#[cfg(test)]
-pub(super) use json_migration::{AFTER_CLAIM, BEFORE_IMPORT, IMPORTS};
 pub(crate) mod native_usage;
 mod relocation;
 mod semantic_stage;
@@ -623,22 +617,20 @@ struct SqliteStore {
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
 
-/// Opens (creating when missing) the store at `path` and reads all of it,
-/// first importing what the retired JSON event cache at `legacy` holds that
-/// the logs can't give back ([`import_legacy`]).
+/// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Any other failure
 /// (a read-only directory, a lock held past the timeout, a store a newer
 /// Semon wrote) is returned for the caller to run in memory.
-pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
-    let (store, loaded) = match SqliteStore::attempt(path, Some(legacy)) {
+pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+    let (store, loaded) = match SqliteStore::attempt(path) {
         Err(Unopened::Corrupt(error)) => {
             set_aside(path).map_err(|aside| format!("{error}; it can't be set aside: {aside}"))?;
             eprintln!(
                 "semon: the session index {} was damaged ({error}); it was set aside and is being rebuilt",
                 path.display()
             );
-            SqliteStore::attempt(path, Some(legacy)).map_err(|error| error.to_string())?
+            SqliteStore::attempt(path).map_err(|error| error.to_string())?
         }
         opened => opened.map_err(|error| error.to_string())?,
     };
@@ -648,12 +640,9 @@ pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, L
 /// Producer open: initialize the durable store without restoring unrelated indexes.
 /// Store failures are returned; a background worker must retry rather than silently
 /// switch to an unbounded in-memory rebuild.
-pub(super) fn open_scoped(
-    path: &Path,
-    legacy: &Path,
-) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
     let (store, loaded) =
-        SqliteStore::attempt_scoped(path, Some(legacy), true).map_err(|error| error.to_string())?;
+        SqliteStore::attempt_scoped(path, true).map_err(|error| error.to_string())?;
     Ok((Box::new(store), loaded))
 }
 
@@ -696,7 +685,7 @@ pub(crate) fn note_catalog_audit(
     now: i64,
 ) -> io::Result<bool> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -721,7 +710,7 @@ pub(crate) fn audit_catalog_sources(
     _runtime: &str,
 ) -> io::Result<Option<String>> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
@@ -862,7 +851,7 @@ pub(crate) fn catalog_dependents(
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let mut found = std::collections::BTreeSet::new();
     let mut statement=store.connection.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
@@ -936,7 +925,7 @@ pub(crate) fn verify_relocation_prefix(
     expected: &str,
 ) -> io::Result<bool> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     if let Some((_, ledger)) =
         ledger_row(&store.connection, &path.to_string_lossy()).map_err(io::Error::other)?
@@ -962,7 +951,7 @@ pub(crate) fn complete_relocation(
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -989,7 +978,7 @@ pub(crate) fn complete_relocation(
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
 pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1034,7 +1023,7 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1052,7 +1041,7 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
 /// the ordinary discovery and drain owners rebuild its derived metadata.
 pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Result<bool> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1069,7 +1058,7 @@ pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Resul
 
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     store
         .connection
@@ -1114,7 +1103,7 @@ pub(crate) fn requeue_concurrent_sources(
         return Ok(());
     }
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1129,7 +1118,7 @@ pub(crate) fn enqueue_sources(
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1173,7 +1162,7 @@ fn enqueue_native_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusqlite:
 }
 pub(crate) fn enqueue_native(options: &crate::Options, harness: &str, id: &str) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1182,7 +1171,7 @@ pub(crate) fn enqueue_native(options: &crate::Options, harness: &str, id: &str) 
 }
 pub(crate) fn enqueue_pid(options: &crate::Options, pid: u32) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1214,7 +1203,7 @@ pub(crate) fn preserve_legacy_runtime(
     let wanted = crate::native_evidence::recorded_runtime_fingerprint(options, after)?;
     let legacy = crate::native_evidence::legacy_runtime_generation(options)?;
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1248,7 +1237,7 @@ pub(crate) fn enqueue_facts(
     push_driven: bool,
 ) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1446,7 +1435,7 @@ pub(crate) fn checkpoint_source_scan(
     ledger: &Ledger,
     physical: &Stat,
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(stem), None, true)
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(stem), true)
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1508,7 +1497,7 @@ pub(crate) fn resume_runtime_input(options: &crate::Options, path: &str) -> io::
         return Ok(());
     }
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1566,7 +1555,7 @@ pub(crate) fn begin_source_write(
     input: &crate::Input,
 ) -> io::Result<(i64, Option<crate::source_change::AppendEvidence>)> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
@@ -1641,7 +1630,7 @@ pub(crate) fn complete_source_write(
     evidence: Option<&crate::source_change::AppendEvidence>,
 ) -> io::Result<()> {
     let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
+        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
             .map_err(|error| io::Error::other(error.to_string()))?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
@@ -1820,7 +1809,7 @@ pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
         ));
     }
     drop(db);
-    let _owner = SqliteStore::attempt_scoped(path, None, true)
+    let _owner = SqliteStore::attempt_scoped(path, true)
         .map_err(|_| io::Error::other("Native focused schema preparation unavailable"))?;
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(io::Error::other)
 }
@@ -1851,14 +1840,14 @@ const O_NONBLOCK: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
     0
 };
 
-/// Opens a JSON cache or claim for reading only if it is a regular file:
+/// Opens a source for reading only if it is a regular file:
 /// never through a symlink, and never waiting on a FIFO. Anything else is
 /// left where it is and reported once; `None` too when it is gone or can't
 /// be opened.
 pub(crate) fn open_regular(path: &Path) -> Option<fs::File> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
-        warn_import(path, &"it isn't a regular file");
+        warn_source_read(path, &"it isn't a regular file");
         return None;
     }
     let mut options = fs::OpenOptions::new();
@@ -1869,31 +1858,28 @@ pub(crate) fn open_regular(path: &Path) -> Option<fs::File> {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
-            warn_import(path, &error);
+            warn_source_read(path, &error);
             return None;
         }
     };
     match file.metadata() {
         Ok(metadata) if metadata.is_file() => Some(file),
         Ok(_) => {
-            warn_import(path, &"it isn't a regular file");
+            warn_source_read(path, &"it isn't a regular file");
             None
         }
         Err(error) => {
-            warn_import(path, &error);
+            warn_source_read(path, &error);
             None
         }
     }
 }
 
-/// Says once per process that the JSON cache's import is waiting.
-fn warn_import(legacy: &Path, error: &dyn fmt::Display) {
+/// Reports a source read failure once per process.
+fn warn_source_read(path: &Path, error: &dyn fmt::Display) {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "semon: {} isn't imported yet ({error}); it is tried again at the next start",
-            legacy.display()
-        );
+        eprintln!("semon: {} cannot be read ({error})", path.display());
     }
 }
 
@@ -3788,15 +3774,11 @@ impl SqliteStore {
         result.map(|outcome| (outcome, published))
     }
 
-    fn attempt(path: &Path, legacy: Option<&Path>) -> Result<(Self, Loaded), Unopened> {
-        Self::attempt_scoped(path, legacy, false)
+    fn attempt(path: &Path) -> Result<(Self, Loaded), Unopened> {
+        Self::attempt_scoped(path, false)
     }
 
-    fn attempt_scoped(
-        path: &Path,
-        legacy: Option<&Path>,
-        scoped: bool,
-    ) -> Result<(Self, Loaded), Unopened> {
+    fn attempt_scoped(path: &Path, scoped: bool) -> Result<(Self, Loaded), Unopened> {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
@@ -3828,13 +3810,6 @@ impl SqliteStore {
                     "a newer version of semon wrote it".to_owned(),
                 ));
             }
-        }
-        // The import never keeps the store from opening: it is tried again
-        // at the next open.
-        if let Some(legacy) = legacy
-            && let Err(error) = import_legacy(&mut connection, legacy)
-        {
-            warn_import(legacy, &error);
         }
         let store = Self {
             connection,
@@ -6349,8 +6324,7 @@ mod tests {
     fn scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history() {
         let root = scratch("scoped-runs");
         let path = root.join("index.sqlite3");
-        let legacy = root.join("index.events.json");
-        let (mut store, _) = SqliteStore::attempt(&path, None)
+        let (mut store, _) = SqliteStore::attempt(&path)
             .map_err(|error| error.to_string())
             .unwrap();
         let mut old = run();
@@ -6373,7 +6347,7 @@ mod tests {
             transaction.commit().unwrap();
         }
         drop(store);
-        let (mut store, loaded) = open_scoped(&path, &legacy).unwrap();
+        let (mut store, loaded) = open_scoped(&path).unwrap();
         assert!(loaded.files.is_empty());
         assert!(loaded.reported_runs.is_empty());
         assert_eq!(loaded.stamp, Some(stamp()));
@@ -6391,52 +6365,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn finishing_the_same_corrupt_claim_keeps_one_archive() {
-        let root = scratch("same-corrupt-claim");
-        let legacy = root.join("index.events.json");
-        let claim = root.join("claim");
-        let aside = sibling(&legacy, ".corrupt");
-        fs::write(&claim, b"damaged cache").unwrap();
-        fs::hard_link(&claim, &aside).unwrap();
-        assert_eq!(
-            set_aside_legacy(&legacy, &claim).unwrap(),
-            Some(aside.clone())
-        );
-        assert!(!claim.exists());
-        assert!(!sibling(&legacy, ".corrupt.1").exists());
-        assert_eq!(fs::read(&aside).unwrap(), b"damaged cache");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn different_corrupt_claims_never_replace_each_other() {
-        let root = scratch("different-corrupt-claims");
-        let legacy = root.join("index.events.json");
-        let claims: Vec<_> = (0..8)
-            .map(|index| {
-                let claim = root.join(format!("claim-{index}"));
-                fs::write(&claim, index.to_string()).unwrap();
-                claim
-            })
-            .collect();
-        let workers: Vec<_> = claims
-            .into_iter()
-            .map(|claim| {
-                let legacy = legacy.clone();
-                std::thread::spawn(move || set_aside_legacy(&legacy, &claim).unwrap().unwrap())
-            })
-            .collect();
-        let contents: BTreeSet<_> = workers
-            .into_iter()
-            .map(|worker| fs::read_to_string(worker.join().unwrap()).unwrap())
-            .collect();
-        assert_eq!(contents, (0..8).map(|index| index.to_string()).collect());
-        fs::remove_dir_all(root).unwrap();
-    }
-
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path, None) {
+        match SqliteStore::attempt(path) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
         }
@@ -8072,7 +8002,7 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = match SqliteStore::attempt_scoped(&path, None, true) {
+                store = match SqliteStore::attempt_scoped(&path, true) {
                     Ok((store, _)) => store,
                     Err(error) => panic!("reopen transfer store: {error}"),
                 };
@@ -8236,7 +8166,7 @@ mod tests {
                 let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
                 // Every EventCache/NativeEvidence owner has already been dropped.
                 fs::copy(&seed, &path).unwrap();
-                match SqliteStore::attempt_scoped(&path, None, true) {
+                match SqliteStore::attempt_scoped(&path, true) {
                     Ok((store, loaded)) => {
                         assert!(loaded.files.is_empty());
                         assert!(loaded.reported_runs.is_empty());
@@ -9154,6 +9084,68 @@ mod tests {
     }
 
     #[test]
+    fn writable_opens_ignore_retired_json_cache_and_interrupted_import_claim() {
+        let root = scratch("ignored-json-cache");
+        let path = root.join("index.sqlite3");
+        let legacy = root.join("index.events.json");
+        let legacy_bytes = legacy_cache_bytes("legacy-cache-only");
+        let mut importing_name = legacy.clone().into_os_string();
+        importing_name.push(".importing.4242.0.0123456789abcdef");
+        let importing = PathBuf::from(importing_name);
+        let importing_bytes = legacy_cache_bytes("legacy-importing-only");
+        fs::write(&legacy, &legacy_bytes).unwrap();
+        fs::write(&importing, &importing_bytes).unwrap();
+
+        let (full, loaded) = open(&path).expect("full writable store opens");
+        assert!(loaded.reported_runs.is_empty());
+        assert!(loaded.stamp.is_none());
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        assert_eq!(fs::read(&importing).unwrap(), importing_bytes);
+        drop(full);
+
+        let (mut scoped, loaded) = open_scoped(&path).expect("scoped writable store opens");
+        assert!(loaded.reported_runs.is_empty());
+        assert!(loaded.stamp.is_none());
+        let selected = BTreeSet::from([
+            "legacy-cache-only".to_owned(),
+            "legacy-importing-only".to_owned(),
+        ]);
+        assert!(scoped.select_reported_runs(&selected).unwrap().is_empty());
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        assert_eq!(fs::read(&importing).unwrap(), importing_bytes);
+
+        drop(scoped);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn legacy_cache_bytes(session_id: &str) -> Vec<u8> {
+        let mut by_start = serde_json::Map::new();
+        by_start.insert(
+            "1000".to_owned(),
+            serde_json::json!({
+                "lastSessionId": session_id,
+                "lastStartTime": 1000,
+                "lastCost": 1.5,
+                "captureAt": 900
+            }),
+        );
+        let mut reported_runs = serde_json::Map::new();
+        reported_runs.insert(session_id.to_owned(), serde_json::Value::Object(by_start));
+        serde_json::to_vec(&serde_json::json!({
+            "version": 9,
+            "files": {},
+            "reported_runs": reported_runs,
+            "claude_json_stamp": {
+                "dev": 1,
+                "ino": 2,
+                "size": 3,
+                "modified_ns": 4
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
     fn only_semons_own_directories_are_tightened() {
         let state = Path::new("/home/u/.local/state/semon");
         let store = |path: &str| Path::new(path).to_owned();
@@ -9797,7 +9789,7 @@ mod tests {
             .unwrap();
         drop(store);
         assert!(matches!(
-            SqliteStore::attempt(&path, None),
+            SqliteStore::attempt(&path),
             Err(Unopened::Other(_))
         ));
         let connection = Connection::open(&path).unwrap();
@@ -9816,7 +9808,7 @@ mod tests {
             .unwrap();
         drop(connection);
         assert!(matches!(
-            SqliteStore::attempt(&path, None),
+            SqliteStore::attempt(&path),
             Err(Unopened::Other(_))
         ));
         fs::remove_dir_all(root).unwrap();
@@ -9868,7 +9860,7 @@ mod summary_tests {
             std::process::id()
         ));
         let (mut store, _) =
-            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+            SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
@@ -9890,7 +9882,7 @@ mod summary_tests {
         );
         drop(store);
         let (store, _) =
-            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+            SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")
