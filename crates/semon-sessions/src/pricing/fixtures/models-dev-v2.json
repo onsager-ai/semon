@@ -1,0 +1,62 @@
+{
+  "anthropic": {
+    "id": "anthropic",
+    "models": {
+      "claude-new": {
+        "id": "claude-new",
+        "cost": {
+          "text": {
+            "input": {
+              "cache": {
+                "write": {
+                  "5m": 3.75,
+                  "1h": 6.0,
+                  "future": 99.0
+                }
+              }
+            }
+          },
+          "tiers": [
+            {
+              "tier": { "type": "context", "size": 272000 },
+              "cost": {
+                "text": {
+                  "input": {
+                    "cache": {
+                      "write": { "5m": 5.5, "1h": 8.0 }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "claude-new-alias": {
+        "id": "claude-new-alias",
+        "cost": {
+          "text": {
+            "input": {
+              "cache": { "write": { "5m": 99.0, "1h": 99.0 } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "openai": {
+    "id": "openai",
+    "models": {
+      "claude-new": {
+        "id": "claude-new",
+        "cost": {
+          "text": {
+            "input": {
+              "cache": { "write": { "5m": 88.0, "1h": 88.0 } }
+            }
+          }
+        }
+      }
+    }
+  }
+}
