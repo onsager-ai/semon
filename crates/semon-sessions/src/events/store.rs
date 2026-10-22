@@ -24,6 +24,7 @@ pub(crate) mod chunk_proofs;
 mod launch_calls;
 pub(crate) mod native_usage;
 mod relocation;
+pub(crate) mod reprice;
 mod semantic_stage;
 pub(crate) mod tree_state;
 
@@ -242,7 +243,7 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-pub(crate) const SCHEMA_VERSION: i64 = 30;
+pub(crate) const SCHEMA_VERSION: i64 = 31;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -503,7 +504,7 @@ DELETE FROM catalog_semantic_paths;
 DELETE FROM catalog_semantic_relations;
 DELETE FROM catalog_semantic_events;
 DELETE FROM catalog_semantic_names;
-DELETE FROM meta WHERE key IN ('catalog_semantic_gc','catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after','catalog_legacy_runtime_anchor','catalog_legacy_runtime_semantics');
+DELETE FROM meta WHERE key IN ('catalog_semantic_gc','catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after');
 UPDATE session_catalog SET lifecycle='retained',metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END;
 UPDATE session_catalog_sources SET lifecycle='retained';
 DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at', 'catalog_completeness', 'catalog_publication_epoch');
@@ -574,6 +575,21 @@ const PUT_EVENT: &str = "INSERT OR REPLACE INTO events (file_id, extra, seq, k, 
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)";
 
+/// Event-local parser metadata kept in the existing `events.y` JSON slot.
+/// The parser version invalidates older rows when this envelope is introduced.
+#[derive(Debug, Deserialize, Serialize)]
+struct EventState {
+    version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    yielded: Option<Box<Yield>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    poll_target: Option<String>,
+    #[serde(default)]
+    result_source: bool,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    native_direct_call: bool,
+}
+
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
 const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
@@ -617,22 +633,20 @@ struct SqliteStore {
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
 
-/// Opens (creating when missing) the store at `path` and reads all of it,
-/// first importing what the retired JSON event cache at `legacy` holds that
-/// the logs can't give back ([`import_legacy`]).
+/// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Any other failure
 /// (a read-only directory, a lock held past the timeout, a store a newer
 /// Semon wrote) is returned for the caller to run in memory.
-pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
-    let (store, loaded) = match SqliteStore::attempt(path, Some(legacy)) {
+pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+    let (store, loaded) = match SqliteStore::attempt(path) {
         Err(Unopened::Corrupt(error)) => {
             set_aside(path).map_err(|aside| format!("{error}; it can't be set aside: {aside}"))?;
             eprintln!(
                 "semon: the session index {} was damaged ({error}); it was set aside and is being rebuilt",
                 path.display()
             );
-            SqliteStore::attempt(path, Some(legacy)).map_err(|error| error.to_string())?
+            SqliteStore::attempt(path).map_err(|error| error.to_string())?
         }
         opened => opened.map_err(|error| error.to_string())?,
     };
@@ -642,12 +656,9 @@ pub(super) fn open(path: &Path, legacy: &Path) -> Result<(Box<dyn IndexStore>, L
 /// Producer open: initialize the durable store without restoring unrelated indexes.
 /// Store failures are returned; a background worker must retry rather than silently
 /// switch to an unbounded in-memory rebuild.
-pub(super) fn open_scoped(
-    path: &Path,
-    legacy: &Path,
-) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
     let (store, loaded) =
-        SqliteStore::attempt_scoped(path, Some(legacy), true).map_err(|error| error.to_string())?;
+        SqliteStore::attempt_scoped(path, true).map_err(|error| error.to_string())?;
     Ok((Box::new(store), loaded))
 }
 
@@ -689,9 +700,8 @@ pub(crate) fn note_catalog_audit(
     expected: Option<&str>,
     now: i64,
 ) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation' AND value=?1) AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage)", [expected], |r| r.get(0)).map_err(io::Error::other)?;
@@ -714,9 +724,8 @@ pub(crate) fn audit_catalog_sources(
     after: Option<&str>,
     _runtime: &str,
 ) -> io::Result<Option<String>> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
@@ -855,9 +864,8 @@ pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut found = std::collections::BTreeSet::new();
     let mut statement=store.connection.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
     let expanded = selectors.iter().flat_map(|(harness, id)| {
@@ -929,9 +937,8 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     if let Some((_, ledger)) =
         ledger_row(&store.connection, &path.to_string_lossy()).map_err(io::Error::other)?
         && ledger.stat == *stat
@@ -955,9 +962,8 @@ pub(crate) fn complete_relocation(
     input: &crate::Input,
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
@@ -982,9 +988,8 @@ pub(crate) fn complete_relocation(
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
 pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let after: Option<String> = tx
@@ -1027,9 +1032,8 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');").map_err(io::Error::other)?;
@@ -1045,9 +1049,8 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
 /// can publish the current version. Published history remains available while
 /// the ordinary discovery and drain owners rebuild its derived metadata.
 pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let unsupported: bool = tx.query_row(
@@ -1062,9 +1065,8 @@ pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Resul
 }
 
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     store
         .connection
         .query_row(
@@ -1107,9 +1109,8 @@ pub(crate) fn requeue_concurrent_sources(
     if paths.is_empty() {
         return Ok(());
     }
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     for path in paths {
@@ -1122,9 +1123,8 @@ pub(crate) fn enqueue_sources(
     options: &crate::Options,
     inputs: &[crate::inputs::Input],
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     for input in inputs {
@@ -1166,18 +1166,16 @@ fn enqueue_native_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusqlite:
     Ok(())
 }
 pub(crate) fn enqueue_native(options: &crate::Options, harness: &str, id: &str) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     enqueue_native_tx(&tx, harness, id).map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
 }
 pub(crate) fn enqueue_pid(options: &crate::Options, pid: u32) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     enqueue_dependency_tx(&tx, "runtime:pid", &pid.to_string()).map_err(io::Error::other)?;
@@ -1196,54 +1194,14 @@ fn enqueue_dependency_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusql
     Ok(())
 }
 
-/// Keep a previously qualified legacy runtime fence usable across a journaled
-/// facts write. Only fingerprints are persisted; no process payload is copied.
-/// Row readers additionally reject pending source/dependency revisions.
-pub(crate) fn preserve_legacy_runtime(
-    options: &crate::Options,
-    before: &crate::Facts,
-    after: &crate::Facts,
-) -> io::Result<()> {
-    let previous = crate::native_evidence::recorded_runtime_fingerprint(options, before)?;
-    let wanted = crate::native_evidence::recorded_runtime_fingerprint(options, after)?;
-    let legacy = crate::native_evidence::legacy_runtime_generation(options)?;
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    let existing: Option<String> = tx
-        .query_row(
-            "SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(io::Error::other)?;
-    if existing.as_deref() != Some(previous.as_str()) {
-        tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor',?1)",
-            [legacy],
-        )
-        .map_err(io::Error::other)?;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
-        [wanted],
-    )
-    .map_err(io::Error::other)?;
-    tx.commit().map_err(io::Error::other)
-}
-
 pub(crate) fn enqueue_facts(
     options: &crate::Options,
     before: &crate::Facts,
     after: &crate::Facts,
     push_driven: bool,
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     let global = before.hostname != after.hostname
@@ -1440,7 +1398,7 @@ pub(crate) fn checkpoint_source_scan(
     ledger: &Ledger,
     physical: &Stat,
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(stem), None, true)
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(stem), true)
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1485,25 +1443,19 @@ fn runtime_input_evidence(
             serde_json::from_str::<crate::source_change::RuntimeInputEvidence>(&text).ok()
         })
         .filter(|evidence| {
-            [
-                &evidence.runtime_before,
-                &evidence.legacy_before,
-                &evidence.unaffected,
-            ]
-            .into_iter()
-            .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            let hash = &evidence.unaffected;
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         }))
 }
 
-/// Resolve a pre-Raw runtime witness under the input's facts fence. This also
-/// runs on replay; a crash cannot lose the pre-mutation legacy qualification.
+/// Replay a PID input's dependency invalidation under its facts fence.
+/// Unrelated process inputs and semantic facts must still match the witness.
 pub(crate) fn resume_runtime_input(options: &crate::Options, path: &str) -> io::Result<()> {
     if options.facts.is_none() {
         return Ok(());
     }
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     resume_runtime_input_tx(&tx, options, path).map_err(io::Error::other)?;
@@ -1534,7 +1486,7 @@ fn resume_runtime_input_tx(
     if unaffected != evidence.unaffected {
         return Ok(());
     }
-    // The new PID identity is dirtied before advancing the compatibility fence.
+    // Dirty the new PID identity before acknowledging the source mutation.
     if let Some(id) = crate::read_regular_at_most(Path::new(path), 65536)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -1542,16 +1494,6 @@ fn resume_runtime_input_tx(
     {
         enqueue_native_tx(tx, "claude", &id)?;
     }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor',?1)",
-        [&evidence.legacy_before],
-    )?;
-    let wanted = crate::native_evidence::recorded_runtime_fingerprint(options, &facts)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
-        [wanted],
-    )?;
     Ok(())
 }
 
@@ -1559,9 +1501,8 @@ pub(crate) fn begin_source_write(
     options: &crate::Options,
     input: &crate::Input,
 ) -> io::Result<(i64, Option<crate::source_change::AppendEvidence>)> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1598,15 +1539,7 @@ pub(crate) fn begin_source_write(
             .as_ref()
             .and_then(|file| crate::read_facts(file).ok())
     {
-        let runtime_before = crate::native_evidence::recorded_runtime_fingerprint(options, &facts)?;
-        let preserved: Option<(String,String)> = tx.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_legacy_runtime_anchor'),(SELECT value FROM meta WHERE key='catalog_legacy_runtime_semantics')",[],|row|Ok((row.get(0)?,row.get(1)?))).ok();
-        let legacy_before = match preserved {
-            Some((anchor, semantics)) if semantics == runtime_before => anchor,
-            _ => crate::native_evidence::legacy_runtime_generation(options)?,
-        };
         let evidence = crate::source_change::RuntimeInputEvidence {
-            runtime_before,
-            legacy_before,
             unaffected: crate::native_evidence::recorded_runtime_fingerprint_excluding(
                 options,
                 &facts,
@@ -1634,9 +1567,8 @@ pub(crate) fn complete_source_write(
     revision: i64,
     evidence: Option<&crate::source_change::AppendEvidence>,
 ) -> io::Result<()> {
-    let (store, _) =
-        SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), None, true)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -1687,7 +1619,7 @@ fn read_append_evidence(
 }
 
 /// Load only the selected native sources in the caller's existing read snapshot.
-/// This never opens a writable store, imports legacy data, walks roots or prunes
+/// This never opens a writable store, walks roots or prunes
 /// source membership. Catalog identities and event ledgers must agree exactly.
 pub(super) fn read_selected(
     connection: &Connection,
@@ -1799,7 +1731,7 @@ pub(super) fn selected_roles_current(
 }
 
 /// Additive storage preparation for already-published focused recipes. This is
-/// the existing schema owner with lazy loading and no legacy-file import. A
+/// the existing schema owner with lazy loading. A
 /// parser change is left to its producer instead of resetting evidence in a read.
 pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -1814,45 +1746,16 @@ pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
         ));
     }
     drop(db);
-    let _owner = SqliteStore::attempt_scoped(path, None, true)
+    let _owner = SqliteStore::attempt_scoped(path, true)
         .map_err(|_| io::Error::other("Native focused schema preparation unavailable"))?;
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(io::Error::other)
 }
 
-/// The `meta` key recording when a retired JSON event cache that couldn't
-/// be read was set aside (epoch ms). A readable one needs no marker: it is
-/// imported whenever it is found, and removed.
-const SET_ASIDE: &str = "legacy_json_set_aside";
-
-/// What the retired JSON event cache (`sessions-index.events.json`) holds
-/// that the logs can't give back: the reported runs `~/.claude.json` has
-/// since overwritten, and the stamp they were last read at. Only these
-/// fields are read; the rest of the file (its version and every file's
-/// index) is skipped as it streams past, and those files are read again
-/// from their logs.
-#[derive(Deserialize)]
-struct Legacy {
-    #[serde(default)]
-    reported_runs: BTreeMap<String, BTreeMap<i64, ReportedRunSnapshot>>,
-    #[serde(default)]
-    claude_json_stamp: Option<ReportedFileStamp>,
-}
-
-/// A test hook: runs once, at a set point of the import.
 #[cfg(test)]
 type Hook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 
 #[cfg(test)]
 thread_local! {
-    /// The JSON caches this thread imported (or set aside), in order.
-    pub(super) static IMPORTS: std::cell::RefCell<Vec<PathBuf>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    /// Runs once, after the JSON cache is parsed and before its import
-    /// takes the write lock.
-    pub(super) static BEFORE_IMPORT: Hook = const { std::cell::RefCell::new(None) };
-    /// Runs once, after the JSON cache is claimed and before the claimed
-    /// file is checked and removed.
-    pub(super) static AFTER_CLAIM: Hook = const { std::cell::RefCell::new(None) };
     static AFTER_TREE_LEDGER: Hook = const { std::cell::RefCell::new(None) };
 }
 
@@ -1861,140 +1764,6 @@ fn hook(slot: &'static std::thread::LocalKey<Hook>) {
     if let Some(hook) = slot.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-}
-
-/// Which file a handle is: dev, inode, size and modified time. A rename
-/// keeps all four; an older semon's save (a new file renamed over the path)
-/// changes the inode.
-type Identity = (u64, u64, u64, Option<std::time::SystemTime>);
-
-fn identity(file: &fs::File) -> io::Result<Identity> {
-    let metadata = file.metadata()?;
-    #[cfg(unix)]
-    let (dev, ino) = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.dev(), metadata.ino())
-    };
-    #[cfg(not(unix))]
-    let (dev, ino) = (0, 0);
-    Ok((dev, ino, metadata.len(), metadata.modified().ok()))
-}
-
-/// A JSON cache read from an open handle: which file it was, and what it
-/// held. An error when it couldn't be read to its end (an I/O error): it is
-/// then left for the next open.
-fn read_legacy(file: &fs::File) -> io::Result<(Identity, Result<Legacy, serde_json::Error>)> {
-    let read_as = identity(file)?;
-    match serde_json::from_reader::<_, Legacy>(io::BufReader::new(file)) {
-        Err(error) if error.is_io() => Err(io::Error::other(error)),
-        parsed => Ok((read_as, parsed)),
-    }
-}
-
-/// Imports the retired JSON event cache whenever it is found, then removes
-/// it.
-///
-/// Its reported runs join the store's with `INSERT OR IGNORE`, so a run the
-/// store holds (captured since, or imported before) keeps its snapshot, and
-/// importing the same file twice, or from two processes at once, changes
-/// nothing. Its stamp is taken only if the store has none. It is imported
-/// again whenever it is present: an older semon still running after the
-/// upgrade rewrites it with runs no process here has seen, and
-/// `~/.claude.json` has since overwritten them.
-///
-/// The file is parsed from its open handle before the write lock is taken,
-/// reading only those two fields as it streams past, and its rows commit
-/// with `synchronous = FULL`, so they are on disk before the file goes.
-///
-/// Removal claims the file first, renaming it to `<name>.importing.<pid>.<n>.<16 hex digits>`,
-/// so no save an older semon makes to the path is ever removed or set aside
-/// unread: the claimed file is removed (or set aside) only if it is the one
-/// that was parsed, and read and imported first if it isn't. A claim left by
-/// a crash is imported and removed at the next open, as is any other
-/// process's claim: every step is idempotent.
-///
-/// A file that isn't that JSON, whatever its version, is renamed aside
-/// (`.corrupt`, then `.corrupt.1`, …; never over an existing file) and
-/// recorded in `meta`. A file that can't be opened or read to its end is
-/// left for the next open.
-fn import_legacy(connection: &mut Connection, legacy: &Path) -> rusqlite::Result<()> {
-    for claimed in claims(legacy) {
-        finish(connection, legacy, &claimed, None)?;
-    }
-    let Some(file) = open_regular(legacy) else {
-        return Ok(());
-    };
-    let (read_as, parsed) = match read_legacy(&file) {
-        Ok(read) => read,
-        Err(error) => {
-            warn_import(legacy, &error);
-            return Ok(());
-        }
-    };
-    // The handle stays open until the claim is checked, so its inode can't
-    // be reused by another file meanwhile.
-    #[cfg(test)]
-    hook(&BEFORE_IMPORT);
-    if let Ok(found) = &parsed {
-        import_rows(connection, legacy, Some(found))?;
-    }
-    let claimed = sibling(legacy, &claim_suffix());
-    match fs::rename(legacy, &claimed) {
-        Ok(()) => {}
-        // Claimed or removed by another process meanwhile: its import is
-        // the same as this one.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            warn_import(legacy, &error);
-            return Ok(());
-        }
-    }
-    #[cfg(test)]
-    hook(&AFTER_CLAIM);
-    let finished = finish(connection, legacy, &claimed, Some((read_as, parsed)));
-    drop(file);
-    finished
-}
-
-/// A claim's suffix, unique to this call: the pid, a counter, and 64
-/// random bits, so no two claims share a name (a rename would replace the
-/// other), whichever processes make them.
-fn claim_suffix() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let claim = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut random = std::collections::hash_map::RandomState::new().build_hasher();
-    random.write_u64(claim);
-    random.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_nanos()),
-    );
-    format!(
-        ".importing.{}.{claim}.{:016x}",
-        std::process::id(),
-        random.finish()
-    )
-}
-
-/// Whether `suffix` (after `<name>`) is a claim's: `.importing.<pid>.<n>.
-/// <16 hex digits>`, exactly as [`claim_suffix`] makes it.
-fn is_claim(suffix: &str) -> bool {
-    let Some(rest) = suffix.strip_prefix(".importing.") else {
-        return false;
-    };
-    fn digits(part: &str) -> bool {
-        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-    }
-    let parts: Vec<&str> = rest.split('.').collect();
-    matches!(
-        parts.as_slice(),
-        [pid, n, random]
-            if digits(pid)
-                && digits(n)
-                && random.len() == 16
-                && random.bytes().all(|byte| byte.is_ascii_hexdigit())
-    )
 }
 
 /// `O_NONBLOCK`, which `std` doesn't name: a FIFO at the path opens at
@@ -2008,14 +1777,14 @@ const O_NONBLOCK: i32 = if cfg!(any(target_os = "macos", target_os = "ios")) {
     0
 };
 
-/// Opens a JSON cache or claim for reading only if it is a regular file:
+/// Opens a source for reading only if it is a regular file:
 /// never through a symlink, and never waiting on a FIFO. Anything else is
 /// left where it is and reported once; `None` too when it is gone or can't
 /// be opened.
 pub(crate) fn open_regular(path: &Path) -> Option<fs::File> {
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
-        warn_import(path, &"it isn't a regular file");
+        warn_source_read(path, &"it isn't a regular file");
         return None;
     }
     let mut options = fs::OpenOptions::new();
@@ -2026,237 +1795,28 @@ pub(crate) fn open_regular(path: &Path) -> Option<fs::File> {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
-            warn_import(path, &error);
+            warn_source_read(path, &error);
             return None;
         }
     };
     match file.metadata() {
         Ok(metadata) if metadata.is_file() => Some(file),
         Ok(_) => {
-            warn_import(path, &"it isn't a regular file");
+            warn_source_read(path, &"it isn't a regular file");
             None
         }
         Err(error) => {
-            warn_import(path, &error);
+            warn_source_read(path, &error);
             None
         }
     }
 }
 
-/// The claims (`<name>.importing.…`) a crash or another process left.
-fn claims(legacy: &Path) -> Vec<PathBuf> {
-    let (Some(dir), Some(name)) = (legacy.parent(), legacy.file_name()) else {
-        return Vec::new();
-    };
-    let dir = if dir.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        dir
-    };
-    let name = name.to_string_lossy();
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .strip_prefix(&*name)
-                        .is_some_and(is_claim)
-                })
-                .map(|entry| entry.path())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Ends the import of a claimed file: removes it when it is the file whose
-/// rows were imported (or sets it aside, when that file was unreadable), and
-/// otherwise reads it and does the same with its own contents.
-fn finish(
-    connection: &mut Connection,
-    legacy: &Path,
-    claimed: &Path,
-    read: Option<(Identity, Result<Legacy, serde_json::Error>)>,
-) -> rusqlite::Result<()> {
-    // Gone (finished by another process), or not a regular file.
-    let Some(file) = open_regular(claimed) else {
-        return Ok(());
-    };
-    let parsed = match (identity(&file), read) {
-        (Ok(now), Some((read_as, parsed))) if now == read_as => parsed,
-        // Not the file that was parsed (or no file was): read this one.
-        _ => match read_legacy(&file) {
-            Ok((_, parsed)) => {
-                if let Ok(found) = &parsed {
-                    import_rows(connection, legacy, Some(found))?;
-                }
-                parsed
-            }
-            Err(error) => {
-                warn_import(legacy, &error);
-                return Ok(());
-            }
-        },
-    };
-    drop(file);
-    match parsed {
-        Ok(Legacy { reported_runs, .. }) => {
-            remove_legacy(claimed);
-            let runs: usize = reported_runs.values().map(BTreeMap::len).sum();
-            eprintln!(
-                "semon: imported {runs} reported runs from {} into the session index, and removed it",
-                legacy.display()
-            );
-        }
-        // Recorded only once it is set aside, so a claim that can't be is
-        // tried again rather than recorded as done.
-        Err(error) => match set_aside_legacy(legacy, claimed) {
-            Ok(Some(aside)) => {
-                import_rows(connection, legacy, None)?;
-                eprintln!(
-                    "semon: {} couldn't be read ({error}); it was set aside as {} and not imported",
-                    legacy.display(),
-                    aside.display()
-                );
-            }
-            // Set aside by another process meanwhile.
-            Ok(None) => {}
-            Err(rename) => warn_import(legacy, &rename),
-        },
-    }
-    Ok(())
-}
-
-/// Moves an unreadable claimed file to the first free name of
-/// `<legacy>.corrupt`, `<legacy>.corrupt.1`, …, never over an existing
-/// file: hard-linked there (a link fails rather than replaces), then
-/// unlinked from its claim. Where the filesystem has no hard links, it is
-/// left intact and an error is returned; a check then rename could overwrite
-/// another process's archive. `None` when the claim is
-/// already gone: another process set it aside.
-fn set_aside_legacy(legacy: &Path, claimed: &Path) -> io::Result<Option<PathBuf>> {
-    for n in 0..1000 {
-        let aside = if n == 0 {
-            sibling(legacy, ".corrupt")
-        } else {
-            sibling(legacy, &format!(".corrupt.{n}"))
-        };
-        {
-            match fs::hard_link(claimed, &aside) {
-                Ok(()) => {
-                    match fs::remove_file(claimed) {
-                        Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                            return Err(error);
-                        }
-                        _ => {}
-                    }
-                    return Ok(Some(aside));
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if let (Ok(source), Ok(target)) =
-                            (fs::symlink_metadata(claimed), fs::symlink_metadata(&aside))
-                            && source.dev() == target.dev()
-                            && source.ino() == target.ino()
-                        {
-                            match fs::remove_file(claimed) {
-                                Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                                    return Err(error);
-                                }
-                                _ => return Ok(Some(aside)),
-                            }
-                        }
-                    }
-                    continue;
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                // No hard links here (EPERM, unsupported): preserve the claim.
-                Err(_) => {}
-            }
-        }
-        // Refuse to rename on filesystems without hard links: rename can
-        // replace another process's archive after a check for existence.
-        // Keep the original claim intact rather than risk losing either file.
-        return Err(io::Error::other(
-            "cannot archive the claim safely: this filesystem has no hard links",
-        ));
-    }
-    Err(io::Error::other("no free .corrupt name"))
-}
-
-/// Writes a parsed JSON cache's runs and stamp in one `BEGIN IMMEDIATE`
-/// transaction with `synchronous = FULL`, or, for one that couldn't be read
-/// (`None`), the record that it is set aside.
-fn import_rows(
-    connection: &mut Connection,
-    legacy: &Path,
-    parsed: Option<&Legacy>,
-) -> rusqlite::Result<()> {
-    connection.pragma_update(None, "synchronous", "FULL")?;
-    let written = write_import(connection, parsed);
-    connection.pragma_update(None, "synchronous", "NORMAL")?;
-    written?;
-    #[cfg(test)]
-    IMPORTS.with(|imports| imports.borrow_mut().push(legacy.to_owned()));
-    #[cfg(not(test))]
-    let _ = legacy;
-    Ok(())
-}
-
-fn write_import(connection: &mut Connection, parsed: Option<&Legacy>) -> rusqlite::Result<()> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    match parsed {
-        Some(Legacy {
-            reported_runs,
-            claude_json_stamp,
-        }) => {
-            let mut put = transaction.prepare(&PUT_RUN.replacen("OR REPLACE", "OR IGNORE", 1))?;
-            for run in reported_runs.values().flat_map(BTreeMap::values) {
-                put_run(&mut put, run)?;
-            }
-            drop(put);
-            if let Some(stamp) = claude_json_stamp {
-                transaction.execute(
-                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('claude_json_stamp', ?1)",
-                    [json(stamp)?],
-                )?;
-            }
-        }
-        None => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_millis())
-                .to_string();
-            transaction.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
-                [SET_ASIDE, now.as_str()],
-            )?;
-        }
-    }
-    transaction.commit()
-}
-
-/// Removes the imported JSON cache; failing that, it is imported again at
-/// the next open.
-fn remove_legacy(legacy: &Path) {
-    match fs::remove_file(legacy) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => warn_import(legacy, &error),
-        _ => {}
-    }
-}
-
-/// Says once per process that the JSON cache's import is waiting.
-fn warn_import(legacy: &Path, error: &dyn fmt::Display) {
+/// Reports a source read failure once per process.
+fn warn_source_read(path: &Path, error: &dyn fmt::Display) {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "semon: {} isn't imported yet ({error}); it is tried again at the next start",
-            legacy.display()
-        );
+        eprintln!("semon: {} cannot be read ({error})", path.display());
     }
 }
 
@@ -4108,6 +3668,7 @@ impl SqliteStore {
             // production publisher has no traversal probes.
             commit_boundary.capture(&transaction);
             transaction.commit().map_err(failure)?;
+            crate::pricing::runtime::notify_reprice();
             commit_boundary.capture(&self.connection);
             #[cfg(test)]
             if let Some(before) = commit_before {
@@ -4151,15 +3712,11 @@ impl SqliteStore {
         result.map(|outcome| (outcome, published))
     }
 
-    fn attempt(path: &Path, legacy: Option<&Path>) -> Result<(Self, Loaded), Unopened> {
-        Self::attempt_scoped(path, legacy, false)
+    fn attempt(path: &Path) -> Result<(Self, Loaded), Unopened> {
+        Self::attempt_scoped(path, false)
     }
 
-    fn attempt_scoped(
-        path: &Path,
-        legacy: Option<&Path>,
-        scoped: bool,
-    ) -> Result<(Self, Loaded), Unopened> {
+    fn attempt_scoped(path: &Path, scoped: bool) -> Result<(Self, Loaded), Unopened> {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
@@ -4191,13 +3748,6 @@ impl SqliteStore {
                     "a newer version of semon wrote it".to_owned(),
                 ));
             }
-        }
-        // The import never keeps the store from opening: it is tried again
-        // at the next open.
-        if let Some(legacy) = legacy
-            && let Err(error) = import_legacy(&mut connection, legacy)
-        {
-            warn_import(legacy, &error);
         }
         let store = Self {
             connection,
@@ -4371,6 +3921,7 @@ impl SqliteStore {
         }
         write_index_changes(&transaction, path, ledger, index, changes, expected)?;
         transaction.commit()?;
+        crate::pricing::runtime::notify_reprice();
         Ok(Outcome::Written)
     }
 
@@ -4699,6 +4250,20 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_usage_sources') WHERE name='usage_ready')",[],|r|r.get::<_,bool>(0))? {
             transaction.execute_batch("ALTER TABLE native_usage_sources ADD COLUMN usage_ready INTEGER NOT NULL DEFAULT 1")?;
         }
+        if !transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='codex_pricing_fingerprint')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? {
+            transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_pricing_fingerprint TEXT")?;
+        }
+        if !transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='pricing_fingerprint')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? {
+            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN pricing_fingerprint TEXT")?;
+        }
         transaction.execute_batch(tree_state::SCHEMA)?;
         // New usage identities are maintained by the installed copy triggers.
         // Only files already present at the additive upgrade need bootstrap.
@@ -4773,6 +4338,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         if schema < 21 {
             transaction.execute_batch("INSERT OR IGNORE INTO meta(key,value) SELECT 'overview_needed:'||c.session_key,'1' FROM session_catalog c LEFT JOIN session_overview o USING(session_key) LEFT JOIN session_trace_headers t USING(session_key) WHERE o.session_key IS NULL OR t.session_key IS NULL;")?;
         }
+        // Pricing indexes reference legacy columns installed above, including
+        // codex_native_usage on schema-1 stores.
+        transaction.execute_batch(reprice::SCHEMA)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
@@ -4784,6 +4352,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         )?;
     }
     transaction.commit()?;
+    crate::pricing::runtime::notify_reprice();
     if wiped {
         // Not fatal: the automatic checkpoint and the size limit follow.
         checkpoint(connection).ok();
@@ -5148,6 +4717,21 @@ fn from_json<T: DeserializeOwned>(column: usize, text: &str) -> rusqlite::Result
     serde_json::from_str(text).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
     })
+}
+
+fn event_state(column: usize, text: &str) -> rusqlite::Result<EventState> {
+    let state: EventState = from_json(column, text)?;
+    if state.version != 1 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported event-state version",
+            )),
+        ));
+    }
+    Ok(state)
 }
 
 /// An enum's serde name (`Kind`, `SignalKind`), so a new variant needs no
@@ -5713,10 +5297,19 @@ fn read_file(
 
 /// One `events` row, selected as [`EVENT_COLUMNS`].
 fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
-    let y = row
+    let state = row
         .get::<_, Option<String>>(12)?
-        .map(|text| from_json::<Yield>(12, &text).map(Box::new))
+        .map(|text| event_state(12, &text))
         .transpose()?;
+    let (y, poll_target, result_source, native_direct_call) = match state {
+        Some(state) => (
+            state.yielded,
+            state.poll_target,
+            state.result_source,
+            state.native_direct_call,
+        ),
+        None => (None, None, false, false),
+    };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
             o: uint(row.get(15)?),
@@ -5746,9 +5339,12 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         id: row.get(6)?,
         n: row.get(7)?,
         code_mode: row.get(8)?,
+        native_direct_call,
         code_mode_open: row.get(9)?,
         parent: row.get::<_, Option<i64>>(10)?.map(seq_of),
         script: row.get(11)?,
+        poll_target,
+        result_source,
         y,
         poll: row.get::<_, Option<i64>>(13)?.map(seq_of),
         r,
@@ -6290,9 +5886,12 @@ fn put_event(
         id,
         n,
         code_mode,
+        native_direct_call,
         code_mode_open,
         parent,
         script,
+        poll_target,
+        result_source,
         y,
         poll,
         r,
@@ -6300,7 +5899,17 @@ fn put_event(
         peer,
         u,
     } = event;
-    let y = y.as_deref().map(json).transpose()?;
+    let y = if y.is_some() || poll_target.is_some() || *result_source || *native_direct_call {
+        Some(json(&EventState {
+            version: 1,
+            yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
+            poll_target: poll_target.as_ref().cloned(),
+            result_source: *result_source,
+            native_direct_call: *native_direct_call,
+        })?)
+    } else {
+        None
+    };
     let (reply, reply_o, reply_b, reply_t, reply_e, reply_f, reply_m) = match r {
         Some(Reply {
             o: reply_o,
@@ -6712,8 +6321,7 @@ mod tests {
     fn scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history() {
         let root = scratch("scoped-runs");
         let path = root.join("index.sqlite3");
-        let legacy = root.join("index.events.json");
-        let (mut store, _) = SqliteStore::attempt(&path, None)
+        let (mut store, _) = SqliteStore::attempt(&path)
             .map_err(|error| error.to_string())
             .unwrap();
         let mut old = run();
@@ -6736,7 +6344,7 @@ mod tests {
             transaction.commit().unwrap();
         }
         drop(store);
-        let (mut store, loaded) = open_scoped(&path, &legacy).unwrap();
+        let (mut store, loaded) = open_scoped(&path).unwrap();
         assert!(loaded.files.is_empty());
         assert!(loaded.reported_runs.is_empty());
         assert_eq!(loaded.stamp, Some(stamp()));
@@ -6754,52 +6362,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn finishing_the_same_corrupt_claim_keeps_one_archive() {
-        let root = scratch("same-corrupt-claim");
-        let legacy = root.join("index.events.json");
-        let claim = root.join("claim");
-        let aside = sibling(&legacy, ".corrupt");
-        fs::write(&claim, b"damaged cache").unwrap();
-        fs::hard_link(&claim, &aside).unwrap();
-        assert_eq!(
-            set_aside_legacy(&legacy, &claim).unwrap(),
-            Some(aside.clone())
-        );
-        assert!(!claim.exists());
-        assert!(!sibling(&legacy, ".corrupt.1").exists());
-        assert_eq!(fs::read(&aside).unwrap(), b"damaged cache");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn different_corrupt_claims_never_replace_each_other() {
-        let root = scratch("different-corrupt-claims");
-        let legacy = root.join("index.events.json");
-        let claims: Vec<_> = (0..8)
-            .map(|index| {
-                let claim = root.join(format!("claim-{index}"));
-                fs::write(&claim, index.to_string()).unwrap();
-                claim
-            })
-            .collect();
-        let workers: Vec<_> = claims
-            .into_iter()
-            .map(|claim| {
-                let legacy = legacy.clone();
-                std::thread::spawn(move || set_aside_legacy(&legacy, &claim).unwrap().unwrap())
-            })
-            .collect();
-        let contents: BTreeSet<_> = workers
-            .into_iter()
-            .map(|worker| fs::read_to_string(worker.join().unwrap()).unwrap())
-            .collect();
-        assert_eq!(contents, (0..8).map(|index| index.to_string()).collect());
-        fs::remove_dir_all(root).unwrap();
-    }
-
     fn opened(path: &Path) -> (SqliteStore, Loaded) {
-        match SqliteStore::attempt(path, None) {
+        match SqliteStore::attempt(path) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
         }
@@ -8435,7 +7999,7 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = match SqliteStore::attempt_scoped(&path, None, true) {
+                store = match SqliteStore::attempt_scoped(&path, true) {
                     Ok((store, _)) => store,
                     Err(error) => panic!("reopen transfer store: {error}"),
                 };
@@ -8599,7 +8163,7 @@ mod tests {
                 let path = seed.with_file_name(format!("traversal-{arm}.sqlite3"));
                 // Every EventCache/NativeEvidence owner has already been dropped.
                 fs::copy(&seed, &path).unwrap();
-                match SqliteStore::attempt_scoped(&path, None, true) {
+                match SqliteStore::attempt_scoped(&path, true) {
                     Ok((store, loaded)) => {
                         assert!(loaded.files.is_empty());
                         assert!(loaded.reported_runs.is_empty());
@@ -9322,8 +8886,11 @@ mod tests {
                     n: Some("Bash".to_owned()),
                     code_mode: true,
                     code_mode_open: true,
+                    native_direct_call: true,
                     parent: Some(7),
                     script: STDIN | SENDS,
+                    poll_target: Some("26789".to_owned()),
+                    result_source: true,
                     y: Some(Box::new(Yield {
                         polls: vec![1, 2, u64::MAX],
                         cut: true,
@@ -10024,7 +9591,17 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE usage DROP COLUMN record_ids;
+                "DROP TRIGGER pricing_pending_file_insert;
+             DROP TRIGGER pricing_pending_file_update;
+             DROP TRIGGER pricing_pending_native_usage_ready;
+             DROP TRIGGER pricing_pending_catalog_insert;
+             DROP TRIGGER pricing_pending_catalog_update;
+             DROP INDEX files_codex_pricing_fingerprint;
+             DROP INDEX session_catalog_pricing_fingerprint;
+             DROP TABLE pricing_recompute_pending;
+             ALTER TABLE files DROP COLUMN codex_pricing_fingerprint;
+             ALTER TABLE session_catalog DROP COLUMN pricing_fingerprint;
+             ALTER TABLE usage DROP COLUMN record_ids;
              ALTER TABLE files DROP COLUMN copilot;
              ALTER TABLE files DROP COLUMN codex_native_usage;
              PRAGMA user_version = 1;
@@ -10160,7 +9737,7 @@ mod tests {
             .unwrap();
         drop(store);
         assert!(matches!(
-            SqliteStore::attempt(&path, None),
+            SqliteStore::attempt(&path),
             Err(Unopened::Other(_))
         ));
         let connection = Connection::open(&path).unwrap();
@@ -10179,7 +9756,7 @@ mod tests {
             .unwrap();
         drop(connection);
         assert!(matches!(
-            SqliteStore::attempt(&path, None),
+            SqliteStore::attempt(&path),
             Err(Unopened::Other(_))
         ));
         fs::remove_dir_all(root).unwrap();
@@ -10230,8 +9807,7 @@ mod summary_tests {
             "semon-summary-rollback-{}.sqlite3",
             std::process::id()
         ));
-        let (mut store, _) =
-            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+        let (mut store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
         let rows = vec![("first".into(), 1, "inputs".into(), "old".into())];
         store.save_session_descriptions(&rows).unwrap();
         store.connection.execute_batch("CREATE TEMP TRIGGER interrupt_summary BEFORE INSERT ON session_descriptions WHEN NEW.session_key = 'second' BEGIN SELECT RAISE(ABORT, 'interrupted'); END;").unwrap();
@@ -10252,8 +9828,7 @@ mod summary_tests {
             None
         );
         drop(store);
-        let (store, _) =
-            SqliteStore::attempt(&path, None).unwrap_or_else(|error| panic!("{error}"));
+        let (store, _) = SqliteStore::attempt(&path).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
                 .session_description("first", 1, "inputs")

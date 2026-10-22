@@ -104,8 +104,7 @@ fn day_start(day: &str) -> Option<i64> {
     Some(crate::days_from_civil(year, month, date) * DAY_MS)
 }
 
-/// What Analytics reads of the model's sessions before the model is trimmed
-/// to its window: every session active since `now - KEEP_MS`, its busy
+/// Native Analytics publication before Query output-window trimming: every session active since `now - KEEP_MS`, its busy
 /// intervals, turns and cost days since then, and its waits on you.
 pub(crate) fn activity(
     sessions: &BTreeMap<String, Session>,
@@ -228,7 +227,7 @@ pub(crate) fn activity(
         }
     }
     // Collected and pushed without knowing their lengths: give back what
-    // the growth left over, since these rows live as long as the model.
+    // the growth left over, before these rows enter compact native publication.
     for row in rows.values_mut() {
         row.busy.shrink_to_fit();
         row.turns.shrink_to_fit();

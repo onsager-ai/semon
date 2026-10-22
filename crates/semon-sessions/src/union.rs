@@ -1577,7 +1577,6 @@ mod tests {
             ("second".into(), second.clone()),
         ]);
         core.set_refresh(Refresh::OnInvalidate);
-        let builds = model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let native_tree = core.respond("GET", "/api/tree", "", None);
         assert_eq!(native_tree.status, 200);
         let native_tree: Value = serde_json::from_slice(&native_tree.body).unwrap();
@@ -1637,7 +1636,6 @@ mod tests {
             core.session_machine_key("shared").unwrap().as_deref(),
             Some("first")
         );
-        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
         renamed.close();
         core.close();
         assert_eq!(core.session_machine_key("replacement").unwrap(), None);

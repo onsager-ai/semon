@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+# Fixture processes use deterministic bundled reference prices.
+env:
+  SEMON_PRICING_REFRESH: "off"
+
 # A newer PR revision supersedes only that PR's earlier Rust run.
 concurrency:
   group: rust-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -65,6 +69,9 @@ jobs:
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
 
+      - name: Verify Model retirement and independent reference provenance
+        run: python3 -m unittest discover -s tests/spikes -p test_model_retirement.py -v
+
       - name: Verify separate native Codex control evidence and provenance
         run: python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
 
@@ -91,6 +98,12 @@ jobs:
       # as published (vendor/tiny_http/SEMON-PATCH.md).
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- --no-deps -D warnings
+
+      - name: Runtime pricing regressions
+        run: |
+          cargo test -p semon-sessions --lib --locked pricing::runtime::tests::
+          cargo test -p semon-sessions --lib --locked events::store::reprice::tests::
+          cargo test -p semon-sessions --lib --locked catalog_statement_journal_batch_probe_preserves_catalog_feed_and_transaction_rollback
 
       - name: Collection pause boundaries before broad regressions
         run: |
@@ -165,3 +178,7 @@ jobs:
         run: |
           cargo clippy -p semon-runtime --all-targets --features e2b-process --locked -- --no-deps -D warnings
           SEMON_TEST_COORDINATOR_SECRET=offline-fixture E2B_API_KEY=offline-fixture SEMON_TEST_NETWORK_GUARD=keep cargo test -p semon-runtime --features e2b-process --locked
+
+  codex-conformance:
+    name: Pinned Codex fixture conformance
+    uses: ./.github/workflows/codex-conformance.yml
