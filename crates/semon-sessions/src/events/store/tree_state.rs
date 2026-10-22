@@ -18,10 +18,8 @@ CREATE TABLE IF NOT EXISTS native_tree_codex_work (
  PRIMARY KEY(projection_id,identity)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_headers (
- source_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL, projection_id INTEGER NOT NULL, ledger TEXT NOT NULL,
- copies_ready INTEGER NOT NULL, copy_message TEXT NOT NULL DEFAULT '',copy_uuid TEXT NOT NULL DEFAULT '',copy_attempt INTEGER NOT NULL DEFAULT 0
+ source_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL, projection_id INTEGER NOT NULL, ledger TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_copy_queue ON native_tree_headers(copies_ready,copy_attempt,source_path);
 CREATE TABLE IF NOT EXISTS native_tree_models (
  projection_id INTEGER NOT NULL,model TEXT NOT NULL,PRIMARY KEY(projection_id,model)
 ) STRICT, WITHOUT ROWID;
@@ -78,7 +76,7 @@ type SharedUsage = (
 impl Snapshot {
     fn with<T>(
         &self,
-        read: impl FnOnce(&Connection, i64, i64, bool) -> rusqlite::Result<T>,
+        read: impl FnOnce(&Connection, i64, i64) -> rusqlite::Result<T>,
     ) -> io::Result<T> {
         let c = Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(io::Error::other)?;
@@ -92,23 +90,23 @@ impl Snapshot {
         {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let actual: (i64, String, bool, i64) = tx
+        let actual: (i64, String, i64) = tx
             .query_row(
-                "SELECT file_id,ledger,copies_ready,projection_id FROM native_tree_headers WHERE source_path=?1",
+                "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE source_path=?1",
                 [&self.path],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .map_err(io::Error::other)?;
         if actual.0 != self.file_id
             || actual.1 != header_ledger(&self.ledger)
-            || actual.3 != self.projection_id
+            || actual.2 != self.projection_id
         {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        read(&tx, self.file_id, self.projection_id, actual.2).map_err(io::Error::other)
+        read(&tx, self.file_id, self.projection_id).map_err(io::Error::other)
     }
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
-        self.with(|c, _, projection_id, _| {
+        self.with(|c, _, projection_id| {
             c.query_row(
                 "SELECT name FROM native_tree_tools WHERE projection_id=?1 AND tool_id=?2",
                 params![projection_id, id],
@@ -119,8 +117,8 @@ impl Snapshot {
         })
     }
     pub(crate) fn shared_usage(&self) -> io::Result<SharedUsage> {
-        self.with(|c,id,projection_id,ready|{
-            let sql = if ready {"SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid"} else {"SELECT i.message_id,i.record_uuid FROM usage_identity i WHERE i.file_id=?1 AND EXISTS(SELECT 1 FROM usage_identity p WHERE p.message_id=i.message_id AND p.record_uuid=i.record_uuid AND p.file_id<>i.file_id) ORDER BY i.message_id,i.record_uuid"};
+        self.with(|c,id,projection_id|{
+            let sql = "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid";
             let mut statement = c.prepare(sql)?;
             let mut rows = statement.query([id])?;
             let mut records = crate::claude_usage::Records::new();
@@ -146,7 +144,6 @@ pub(super) fn write(
     let id: i64 = tx.query_row("SELECT file_id FROM files WHERE path=?1", [path], |r| {
         r.get(0)
     })?;
-    let ready = copies_ready(tx, id)?;
     let source_id = native_usage::source(tx, path)?
         .ok_or(rusqlite::Error::InvalidQuery)?
         .0;
@@ -155,7 +152,7 @@ pub(super) fn write(
         Some(id) => id,
         None => new_generation(tx, source_id, ledger)?,
     };
-    tx.execute("INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger,copies_ready) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger),ready])?;
+    tx.execute("INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger)])?;
     write_values(tx, projection_id, summary)?;
     tx.execute(
         "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1",
@@ -185,17 +182,12 @@ pub(super) fn bind_generation(
     let id: i64 = tx.query_row("SELECT file_id FROM files WHERE path=?1", [path], |r| {
         r.get(0)
     })?;
-    let ready = copies_ready(tx, id)?;
     tx.execute(
         "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1",
         params![projection_id, header_ledger(ledger)],
     )?;
-    tx.execute("INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger,copies_ready) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger),ready])?;
+    tx.execute("INSERT INTO native_tree_headers(source_path,file_id,projection_id,ledger) VALUES(?1,?2,?3,?4) ON CONFLICT(source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger)])?;
     Ok(())
-}
-
-fn copies_ready(c: &Connection, id: i64) -> rusqlite::Result<bool> {
-    c.query_row("SELECT ?1>COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='native_tree_legacy_max_file'),0) OR NOT EXISTS(SELECT 1 FROM usage_identity WHERE file_id=?1)",[id],|r|r.get(0))
 }
 
 pub(super) fn write_values(
@@ -300,41 +292,6 @@ pub(super) fn restore(
 
 pub(super) fn ready(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
     c.query_row("SELECT EXISTS(SELECT 1 FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current c ON c.source_path=h.source_path AND c.source_id=g.source_id JOIN meta m ON m.key='native_tree_summary:'||h.source_path WHERE h.source_path=?1 AND h.ledger=?2 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger AND CASE WHEN octet_length(m.value)<=1048576 AND json_valid(m.value) THEN json_extract(m.value,'$.version')=3 ELSE 0 END)",params![path,header_ledger(ledger)],|r|r.get(0))
-}
-
-pub(super) fn advance_copies(c: &mut Connection) -> rusqlite::Result<bool> {
-    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if !current(&tx)? {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let selected:Option<(String,i64,String,String)> = tx.query_row("SELECT source_path,file_id,copy_message,copy_uuid FROM native_tree_headers WHERE copies_ready=0 ORDER BY copy_attempt,source_path LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    if let Some((path, id, message, uuid)) = selected {
-        let identities=tx.prepare("SELECT message_id,record_uuid FROM usage_identity WHERE file_id=?1 AND (message_id,record_uuid)>(?2,?3) ORDER BY message_id,record_uuid LIMIT 512")?.query_map(params![id,message,uuid],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
-        for (message, uuid) in &identities {
-            tx.execute("INSERT INTO native_tree_copied_identities SELECT file_id,message_id,record_uuid FROM usage_identity WHERE file_id=?1 AND message_id=?2 AND record_uuid=?3 AND EXISTS(SELECT 1 FROM usage_identity p WHERE p.message_id=?2 AND p.record_uuid=?3 AND p.file_id<>?1) ON CONFLICT DO NOTHING",params![id,message,uuid])?;
-        }
-        if let Some((message, uuid)) = identities.last() {
-            tx.execute(
-                "UPDATE native_tree_headers SET copy_message=?2,copy_uuid=?3 WHERE source_path=?1",
-                params![path, message, uuid],
-            )?;
-        }
-        if identities.len() < 512 {
-            tx.execute(
-                "UPDATE native_tree_headers SET copies_ready=1 WHERE source_path=?1",
-                [&path],
-            )?;
-        }
-        tx.execute("INSERT INTO meta VALUES('native_tree_copy_clock','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[])?;
-        tx.execute("UPDATE native_tree_headers SET copy_attempt=CAST((SELECT value FROM meta WHERE key='native_tree_copy_clock') AS INTEGER) WHERE source_path=?1",[path])?;
-    }
-    let pending = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM native_tree_headers WHERE copies_ready=0)",
-        [],
-        |r| r.get(0),
-    )?;
-    tx.commit()?;
-    Ok(pending)
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {

@@ -192,3 +192,26 @@ states the aggregate maximum explicitly. A source read failure fails the union;
 it never becomes an empty source or a complete partial success. Capacity and
 source-unavailable responses remain distinct. The hosted adapter adds bounded
 request admission, a deadline and the existing Catalog publication coordinator.
+
+## Current Semon storage contract
+
+The Event Index initializes schema 32 with parser/cache version 28 in one
+transaction, including pricing fingerprints and native usage readiness default
+0. It does not upgrade previous Semon schemas or reset a parser mismatch.
+A nonempty schema zero, absent/malformed version metadata, older/newer schema,
+parser mismatch, incompatible publication/search metadata or archived marker
+version is refused before WAL, schema, reset or recovery writes. Ordinary cache
+opens propagate unsupported-state errors instead of presenting empty in-memory
+history. Focused readers never initialize or upgrade storage.
+
+Current native usage writes persist the normalized source facts and dimensions
+with the ledger. Tree writes maintain copied-usage identities through the current
+insert/delete triggers; there is no old-file discovery or copied-identity
+backfill. A missing/corrupt current tree projection may still be repaired in
+receipt-bound slices from authorized, verified source ranges. This repair never
+converts legacy usage accumulators. Unavailable sources/proofs leave repair
+blocked without discarding original facts or archive custody. Upstream harness
+log formats remain supported product inputs.
+
+The [compatibility inventory](prerelease-compatibility-cleanup.md) records the
+removed Semon-only paths and retained current guards.
