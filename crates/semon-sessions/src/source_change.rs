@@ -25,13 +25,11 @@ impl AppendEvidence {
     }
 }
 
-// Content-free upgrade evidence for one receiver-owned PID input mutation.
+// Content-free evidence for one receiver-owned PID input mutation.
 // Other process inputs and semantic facts must remain exactly the same.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeInputEvidence {
-    pub(crate) runtime_before: String,
-    pub(crate) legacy_before: String,
     pub(crate) unaffected: String,
 }
 
@@ -248,7 +246,6 @@ impl SessionFactsWrite {
             .and_then(|path| crate::read_facts(path).ok())
             .unwrap_or_default();
         crate::events::store::enqueue_facts(options, &before, wanted, push_driven)?;
-        crate::events::store::preserve_legacy_runtime(options, &before, wanted)?;
         Ok(Self {
             options: options.clone(),
             before,
