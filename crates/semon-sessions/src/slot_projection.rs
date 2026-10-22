@@ -442,8 +442,9 @@ impl SavedSlot {
         let field = slot.file.as_ref().and_then(|file| {
             if let Some(history) = history
                 && history.index(&file.path).is_some()
+                && let Some(field) = history.field(&file.path, slot.offset, slot.block)
             {
-                return history.field(&file.path, slot.offset, slot.block);
+                return Some(field);
             }
             let (field, record) =
                 crate::native_field::capture_with_record(slot.offset, slot.block, &recipe, |at| {

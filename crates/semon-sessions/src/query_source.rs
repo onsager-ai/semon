@@ -116,7 +116,7 @@ impl Sources {
                     let c = crate::events::store::focused_connection(&cache_path)?;
                     c.busy_timeout(std::time::Duration::from_millis(100))
                         .map_err(io::Error::other)?;
-                    db = Some(Arc::new(Mutex::new(c)));
+                    db = Some(crate::events::store::chunk_proofs::Snapshot::new(c));
                 }
                 let ledger = Ledger {
                     stat: Stat {
@@ -218,6 +218,7 @@ impl Sources {
         Ok(captured)
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_focused(
         options: &Options,
         sources: &[CatalogSource],
@@ -236,7 +237,26 @@ impl Sources {
             .map_err(|error| {
                 crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
             })?;
-        let db = Arc::new(Mutex::new(db));
+        Self::capture_focused_snapshot(options, sources, db)
+    }
+
+    /// Take ownership of the connection which selected the Catalog recipes.
+    /// Its open read transaction pins even proof generations collected between
+    /// selection and the first lazy proof read.
+    pub(crate) fn capture_focused_snapshot(
+        options: &Options,
+        sources: &[CatalogSource],
+        db: rusqlite::Connection,
+    ) -> io::Result<Self> {
+        if sources.len() > 64 {
+            return Err(unavailable());
+        }
+        let cache_path = crate::events::EventCache::path(&options.cache);
+        let db = crate::events::store::chunk_proofs::Snapshot::new(db);
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_FOCUSED_CAPTURE.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         let proofs = sources
             .iter()
             .map(|source| {
@@ -304,6 +324,11 @@ impl Sources {
             failure_stage: Mutex::new(None),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_FOCUSED_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The verification cache belongs to one read, never the shared query cohort.
