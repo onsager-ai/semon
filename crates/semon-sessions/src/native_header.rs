@@ -349,7 +349,7 @@ mod tests {
             !crate::source_event_index_retained(&home.options, &proof, &ready).unwrap(),
             "even decodable header changes require another verified marker"
         );
-        // Earlier markers are refused without changing their original custody.
+        // Focused retention refuses earlier markers without changing custody.
         marker["version"] = json!(1);
         marker
             .as_object_mut()
@@ -378,12 +378,8 @@ mod tests {
             .unwrap();
         fs::remove_file(&home.path).unwrap();
         let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
-        assert!(crate::events::EventCache::open_scoped(&home.options.cache).is_err());
-        assert!(
-            Query::new(home.options.clone())
-                .call_at("list_sessions", &json!({}), NOW)
-                .is_err()
-        );
+        // Normal producers (including Query) now rebuild obsolete indexes;
+        // exercise only the focused read/retention boundary before that reset.
         assert_eq!(
             crate::source_event_index_retained(&home.options, &proof, &ready),
             Err(crate::CatalogIdentityError::Unavailable)
