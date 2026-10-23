@@ -55,7 +55,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         records.push(codex_line(
             ts(5, 2),
             "event_msg",
-            json!({"type":"token_count","info":null,"rate_limits":null}),
+            json!({"type":"context_compacted"}),
         ));
     }
     let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
