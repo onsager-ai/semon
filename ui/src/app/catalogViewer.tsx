@@ -863,7 +863,7 @@ export function createCatalogViewer(
     history.pushState(null, '', url);
     fromLocation();
   }
-  function leaveScreen() {
+  function leaveScreen(keepOverview = false) {
     if (navigation.route.v === 'host') {
       hostScroll.delete(navigation.route.id);
       hostScroll.set(navigation.route.id, {
@@ -890,9 +890,11 @@ export function createCatalogViewer(
       // survive a destination change.
       closeSessionComposer(active.root);
     }
-    overview.leave();
-    for (const request of overviewRequests) request.abort();
-    overviewRequests.clear();
+    if (!keepOverview) {
+      overview.leave();
+      for (const request of overviewRequests) request.abort();
+      overviewRequests.clear();
+    }
     ++listEpoch;
     updating = false;
     scope.clearTimeout(listRetry);
@@ -2592,7 +2594,7 @@ export function createCatalogViewer(
     if (active) active.scroll = scroll;
     else if (!sourcesOpen) listScroll = scroll;
   }
-  function goList(push = true) {
+  function goList(push = true, keepOverview = false) {
     if (push && active && new URLSearchParams(location.search).get('all_machines') === '1') {
       const p = browsingParams();
       p.delete('machine');
@@ -2601,7 +2603,7 @@ export function createCatalogViewer(
       fromLocation();
       return;
     }
-    leaveScreen();
+    leaveScreen(keepOverview);
     navigation.route = { v: 'sessions' };
     if (push) history.pushState(navigation.route, '', '/sessions?' + browsingParams());
     root.replaceChildren();
@@ -4056,7 +4058,7 @@ export function createCatalogViewer(
         sourceItems.length === 1 &&
         new URLSearchParams(location.search).get('choose_source') !== '1'
       )
-        await switchSource(sourceItems[0].source_key, false);
+        await switchSource(sourceItems[0].source_key, false, true);
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
@@ -4108,10 +4110,17 @@ export function createCatalogViewer(
     drawSources();
     if (!sourceItems.length) await loadSources(false);
   }
-  async function switchSource(key: string, push = true) {
+  async function switchSource(key: string, push = true, fromChooser = push) {
     if (disposed) return;
     const epoch = ++sourcesEpoch,
-      requestedURL = location.href;
+      requestedURL = location.href,
+      // Discovery and chooser clicks already started workspace metadata. Direct
+      // scoped entry has not, and must perform fromLocation's normal refresh.
+      keepOverview =
+        fromChooser &&
+        sourcesOpen &&
+        navigation.route.v === 'sessions' &&
+        (location.pathname === '/' || location.pathname === '/sessions');
     sourcesUpdating = true;
     sourcesNote = '';
     drawSources();
@@ -4152,13 +4161,21 @@ export function createCatalogViewer(
       sourcesOpen = false;
       active = null;
       const bookmark = location.pathname.startsWith('/s/') ? location.pathname.split('/')[3] : null;
+      if (!push) {
+        // The current URL owns this transition. Re-enter it once, rather than
+        // admitting a list before and after fromLocation's own goList call.
+        fromLocation(keepOverview);
+        chrome();
+        if (!sourcesOpen && !updating) void loadList(false);
+        return;
+      }
       if (push && bookmark) {
         await goSession(decodeURIComponent(bookmark), undefined, true);
         chrome();
         return;
       }
       if (push && retained?.selectedKey) await goSession(retained.selectedKey, undefined, false);
-      else goList(false);
+      else goList(false, keepOverview);
       const url = retained?.selectedKey
         ? '/s/' +
           encodeURIComponent(
@@ -4167,10 +4184,9 @@ export function createCatalogViewer(
           '/' +
           encodeURIComponent(retained.selectedKey)
         : '/sessions';
-      if (push) history.pushState(navigation.route, '', url + '?' + browsingParams());
-      else fromLocation();
+      history.pushState(navigation.route, '', url + '?' + browsingParams());
       chrome();
-      void loadList(false);
+      if (!updating) void loadList(false);
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
@@ -4194,7 +4210,7 @@ export function createCatalogViewer(
                 sourceItems.length === 1 &&
                 sourceItems[0].source_key === key))
           )
-            void switchSource(key, false);
+            void switchSource(key, false, keepOverview);
         }, 1000);
     } finally {
       if (!disposed && epoch === sourcesEpoch) {
@@ -4283,7 +4299,7 @@ export function createCatalogViewer(
       locating = false;
     }
   }
-  function fromLocation() {
+  function fromLocation(keepOverview = false) {
     const url = new URL(location.href);
     if (viewerHost?.pages?.match(url)) {
       void showHostPage(url);
@@ -4395,8 +4411,8 @@ export function createCatalogViewer(
       shell.closeDrawer(true);
       overview.draw();
       void overview.refresh(true);
-    } else goList(false);
-    if (!machineBookmark) void overview.refresh();
+    } else goList(false, keepOverview);
+    if (!machineBookmark && !keepOverview) void overview.refresh();
   }
   scope.listen(window, 'popstate', () => {
     if (overlayBackPending) {
