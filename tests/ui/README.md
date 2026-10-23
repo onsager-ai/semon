@@ -158,6 +158,21 @@ its completion witness is the native-publication success message in the CI log.
   `acceptance-image-table-ea77` image inspection and the Manager decision, with
   no human appearance approval claimed. The one-off audit remains in Git history
   and its CI artifact; final-head CI and acceptance remain required.
+- The combined Source #448/main `c589a9d8` review uses
+  [run 39948275965 visual captures](https://github.com/onsager-ai/semon/actions/runs/39948275965/artifacts/12500060720)
+  and its [transport captures](https://github.com/onsager-ai/semon/actions/runs/39948275965/artifacts/12499047700).
+  The 161 exact states retain 62 preservation, 93 main and six two-machine raw
+  differences; pushed parity has none. Of 966 image/evidence digests, 965 match
+  the prior Source 158-state and main three-menu reviews. The sole changed
+  two-machine reference PNG and current family triplets, including all three
+  Last-turn menus, were inspected. The same settled root/navigation and prior
+  notice/menu decisions apply; all original approval history, references,
+  thresholds and required coverage remain. The first interaction attempt had
+  one pending-observation retry timeout (143/144); one unchanged-SHA diagnostic
+  rerun passed 144/144 and the complete interaction lane. Its cause remains
+  unproven. Final delivered-head CI must pass 144/144 on its first attempt, with
+  no rerun allowance, followed by fresh independent acceptance. This capture
+  record does not claim that the delivered revision has already passed CI.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
@@ -246,6 +261,6 @@ remain required.
 The interaction lane also runs `ui/tests/catalog-served.mjs` and
 `ui/tests/overview-served.mjs` against the compiled producer and embedded bundle
 at 390px, 820px and 1280px in both themes. They check bounded ranges, native bytes,
-keyboard paging, focus, Home/Analytics, causal navigation and paused-control
+keyboard paging, focus, root Sessions/Analytics, causal navigation and paused-control
 refusal, and save actual served screenshots for review. New screenshots do not
 replace approved visual references.
