@@ -1,5 +1,7 @@
 # Native session source readers
 
+Public addresses use [session identity and URLs](session-identity-and-urls.md).
+
 `SessionSourceReader` is a provider-neutral per-request callback for native
 source ranges. It supplements the logical `SessionSourceRef` identities emitted
 by the focused catalog. It provides no authorization grant or raw HTTP route.

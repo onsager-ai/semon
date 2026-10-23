@@ -286,6 +286,23 @@ pub struct ViewerReply {
 }
 
 impl ViewerReply {
+    /// Redirects carry their same-origin canonical target as their plain body.
+    /// HTTP adapters must forward it as Location, including for no-JS clients.
+    pub fn redirect(location: String) -> Self {
+        Self {
+            status: 308,
+            content_type: "text/plain; charset=utf-8",
+            body: location.into_bytes(),
+            etag: None,
+        }
+    }
+
+    pub fn redirect_location(&self) -> Option<&str> {
+        (self.status == 308)
+            .then(|| std::str::from_utf8(&self.body).ok())
+            .flatten()
+    }
+
     /// The headers to send with this reply besides `Content-Type` and
     /// `ETag`: [`SECURITY_HEADERS`], except for an attachment's image (a 200
     /// whose type is one of the four native selected image types,
@@ -464,7 +481,11 @@ fn header(name: &str, value: &str) -> Header {
 
 fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
     let headers = reply.headers();
+    let location = reply.redirect_location().map(str::to_owned);
     let mut response = Response::from_data(reply.body).with_status_code(StatusCode(reply.status));
+    if let Some(location) = location {
+        response.add_header(header("Location", &location));
+    }
     if let Some(etag) = reply.etag.as_deref() {
         response.add_header(header("ETag", etag));
     }

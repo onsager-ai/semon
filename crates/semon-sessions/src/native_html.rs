@@ -24,10 +24,24 @@ pub fn query(pairs: &[(&str, &str)]) -> String {
 }
 
 pub fn link(path: &str, pairs: &[(&str, &str)], label: &str) -> String {
+    let pairs: Vec<_> = pairs
+        .iter()
+        .copied()
+        .filter(|(name, _)| !path.starts_with("/session/") || *name != "machine")
+        .collect();
+    let suffix = if pairs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}{}",
+            if path.contains('?') { "&" } else { "?" },
+            query(&pairs)
+        )
+    };
     format!(
-        "<a href=\"{}?{}\">{}</a>",
+        "<a href=\"{}{}\">{}</a>",
         crate::shell::escape(path),
-        crate::shell::escape(&query(pairs)),
+        crate::shell::escape(&suffix),
         crate::shell::escape(label)
     )
 }
@@ -72,14 +86,14 @@ pub fn machine_overview(body: &mut String, value: &Value, key: &str) -> bool {
 pub fn overview_sessions(body: &mut String, rows: &Value) {
     body.push_str("<ul>");
     for row in rows.as_array().into_iter().flatten() {
-        let (Some(machine), Some(key), Some(harness)) = (
+        let (Some(machine), Some(key), Some(_harness)) = (
             row["source_key"].as_str(),
             row["catalog_key"].as_str(),
             row["session"]["harness"].as_str(),
         ) else {
             continue;
         };
-        let path = format!("/s/{}/{}", path_segment(harness), path_segment(key));
+        let path = crate::session_route::session_path(machine, key);
         body.push_str(&format!(
             "<li>{} <span>{}</span></li>",
             link(
@@ -104,11 +118,11 @@ fn render_family(body: &mut String, session: &Value, machine: &str) {
     }
     body.push_str("<details class=\"sh-disclosure\"><summary>Related sessions</summary><ul>");
     for relative in relatives {
-        let (Some(key), Some(harness)) = (relative["key"].as_str(), relative["harness"].as_str())
+        let (Some(key), Some(_harness)) = (relative["key"].as_str(), relative["harness"].as_str())
         else {
             continue;
         };
-        let path = format!("/s/{}/{}", path_segment(harness), path_segment(key));
+        let path = crate::session_route::session_path(machine, key);
         body.push_str(&format!(
             "<li>{}</li>",
             link(
@@ -143,18 +157,13 @@ fn render_handoff(body: &mut String, entry: &Value, context: &Value, machine: &s
         };
         let session = &context["sessions"][key];
         let destination = match session["harness"].as_str() {
-            Some(harness) => {
+            Some(_harness) => {
                 let path = if field == "to"
                     && let Some(turn) = edge["target_turn"].as_str()
                 {
-                    format!(
-                        "/trace/{}/{}/{}",
-                        path_segment(harness),
-                        path_segment(key),
-                        path_segment(turn)
-                    )
+                    crate::session_route::trace_path(machine, key, turn)
                 } else {
-                    format!("/s/{}/{}", path_segment(harness), path_segment(key))
+                    crate::session_route::session_path(machine, key)
                 };
                 link(
                     &path,
@@ -178,7 +187,7 @@ fn render_handoff(body: &mut String, entry: &Value, context: &Value, machine: &s
 
 /// Render an already authorized selected Transcript or Entry reply. Generation
 /// anchors, attachment URLs, collapsed Thinking and tool expansions stay shared.
-pub fn transcript(value: &Value, route: &str, machine: &str, harness: &str, key: &str) -> String {
+pub fn transcript(value: &Value, route: &str, machine: &str, _harness: &str, key: &str) -> String {
     let mut body = String::new();
     body.push_str(&format!(
         "<h1>{}</h1>",
@@ -340,7 +349,7 @@ pub fn transcript(value: &Value, route: &str, machine: &str, harness: &str, key:
     }
     body.push_str("</section><nav aria-label=\"Transcript pages\">");
     let first = value["range"]["first"].as_u64().unwrap_or(0);
-    let path = format!("/s/{}/{}", path_segment(harness), path_segment(key));
+    let path = crate::session_route::session_path(machine, key);
     if first > 0 {
         body.push_str(&link(
             &path,
@@ -394,9 +403,7 @@ mod tests {
             "source&key",
         );
         assert!(
-            body.contains(
-                "/trace/claude/session%2Fkey/turn%2Bone?machine=source%26key&amp;native=1"
-            ),
+            body.contains("/session/source%26key/session%2Fkey/trace/turn%2Bone?native=1"),
             "{body}"
         );
         assert!(body.contains("&lt;script&gt;name&lt;/script&gt;"), "{body}");

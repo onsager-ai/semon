@@ -60,6 +60,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
+      - name: Session URL shared vectors (ordinary PR gate)
+        run: cargo test --locked -p semon-sessions session_route_shared_vectors -- --nocapture
+
       - name: cargo fmt --check
         run: cargo fmt --all --check
 

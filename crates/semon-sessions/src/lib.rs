@@ -77,6 +77,7 @@ mod native_page;
 mod native_record;
 mod native_sidecar;
 mod native_tree;
+pub mod session_route;
 use native_tree::Summary;
 mod read_capabilities;
 mod source_change;
