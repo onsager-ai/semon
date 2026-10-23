@@ -48,7 +48,7 @@ export default async function sidebarFocus(browser) {
     home.observations = [];
     await page.route('**/api/viewer/home**', (route) => route.fulfill({ json: home }));
     await page.reload();
-    await page.waitForFunction(() => history.state?.v === 'home');
+    await page.waitForFunction(() => history.state?.v === 'sessions');
     const item = page.getByRole('treeitem', { name: 'Focus parent', exact: true });
     await item.locator('.tree-all').first().click();
     await item

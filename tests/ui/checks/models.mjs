@@ -10,7 +10,7 @@ export default async function models(browser) {
   for (const size of ['phone', 'desktop']) {
     const page = await served(browser, { size });
     try {
-      await page.waitForFunction(() => history.state?.v === 'home');
+      await page.waitForFunction(() => history.state?.v === 'sessions');
       const actual = await (
         await page.request.get(ENV.base + '/api/viewer/analytics?range=7d')
       ).json();

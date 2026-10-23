@@ -402,7 +402,7 @@ for (const width of [390, 1280])
                 panelBody = document.querySelector('dialog .panel-b');
               }
               if (mode === 'host') {
-                document.querySelector('#nav [data-go="home"]').click();
+                document.querySelector('#nav [data-go="analytics"]').click();
                 await settle();
                 assert(
                   document.querySelector('#nav [data-go="machines"]').getAttribute('href') ===
@@ -427,7 +427,7 @@ for (const width of [390, 1280])
               await settle();
               assert(requests === before, 'disposed refresh listener polled');
             }
-            history.replaceState(null, '', '/');
+            history.replaceState(null, '', '/machines/' + encodeURIComponent(model.machines[0].key));
             pendingObservation = true;
             const retrying = Application.mountViewerApplication(host());
             await ready();

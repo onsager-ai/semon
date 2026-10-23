@@ -463,7 +463,7 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
       [...document.querySelectorAll('#page button.more')].map((b) => b.textContent),
     );
     const nav = async (route) => {
-      if (route.v === 'home')
+      if (route.v === 'sessions')
         await page.evaluate(() => {
           history.pushState(null, '', '/');
           dispatchEvent(new PopStateEvent('popstate'));
@@ -474,8 +474,8 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
         await page.locator('.session-list .nrow[data-id="faults"]').click();
       }
     };
-    await nav({ v: 'home' });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
+    await nav({ v: 'sessions' });
+    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Sessions');
     await nav({ v: 'session', id: 'faults' });
     await page.waitForFunction(
       () =>

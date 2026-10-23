@@ -13,17 +13,15 @@
 //
 // Assertions:
 //  - no page errors, light or dark.
-//  - zero overflow screens on every screen visited (home, machines, every session, every trace).
+//  - zero overflow screens on every screen visited (Sessions, Machines, every session, every trace).
 //  - T.modelMismatch is empty: every session's rendered turn list (ids, and which turns show a Trace button) matches
 //    the independent model: a turn shows a Trace button exactly when it sent something onward (the overhaul draws a child
 //    session's brief inside its first turn, so no turn is exempt).
 //  - onwardWithoutButton === 0 and buttonWithoutOnward === 0.
 //  - every trace opened matches the model with no `bad` count (root turn, crumb, title and history state all agree).
-//  - deep links land on the exact expected turn id (fromTrace.turn === expectTurn, fromHome.turn === expectTurn), and
-//    inView with a flash, in every form the original tried (from a trace node, from Home's item, from Home's Trace
-//    button, by Enter and by Space); a trace child node and a Home item must actually be found (hadPick, hadHome),
-//    not silently skipped; back always returns to the screen it came from (fromTrace.backTo, crumb.backTo === "trace",
-//    homeTrace.backTo, homeEnter.backTo, fromHome.backTo === "Home").
+//  - native and Trace deep links land on the exact expected turn, in view with a flash;
+//    Back returns to Sessions or Trace. Home inbox click/Trace/Enter/Space controls
+//    were removed with Home; retained keyboard/touch controls stay audited.
 //  - the handoff census: multi === 0 (no handoff drawn in more than one trace) and no zero-occurrence handoff whose
 //    reason starts with "UNEXPECTED" (an origin trace or its nesting missed a handoff the model says it should hold).
 //  - find matches the expected turns and empties correctly on no match; the tools filter is checked non-vacuously:
@@ -31,7 +29,7 @@
 //    must still hide every step (stepsWhileFiltered === 0); either way both are undone by the end (findFilter.restored
 //    === findFilter.allTurns).
 //  - tap targets: every measured group has nothing under 36px, and the groups this fixture is expected to populate
-//    (Home items and their Trace buttons, session Trace buttons, the one relay header, trace child "open" links)
+//    (Sessions/Machine rows, session Trace buttons, the one relay header, trace child "open" links)
 //    measured at least one element — a missing selector or broken affordance can't pass by measuring zero of both.
 import path from 'node:path';
 import { ENV, served, goto, data, reporter, overflow } from '../lib.mjs';
@@ -154,10 +152,9 @@ export default async function turnsCheck(browser) {
       if (rr.min != null) t.min = t.min == null ? rr.min : Math.min(t.min, rr.min);
     };
 
-    // Home and Machines.
-    await screen('home');
-    addTap('ib', await small('.ib'));
-    addTap('ib .tracebtn', await small('.ib .tracebtn'));
+    // Root Sessions and Machines. Home inbox tap targets were removed with Home.
+    await screen('sessions');
+    addTap('sessions rows', await small('.session-list .nrow'));
     await goto(page, { v: 'machines' }, D0);
     await screen('machines');
     for (const m of await page.evaluate(() =>
@@ -165,7 +162,7 @@ export default async function turnsCheck(browser) {
     )) {
       await goto(page, { v: 'machine', id: m }, D0);
       await screen('machine ' + m);
-      addTap('ib', await small('.ib'));
+      addTap('machine rows', await small('.page .nrow'));
     }
 
     // Every session page: turns, trace buttons against the model, overflow collapsed and fully opened.
@@ -460,54 +457,21 @@ export default async function turnsCheck(browser) {
         D1.crumb.backTo = await page.evaluate(() => history.state?.v);
       }
       D1.hadPick = !!pick;
-      // From Home: tap the first Needs you item, then back; its Trace button, then back; keyboard Enter, then back.
-      await goto(page, { v: 'home' }, D0);
-      await page.evaluate(() => window.scrollTo(0, 0));
-      const hid = await page.evaluate(() => document.querySelector('.ib')?.dataset.h);
-      const hasHome = !!hid;
-      D1.hadHome = hasHome;
-      if (hasHome) {
-        const homeTurn = D.holds.get(JSON.parse(hid)[1])?.id;
-        await page.click('.ib .q');
-        await page.waitForTimeout(250);
-        const fromHome = {
-          h: hid,
-          expectTurn: homeTurn,
-          ...(await landed()),
-        };
-        D1.fromHome = fromHome;
-        await page.goBack();
-        await page.waitForTimeout(200);
-        D1.fromHome.backTo = await page.evaluate(
-          () => document.querySelector('.topbar .t')?.textContent,
+      // Home's inbox click/Trace/Enter/Space affordances were removed with
+      // Home. Retain the anchored native URL and Back contract from Sessions.
+      const started = [...D.holds.values()].find((turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1));
+      D1.hadAnchor = !!started;
+      if (started) {
+        await goto(page, { v: 'sessions' }, D0);
+        await goto(page, { v: 'session', id: started.sid, turn: started.id }, D0);
+        await page.waitForFunction(
+          (turn) => document.querySelector('.turn.flash[data-turn="' + CSS.escape(turn) + '"]'),
+          started.id,
         );
-        await page.click('.ib .tracebtn');
-        await page.waitForTimeout(200);
-        D1.homeTrace = await page.evaluate(() => ({
-          v: history.state?.v,
-          turn: history.state?.turn,
-          root: document.querySelector('.hop.k-root')?.dataset.turn,
-        }));
+        D1.fromSessions = { expectTurn: started.id, ...(await landed()) };
         await page.goBack();
-        await page.waitForTimeout(200);
-        D1.homeTrace.backTo = await page.evaluate(
-          () => document.querySelector('.topbar .t')?.textContent,
-        );
-        await page.focus('.ib');
-        await page.keyboard.press('Enter');
-        await page.waitForTimeout(250);
-        D1.homeEnter = await landed();
-        await page.goBack();
-        await page.waitForTimeout(200);
-        await page.focus('.ib');
-        await page.keyboard.press(' ');
-        await page.waitForTimeout(250);
-        D1.homeSpace = { v: (await landed()).turn ?? null };
-        await page.goBack();
-        await page.waitForTimeout(200);
-        D1.homeEnter.backTo = await page.evaluate(
-          () => document.querySelector('.topbar .t')?.textContent,
-        );
+        await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Sessions');
+        D1.fromSessions.backTo = await page.evaluate(() => document.querySelector('#topbar .t')?.textContent);
       }
       D1.nestedButtonsInItems = await page.evaluate(
         () => document.querySelectorAll('button .ib, .ib button button, button button').length,
@@ -578,10 +542,10 @@ export default async function turnsCheck(browser) {
         restored: await page.evaluate(() => document.querySelectorAll('.turns > .turn').length),
       };
       // Screenshots.
-      await goto(page, { v: 'home' }, D0);
+      await goto(page, { v: 'sessions' }, D0);
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.waitForTimeout(150);
-      await page.screenshot({ path: path.join(ENV.out, 'turns-sample-home.png') });
+      await page.screenshot({ path: path.join(ENV.out, 'turns-sample-sessions.png') });
       await goto(page, { v: 'session', id: 'harbor' }, D0);
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.waitForTimeout(150);
@@ -619,15 +583,13 @@ export default async function turnsCheck(browser) {
 
   // Hold the real anchored range until its generation-bound scroll has run,
   // then release the pending animation frames. A stale opening pin must not
-  // pull a newly anchored Home turn back to the transcript tail.
+  // pull a newly anchored native turn back to the transcript tail.
   const anchorPage = await served(browser, { size: 'phone' });
   const anchorPin = { passed: false };
   let releaseRange = () => {};
   try {
-    const hid = await anchorPage.evaluate(() => document.querySelector('.ib')?.dataset.h);
-    const edgeId = hid ? JSON.parse(hid)[1] : undefined;
-    const started = edgeId ? D.holds.get(edgeId) : undefined;
-    if (!started) throw Error('Home fixture has no model turn for its first Needs you item');
+    const started = [...D.holds.values()].find((turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1));
+    if (!started) throw Error('fixture has no recorded turn for anchored navigation');
     const sid = D.KEYS?.[started.sid] ?? started.sid;
     let fetchedResolve;
     const fetched = new Promise((resolve) => (fetchedResolve = resolve));
@@ -653,7 +615,7 @@ export default async function turnsCheck(browser) {
         writes.push(args);
         return nativeScrollTo.apply(window, args);
       };
-      Object.defineProperty(window, '__homeAnchorPinControl', {
+      Object.defineProperty(window, '__anchorPinControl', {
         value: {
           flush() {
             let count = 0;
@@ -699,7 +661,14 @@ export default async function turnsCheck(browser) {
         }),
       ]).finally(() => clearTimeout(timer));
     };
-    await anchorPage.click('.ib .q');
+    // Start navigation without awaiting the intentionally held transcript.
+    await anchorPage.evaluate(({ sid, turn, harness, machine }) => {
+      const url = new URL('/s/' + harness + '/' + encodeURIComponent(sid), location.href);
+      url.searchParams.set('machine', machine);
+      url.hash = 'turn=' + encodeURIComponent(turn);
+      history.pushState({ v: 'session', id: sid, turn }, '', url.pathname + url.search + url.hash);
+      dispatchEvent(new PopStateEvent('popstate'));
+    }, { sid, turn: started.id, harness: D.SESS[started.sid].harness, machine: D.SOURCES?.[D.SESS[started.sid].machine] ?? D.SESS[started.sid].machine });
     const fetchedRange = await bounded(fetched, 'anchored transcript range');
     if (fetchedRange.status !== 200)
       throw Error('anchored transcript range failed: ' + JSON.stringify(fetchedRange));
@@ -721,10 +690,10 @@ export default async function turnsCheck(browser) {
         found: !!target,
         top: target ? Math.round(target.getBoundingClientRect().top) : null,
         barBottom: Math.round(bar.bottom),
-        writes: window.__homeAnchorPinControl.writes(),
+        writes: window.__anchorPinControl.writes(),
       };
     }, started.id);
-    const flushed = await anchorPage.evaluate(() => window.__homeAnchorPinControl.flush());
+    const flushed = await anchorPage.evaluate(() => window.__anchorPinControl.flush());
     const after = await anchorPage.evaluate((turn) => {
       const target = [...document.querySelectorAll('.turn')].find(
         (node) => node.dataset.turn === turn,
@@ -767,14 +736,14 @@ export default async function turnsCheck(browser) {
     anchorPin.errors = anchorPage.errors;
     await anchorPage.context().close();
   }
-  out.homeAnchorPin = anchorPin;
+  out.anchorPin = anchorPin;
   r.expect(
     anchorPin.passed,
-    'anchored Home navigation was moved by a pending tail pin: ' + JSON.stringify(anchorPin),
+    'anchored native navigation was moved by a pending tail pin: ' + JSON.stringify(anchorPin),
   );
   r.expect(
     anchorPin.errors.length === 0,
-    'Home anchor pin page errors: ' + anchorPin.errors.join(' | '),
+    'Native anchor pin page errors: ' + anchorPin.errors.join(' | '),
   );
 
   // Handoff content stays on the page; only its names navigate.
@@ -889,32 +858,12 @@ export default async function turnsCheck(browser) {
       'crumb back did not return to Trace: ' + light.deepLinks.crumb.backTo,
     );
   }
+  r.expect(light.deepLinks.hadAnchor === true, 'fixture has no recorded turn for native deep-link coverage');
+  const anchored = light.deepLinks.fromSessions;
   r.expect(
-    light.deepLinks.hadHome === true,
-    "no Home 'Needs you' item was found for the fromHome/homeTrace/homeEnter deep-link test",
+    anchored?.inView && anchored.flash && anchored.turn === anchored.expectTurn && anchored.backTo === 'Sessions',
+    'native turn link or Back to Sessions failed: ' + JSON.stringify(anchored),
   );
-  if (light.deepLinks.fromHome) {
-    r.expect(
-      light.deepLinks.fromHome.inView && light.deepLinks.fromHome.flash,
-      'fromHome did not land inView+flash: ' + JSON.stringify(light.deepLinks.fromHome),
-    );
-    r.expect(
-      light.deepLinks.fromHome.turn === light.deepLinks.fromHome.expectTurn,
-      'fromHome landed on the wrong turn: got ' +
-        light.deepLinks.fromHome.turn +
-        ' expected ' +
-        light.deepLinks.fromHome.expectTurn,
-    );
-    r.expect(
-      light.deepLinks.fromHome.backTo === 'Home',
-      'fromHome back did not return Home: ' + light.deepLinks.fromHome.backTo,
-    );
-  }
-  if (light.deepLinks.homeEnter)
-    r.expect(
-      light.deepLinks.homeEnter.inView && light.deepLinks.homeEnter.flash,
-      'homeEnter did not land inView+flash',
-    );
   r.expect(
     light.census.multi === 0,
     'census multi=' + light.census.multi + ' ' + JSON.stringify(light.census.multiIds),
@@ -957,11 +906,11 @@ export default async function turnsCheck(browser) {
         light.findFilter.stepsWhileFiltered,
     );
   // Tap targets: every group measured must have nothing under 36px; groups this fixture is expected to populate
-  // (Home's items and their Trace buttons, session Trace buttons, the one relay header, and trace child "open"
+  // (Sessions/Machine rows, session Trace buttons, the one relay header, and trace child "open"
   // links) must also have measured something, so a selector typo or a broken affordance fails loudly.
   const expectPositiveTaps = new Set([
-    'ib',
-    'ib .tracebtn',
+    'sessions rows',
+    'machine rows',
     '.turn-end .link',
     '.turn-h .who-link',
     '.hop .open',
