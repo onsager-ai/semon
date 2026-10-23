@@ -1582,6 +1582,8 @@ for (const width of [390, 1280])
           await page.route('http://catalog.test/**', async (route) => {
             const url = new URL(route.request().url());
             const machine = url.searchParams.get('machine') ?? 'source';
+            if (url.pathname === '/api/session-sources')
+              return route.fulfill({ json: singleSourceInventory });
             if (url.pathname === '/api/session-capabilities')
               return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
             if (url.pathname === '/api/sessions')
