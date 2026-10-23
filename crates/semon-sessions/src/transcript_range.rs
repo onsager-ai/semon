@@ -27,6 +27,7 @@ const READ_CHUNK: usize = 4096;
 thread_local! {
     pub(crate) static AFTER_LOCAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static LAST_LOCAL_FAILURE: std::cell::Cell<Option<crate::source_carrier::FailureStage>> = const { std::cell::Cell::new(None) };
 }
 
 fn reply(status: u16, value: Value) -> ViewerReply {
@@ -848,6 +849,15 @@ impl std::error::Error for LocalRevisionChanged {
 }
 
 fn source_read_fence(error: &io::Error) -> ProjectionFence {
+    #[cfg(test)]
+    LAST_LOCAL_FAILURE.with(|stage| {
+        stage.set(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+                .map(|detail| detail.2),
+        );
+    });
     error
         .get_ref()
         .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())

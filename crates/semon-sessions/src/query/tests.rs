@@ -50,7 +50,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         records.push(codex_line(
             ts(5, 1),
             "response_item",
-            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(4000))}]}),
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(2000))}]}),
         ));
         records.push(codex_line(
             ts(5, 2),
@@ -73,6 +73,13 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
             );
             let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            if reply.status != 200 {
+                assert_eq!(
+                    crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
+                    Some(crate::source_carrier::FailureStage::Budget),
+                    "unexpected underlying source failure"
+                );
+            }
             assert_eq!(reply.status, 200, "selected page fence: {body}");
             let entries = body["entries"].as_array().unwrap();
             assert!(!entries.is_empty());
