@@ -1737,7 +1737,7 @@ mod tests {
         let listing = core.respond("GET", "/sessions", "native=1", None);
         assert_eq!(listing.status, 200);
         let listing = String::from_utf8(listing.body).unwrap();
-        assert!(listing.contains("/s/claude/native-html?machine=local&amp;native=1"));
+        assert!(listing.contains("/session/local/native-html?native=1"));
         assert_eq!(
             core.respond("GET", "/machines/local", "machine=local", None)
                 .status,
@@ -1757,12 +1757,7 @@ mod tests {
                 .status,
             404
         );
-        let selected = core.respond(
-            "GET",
-            "/s/claude/native-html",
-            "native=1&machine=local&t=secret-bootstrap",
-            None,
-        );
+        let selected = core.respond("GET", "/session/local/native-html", "native=1", None);
         assert_eq!(selected.status, 200);
         let html = String::from_utf8(selected.body).unwrap();
         assert!(
@@ -1796,8 +1791,8 @@ mod tests {
         assert_eq!(
             core.respond(
                 "GET",
-                "/s/claude/native-html",
-                "native=1&machine=local&after=0&generation=obsolete",
+                "/session/local/native-html",
+                "native=1&after=0&generation=obsolete",
                 None
             )
             .status,
@@ -3616,8 +3611,8 @@ mod tests {
             "/sessions".into(),
             "/machines".into(),
             "/machines/testbox".into(),
-            "/s/claude/lane".into(),
-            format!("/trace/claude/lane/{turn}"),
+            "/session/local/lane".into(),
+            format!("/session/local/lane/trace/{turn}"),
         ];
         for path in paths {
             assert!(crate::shell::is_page_path(&path), "{path}");
@@ -4527,8 +4522,8 @@ mod tests {
             404
         );
         for (path, status) in [
-            ("/s/claude/lane-a", 200),
-            ("/s/claude/lane-b", 200),
+            ("/session/a/lane-a", 200),
+            ("/session/b/lane-b", 200),
             ("/s/claude/nobody", 404),
             ("/machines/alpha", 200),
             ("/machines/bravo", 200),
@@ -4573,7 +4568,11 @@ mod tests {
             assert_eq!(body_of(&selected)["identity"]["source_key"], source);
             assert!(String::from_utf8_lossy(&selected.body).contains(&format!("done on {name}")));
         }
-        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
+        let chooser = core.respond("GET", "/s/claude/same", "", None);
+        assert_eq!(chooser.status, 200);
+        let chooser = String::from_utf8(chooser.body).unwrap();
+        assert!(chooser.contains("/session/a/same") && chooser.contains("/session/b/same"));
+        assert!(!chooser.contains("done on"));
         let analytics = analytics_of(&core, "range=7d");
         assert_eq!(
             analytics["machine_labels"],
@@ -7396,11 +7395,11 @@ mod tests {
         let views = core.machine_views();
         crate::events::CACHE_READS.with(|reads| reads.set(0));
         for path in [
-            "/s/claude/lane-a".to_owned(),
-            "/s/claude/lane-b@twin~b".into(),
+            "/session/a/lane-a".to_owned(),
+            "/session/b/lane-b".into(),
             "/machines/twin".into(),
             "/machines/twin~b".into(),
-            format!("/trace/claude/lane-a/{turn}"),
+            format!("/session/a/lane-a/trace/{turn}"),
         ] {
             let reply = core.respond("GET", &path, "", None);
             assert_eq!(
@@ -7417,11 +7416,15 @@ mod tests {
             "/s/claude/lane-b@unconfigured",
             "/machines/missing",
             "/trace/claude/lane-a/missing-turn",
-            "/s/claude/lane-a/extra",
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
         }
         assert_eq!(core.respond("GET", "/s/claude/%FF", "", None).status, 400);
+        assert_eq!(
+            core.respond("GET", "/session/a/lane-a/extra", "", None)
+                .status,
+            400
+        );
         assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), 0);
         for view in &views {
             assert_retired_routes_absent(view);
@@ -7434,10 +7437,10 @@ mod tests {
         let during = {
             let core = core.clone();
             at_once("native permalink during observation", move || {
-                core.respond("GET", "/s/claude/brand-new", "", None)
+                core.respond("GET", "/session/a/brand-new", "", None)
             })
         };
-        assert_eq!(during.status, 200);
+        assert_eq!(during.status, 503);
         drop(observing);
         core.close();
     }
@@ -7465,16 +7468,13 @@ mod tests {
             assert_eq!(reply.body, PAGE.as_bytes(), "{path}");
         };
         // No model yet: every page is the shell, and nothing is read.
-        for path in [
-            "/",
-            "/timeline",
-            "/s/claude/lane",
-            "/s/claude/nobody",
-            "/machines/testbox",
-            "/trace/claude/lane/some-turn",
-        ] {
+        for path in ["/", "/timeline", "/machines/testbox"] {
             page(path);
         }
+        assert_eq!(
+            core.respond("GET", "/session/local/lane", "", None).status,
+            503
+        );
         assert_eq!(core.respond("GET", "/viewer.js", "", None).status, 200);
         assert_eq!(refresh_counts(&view), (0, 0, 0), "a page read the logs");
 
@@ -7489,9 +7489,9 @@ mod tests {
         assert!(core.invalidate(""));
         let before = refresh_counts(&view);
         for path in [
-            "/s/claude/lane".to_owned(),
+            "/session/local/lane".to_owned(),
             "/machines/testbox".into(),
-            format!("/trace/claude/lane/{turn}"),
+            format!("/session/local/lane/trace/{turn}"),
             "/timeline".into(),
         ] {
             page(&path);
@@ -7557,9 +7557,13 @@ mod tests {
                 "{path}"
             );
         };
-        for path in ["/s/claude/lane-b", "/machines/alpha", "/s/claude/nobody"] {
+        for path in ["/machines/alpha"] {
             shell(path);
         }
+        assert_eq!(
+            core.respond("GET", "/session/b/lane-b", "", None).status,
+            503
+        );
         for view in &views {
             assert_eq!(refresh_counts(view), (0, 0, 0), "a page read the logs");
         }
@@ -7573,7 +7577,7 @@ mod tests {
         say(&bravo, "lane-b", 1, "announced while idle");
         assert!(core.invalidate("a") && core.invalidate("b"));
         let before: Vec<_> = views.iter().map(|view| refresh_counts(view)).collect();
-        for path in ["/s/claude/lane-a", "/s/claude/lane-b", "/machines/bravo"] {
+        for path in ["/session/a/lane-a", "/session/b/lane-b", "/machines/bravo"] {
             shell(path);
         }
         let after: Vec<_> = views.iter().map(|view| refresh_counts(view)).collect();
@@ -7633,7 +7637,7 @@ mod tests {
             page.is_finished(),
             "native shell waited for a workspace model"
         );
-        assert_eq!(page.join().expect("the page request panicked"), 200);
+        assert_eq!(page.join().expect("the page request panicked"), 503);
         drop(release);
         let published = warming.join().expect("native publication panicked");
         assert!(

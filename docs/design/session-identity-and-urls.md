@@ -78,10 +78,3 @@ Retire legacy input only after all first-party producers use this grammar, the
 cross-host direct/history/native matrix passes, and an explicit product decision
 sets a compatibility window and communicates bookmark replacement. No retirement,
 data rewrite, database merge or deletion is authorized by this change.
-
-## Compatibility corrections caught before implementation
-
-The first brief incorrectly rejected encoded slashes, which would have broken
-the existing `session/key` relationship fixture. It also omitted browsing and
-native paging controls, and assumed trace had no required path turn. The revised
-contract preserves opaque keys and read controls and requires the trace turn.
