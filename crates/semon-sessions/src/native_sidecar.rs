@@ -625,7 +625,7 @@ mod tests {
             )
             .unwrap();
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
-        // Unsupported markers refuse without changing the already retained rows.
+        // Focused retention refuses old markers without changing retained rows.
         marker["version"] = json!(1);
         marker
             .as_object_mut()
@@ -655,7 +655,8 @@ mod tests {
         fs::remove_file(&home.path).unwrap();
         let connection = home.connection();
         let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
-        assert!(crate::events::EventCache::open_scoped(&home.options.cache).is_err());
+        // Writable producers now rebuild obsolete indexes; keep this check on
+        // the focused read/retention boundary before that reset.
         assert_eq!(
             crate::source_event_index_retained(&home.options, &proof, &ready),
             Err(crate::CatalogIdentityError::Unavailable)
