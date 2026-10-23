@@ -50,7 +50,7 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
     (parts[0] === 's' && parts.length === 3) ||
     (parts[0] === 'trace' && parts.length === 4)
   ) {
-    if (!['native', 'codex', 'claude'].includes(parts[1])) return fail();
+    if (!['native', 'codex', 'claude', 'copilot'].includes(parts[1])) return fail();
     legacyHarness = parts[1];
     key = parts[2];
     turn = parts[3] ?? null;
@@ -134,4 +134,19 @@ export function resolveSessionRoute(
   )
     return { outcome: 'mismatch' };
   return { outcome: 'valid', candidate };
+}
+
+/** Only authorized complete session-locate index results may use this compatibility path. */
+export function resolveSessionBookmark(
+  route: SessionRoute,
+  candidates: readonly SessionCandidate[],
+) {
+  if (route.legacyHarness && route.key.startsWith('unsent:')) {
+    const mapped = candidates.map((candidate) => ({ ...candidate, catalog_key: '' }));
+    const result = resolveSessionRoute({ ...route, key: '' }, mapped);
+    if (result.outcome === 'valid')
+      return { outcome: 'valid' as const, candidate: candidates[mapped.indexOf(result.candidate)] };
+    return result;
+  }
+  return resolveSessionRoute(route, candidates);
 }

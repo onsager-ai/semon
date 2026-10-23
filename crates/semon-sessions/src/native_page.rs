@@ -253,7 +253,7 @@ fn selected_reply(
     arguments: &str,
     read: &mut impl FnMut(&str, &str) -> ViewerReply,
 ) -> ViewerReply {
-    use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
+    use crate::session_route::{Candidate, Resolution, SessionRoute, resolve_bookmark};
     let route = match SessionRoute::parse(path, arguments) {
         Ok(route) => route,
         Err(_) => return response(400, "<p>Malformed session address.</p>"),
@@ -286,7 +286,7 @@ fn selected_reply(
             return reply;
         }
         let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-        if value["unavailable"].as_u64().is_some_and(|n| n > 0) {
+        if value["unavailable"].as_u64().is_none_or(|n| n > 0) {
             return response(503, "<p>Session index is updating.</p>");
         }
         candidates.extend(
@@ -297,7 +297,7 @@ fn selected_reply(
                 .filter_map(|item| serde_json::from_value::<Candidate>(item.clone()).ok()),
         );
     }
-    let selected = match resolve(&route, &candidates) {
+    let selected = match resolve_bookmark(&route, &candidates) {
         Resolution::Valid(index) => &candidates[index],
         Resolution::Ambiguous => {
             let mut body = String::from("<h1>Choose a session source</h1><ul>");

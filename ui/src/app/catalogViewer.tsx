@@ -3,7 +3,7 @@ import {
   tracePath,
   parseSessionRoute,
   canonicalSessionRoute,
-  resolveSessionRoute,
+  resolveSessionBookmark,
   type SessionRoute,
 } from '../lib/sessionRoute';
 import { compareCatalogKeys } from '../lib/catalogIdentity';
@@ -4208,7 +4208,7 @@ export function createCatalogViewer(
           harness: text(match.harness),
         };
       });
-      const resolved = resolveSessionRoute(route, candidates);
+      const resolved = resolveSessionBookmark(route, candidates);
       if (resolved.outcome === 'valid' && reply.unavailable === 0) {
         const match = resolved.candidate;
         history.replaceState(

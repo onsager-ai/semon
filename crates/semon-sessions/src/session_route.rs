@@ -71,10 +71,14 @@ impl SessionRoute {
             ["session", source, key, "trace", turn] => {
                 (Some((*source).into()), *key, Some((*turn).into()), None)
             }
-            ["s", harness, key] if matches!(*harness, "native" | "codex" | "claude") => {
+            ["s", harness, key]
+                if matches!(*harness, "native" | "codex" | "claude" | "copilot") =>
+            {
                 (None, *key, None, Some((*harness).into()))
             }
-            ["trace", harness, key, turn] if matches!(*harness, "native" | "codex" | "claude") => {
+            ["trace", harness, key, turn]
+                if matches!(*harness, "native" | "codex" | "claude" | "copilot") =>
+            {
                 (None, *key, Some((*turn).into()), Some((*harness).into()))
             }
             _ => return Err(malformed()),
@@ -188,11 +192,16 @@ pub enum Resolution {
 /// Candidates must already be authorized, unrevoked and from the active scope.
 /// Exact opaque keys win; provenance and display labels never select a reader.
 pub fn resolve(route: &SessionRoute, candidates: &[Candidate]) -> Resolution {
+    resolve_candidates(route, candidates, false)
+}
+
+fn resolve_candidates(route: &SessionRoute, candidates: &[Candidate], indexed: bool) -> Resolution {
     let matches: Vec<_> = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
-            candidate.catalog_key == route.key
+            (candidate.catalog_key == route.key
+                || indexed && route.legacy_harness.is_some() && route.key.starts_with("unsent:"))
                 && route
                     .source
                     .as_ref()
@@ -214,6 +223,12 @@ pub fn resolve(route: &SessionRoute, candidates: &[Candidate]) -> Resolution {
         }
         _ => Resolution::Ambiguous,
     }
+}
+
+/// Only call with results from the authorized, complete session_bookmark index.
+/// The historical unsent target is an indexed bookmark, never a canonical alias.
+pub fn resolve_bookmark(route: &SessionRoute, candidates: &[Candidate]) -> Resolution {
+    resolve_candidates(route, candidates, true)
 }
 
 #[cfg(test)]
@@ -238,7 +253,11 @@ mod tests {
             let route = route.unwrap_or_else(|error| panic!("{vector}: {error}"));
             let candidates: Vec<Candidate> =
                 serde_json::from_value(vector["candidates"].clone()).unwrap();
-            let result = resolve(&route, &candidates);
+            let result = if vector["indexed_bookmark"] == true {
+                resolve_bookmark(&route, &candidates)
+            } else {
+                resolve(&route, &candidates)
+            };
             let outcome = match result {
                 Resolution::Valid(_) => "valid",
                 Resolution::NotFound => "not_found",
