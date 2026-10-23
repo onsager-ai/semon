@@ -354,7 +354,7 @@ fn repair_key(prefix: &str) -> String {
 }
 
 fn repair_sql_error(error: rusqlite::Error) -> io::Error {
-    if super::is_unavailable(&error) {
+    if super::is_unavailable(&error) || matches!(error, rusqlite::Error::QueryReturnedNoRows) {
         io::Error::other(error)
     } else {
         io::Error::new(io::ErrorKind::InvalidData, error)
@@ -406,9 +406,10 @@ fn repair_step(
         })
         .map_err(repair_sql_error)?;
     if encoded != expected {
-        return Err(repair_value_error(io::Error::other(
-            "Native proof header changed",
-        )));
+        // A producer can replace this publication while an existing reader
+        // still owns its original WAL snapshot. Preparation is unavailable;
+        // that reader must qualify the original snapshot's fingerprint.
+        return Err(io::Error::other("Native proof header changed"));
     }
     let header: Header = serde_json::from_str(&encoded).map_err(repair_value_error)?;
     let key = repair_key(prefix);
