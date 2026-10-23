@@ -1383,13 +1383,13 @@ for (const width of [390, 1280])
           const tool = page.locator('#page [data-entry-key="one:7"]');
           await tool.locator('button').click();
           await tool.getByRole('button', { name: 'View all', exact: true }).click();
-          await page.getByText('Recorded text preview.', { exact: false }).waitFor();
-          const loadText = page.getByRole('button', { name: 'Load recorded text', exact: true });
-          assert.equal(await loadText.count(), 1);
-          await loadText.click();
-          await page.getByRole('button', { name: 'Load more text', exact: true }).waitFor();
+          const loadMoreToolText = page.getByRole('button', {
+            name: 'Load more text',
+            exact: true,
+          });
+          await loadMoreToolText.waitFor();
           assert.match(await page.locator('body').innerText(), /First native tool text chunk/);
-          await page.getByRole('button', { name: 'Load more text', exact: true }).click();
+          await loadMoreToolText.click();
           await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
           assert.match(await page.locator('body').innerText(), /and final native tool text chunk/);
           await page.keyboard.press('Escape');
