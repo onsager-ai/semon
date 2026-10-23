@@ -53,6 +53,21 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
             json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(2000))}]}),
         ));
         records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"reasoning","summary":[{"type":"summary_text","text":format!("Readable record thinking {index} {}", "synthetic ".repeat(2000))}]}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"function_call","call_id":format!("call-{index}"),"name":"exec_command","arguments":"{\"cmd\":\"echo synthetic\"}"}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"function_call_output","call_id":format!("call-{index}"),"output":format!("Readable record output {index} {}", "synthetic ".repeat(2000))}),
+        ));
+        records.push(codex_line(
             ts(5, 2),
             "event_msg",
             json!({"type":"context_compacted"}),
