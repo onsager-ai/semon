@@ -74,8 +74,15 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         ));
     }
     let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
-    let mut query = home.query();
-    query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
     let read_pages = || {
         let mut after = 0;
         let mut pages = Vec::new();
@@ -92,7 +99,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
                 assert_eq!(
                     crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
                     Some(crate::source_carrier::FailureStage::Budget),
-                    "unexpected underlying source failure"
+                    "unexpected underlying source failure: status={} body={body}", reply.status
                 );
             }
             assert_eq!(reply.status, 200, "selected page fence: {body}");
