@@ -179,6 +179,218 @@ for (const sourceCount of [1, 2])
     }
   });
 
+// Hold workspace metadata independently of source discovery. A source choice
+// within Sessions keeps that request; a real destination change must abort it.
+for (const scenario of ['sole', 'multiple', 'forced', 'hosted', 'scoped'])
+  for (const finish of scenario === 'sole' || scenario === 'multiple'
+    ? ['publish', 'navigate', 'destroy']
+    : ['publish'])
+    test(`cold ${scenario} source bootstrap admits once and ${finish} fences overview`, async () => {
+      const browser = await chromium.launch();
+      const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+      const capabilityScopes = [],
+        catalogScopes = [],
+        errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      const hosted = scenario === 'hosted',
+        chooser = scenario === 'multiple' || scenario === 'forced';
+      try {
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url()),
+            machine = url.searchParams.get('machine');
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({
+              json: {
+                ...singleSourceInventory,
+                items:
+                  scenario === 'multiple'
+                    ? [
+                        ...singleSourceInventory.items,
+                        { source_key: 'second', label: 'Second source' },
+                      ]
+                    : singleSourceInventory.items,
+              },
+            });
+          if (url.pathname === '/api/session-capabilities') {
+            capabilityScopes.push(machine);
+            if (!hosted && !machine)
+              return route.fulfill({
+                status: 400,
+                json: { error: { code: 'machine_scope_required' } },
+              });
+            return route.fulfill({
+              json: {
+                ...capabilities(false),
+                source_key: machine ?? '',
+                global_union: hosted,
+                order: hosted ? 'last_desc_key_asc_machine_asc' : 'last_desc_key_asc',
+              },
+            });
+          }
+          if (url.pathname === '/api/sessions') {
+            catalogScopes.push(machine);
+            return route.fulfill({
+              json: {
+                ...list([
+                  {
+                    ...meta('one'),
+                    ...(hosted ? { machine: { key: 'source', label: 'Fixture source' } } : {}),
+                  },
+                ]),
+                machine: machine ?? '',
+                machine_info: {
+                  key: machine ?? '',
+                  label: 'Fixture source',
+                  freshness: 'cached',
+                },
+                capabilities: {
+                  ...list([]).capabilities,
+                  global_union: hosted,
+                  order: hosted ? 'last_desc_key_asc_machine_asc' : 'last_desc_key_asc',
+                },
+              },
+            });
+          }
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto(
+          'http://catalog.test/?harness=claude' +
+            (scenario === 'forced' ? '&choose_source=1' : '') +
+            (scenario === 'scoped' ? '&machine=source' : '') +
+            '#retained',
+        );
+        const initialHistoryLength = await page.evaluate(() => history.length);
+        await page.clock.install({ time: new Date('2026-10-23T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-23T00:01:00Z'));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate((hosted) => {
+          const originalFetch = window.fetch;
+          window.bootstrapOverviewReads = [];
+          window.fetch = (input, options) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/viewer/home') return originalFetch(input, options);
+            const read = { signal: options?.signal };
+            window.bootstrapOverviewReads.push(read);
+            return new Promise((resolve) => {
+              // Deliberately deliver even after abort, to qualify epoch fencing.
+              read.release = (name = 'Bootstrap Recent') =>
+                resolve(
+                  new Response(
+                    JSON.stringify({
+                      api: 1,
+                      version: 'a'.repeat(64),
+                      now: 10000,
+                      next: { inbox: null, working: null, answered: null },
+                      totals: { waiting: 0, working: 0, answered: 0 },
+                      machines: [
+                        {
+                          key: 'source',
+                          label: 'Fixture source',
+                          up: true,
+                          working: 0,
+                          sessions: 1,
+                          last: 10000,
+                        },
+                      ],
+                      recent: [
+                        {
+                          id: 'bootstrap-recent',
+                          source_key: 'source',
+                          catalog_key: 'bootstrap-recent',
+                          session: {
+                            name,
+                            harness: 'claude',
+                            model: '',
+                            repo: null,
+                            state: 'idle',
+                            last: 10000,
+                            start: 9000,
+                            content_generation: 'b'.repeat(64),
+                          },
+                        },
+                      ],
+                      inbox: [],
+                      working: [],
+                      answered: [],
+                      observations: [],
+                    }),
+                    { headers: { 'Content-Type': 'application/json' } },
+                  ),
+                );
+            });
+          };
+          window.app = CatalogViewer.mountViewerApplication(
+            hosted ? { catalogSources: true } : undefined,
+          );
+        }, hosted);
+        if (chooser) {
+          const key = scenario === 'multiple' ? 'second' : 'source';
+          await page.locator(`[data-source-key="${key}"]`).waitFor();
+          assert.deepEqual(capabilityScopes, [], 'chooser must not make unscoped reads');
+          assert.deepEqual(catalogScopes, [], 'chooser must await source authority');
+          assert.equal(await page.evaluate(() => bootstrapOverviewReads.length), 1);
+          assert.equal(
+            await page.evaluate(() => bootstrapOverviewReads[0].signal.aborted),
+            false,
+            'metadata starts before the source is selected',
+          );
+          await page.locator(`[data-source-key="${key}"]`).click();
+        }
+        await page.locator('[data-session-row="list"]').waitFor();
+        assert.match(await page.locator('[data-session-row="list"]').innerText(), /Session one/);
+        await page.clock.runFor(100);
+        const selectedScope = hosted ? null : scenario === 'multiple' ? 'second' : 'source';
+        assert.deepEqual(capabilityScopes, [selectedScope]);
+        assert.deepEqual(catalogScopes, [selectedScope], 'one initial list admission');
+        assert.equal(new URL(page.url()).searchParams.get('harness'), 'claude');
+        if (!chooser) {
+          assert.equal(new URL(page.url()).hash, '#retained');
+          assert.equal(await page.evaluate(() => history.length), initialHistoryLength);
+        }
+        assert.deepEqual(
+          await page.evaluate(() => bootstrapOverviewReads.map((read) => read.signal.aborted)),
+          [false],
+          'source selection must retain the single valid metadata request',
+        );
+        if (finish === 'publish') {
+          await page.evaluate(() => bootstrapOverviewReads[0].release());
+          await page.locator('#lanes').getByText('Bootstrap Recent', { exact: true }).waitFor();
+          await page.clock.runFor(100);
+          assert.equal(await page.evaluate(() => bootstrapOverviewReads.length), 1);
+          assert.deepEqual(catalogScopes, [selectedScope]);
+        } else {
+          if (finish === 'navigate') {
+            await page.locator('#nav [data-go="machines"]').click();
+            assert.equal(await page.evaluate(() => bootstrapOverviewReads.length), 2);
+          } else await page.evaluate(() => app.destroy());
+          assert.equal(
+            await page.evaluate(() => bootstrapOverviewReads[0].signal.aborted),
+            true,
+            'real navigation and destruction must abort the held metadata request',
+          );
+          await page.evaluate(() => bootstrapOverviewReads[0].release('Late bootstrap Recent'));
+          await page.clock.runFor(100);
+          assert.equal(await page.getByText('Late bootstrap Recent', { exact: true }).count(), 0);
+          if (finish === 'navigate') {
+            assert.equal(new URL(page.url()).pathname, '/machines');
+            assert.equal(await page.locator('[data-session-row="list"]').count(), 0);
+            await page.evaluate(() => bootstrapOverviewReads[1].release('Current machine Recent'));
+            await page
+              .locator('#lanes')
+              .getByText('Current machine Recent', { exact: true })
+              .waitFor();
+            assert.equal(await page.getByText('Late bootstrap Recent', { exact: true }).count(), 0);
+          }
+          assert.deepEqual(catalogScopes, [selectedScope], 'late data cannot admit another list');
+        }
+        assert.deepEqual(errors, []);
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
+
 for (const width of [390, 820, 1280])
   for (const colorScheme of ['light', 'dark'])
     test(`root opens existing Sessions without Home at ${width}px ${colorScheme}`, async () => {
