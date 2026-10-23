@@ -41,7 +41,7 @@ struct Header {
     parser_version: u32,
     ledger: String,
     count: usize,
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     consumed_offset: Option<u64>,
     fingerprint: [u8; 32],
     pages_root: [u8; 32],
@@ -623,10 +623,12 @@ impl Focused {
             || part.index != page
             || part.hashes.len() != (self.count - page * PAGE).min(PAGE)
         {
-            return Err(FailureStage::PageMissing.wrap_preserving_kind(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Native proof page is incomplete",
-            )));
+            return Err(
+                FailureStage::PageMissing.wrap_preserving_kind(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Native proof page is incomplete",
+                )),
+            );
         }
         let canonical = part
             .canonical()
@@ -969,6 +971,9 @@ mod tests {
                 .query_row(NATIVE_METADATA_VALUE, [&key], |row| row.get(0))
                 .unwrap();
             let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            if is_header {
+                assert_eq!(value["consumed_offset"], serde_json::json!(ledger.offset));
+            }
             if let Some(replacement) = replacement {
                 value[field] = replacement;
             } else {
@@ -993,7 +998,11 @@ mod tests {
                 header_ready(&store.connection, "original", &ledger).unwrap(),
                 !is_header
             );
-            assert!(read(&store.connection, "original", &ledger).unwrap().is_none());
+            assert!(
+                read(&store.connection, "original", &ledger)
+                    .unwrap()
+                    .is_none()
+            );
             let error = Focused::open(&path, "original", &ledger)
                 .and_then(|reader| reader.verify(0, &bytes))
                 .unwrap_err();
@@ -1336,7 +1345,14 @@ mod tests {
             let tx = store.connection.transaction().unwrap();
             write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
             tx.commit().unwrap();
-            let count: i64 = store.connection.query_row("SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'", [], |r|r.get(0)).unwrap();
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(count, 1, "unbounded retained versions at mutation {at}");
             Focused::open(&path, "original", &old)
                 .unwrap()
@@ -1344,7 +1360,11 @@ mod tests {
                 .unwrap();
         }
         let retained_reader = Focused::open(&path, "original", &old).unwrap();
-        assert!(retained_reader.prefix.starts_with("native_published_chunks:"));
+        assert!(
+            retained_reader
+                .prefix
+                .starts_with("native_published_chunks:")
+        );
         // Both current and history references count. Publishing a different
         // Current alone must not collect the original retained observation.
         store
@@ -1400,7 +1420,11 @@ mod tests {
         drop(live_reader);
         assert!(owned_snapshot.upgrade().is_none());
         drop(retained_reader);
-        assert_eq!(checkpoint(&store.connection), 0, "last drop must release WAL");
+        assert_eq!(
+            checkpoint(&store.connection),
+            0,
+            "last drop must release WAL"
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
