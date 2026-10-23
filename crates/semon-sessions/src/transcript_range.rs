@@ -1379,6 +1379,15 @@ fn render(
     // archive bytes. A rejected source generation is different: never replace
     // accepted content with empty entries under the same projection proof.
     let source_changed = std::cell::Cell::new(None);
+    // Keep the first integrity failure. A later budget failure cannot hide it;
+    // a later observed integrity failure takes priority over an earlier budget.
+    let note_source_failure = |reason| {
+        if source_changed.get().is_none()
+            || matches!(source_changed.get(), Some(ProjectionFence::SourceBudget))
+        {
+            source_changed.set(Some(reason));
+        }
+    };
     let source_read = |reference: &SessionSourceRef, expected: Option<&str>, offset, max| {
         let result = reader.read_range(reference, expected, offset, max);
         if result
@@ -1386,7 +1395,7 @@ fn render(
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
             let error = result.as_ref().expect_err("checked source failure");
-            source_changed.set(Some(source_read_fence(error)));
+            note_source_failure(source_read_fence(error));
         }
         result
     };
@@ -1458,7 +1467,7 @@ fn render(
                     || known
                         .is_some_and(|known| known.0 != part.generation || known.1 != part.length)
                 {
-                    source_changed.set(Some(ProjectionFence::SourceRange));
+                    note_source_failure(ProjectionFence::SourceRange);
                     return Err(invalid());
                 }
                 bytes_left -= part.bytes.len();
@@ -1551,7 +1560,7 @@ fn render(
                 || part.generation.len() > 4096
                 || known.is_some_and(|known| known.0 != part.generation || known.1 != part.length)
             {
-                source_changed.set(Some(ProjectionFence::SourceRange));
+                note_source_failure(ProjectionFence::SourceRange);
                 return Err(invalid());
             }
             generations
