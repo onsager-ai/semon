@@ -172,9 +172,10 @@ export default async function homeCheck(browser) {
       await page.reload({ waitUntil: 'load' });
       await settled(page);
       await page.waitForFunction(
-        (parent) => [...document.querySelectorAll('#lanes > .treeitem')].some(
-          (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
-        ),
+        (parent) =>
+          [...document.querySelectorAll('#lanes > .treeitem')].some(
+            (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
+          ),
         out.tree.pair.parent,
       );
       out.tree.collapseReload = await page.evaluate(({ parent, child }) => {
@@ -210,9 +211,10 @@ export default async function homeCheck(browser) {
       await page.reload({ waitUntil: 'load' });
       await settled(page);
       await page.waitForFunction(
-        (parent) => [...document.querySelectorAll('#lanes > .treeitem')].some(
-          (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
-        ),
+        (parent) =>
+          [...document.querySelectorAll('#lanes > .treeitem')].some(
+            (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
+          ),
         out.tree.pair.parent,
       );
       out.tree.expandReload = await page.evaluate(({ parent, child }) => {

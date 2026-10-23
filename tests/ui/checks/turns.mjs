@@ -102,10 +102,9 @@ function model(D) {
 // Select an actual non-tail native turn, rather than an outgoing handoff's
 // holder: a retained turn need not have sent anything onward.
 const nativeAnchor = (D) =>
-  D.model.turns.find((native) =>
-    D.SESS[native.sid] && D.turns[native.sid]?.slice(0, -1).some(
-      (turn) => turn.id === native.id,
-    ),
+  D.model.turns.find(
+    (native) =>
+      D.SESS[native.sid] && D.turns[native.sid]?.slice(0, -1).some((turn) => turn.id === native.id),
   );
 
 export default async function turnsCheck(browser) {

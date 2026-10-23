@@ -124,13 +124,18 @@ for (const sourceCount of [1, 2])
         const url = new URL(route.request().url()),
           machine = url.searchParams.get('machine');
         if (url.pathname === '/api/session-sources')
-          return route.fulfill({ json: {
-            ...singleSourceInventory,
-            items: sourceCount === 1 ? singleSourceInventory.items : [
-              ...singleSourceInventory.items,
-              { source_key: 'second', label: 'Fixture source' },
-            ],
-          } });
+          return route.fulfill({
+            json: {
+              ...singleSourceInventory,
+              items:
+                sourceCount === 1
+                  ? singleSourceInventory.items
+                  : [
+                      ...singleSourceInventory.items,
+                      { source_key: 'second', label: 'Fixture source' },
+                    ],
+            },
+          });
         if (url.pathname === '/api/session-capabilities') {
           capabilityScopes.push(machine);
           return machine
@@ -139,11 +144,13 @@ for (const sourceCount of [1, 2])
         }
         if (url.pathname === '/api/sessions') {
           catalogScopes.push(machine);
-          return route.fulfill({ json: {
-            ...list([meta('one')]),
-            machine,
-            machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
-          } });
+          return route.fulfill({
+            json: {
+              ...list([meta('one')]),
+              machine,
+              machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
+            },
+          });
         }
         if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
         return fulfillCatalogStatic(route, url);
@@ -1708,8 +1715,7 @@ test('temporary boot failure and pending projection recover without starting glo
       const url = new URL(route.request().url()),
         p = url.pathname;
       requests.push(p);
-      if (p === '/api/session-sources')
-        return route.fulfill({ json: singleSourceInventory });
+      if (p === '/api/session-sources') return route.fulfill({ json: singleSourceInventory });
       if (p === '/api/session-capabilities') {
         if (++capabilityReads === 1) return route.fulfill({ status: 503, body: '' });
         return route.fulfill({ json: capabilities(ready) });
@@ -2084,8 +2090,7 @@ test('partial catalog discovery completes while retaining uncommitted search foc
       complete = false;
     await page.route('http://catalog.test/**', (route) => {
       const path = new URL(route.request().url()).pathname;
-      if (path === '/api/session-sources')
-        return route.fulfill({ json: singleSourceInventory });
+      if (path === '/api/session-sources') return route.fulfill({ json: singleSourceInventory });
       if (path === '/api/session-capabilities')
         return route.fulfill({
           json: {
