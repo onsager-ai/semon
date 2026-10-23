@@ -72,3 +72,18 @@ Only fmt requested a wrap of the enlarged filler macro; applied exact artifact
 12495252871. No local formatter/test/generator used. Final new runtime still needs
 actual visual artifact qualification; retained fingerprints are explicitly stale
 until that evidence exists, never an inferred pass.
+
+Gateway mechanical fingerprint rebind after current-storage integration:
+completed Viewer run39939977102, immutable visual artifact12495324491,
+source c3dab813d0494b87b02c15dbd91a886abf6484bf; tested merge
+0c7f79a4617234906e1cb4f422b6d63c17127454 has the same tree.
+Bounded comparison of CI-produced strict report JSON proves all114 binding
+identities and all684 image/evidence digests equal their existing approvals.
+Main has111 shared bindings; the3 prior-reviewed Last-turn regions remain.
+Raw findings remain42 preservation +72 main, coverage errors0, new states0;
+all114 stale-binding errors are solely the old fingerprint. Proof is in
+.review-474/481-review/visual-binding-proof.json. Only candidateFingerprint
+fields change to 9500b46c87be5016a5477db053a64024af1a4cd2fda48e5ab94590bf191cb289.
+Review decisions, references, digests, thresholds and all raw gates stay intact.
+No local builds/tests/generation or screenshot-corpus hashing was used.
+Final-head green CI and fresh independent source/image review remain required.
