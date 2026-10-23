@@ -265,9 +265,9 @@ export default async function namesCheck(browser) {
     await page.locator('.analytics-session').first().scrollIntoViewIfNeeded();
     await page.waitForTimeout(150);
     await shot('analytics-list');
-    // The sidebar last: on a phone it is the drawer over Home, on desktop it sits beside the open session (its row selected).
+    // The sidebar last: on a phone it is the drawer over Sessions, on desktop it sits beside the open session (its row selected).
     if (size === 'phone') {
-      await goto(page, { v: 'home' }, D);
+      await goto(page, { v: 'sessions' }, D);
       await page.click('#lead-btn');
       await page.waitForTimeout(320);
     } else {

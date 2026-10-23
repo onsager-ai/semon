@@ -83,7 +83,7 @@ export default async function embedCheck(browser) {
           await new Promise((resolve) =>
             requestAnimationFrame(() => requestAnimationFrame(resolve)),
           );
-          const replacementAlive = !!document.querySelector('#nav a[data-go="home"]');
+          const replacementAlive = !!document.querySelector('#nav a[data-go="sessions"]');
           newer.destroy();
           mountViewerApplication({ machinesPath: '/machines', catalogSources: false });
           return { before, retained, replacementAlive };
@@ -98,7 +98,7 @@ export default async function embedCheck(browser) {
         });
         assert.equal(result.retained, true);
         assert.equal(result.replacementAlive, true);
-        await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+        await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
         assert.equal(await overflow(page), 0);
         assert.deepEqual(retired, []);
         assert.deepEqual(page.errors, []);

@@ -28,7 +28,20 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
-- Every functional assertion stays required, including live updates, session order,
+- The Sessions-default decision in `docs/design/ui-design-brief.md` supersedes
+  Home navigation and inbox assertions. Root/title waits now require Sessions;
+  ordering leaves the list through Analytics and returns to Sessions; pending
+  overview retries use machine details. Native turn URLs retain anchor, flash,
+  stale-tail-pin and Back coverage. Font, harness-mark, accessibility, storage,
+  transcript answers, Recent and embedding checks stay on retained surfaces.
+  Only removed Home inbox affordances (badges, working/inbox marks, question
+  summary/Trace/Enter/Space controls and inbox grouping) lose their assertions.
+  Negative checks ensure the inbox does not reappear in Sessions. Historical
+  visual case identities remain required: candidate `home` means the root
+  Sessions destination, while the independently pinned reference keeps Home.
+  Pushed self-parity uses root Sessions on both sides. Actual visual differences
+  still require exact artifact review; no baseline acceptance is implied here.
+- Every retained-surface functional assertion stays required, including live updates, session order,
   embedding, approval reviews, transcript paging, and error navigation.
 - The touch audit checks phone, landscape, and tablet viewports; top-level screens,
   account menus, and a named set of distinct transcript/control shapes across the

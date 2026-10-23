@@ -8,7 +8,7 @@ import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 
 const root = new URL('../../', import.meta.url).pathname;
 test(
-  'served collection Home, Analytics and selected session across layouts and themes',
+  'served collection Sessions, Analytics and selected session across layouts and themes',
   {
     skip: !process.env.SEMON_CATALOG_SERVED_BIN,
   },
@@ -405,7 +405,7 @@ test(
                 await route.fulfill({ response });
               });
             await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
-            await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+            await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
             // The sample's six direct ingest children include one nested child.
             // The published All action opens all seven recorded descendants.
             await page
@@ -415,7 +415,7 @@ test(
               await page.locator('[aria-label="All 7 sessions under atlas ingest"]').count(),
               1,
             );
-            await page.locator('#page .ib').first().waitFor();
+            await page.locator('#page [data-session-row="list"]').first().waitFor();
             await page.locator('#lanes .srow').first().waitFor({ state: 'attached' });
             assert.equal(
               await page.locator('#lanes .child-dot').count(),
@@ -595,7 +595,7 @@ test(
               sawUnavailableStatus = false;
               await page.route('**/api/session-transcript?**', unavailableTranscript);
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
-              await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+              await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
               await ingestRecent.waitFor({ state: 'visible' });
               await ingestRecent
                 .getByText(homeWitnessName, { exact: true })
@@ -620,7 +620,7 @@ test(
               const warmInitialIds = await warmListedChildren.evaluateAll((nodes) =>
                 nodes.map((node) => node.getAttribute('data-id') ?? ''),
               );
-              assert.equal(warmInitialIds.length, 3, 'Home starts with three Recent preview rows');
+              assert.equal(warmInitialIds.length, 3, 'Sessions starts with three Recent preview rows');
               assert.equal(
                 warmInitialIds.some((id) => id.includes('a-docs')),
                 false,
@@ -670,7 +670,7 @@ test(
               );
               await page.unrouteAll({ behavior: 'wait' });
               await page.goto(address[1] + '/?t=' + address[2] + '&compat=1');
-              await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+              await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
             }
             if (width === 1280) {
               await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
@@ -685,51 +685,45 @@ test(
             }
 
             if (delayed) {
-              assert.equal(
-                await page.locator('#page .ib:not(.quiet)').count(),
-                home.inbox.length,
-                'activity renders while native previews are pending',
-              );
+              // Machine details retain native preview reads. Hold those reads,
+              // leave for Analytics and ensure their late result cannot repaint it.
+              await navigate('machines');
+              await page.locator('#page [data-m]').first().click();
+              await page.getByRole('button', { name: 'Back to Machines', exact: true }).waitFor();
+              await page.locator('#page .nrow[data-id]').first().waitFor();
               assert.equal(await page.getByText(question.brief, { exact: true }).count(), 0);
+              // Prove the test actually intercepted a retained preview request.
+              for (let attempt = 0; attempt < 100 && !held.length; attempt++)
+                await page.waitForTimeout(25);
+              assert.ok(held.length, 'machine preview read was not held');
               await navigate('analytics');
               await page.locator('#page h1').filter({ hasText: 'Analytics' }).waitFor();
               releaseHeldPreviews();
               await page.locator('.analytics-metrics').waitFor();
-              assert.equal(
-                await page.locator('#page .ib').count(),
-                0,
-                'late preview cannot replace Analytics',
-              );
-              await navigate('home');
-              await page.locator('#page h1').filter({ hasText: 'Home' }).waitFor();
+              assert.equal(await page.locator('#page.machine-page, #page .ib').count(), 0,
+                'late machine preview cannot replace Analytics');
+              await navigate('sessions');
+              await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
             }
-            await page.getByText(question.brief, { exact: true }).waitFor();
-            assert.equal(await page.locator('#page .ib:not(.quiet)').count(), home.inbox.length);
-            assert.ok(
-              (await page.locator('#page .ib .q').allTextContents()).every(
-                (text) => text.trim().length,
-              ),
-            );
-            for (const row of home.working.filter((row) => row.session.activity)) {
-              const activity = row.session.activity;
-              assert.ok(
-                (
-                  await page
-                    .locator('#page .nrow')
-                    .filter({ has: page.getByText(row.session.name, { exact: true }) })
-                    .textContent()
-                ).includes(activity[0]),
-                'Home retains the recorded tool name in working activity',
-              );
-            }
+            assert.equal(await page.locator('#page .ib, #nav [data-go="home"]').count(), 0,
+              'Home inbox and navigation must not move into Sessions');
+            await page.locator('#page [data-session-row="list"]').first().waitFor();
             assert.ok((await page.locator('#lanes > .treeitem').count()) <= 8);
             assert.ok(
               (await page.locator('#lanes .tree-group .treeitem').count()) > 0,
               'resolved ancestry remains nested',
             );
             assert.equal(new URL(page.url()).searchParams.has('compat'), false);
-            await screenshot('home');
-            await page.locator('#page .tracebtn').first().click();
+            await screenshot('root-sessions');
+            // The removed Home Trace button is replaced by the retained native
+            // Trace bookmark for the same exact source/session/recorded turn.
+            const traceTurn = question.turn ?? waiting.event.turn;
+            assert.ok(traceTurn, 'the qualified question identifies its recorded turn');
+            const tracePath = '/trace/' + encodeURIComponent(waiting.session.harness) + '/' +
+              encodeURIComponent(waiting.catalog_key) + '/' + encodeURIComponent(traceTurn);
+            await page.goto(address[1] + tracePath + '?' + new URLSearchParams({
+              t: address[2], machine: waiting.source_key,
+            }));
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
             assert.match(new URL(page.url()).pathname, /^\/trace\//);

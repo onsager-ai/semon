@@ -21,7 +21,7 @@ they do not select an active landing page.
 | `app/catalogViewer` | Source selection, navigation, bounded selected roots, source lists, transport and refresh cadence | Check source, request epoch and route before accepting or painting. |
 | `CatalogSelectionStore` | Current-scope selected native identity | Historical identity never grants runtime or control authority. |
 | `CatalogTranscriptStore` | Issued requests, source-qualified ranges, stable entry identities and projection generations | Reject holes, inconsistent overlaps, stale selection and mixed generations before replacement. |
-| `app/overviewPages` | One accepted Home/Analytics response, facets, seen results and route panels | Adopt coherent metadata first; accept each visible preview only for its requested source generation. Reject changed publication versions. Pending Home/machine reads have one retry timer in the reader's EffectScope, with bounded backoff; navigation and teardown cancel it. |
+| `app/overviewPages` | Compact workspace publication for Recent, Analytics, machine views and route panels | Adopt coherent metadata first; accept each visible preview only for its requested source generation. Reject changed publication versions. Pending workspace/machine reads have one retry timer in the reader's EffectScope, with bounded backoff; navigation and teardown cancel it. |
 | `app/tracePresentation` and `domain/trace` | Validated requested causal closure and pure rail/chart calculations | No workspace graph, model stream, native authority or separate router. |
 | Shared `lib` components | Shell, Topbar, Recent, screens, panels, measured charts and transcript DOM | One owner per region; synchronous commits retain stable keys and native control roots. |
 | Scoped control/runtime observers | Status streams, recovery and selected custody observations | Exact source/native identity, independent authorization and teardown govern every delivery. |
@@ -59,17 +59,20 @@ root rather than assuming that a changed toolbar title means content is ready.
 The native reader wrapper preserves the established 24px transcript-to-dock gap
 and 8px top inset across viewport sizes.
 
-Home and Analytics read compact producer publications across authorized sources.
-Machine details borrow that same producer with an exact source key, validated
-before source admission, observation scheduling and preview reads. The canonical
-reader retains machine bookmarks and shell headers; shared Machine rows use the
-accepted sixty-row Recent publication and generation-fenced previews. A scoped
-machine response cannot supply global Home counters or the Machines inventory.
+Recent, Analytics and machine details read compact producer publications across
+authorized sources. Machine details borrow that same producer with an exact
+source key, validated before source admission, observation scheduling and preview
+reads. The canonical reader retains machine bookmarks and shell headers; shared
+Machine rows use the accepted sixty-row Recent publication and generation-fenced
+previews. A scoped machine response cannot supply workspace counters or the
+Machines inventory. The retained Home-format publication may carry inbox and
+status fields for compatibility, but the active application does not render a
+Home page or move those sections into Sessions.
 The shared Machine screen owns its route-specific geometry class and removes it
 when released; section and row styles must not leak into another route.
-Home retains the established Needs You, Working Now, Answered and Recent
-presentation. Native text is absent from persistent metadata: visible previews
-use the qualified selected-session reader with bounded record and byte budgets.
+Recent remains in shared chrome. Native text is absent from persistent metadata:
+visible previews use the qualified selected-session reader with bounded record
+and byte budgets.
 Analytics uses timing, costs, waits and model observations captured before source
 window trimming. Causal queries follow recorded starts, spawns and relays through
 indexed metadata, with explicit limits and further branch navigation. Missing or
@@ -145,10 +148,11 @@ native result anchor, which can differ from the tool call's provenance. Structur
 Codex output expands one qualified entry with a 64 KiB text cap and retains actual
 recorded gaps; script and image reads remain independently qualified.
 
-Home sections have 100-row pages. Recent uses a 60-row publication and eight
-ancestry roots, borrowing at most 32 ancestors, 99 runs and the current selected
-session from its verified family when it is outside that publication. The selected
-path remains visible. Approval-review roles use presentation metadata without
+Legacy Home-format inbox/status collections use 100-row wire pages; the active
+Sessions UI does not page or render those sections. Recent uses a 60-row publication and
+eight ancestry roots, borrowing at most 32 ancestors, 99 runs and the current
+selected session from its verified family when it is outside that publication.
+The selected path remains visible. Approval-review roles use presentation metadata without
 changing native harness/kind or cost identity; hidden reviews forward descendants
 and current selections retain their ancestors. Ordering holds belong to the same
 application owner during pointer, focus, scroll and open-menu interactions.
@@ -349,18 +353,17 @@ Received sources use their own facts and never the viewer host's native database
 Metadata changes invalidate native metadata observations while preserving
 unchanged transcript generations.
 
-## Empty local native launch
+## Legacy `initialHome` content
 
-Before the first rollout exists, Home can render the existing local input
-component from the isolated launcher's empty-thread witness. This is creation
-authority, not a provisional Catalog identity. The same local control owner holds
-its source-qualified draft and exact operation receipt; the existing Home refresh
-and EffectScope own observation and teardown. Only initial input is exposed.
-Recorded native turns/intents retire that witness. Subsequent session control
-selection still requires qualified native Catalog ownership, and archive
-readiness is unchanged. The host never constructs a transcript or synthetic row.
+The optional `initialHome` compatibility port does not select the default page;
+`/` opens Sessions. Any host-supplied content remains owned by the host and is
+shown only when the host explicitly mounts it. This port does not restore the
+removed Home page or relocate its inbox/status sections into Sessions. Existing
+local control drafts, exact operation receipts, native identity checks and
+archive readiness keep their own owners. The host never constructs a transcript
+or synthetic row.
 
-A host may supply `initialHome.title` with its onboarding content. The canonical
-reader uses that heading only while the same content element occupies its root;
-ordinary Home and other routes retain their shared titles. Domain wording stays
+A host may supply `initialHome.title` with that optional content. The canonical
+reader uses the heading only while the same content element occupies its root;
+Sessions and other retained routes keep their shared titles. Domain wording stays
 with the host and introduces no additional routing or observation owner.
