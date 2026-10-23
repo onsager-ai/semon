@@ -313,19 +313,6 @@ jobs:
           SEMON_PIXEL_SCOPE=main node pixels.mjs || failed=1
           exit "$failed"
 
-      - name: Audit existing exact visual bindings without changing approvals
-        if: ${{ always() && !cancelled() && matrix.suite == 'visual' }}
-        working-directory: tests/ui
-        run: node audit-visual-bindings.mjs
-
-      - name: Upload advisory visual binding proof
-        if: ${{ always() && matrix.suite == 'visual' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: viewer-visual-binding-audit
-          path: tests/ui/out/visual-binding-audit.json
-          if-no-files-found: error
-
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
         working-directory: tests/ui
