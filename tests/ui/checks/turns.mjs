@@ -99,6 +99,15 @@ function model(D) {
   return { ...D, HID, turns, starts, holds, inTx, hasChildOrigin };
 }
 
+// Select an actual non-tail native turn, rather than an outgoing handoff's
+// holder: a retained turn need not have sent anything onward.
+const nativeAnchor = (D) =>
+  D.model.turns.find((native) =>
+    D.SESS[native.sid] && D.turns[native.sid]?.slice(0, -1).some(
+      (turn) => turn.id === native.id,
+    ),
+  );
+
 export default async function turnsCheck(browser) {
   const D0 = await data();
   const D = model(D0);
@@ -153,6 +162,9 @@ export default async function turnsCheck(browser) {
     };
 
     // Root Sessions and Machines. Home inbox tap targets were removed with Home.
+    await page.waitForFunction(() =>
+      document.querySelector('.session-list .nrow .nm')?.textContent?.trim(),
+    );
     await screen('sessions');
     addTap('sessions rows', await small('.session-list .nrow'));
     await goto(page, { v: 'machines' }, D0);
@@ -459,9 +471,7 @@ export default async function turnsCheck(browser) {
       D1.hadPick = !!pick;
       // Home's inbox click/Trace/Enter/Space affordances were removed with
       // Home. Retain the anchored native URL and Back contract from Sessions.
-      const started = [...D.holds.values()].find(
-        (turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1),
-      );
+      const started = nativeAnchor(D);
       D1.hadAnchor = !!started;
       if (started) {
         await goto(page, { v: 'sessions' }, D0);
@@ -594,9 +604,7 @@ export default async function turnsCheck(browser) {
   const anchorPin = { passed: false };
   let releaseRange = () => {};
   try {
-    const started = [...D.holds.values()].find(
-      (turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1),
-    );
+    const started = nativeAnchor(D);
     if (!started) throw Error('fixture has no recorded turn for anchored navigation');
     const sid = D.KEYS?.[started.sid] ?? started.sid;
     let fetchedResolve;
