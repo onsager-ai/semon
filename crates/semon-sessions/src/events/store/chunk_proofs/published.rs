@@ -11,10 +11,7 @@ pub(super) fn prefix(path: &str, ledger: &str) -> String {
 }
 
 fn namespaces(prefix: &str) -> [String; 2] {
-    [
-        prefix.to_owned(),
-        format!("native_proof_tree:{prefix}:"),
-    ]
+    [prefix.to_owned(), format!("native_proof_tree:{prefix}:")]
 }
 
 /// Run before replacing/deleting live proofs, in the same Index transaction.
