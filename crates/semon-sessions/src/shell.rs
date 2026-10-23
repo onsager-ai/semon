@@ -202,6 +202,9 @@ pub fn is_page_path(path: &str) -> bool {
     ) {
         return true;
     }
+    if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
+        return crate::session_route::SessionRoute::parse(path, "").is_ok();
+    }
     if !(path.starts_with("/machines/") || path.starts_with("/s/") || path.starts_with("/trace/")) {
         return false;
     }

@@ -993,6 +993,9 @@ impl ViewerCore {
                 etag: None,
             };
         }
+        if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
+            return self.session_page(extras, path, query);
+        }
         if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
             return crate::native_page::reply(path, query, |endpoint, args| {
                 self.respond_with(extras, "GET", endpoint, args, None)
@@ -1085,9 +1088,131 @@ impl ViewerCore {
         views[0].1.respond(method, path, query, if_none_match)
     }
 
+    fn session_page(&self, extras: &Extras, path: &str, query: &str) -> ViewerReply {
+        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
+        let route = match SessionRoute::parse(path, query) {
+            Ok(route) => route,
+            Err(_) => return text(400, "Malformed session address"),
+        };
+        self.follow();
+        let views = self.views();
+        let inventory = self.source_inventory(&views);
+        let mut candidates = Vec::<Candidate>::new();
+        let mut unavailable = false;
+        for (index, (internal, view)) in views.iter().enumerate() {
+            let source = if internal.is_empty() && views.len() == 1 {
+                "local"
+            } else {
+                internal
+            };
+            if route
+                .source
+                .as_ref()
+                .is_some_and(|selected| selected != source)
+            {
+                continue;
+            }
+            // Inventory qualification also rejects duplicated or unstable source keys.
+            if !inventory.valid() || inventory.index(source) != Some(index) {
+                continue;
+            }
+            let _ = view.note_catalog_read();
+            let reply = crate::session_bookmark(
+                view.options(),
+                source,
+                &format!("sid={}", percent_encode(&route.key)),
+            );
+            let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+            unavailable |=
+                reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0);
+            for candidate in value["matches"].as_array().into_iter().flatten() {
+                if let Ok(candidate) = serde_json::from_value(candidate.clone()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        if unavailable {
+            return text(503, "Session index is updating");
+        }
+        match resolve(&route, &candidates) {
+            Resolution::Valid(index) => {
+                let candidate = &candidates[index];
+                if let Some(turn) = &route.turn {
+                    let anchor = self.catalog(
+                        &views,
+                        "/api/session-anchor",
+                        &crate::native_html::query(&[
+                            ("machine", &candidate.source_key),
+                            ("sid", &candidate.catalog_key),
+                            ("turn", turn),
+                            ("scope", "retained_history"),
+                        ]),
+                    );
+                    if anchor.status != 200 {
+                        return anchor;
+                    }
+                }
+                if route.legacy_harness.is_some() {
+                    return ViewerReply::redirect(
+                        route.canonical(&candidate.source_key, &candidate.catalog_key),
+                    );
+                }
+                if route
+                    .controls
+                    .get("native")
+                    .is_some_and(|value| value == "1")
+                {
+                    crate::native_page::reply(path, query, |endpoint, args| {
+                        self.respond_with(extras, "GET", endpoint, args, None)
+                    })
+                } else if let Some((_, view)) = views.first() {
+                    view.respond("GET", "/", "", None)
+                } else {
+                    text(404, "Not found")
+                }
+            }
+            Resolution::Ambiguous => crate::native_page::reply(path, query, |endpoint, args| {
+                self.respond_with(extras, "GET", endpoint, args, None)
+            }),
+            Resolution::NotFound | Resolution::Mismatch => text(404, "Not found"),
+        }
+    }
+
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
     fn catalog(&self, views: &Arc<Views>, path: &str, query: &str) -> ViewerReply {
+        if path == "/api/session-locate"
+            && query_value(query, "machine").is_none()
+            && views.len() > 1
+        {
+            let inventory = self.source_inventory(views);
+            if !inventory.valid() || views.len() > 100 {
+                return text(503, "Choose a source explicitly");
+            }
+            let mut matches = Vec::<Value>::new();
+            let mut unavailable = 0_u64;
+            for (source, view) in views.iter() {
+                let _ = view.note_catalog_read();
+                let reply = crate::session_bookmark(view.options(), source, query);
+                if reply.status != 200 {
+                    return reply;
+                }
+                let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+                unavailable += value["unavailable"].as_u64().unwrap_or(1);
+                matches.extend(value["matches"].as_array().into_iter().flatten().cloned());
+                if matches.len() > 100 {
+                    return text(503, "Choose a source explicitly");
+                }
+            }
+            return ViewerReply {
+                status: 200,
+                content_type: "application/json; charset=utf-8",
+                body: json!({"api":1,"matches":matches,"unavailable":unavailable})
+                    .to_string()
+                    .into_bytes(),
+                etag: None,
+            };
+        }
         let request = if path == "/api/sessions" {
             match crate::catalog::Request::parse(query) {
                 Ok(request) => Some(request),

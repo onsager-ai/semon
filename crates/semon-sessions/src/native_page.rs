@@ -2,7 +2,7 @@
 //! The local HTTP owner authenticates before handing a request to ViewerCore.
 use crate::{
     ViewerReply,
-    native_html::{link, path_segment, query},
+    native_html::{link, query},
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -53,6 +53,9 @@ pub(crate) fn reply(
             serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null),
         )
     };
+    if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
+        return selected_reply(path, arguments, &mut read);
+    }
     let mut body = String::new();
     let mut status = 200;
     if let Some(encoded) = path.strip_prefix("/machines/") {
@@ -209,12 +212,12 @@ pub(crate) fn reply(
                 if code == 200 {
                     body.push_str("<h1>Sessions</h1><ul aria-label=\"Sessions\">");
                     for item in value["items"].as_array().into_iter().flatten() {
-                        let (Some(key), Some(harness)) =
+                        let (Some(key), Some(_harness)) =
                             (item["key"].as_str(), item["harness"].as_str())
                         else {
                             continue;
                         };
-                        let route = format!("/s/{}/{}", path_segment(harness), path_segment(key));
+                        let route = crate::session_route::session_path(machine, key);
                         body.push_str(&format!(
                             "<li>{}</li>",
                             link(
@@ -235,95 +238,7 @@ pub(crate) fn reply(
                     }
                 }
             } else {
-                let parts = crate::viewer::page_parts(path).unwrap_or_default();
-                match parts.as_slice() {
-                    [kind, harness, key] | [kind, harness, key, _]
-                        if matches!(kind.as_str(), "s" | "trace") =>
-                    {
-                        let (code, located) = decoded(read(
-                            "/api/session-locate",
-                            &query(&[("machine", machine), ("sid", key)]),
-                        ));
-                        let matches: Vec<_> = located["matches"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|item| item["harness"] == *harness)
-                            .collect();
-                        if code != 200 || matches.len() != 1 {
-                            status = if code != 200 {
-                                code
-                            } else if located["unavailable"].as_u64().unwrap_or(0) > 0 {
-                                503
-                            } else {
-                                404
-                            };
-                        } else {
-                            let key = matches[0]["catalog_key"].as_str().unwrap_or(key);
-                            let mut after = get("after").map(str::to_owned);
-                            let mut generation = get("generation").map(str::to_owned);
-                            if parts.len() == 4 && after.is_none() {
-                                let (code, anchor) = decoded(read(
-                                    "/api/session-anchor",
-                                    &query(&[
-                                        ("machine", machine),
-                                        ("sid", key),
-                                        ("turn", &parts[3]),
-                                        ("scope", "retained_history"),
-                                    ]),
-                                ));
-                                if code != 200
-                                    || !anchor["slot"].is_number()
-                                    || !anchor["generation"].is_string()
-                                {
-                                    status = if code == 200 { 404 } else { code };
-                                } else {
-                                    after = Some(anchor["slot"].to_string());
-                                    generation = anchor["generation"].as_str().map(str::to_owned);
-                                }
-                            }
-                            if status == 200 {
-                                let mut pairs = vec![
-                                    ("machine", machine),
-                                    ("sid", key),
-                                    ("scope", "retained_history"),
-                                ];
-                                if let Some(after) = after.as_deref() {
-                                    pairs.push(("after", after));
-                                }
-                                if let Some(generation) = generation.as_deref() {
-                                    pairs.push(("generation", generation));
-                                }
-                                let endpoint = if let Some(chunk) = get("field_chunk") {
-                                    pairs.extend([("field_chunk", chunk), ("limit", "1")]);
-                                    "/api/session-entry"
-                                } else if let Some(part) = get("part") {
-                                    pairs.extend([("part", part), ("limit", "1")]);
-                                    "/api/session-entry"
-                                } else {
-                                    pairs.push(("limit", "60"));
-                                    "/api/session-transcript"
-                                };
-                                let (code, value) = decoded(read(endpoint, &query(&pairs)));
-                                status = code;
-                                if code == 200 {
-                                    body.push_str(&crate::native_html::transcript(
-                                        &value, path, machine, harness, key,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    [kind, _] if kind == "machines" => {
-                        body.push_str("<h1>Machine sessions</h1>");
-                        body.push_str(&link(
-                            "/sessions",
-                            &[("machine", machine), ("native", "1")],
-                            "Browse this source",
-                        ));
-                    }
-                    _ => status = 404,
-                }
+                status = 404;
             }
         }
     }
@@ -331,4 +246,139 @@ pub(crate) fn reply(
         body.push_str("<p>Selected native history is unavailable. Reload this page to retry.</p>");
     }
     response(status, &body)
+}
+
+fn selected_reply(
+    path: &str,
+    arguments: &str,
+    read: &mut impl FnMut(&str, &str) -> ViewerReply,
+) -> ViewerReply {
+    use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
+    let route = match SessionRoute::parse(path, arguments) {
+        Ok(route) => route,
+        Err(_) => return response(400, "<p>Malformed session address.</p>"),
+    };
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let sources = if let Some(source) = &route.source {
+        vec![source.clone()]
+    } else {
+        let reply = read("/api/session-sources", "limit=100");
+        if reply.status != 200 {
+            return reply;
+        }
+        let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+        if value["next_cursor"].is_string() {
+            return response(503, "<p>Choose a source explicitly.</p>");
+        }
+        value["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["source_key"].as_str().map(str::to_owned))
+            .collect()
+    };
+    for source in sources {
+        let reply = read(
+            "/api/session-locate",
+            &query(&[("machine", &source), ("sid", &route.key)]),
+        );
+        if reply.status != 200 {
+            return reply;
+        }
+        let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+        if value["unavailable"].as_u64().is_some_and(|n| n > 0) {
+            return response(503, "<p>Session index is updating.</p>");
+        }
+        candidates.extend(
+            value["matches"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| serde_json::from_value::<Candidate>(item.clone()).ok()),
+        );
+    }
+    let selected = match resolve(&route, &candidates) {
+        Resolution::Valid(index) => &candidates[index],
+        Resolution::Ambiguous => {
+            let mut body = String::from("<h1>Choose a session source</h1><ul>");
+            for candidate in candidates
+                .iter()
+                .filter(|candidate| candidate.catalog_key == route.key)
+            {
+                body.push_str(&format!(
+                    "<li>{}</li>",
+                    link(
+                        &route.canonical(&candidate.source_key, &candidate.catalog_key),
+                        &[],
+                        &candidate.source_key
+                    )
+                ));
+            }
+            body.push_str("</ul>");
+            return response(200, &body);
+        }
+        Resolution::NotFound | Resolution::Mismatch => {
+            return response(404, "<p>Session not found.</p>");
+        }
+    };
+    if route.legacy_harness.is_some() {
+        return ViewerReply::redirect(route.canonical(&selected.source_key, &selected.catalog_key));
+    }
+    let machine = selected.source_key.as_str();
+    let key = selected.catalog_key.as_str();
+    let get = |name: &str| route.controls.get(name).map(String::as_str);
+    let mut after = get("after").map(str::to_owned);
+    let mut generation = get("generation").map(str::to_owned);
+    if let Some(turn) = &route.turn {
+        if after.is_none() {
+            let anchor = read(
+                "/api/session-anchor",
+                &query(&[
+                    ("machine", machine),
+                    ("sid", key),
+                    ("turn", turn),
+                    ("scope", "retained_history"),
+                ]),
+            );
+            if anchor.status != 200 {
+                return anchor;
+            }
+            let value: Value = serde_json::from_slice(&anchor.body).unwrap_or(Value::Null);
+            if !value["slot"].is_number() || !value["generation"].is_string() {
+                return response(404, "<p>Turn not found.</p>");
+            }
+            after = Some(value["slot"].to_string());
+            generation = value["generation"].as_str().map(str::to_owned);
+        }
+    }
+    let mut pairs = vec![
+        ("machine", machine),
+        ("sid", key),
+        ("scope", "retained_history"),
+    ];
+    if let Some(after) = after.as_deref() {
+        pairs.push(("after", after));
+    }
+    if let Some(generation) = generation.as_deref() {
+        pairs.push(("generation", generation));
+    }
+    let endpoint = if let Some(chunk) = get("field_chunk") {
+        pairs.extend([("field_chunk", chunk), ("limit", "1")]);
+        "/api/session-entry"
+    } else if let Some(part) = get("part") {
+        pairs.extend([("part", part), ("limit", "1")]);
+        "/api/session-entry"
+    } else {
+        pairs.push(("limit", "60"));
+        "/api/session-transcript"
+    };
+    let reply = read(endpoint, &query(&pairs));
+    if reply.status != 200 {
+        return reply;
+    }
+    let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+    response(
+        200,
+        &crate::native_html::transcript(&value, path, machine, &selected.harness, key),
+    )
 }

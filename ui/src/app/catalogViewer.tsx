@@ -1,3 +1,11 @@
+import {
+  sessionPath,
+  tracePath,
+  parseSessionRoute,
+  canonicalSessionRoute,
+  resolveSessionRoute,
+  type SessionRoute,
+} from '../lib/sessionRoute';
 import { compareCatalogKeys } from '../lib/catalogIdentity';
 import { readShellPreference, writeShellPreference } from '../lib/navigation';
 import {
@@ -704,6 +712,23 @@ export function createCatalogViewer(
       value.set('all_machines', '1');
     return value;
   };
+  const sessionControls = () => {
+    const p = browsingParams();
+    p.delete('machine');
+    return p;
+  };
+  const sessionAnchor = () => {
+    const hash = location.hash.slice(1);
+    try {
+      return hash.startsWith('turn=')
+        ? (new URLSearchParams(hash).get('turn') ?? undefined)
+        : hash
+          ? decodeURIComponent(hash)
+          : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const saveFilters = () =>
     history.replaceState(history.state, '', '/sessions?' + browsingParams());
   const countFilters = () => JSON.stringify([harness, repo, model, query]);
@@ -836,11 +861,8 @@ export function createCatalogViewer(
   });
   function overviewSession(intent: { source_key: string; catalog_key: string }, turn?: string) {
     const url =
-      '/s/native/' +
-      encodeURIComponent(intent.catalog_key) +
-      '?' +
-      new URLSearchParams({ machine: intent.source_key }) +
-      (turn ? '#turn=' + encodeURIComponent(turn) : '');
+      sessionPath(intent.source_key, intent.catalog_key) +
+      (turn ? '#' + encodeURIComponent(turn) : '');
     if (viewerHost?.nativePage) {
       location.assign(url);
       return;
@@ -849,13 +871,7 @@ export function createCatalogViewer(
     fromLocation();
   }
   function overviewTrace(intent: { source_key: string; catalog_key: string }, turn: string) {
-    const url =
-      '/trace/native/' +
-      encodeURIComponent(intent.catalog_key) +
-      '/' +
-      encodeURIComponent(turn) +
-      '?' +
-      new URLSearchParams({ machine: intent.source_key });
+    const url = tracePath(intent.source_key, intent.catalog_key, turn);
     if (viewerHost?.nativePage) {
       location.assign(url);
       return;
@@ -910,7 +926,7 @@ export function createCatalogViewer(
       url.origin === location.origin &&
       (viewerHost.pages.match(url) ||
         ['/', '/sessions', '/analytics', '/timeline'].includes(url.pathname) ||
-        /^\/(s|trace)\//.test(url.pathname))
+        /^\/(session|s|trace)\//.test(url.pathname))
       ? url
       : null;
   }
@@ -1034,11 +1050,7 @@ export function createCatalogViewer(
     renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
       session(key, turn) {
         const url =
-          '/s/native/' +
-          encodeURIComponent(key) +
-          '?' +
-          new URLSearchParams({ machine: accepted.source }) +
-          (turn ? '#turn=' + encodeURIComponent(turn) : '');
+          sessionPath(accepted.source, key) + (turn ? '#' + encodeURIComponent(turn) : '');
         history.pushState(null, '', url);
         fromLocation();
       },
@@ -1943,12 +1955,7 @@ export function createCatalogViewer(
             history.pushState(
               null,
               '',
-              '/trace/native/' +
-                encodeURIComponent(view.key) +
-                '/' +
-                encodeURIComponent(turn) +
-                '?' +
-                browsingParams(),
+              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(),
             );
             goCausal(view.key, turn);
           });
@@ -2139,12 +2146,12 @@ export function createCatalogViewer(
     if (item.machine) {
       saveSource();
       const p = browsingParams();
-      p.set('machine', item.machine.key);
+      p.delete('machine');
       p.set('all_machines', '1');
       history.pushState(
         { v: 'session', id: item.key },
         '',
-        '/s/' + encodeURIComponent(item.harness) + '/' + encodeURIComponent(item.key) + '?' + p,
+        sessionPath(item.machine.key, item.key) + '?' + p,
       );
       fromLocation();
     } else
@@ -2690,13 +2697,7 @@ export function createCatalogViewer(
         {
           committed() {},
           trace(turn) {
-            const url =
-              '/trace/native/' +
-              encodeURIComponent(view.key) +
-              '/' +
-              encodeURIComponent(turn) +
-              '?' +
-              new URLSearchParams({ machine: view.sourceKey });
+            const url = tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls();
             history.pushState(null, '', url);
             goCausal(view.key, turn);
           },
@@ -2937,13 +2938,7 @@ export function createCatalogViewer(
           panelClosed(panel);
         },
         trace(turn) {
-          const url =
-            '/trace/native/' +
-            encodeURIComponent(view.key) +
-            '/' +
-            encodeURIComponent(turn) +
-            '?' +
-            new URLSearchParams({ machine: view.sourceKey });
+          const url = tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls();
           history.pushState(null, '', url);
           goCausal(view.key, turn);
         },
@@ -3608,9 +3603,7 @@ export function createCatalogViewer(
     }
     sessionPanel?.destroy();
     active = view;
-    const turn =
-      anchor ??
-      (push ? undefined : (new URLSearchParams(location.hash.slice(1)).get('turn') ?? undefined));
+    const turn = anchor ?? (push ? undefined : sessionAnchor());
     if (turn) {
       // An anchored reader must not inherit or start the delayed tail pin. The
       // first render happens before its generation-bound range is available.
@@ -3653,13 +3646,10 @@ export function createCatalogViewer(
       history.pushState(
         navigation.route,
         '',
-        '/s/' +
-          encodeURIComponent(view.meta?.harness ?? 'native') +
-          '/' +
-          encodeURIComponent(key) +
+        sessionPath(view.sourceKey, key) +
           '?' +
-          browsingParams() +
-          (anchor ? '#turn=' + encodeURIComponent(anchor) : ''),
+          sessionControls() +
+          (anchor ? '#' + encodeURIComponent(anchor) : ''),
       );
     chrome();
     // The navigation transaction restores its saved position below; the
@@ -3692,7 +3682,7 @@ export function createCatalogViewer(
         view.navigationEpoch === navigationEpoch &&
         capabilities.selected_transcript &&
         sourceKey === capabilities.source_key &&
-        new URLSearchParams(location.hash.slice(1)).get('turn') === turn;
+        sessionAnchor() === turn;
       if (!capabilities.selected_transcript) {
         view.anchorNote =
           'Recorded transcript is updating. The source refresh will appear automatically.';
@@ -4012,7 +4002,13 @@ export function createCatalogViewer(
         note: sourcesNote,
         more: sourceCursor !== null,
         machinesHref: machinesHref(),
-        bookmarks: bookmarkMatches,
+        bookmarks: bookmarkMatches.map((item) => {
+          const route = parseSessionRoute(location.pathname, location.search);
+          return {
+            ...item,
+            href: canonicalSessionRoute(route, item.source_key, item.catalog_key) + location.hash,
+          };
+        }),
       },
       {
         select(key) {
@@ -4139,23 +4135,12 @@ export function createCatalogViewer(
       note = '';
       sourcesOpen = false;
       active = null;
-      const bookmark = location.pathname.startsWith('/s/') ? location.pathname.split('/')[3] : null;
-      if (push && bookmark) {
-        await goSession(decodeURIComponent(bookmark), undefined, true);
-        chrome();
-        return;
-      }
       if (push && retained?.selectedKey) await goSession(retained.selectedKey, undefined, false);
       else goList(false);
-      const url = retained?.selectedKey
-        ? '/s/' +
-          encodeURIComponent(
-            selected.get(cacheKey(retained.selectedKey))?.meta?.harness ?? 'native',
-          ) +
-          '/' +
-          encodeURIComponent(retained.selectedKey)
-        : '/sessions';
-      if (push) history.pushState(navigation.route, '', url + '?' + browsingParams());
+      const destination = retained?.selectedKey
+        ? sessionPath(key, retained.selectedKey) + '?' + sessionControls()
+        : '/sessions?' + browsingParams();
+      if (push) history.pushState(navigation.route, '', destination);
       else fromLocation();
       chrome();
       void loadList(false);
@@ -4172,7 +4157,9 @@ export function createCatalogViewer(
           if (
             !disposed &&
             epoch === sourcesEpoch &&
-            (new URLSearchParams(location.search).get('machine') ?? '') === key
+            (location.pathname.startsWith('/session/')
+              ? parseSessionRoute(location.pathname, location.search).source
+              : (new URLSearchParams(location.search).get('machine') ?? '')) === key
           )
             void switchSource(key, false);
         }, 1000);
@@ -4190,13 +4177,10 @@ export function createCatalogViewer(
   async function locateBookmark(key: string, sourceKey?: string) {
     if (locating) return;
     locating = true;
-    const path = location.pathname;
-    const current = () =>
-      !disposed &&
-      location.pathname === path &&
-      (sourceKey
-        ? capabilities.source_key === sourceKey
-        : !new URLSearchParams(location.search).has('machine'));
+    const path = location.pathname,
+      search = location.search;
+    const route = parseSessionRoute(path, search);
+    const current = () => !disposed && location.pathname === path && location.search === search;
     const retry = () =>
       scope.timeout(() => {
         if (current()) void locateBookmark(key, sourceKey);
@@ -4216,31 +4200,35 @@ export function createCatalogViewer(
         Number(reply.unavailable) < 0
       )
         throw Error('Bookmark lookup unavailable');
-      if (reply.matches.length === 1 && reply.unavailable === 0) {
-        const match = object(reply.matches[0]);
-        if (typeof match.source_key !== 'string' || typeof match.catalog_key !== 'string')
-          throw Error('Invalid bookmark selection');
-        const url = new URL(location.href);
-        url.searchParams.set('machine', match.source_key);
-        if (match.catalog_key !== key) {
-          url.pathname =
-            '/s/' +
-            encodeURIComponent(typeof match.harness === 'string' ? match.harness : 'native') +
-            '/' +
-            encodeURIComponent(match.catalog_key);
-          url.hash = '';
-        }
-        history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+      const candidates = reply.matches.map((value) => {
+        const match = object(value);
+        return {
+          source_key: text(match.source_key),
+          catalog_key: text(match.catalog_key),
+          harness: text(match.harness),
+        };
+      });
+      const resolved = resolveSessionRoute(route, candidates);
+      if (resolved.outcome === 'valid' && reply.unavailable === 0) {
+        const match = resolved.candidate;
+        history.replaceState(
+          history.state,
+          '',
+          canonicalSessionRoute(route, match.source_key, match.catalog_key) +
+            (route.anchor ? '' : location.hash),
+        );
         fromLocation();
       } else {
-        bookmarkMatches = reply.matches.slice(0, 100).map((value) => {
-          const match = object(value);
-          return {
-            source_key: text(match.source_key),
-            catalog_key: text(match.catalog_key),
-            harness: typeof match.harness === 'string' ? match.harness : 'native',
-          };
-        });
+        bookmarkMatches = (resolved.outcome === 'ambiguous' ? reply.matches : [])
+          .slice(0, 100)
+          .map((value) => {
+            const match = object(value);
+            return {
+              source_key: text(match.source_key),
+              catalog_key: text(match.catalog_key),
+              harness: typeof match.harness === 'string' ? match.harness : 'native',
+            };
+          });
         leaveScreen();
         navigation.route = { v: 'sessions' };
         sourcesOpen = true;
@@ -4249,7 +4237,9 @@ export function createCatalogViewer(
             ? 'The recorded session index is updating. Retrying…'
             : reply.matches.length > 1
               ? 'This bookmark has several recorded origins. Choose a session.'
-              : 'Choose a machine to resolve this recorded session.';
+              : resolved.outcome === 'mismatch'
+                ? 'This bookmark does not match the recorded harness.'
+                : 'Recorded session not found.';
         drawSources();
         if (Number(reply.unavailable) > 0) retry();
       }
@@ -4274,6 +4264,23 @@ export function createCatalogViewer(
       chrome();
       if (viewerHost.nativePage.workspaceChrome) void overview.refresh();
       return;
+    }
+    let sessionRoute: SessionRoute | null = null;
+    if (/^\/(session|s|trace)(?:\/|$)/.test(location.pathname)) {
+      try {
+        sessionRoute = parseSessionRoute(location.pathname, location.search);
+      } catch {
+        leaveScreen();
+        navigation.route = { v: 'sessions' };
+        sourcesOpen = false;
+        note = 'Malformed session address.';
+        goList(false);
+        return;
+      }
+      if (sessionRoute.legacyHarness) {
+        void locateBookmark(sessionRoute.key, sessionRoute.source ?? undefined);
+        return;
+      }
     }
     const queryParams = new URLSearchParams(location.search);
     const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
@@ -4306,7 +4313,7 @@ export function createCatalogViewer(
       goOverview(location.pathname === '/' ? 'home' : 'analytics', false);
       return;
     }
-    const machine = queryParams.get('machine');
+    const machine = sessionRoute?.source ?? queryParams.get('machine');
     if (
       queryParams.get('choose_source') === '1' ||
       (viewerHost?.catalogSources && !machine && /^\/(s|trace)\//.test(location.pathname))
@@ -4377,17 +4384,10 @@ export function createCatalogViewer(
       updating = false;
     }
     if (!sourcesOpen && viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
-    const parts = location.pathname.split('/').filter(Boolean);
-    if (parts[0] === 'trace' && parts[2] && parts[3]) {
-      goCausal(decodeURIComponent(parts[2]), decodeURIComponent(parts[3]));
-    } else if (parts[0] === 's' && parts[2]) {
-      try {
-        const key = decodeURIComponent(parts[2]);
-        if (key.startsWith('unsent:')) void locateBookmark(key, capabilities.source_key);
-        else void goSession(key, undefined, false);
-      } catch {
-        goList(false);
-      }
+    if (sessionRoute?.turn) {
+      goCausal(sessionRoute.key, sessionRoute.turn);
+    } else if (sessionRoute) {
+      void goSession(sessionRoute.key, undefined, false);
     } else if (machineBookmark) {
       leaveScreen();
       navigation.route = { v: 'machine', id: capabilities.source_key };
@@ -4415,7 +4415,10 @@ export function createCatalogViewer(
           history.state?.id === ('id' in navigation.route ? navigation.route.id : undefined) &&
           history.state?.turn ===
             ('turn' in navigation.route ? navigation.route.turn : undefined) &&
-          (!active || new URLSearchParams(location.search).get('machine') === active.sourceKey)
+          (!active ||
+            (location.pathname.startsWith('/session/')
+              ? parseSessionRoute(location.pathname, location.search).source
+              : new URLSearchParams(location.search).get('machine')) === active.sourceKey)
         )
           return;
       }
