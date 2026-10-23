@@ -466,7 +466,7 @@ enum SelectedPart {
     Attachment(usize),
 }
 
-fn read(
+pub(crate) fn read(
     options: &Options,
     source_key: &str,
     query: &str,

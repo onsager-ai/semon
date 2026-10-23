@@ -63,6 +63,8 @@ pub(crate) struct Session {
     pub(crate) role: bool,
     pub(crate) machine: String,
     pub(crate) state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_lifecycle: Option<crate::TurnLifecycle>,
     pub(crate) model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) effort: Option<String>,
@@ -1911,6 +1913,7 @@ impl<'a> Builder<'a> {
             role: false,
             machine: self.machine.clone(),
             state: "done",
+            turn_lifecycle: None,
             model: "—".into(),
             effort: None,
             tokens: [0.0; 3],
@@ -2319,7 +2322,18 @@ impl<'a> Builder<'a> {
                     let index =
                         self.add_session(file.id.clone(), SessKind::Codex, vec![position], out);
                     self.sessions[index].alive = held.contains(&file.id);
-                    self.sessions[index].busy = self.sessions[index].alive;
+                    self.sessions[index].out.turn_lifecycle = file
+                        .summary
+                        .tree_summary
+                        .as_ref()
+                        .and_then(|summary| summary.codex_turn.owned(&file.id))
+                        .map(|turn| turn.with_generation(&file.revision.3));
+                    self.sessions[index].busy = self.sessions[index]
+                        .out
+                        .turn_lifecycle
+                        .as_ref()
+                        .is_some_and(|turn| turn.phase == crate::TurnPhase::Active)
+                        && self.sessions[index].alive;
                 }
                 Role::Copilot => {
                     let mut out = self.blank(String::new(), "copilot");
@@ -3718,14 +3732,11 @@ impl<'a> Builder<'a> {
             }
         }
         for (child, spawner, call, ambiguous) in spawns {
-            let failed = self.files[self.sessions[child].files[0]].summary.failed;
-            let state = if self.sessions[child].alive {
-                "work"
-            } else if failed {
-                "err"
-            } else {
-                "done"
-            };
+            let state = self.sessions[child]
+                .out
+                .turn_lifecycle
+                .as_ref()
+                .map_or("off", |turn| turn.state(self.sessions[child].alive));
             self.sessions[child].out.state = state;
             let Some(spawner) = spawner else {
                 continue;
@@ -4499,7 +4510,7 @@ impl<'a> Builder<'a> {
                     self.sessions[child].key.clone(),
                 ),
                 self.sessions[child].out.start,
-                if self.sessions[child].alive {
+                if self.sessions[child].alive && self.sessions[child].kind != SessKind::Codex {
                     "work"
                 } else {
                     self.sessions[child].out.state
@@ -4637,7 +4648,15 @@ impl<'a> Builder<'a> {
                             .iter()
                             .map(|later| event(self.files, *later))
                             .find(|later| later.k == Kind::U);
-                        if self.sessions[index].alive && reply.is_none() && following.is_none() {
+                        if self.sessions[index].busy
+                            && self.sessions[index]
+                                .out
+                                .turn_lifecycle
+                                .as_ref()
+                                .is_some_and(|turn| found.o >= turn.offset)
+                            && reply.is_none()
+                            && following.is_none()
+                        {
                             handoff.status = "wait";
                         }
                         // It was answered when its output says so, else when

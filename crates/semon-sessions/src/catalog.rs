@@ -1931,7 +1931,18 @@ mod tests {
             }
             drop(work);
             staged.retire();
-            assert_eq!(fixture.body("scope=retained_history&limit=60").0, 200);
+            let (status, body) = fixture.body("scope=retained_history&limit=60");
+            assert_eq!(status, 200);
+            let owner = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == "usage-history")
+                .unwrap();
+            assert_eq!(
+                owner["status"]["state"], "off",
+                "native usage records cannot prove turn completion during staged repair"
+            );
             eprintln!(
                 "usage-projection count={count} root_bytes={root_bytes} semantic_phases={phases:?} stable_epoch={epoch} revision_before={before} revision_after={}",
                 revision()
@@ -2625,6 +2636,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable() {
+        use std::io::Write;
+        for completed in [false, true] {
+            let fixture = Fixture::new();
+            let parent = fixture.source("parent");
+            writeln!(fs::OpenOptions::new().append(true).open(parent).unwrap(), "{}", json!({
+                "type":"assistant","sessionId":"parent","timestamp":"2026-10-01T00:01:00Z",
+                "message":{"id":"call","role":"assistant","content":[{"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex exec"}}]}
+            })).unwrap();
+            let relative = fixture.codex_source("child", None, 1);
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(fixture.options.codex_home.join(&relative))
+                .unwrap();
+            writeln!(file, "{}", json!({"type":"response_item","timestamp":"2026-10-01T00:02:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Semon-Parent: claude:parent:launch\nInspect child"}]}})).unwrap();
+            if completed {
+                for kind in ["task_started", "task_complete"] {
+                    writeln!(file, "{}", json!({"type":"event_msg","timestamp":"2026-10-01T00:03:00Z","payload":{"type":kind,"turn_id":"owned"}})).unwrap();
+                }
+            }
+            drop(file);
+            let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+            facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
+            facts.codex_locks.insert("child".into(), 42);
+            crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
+            fixture.publish_existing();
+            let range = crate::transcript_range::read(
+                &fixture.options,
+                "source",
+                "sid=parent&scope=retained_history&limit=100",
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+            .unwrap_or_else(|error| panic!("source-shaped selected parent failed: {error}"));
+            assert_eq!(
+                range.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&range.body)
+            );
+            let body: Value = serde_json::from_slice(&range.body).unwrap();
+            assert!(!body["entries"].as_array().unwrap().is_empty());
+            let edge = body["relationship_context"]["handoffs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|edge| edge["to"] == "child")
+                .unwrap();
+            assert_eq!(edge["status"], if completed { "idle" } else { "off" });
+            assert_eq!(body["session"]["harness"], "claude");
+        }
     }
 
     #[test]

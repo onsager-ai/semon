@@ -146,6 +146,8 @@ pub(crate) struct Endpoint {
     pub(crate) lane: bool,
     pub(crate) role: bool,
     pub(crate) state: String,
+    #[serde(default)]
+    pub(crate) turn_lifecycle: Option<crate::TurnLifecycle>,
     pub(crate) parent: Option<String>,
     pub(crate) native_parents: Vec<(String, String)>,
     pub(crate) root: String,
@@ -264,6 +266,7 @@ fn static_state(value: &str) -> io::Result<&'static str> {
         "idle" => Ok("idle"),
         "done" => Ok("done"),
         "err" => Ok("err"),
+        "off" => Ok("off"),
         _ => Err(io::Error::other("unsupported staged native state")),
     }
 }
@@ -437,6 +440,7 @@ impl Context {
                     lane: session.out.lane,
                     role: session.out.role,
                     state: session.out.state.to_owned(),
+                    turn_lifecycle: session.out.turn_lifecycle.clone(),
                     parent: session
                         .parent
                         .map(|parent| builder.sessions[parent].key.clone()),
@@ -688,6 +692,7 @@ impl Context {
         out.cost.clone_from(&endpoint.row.cost);
         out.tokens = endpoint.row.tokens;
         out.state = static_state(&endpoint.state)?;
+        out.turn_lifecycle.clone_from(&endpoint.turn_lifecycle);
         out.lane = endpoint.lane;
         out.role = endpoint.role;
         out.parent_source.clone_from(&endpoint.row.parent_source);
@@ -725,6 +730,10 @@ impl Context {
                     session.busy = endpoint.busy;
                     session.waiting = endpoint.waiting;
                     session.out.state = static_state(&endpoint.state)?;
+                    session
+                        .out
+                        .turn_lifecycle
+                        .clone_from(&endpoint.turn_lifecycle);
                     session.out.lane = endpoint.lane;
                     session.out.role = endpoint.role;
                     session

@@ -259,7 +259,7 @@ request admission, a deadline and the existing Catalog publication coordinator.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 33 with parser/cache version 28 in one
+The Event Index initializes schema 33 with parser/cache version 29 in one
 transaction, including pricing fingerprints and native usage readiness default
 0. Schema 33 fences the retired proof/tree/usage representations as one contract.
 Normal writable producer opens (complete and scoped/background) automatically
