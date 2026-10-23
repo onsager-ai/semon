@@ -52,3 +52,14 @@ formatting, tests or generation. Live k10temp31C before merge and30.875C after b
 resolution; temps.log absent. Stop CPU work>=85C/no telemetry. Every local read is
 bounded to one file under10MB. CI and fresh independent acceptance remain required;
 Worker does not merge. #430/#426 remain open.
+
+First second-integration CI: merge24727306, Viewer39939272365 artifact12494699399
+provided the exact generated bundle patch (only viewer.generated.js). Foundation
+passed format/architecture/design/types and163/164 tests; sole failure was stale
+bundle. Applied artifact, no local generation. Rust39939272515 artifact12495556351
+provided formatting of the added regression only. Applied exact patch. Exact-head
+conformance passed78 parser tests and9 existing lifecycle tests; the added repair
+fixture incorrectly stayed under the1MiB synchronous repair ceiling, so its
+expectation of deferred repair failed. Increased sanitized filler above1MiB;
+kept all checkpoint/phase/no-migration assertions. Upstream pinned reducer passed.
+No weakening of product or raw gates. New CI required after this correction.
