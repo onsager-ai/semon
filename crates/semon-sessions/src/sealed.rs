@@ -423,6 +423,14 @@ type FrameKey = (String, usize);
 /// Decompressed frames, most recent last, shared by every reader.
 static FRAMES: Mutex<VecDeque<(FrameKey, Arc<[u8]>)>> = Mutex::new(VecDeque::new());
 
+#[cfg(test)]
+pub(crate) fn clear_frame_cache_for_test() {
+    FRAMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
+
 fn decompress(segment: &OpenSegment, index: usize) -> io::Result<Vec<u8>> {
     let frame = segment.table.frames[index];
     let mut compressed = vec![0; frame.file_len as usize];

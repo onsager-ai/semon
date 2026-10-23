@@ -27,6 +27,7 @@ const READ_CHUNK: usize = 4096;
 thread_local! {
     pub(crate) static AFTER_LOCAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static LAST_LOCAL_FAILURE: std::cell::Cell<Option<crate::source_carrier::FailureStage>> = const { std::cell::Cell::new(None) };
 }
 
 fn reply(status: u16, value: Value) -> ViewerReply {
@@ -797,10 +798,24 @@ enum ProjectionFence {
         crate::source_carrier::FailureStage,
     ),
     SourceGeneration,
+    SourceBudget,
     SourceRange,
 }
 
 fn stale(reason: ProjectionFence) -> ViewerReply {
+    if matches!(reason, ProjectionFence::SourceBudget) {
+        let mut reply = catalog::error(
+            503,
+            "source_budget_exhausted",
+            "The selected source evidence exceeds the bounded read budget.",
+            false,
+        );
+        let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
+        body["fence_reason"] = json!("source_budget");
+        body["stage"] = json!("budget");
+        reply.body = body.to_string().into_bytes();
+        return reply;
+    }
     let mut reply = catalog::error(
         409,
         "stale_projection",
@@ -848,15 +863,32 @@ impl std::error::Error for LocalRevisionChanged {
 }
 
 fn source_read_fence(error: &io::Error) -> ProjectionFence {
+    #[cfg(test)]
+    LAST_LOCAL_FAILURE.with(|stage| {
+        stage.set(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
+                .map(|detail| detail.2),
+        );
+    });
     error
         .get_ref()
         .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-        .filter(|detail| detail.2 != crate::source_carrier::FailureStage::Budget)
-        .map(|detail| ProjectionFence::LocalSourceRevision(detail.0, detail.2))
+        .map(|detail| {
+            if detail.2 == crate::source_carrier::FailureStage::Budget {
+                ProjectionFence::SourceBudget
+            } else {
+                ProjectionFence::LocalSourceRevision(detail.0, detail.2)
+            }
+        })
         .unwrap_or(ProjectionFence::SourceGeneration)
 }
 
 fn field_failure_reply(error: &io::Error) -> ViewerReply {
+    if matches!(source_read_fence(error), ProjectionFence::SourceBudget) {
+        return stale(ProjectionFence::SourceBudget);
+    }
     if let Some(detail) = error
         .get_ref()
         .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
@@ -959,7 +991,7 @@ impl SessionSourceReader for Composite<'_> {
     }
 }
 
-type LocalBlock = (PathBuf, usize, Arc<[u8]>);
+type LocalBlocks = BTreeMap<(PathBuf, usize), Arc<[u8]>>;
 
 struct Local<'a> {
     proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
@@ -969,7 +1001,10 @@ struct Local<'a> {
     mode: SessionSourceReadMode,
     observed: std::sync::Mutex<BTreeMap<PathBuf, crate::events::Stat>>,
     proofs: std::sync::Mutex<BTreeMap<PathBuf, crate::events::store::chunk_proofs::Focused>>,
-    block: std::sync::Mutex<Option<LocalBlock>>,
+    // Request-owned verified bytes, capped by bytes_left. Retaining every
+    // charged block prevents field previews and later signal/tool reads from
+    // charging the same evidence twice. Never shared with another request.
+    block: std::sync::Mutex<LocalBlocks>,
     bytes_left: std::sync::Mutex<usize>,
 }
 impl SessionSourceReader for Local<'_> {
@@ -1118,10 +1153,9 @@ impl SessionSourceReader for Local<'_> {
             for index in first..=last {
                 let index_usize = usize::try_from(index).map_err(|_| invalid())?;
                 let mut cached = self.block.lock().map_err(|_| invalid())?;
-                let part = if let Some((_, _, bytes)) =
-                    cached.as_ref().filter(|(known, block, _)| {
-                        before.changed_ns.is_some() && known == path && *block == index_usize
-                    }) {
+                let key = (path.clone(), index_usize);
+                let reusable = before.changed_ns.is_some();
+                let part = if let Some(bytes) = cached.get(&key).filter(|_| reusable) {
                     bytes.clone()
                 } else {
                     let start = index * crate::source_chunks::SIZE as u64;
@@ -1144,7 +1178,9 @@ impl SessionSourceReader for Local<'_> {
                             )
                         })?
                         .into();
-                    *cached = Some((path.clone(), index_usize, bytes.clone()));
+                    if before.changed_ns.is_some() {
+                        cached.insert(key, bytes.clone());
+                    }
                     bytes
                 };
                 let start = index * crate::source_chunks::SIZE as u64;
@@ -1343,6 +1379,15 @@ fn render(
     // archive bytes. A rejected source generation is different: never replace
     // accepted content with empty entries under the same projection proof.
     let source_changed = std::cell::Cell::new(None);
+    // Keep the first integrity failure. A later budget failure cannot hide it;
+    // a later observed integrity failure takes priority over an earlier budget.
+    let note_source_failure = |reason| {
+        if source_changed.get().is_none()
+            || matches!(source_changed.get(), Some(ProjectionFence::SourceBudget))
+        {
+            source_changed.set(Some(reason));
+        }
+    };
     let source_read = |reference: &SessionSourceRef, expected: Option<&str>, offset, max| {
         let result = reader.read_range(reference, expected, offset, max);
         if result
@@ -1350,7 +1395,7 @@ fn render(
             .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
         {
             let error = result.as_ref().expect_err("checked source failure");
-            source_changed.set(Some(source_read_fence(error)));
+            note_source_failure(source_read_fence(error));
         }
         result
     };
@@ -1422,7 +1467,7 @@ fn render(
                     || known
                         .is_some_and(|known| known.0 != part.generation || known.1 != part.length)
                 {
-                    source_changed.set(Some(ProjectionFence::SourceRange));
+                    note_source_failure(ProjectionFence::SourceRange);
                     return Err(invalid());
                 }
                 bytes_left -= part.bytes.len();
@@ -1515,7 +1560,7 @@ fn render(
                 || part.generation.len() > 4096
                 || known.is_some_and(|known| known.0 != part.generation || known.1 != part.length)
             {
-                source_changed.set(Some(ProjectionFence::SourceRange));
+                note_source_failure(ProjectionFence::SourceRange);
                 return Err(invalid());
             }
             generations
@@ -2012,7 +2057,7 @@ mod budget_contract_tests {
     use super::*;
 
     #[test]
-    fn budget_keeps_source_generation_and_field_unavailable_contracts() {
+    fn budget_is_distinct_from_source_generation_for_pages_and_fields() {
         let error = io::Error::new(
             io::ErrorKind::InvalidData,
             LocalRevisionChanged(
@@ -2024,18 +2069,19 @@ mod budget_contract_tests {
         );
         assert!(matches!(
             source_read_fence(&error),
-            ProjectionFence::SourceGeneration
+            ProjectionFence::SourceBudget
         ));
         let source_reply = stale(source_read_fence(&error));
         let source_body: Value = serde_json::from_slice(&source_reply.body).unwrap();
-        assert_eq!(source_reply.status, 409);
-        assert_eq!(source_body["fence_reason"], "source_generation");
+        assert_eq!(source_reply.status, 503);
+        assert_eq!(source_body["fence_reason"], "source_budget");
+        assert_eq!(source_body["stage"], "budget");
         assert!(source_body.get("local_revision_reason").is_none());
 
         let field_reply = field_failure_reply(&error);
         let field_body: Value = serde_json::from_slice(&field_reply.body).unwrap();
         assert_eq!(field_reply.status, 503);
-        assert_eq!(field_body["error"]["code"], "field_unavailable");
+        assert_eq!(field_body["error"]["code"], "source_budget_exhausted");
     }
 }
 
