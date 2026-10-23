@@ -401,26 +401,62 @@ fn set_lock(fixture: &Fixture, id: &str, held: bool) {
 #[test]
 fn codex_subagents_use_thread_ids_and_lock_states() {
     let fixture = Fixture::new();
-    fixture.codex("parent", None, &[codex_line("turn_context", json!({"model":"gpt-test"})),
+    fixture.codex("parent", None, &[codex_line("event_msg", json!({"type":"task_started","turn_id":"parent-turn"})),
+        codex_line("turn_context", json!({"model":"gpt-test"})),
         codex_line("response_item", json!({"type":"function_call","name":"shell","call_id":"open-call","arguments":"{}"})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}})),
         codex_line("event_msg", json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}}))]);
     fixture.codex("child-a", Some("parent"), &[]);
-    fixture.codex("child-b", Some("parent"), &[]);
+    fixture.codex(
+        "child-b",
+        Some("parent"),
+        &[
+            codex_line(
+                "event_msg",
+                json!({"type":"task_started","turn_id":"child-turn"}),
+            ),
+            codex_line(
+                "event_msg",
+                json!({"type":"task_complete","turn_id":"child-turn"}),
+            ),
+        ],
+    );
     #[cfg(unix)]
     set_lock(&fixture, "parent", true);
     let nodes = collect(&fixture.options).unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].children.len(), 2);
-    assert_eq!(nodes[0].children[0].id, "child-a");
-    assert_eq!(nodes[0].children[1].id, "child-b");
+    let child_a = nodes[0]
+        .children
+        .iter()
+        .find(|child| child.id == "child-a")
+        .unwrap();
+    let child_b = nodes[0]
+        .children
+        .iter()
+        .find(|child| child.id == "child-b")
+        .unwrap();
+    assert_eq!(child_a.id, "child-a");
+    assert_eq!(child_b.id, "child-b");
+    assert!(child_b.last_activity > child_a.last_activity);
+    assert_eq!(
+        nodes[0].children[0].id, "child-b",
+        "newer activity sorts first"
+    );
+    // An empty rollout has no terminal evidence; the completed control does.
+    assert_eq!(child_a.state, "unknown");
+    assert!(child_a.turn_lifecycle.is_none());
+    assert_eq!(child_b.state, "ended");
+    assert_eq!(
+        child_b.turn_lifecycle.as_ref().unwrap().phase,
+        semon_sessions::TurnPhase::Completed
+    );
     assert_eq!(nodes[0].tokens.input, 9);
     assert!(nodes[0].open_tools.is_empty());
     #[cfg(unix)]
     {
         assert_eq!(nodes[0].state, "running");
         assert_eq!(nodes[0].pid, Some(4242));
-        assert_eq!(nodes[0].children[0].state, "ended");
         fs::remove_file(fixture.options.proc_root.join("locks")).unwrap();
         assert_eq!(collect(&fixture.options).unwrap()[0].state, "unknown");
     }
@@ -907,7 +943,7 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
     write_model_home(&fixture, false);
     // Preserve the native semantics from the former golden; the retired
     // model envelope, pricing transport and transcript growth marks are gone.
-    let expected: Value =
+    let mut expected: Value =
         serde_json::from_str(include_str!("golden/native-session-evidence.json")).unwrap();
     let now = i64::try_from(
         SystemTime::now()
@@ -936,6 +972,55 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             .map(String::as_str)
             .collect()
     );
+    // This exact native child has no durable lifecycle. codex_spawns
+    // (model.rs:3734-3808) now leaves its spawn off instead of inferring done
+    // from a missing writer. The existing trace fallback (model.rs:6336)
+    // consequently says replied rather than returned. A trace-turn end is
+    // separate from durable lifecycle; parent process exit cannot prove its terminal.
+    const CODEX_SPAWN: &str = "s249fde0718402de8";
+    let codex = query
+        .call_at("get_session", &json!({"id":"codex-run"}), now)
+        .unwrap();
+    let child = &codex["session"];
+    assert_eq!(child["id"], "codex-run");
+    assert_eq!(child["harness"], "codex");
+    assert!(child.get("turn_lifecycle").is_none());
+    assert_eq!(child["state"], "unknown");
+    let exact_spawn = |edge: &Value| {
+        edge["id"] == CODEX_SPAWN
+            && edge["kind"] == "spawn"
+            && edge["from"] == "harbor"
+            && edge["to"] == "codex-run"
+    };
+    let actual_edges: Vec<_> = child["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| exact_spawn(edge))
+        .collect();
+    assert_eq!(actual_edges.len(), 1);
+    assert_eq!(
+        actual_edges[0]["status"], "off",
+        "missing lifecycle cannot prove handoff completion"
+    );
+    // CI inspected every field before this adapter was introduced. Project
+    // only these two proven differences in memory; frozen bytes stay fixed.
+    let turns = expected["turns"].as_array_mut().unwrap();
+    let affected_turns: Vec<_> = turns
+        .iter_mut()
+        .filter(|turn| turn["id"] == CODEX_SPAWN && turn["sid"] == "codex-run")
+        .collect();
+    assert_eq!(affected_turns.len(), 1);
+    let turn = affected_turns.into_iter().next().unwrap();
+    assert_eq!(turn["end"]["st"], "done");
+    assert_eq!(turn["end"]["why"], "returned");
+    turn["end"]["why"] = json!("replied");
+    let edges = expected["handoffs"].as_array_mut().unwrap();
+    let affected_edges: Vec<_> = edges.iter_mut().filter(|edge| exact_spawn(edge)).collect();
+    assert_eq!(affected_edges.len(), 1);
+    let edge = affected_edges.into_iter().next().unwrap();
+    assert_eq!(edge["status"], "done");
+    edge["status"] = json!("off");
     let core = ViewerCore::new(fixture.options.clone());
     let read_catalog = || {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -980,6 +1065,15 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             "{id}: last activity"
         );
         let state = match prior["state"].as_str().unwrap() {
+            // The frozen codex-run source has no lifecycle: absent writers
+            // no longer turn its historical `done` inference into completion.
+            "done"
+                if id == "codex-run"
+                    && session["harness"] == "codex"
+                    && session.get("turn_lifecycle").is_none() =>
+            {
+                "unknown"
+            }
             "done" => "ended",
             "idle" => "idle",
             state => panic!("unexpected pinned state: {state}"),
@@ -1008,6 +1102,44 @@ fn native_query_and_catalog_preserve_the_independent_session_reference() {
             prior["tokens_by_model"],
             "{id}: exact per-model native usage"
         );
+        if id == "codex-run"
+            && session["harness"] == "codex"
+            && session.get("turn_lifecycle").is_none()
+        {
+            // Keep every synthetic-fixture field visible if the strict
+            // assertions below expose a difference beyond the proven adapter.
+            let related = |field: &str| {
+                Value::Array(
+                    expected[field]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|row| row["sid"] == id || row["from"] == id || row["to"] == id)
+                        .cloned()
+                        .collect(),
+                )
+            };
+            let parent = query
+                .call_at("get_session", &json!({"id":"harbor"}), now)
+                .unwrap();
+            let parent_edges: Vec<_> = parent["session"]["handoffs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|edge| edge["from"] == id || edge["to"] == id)
+                .cloned()
+                .collect();
+            let diagnostic = json!({"id":id,
+                "actual_turns":session["turns"],"expected_turns":related("turns"),
+                "actual_handoffs":session["handoffs"],"expected_handoffs":related("handoffs"),
+                "actual_parent_handoff_copies":parent_edges})
+            .to_string();
+            assert!(
+                diagnostic.len() <= 16384,
+                "synthetic lifecycle diagnostic exceeds bound"
+            );
+            eprintln!("missing-lifecycle-contract {diagnostic}");
+        }
         for field in ["turns", "handoffs"] {
             let rows: Vec<_> = expected[field]
                 .as_array()

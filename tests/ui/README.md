@@ -120,6 +120,15 @@ its completion witness is the native-publication success message in the CI log.
   stale binding was the runtime fingerprint. Its registry update preserves every
   state, reference, artifact digest and original image-review provenance; the 68
   preservation cases, 113 main frames and 162 strict regions remain required.
+- PR474 fingerprint-only maintenance uses [run 39763385836, artifact 12418164659](https://github.com/onsager-ai/semon/actions/runs/39763385836/artifacts/12418164659)
+  (archive SHA-256 `f6e073b085e4e665f2f5fcfae58540c5eedda61cef69505dbf32c065c4e3357e`,
+  candidate `9dc88082ea630e542850d94e043ed9dc9ef52f21`): 111 identities and all
+  666 same-run artifact digests match the existing bindings. Only their runtime
+  fingerprint changes; every original per-state review field remains intact.
+  The three exact Last-turn menu-region bindings record independent Claude
+  `acceptance-image-table-ea77` image inspection and the Manager decision, with
+  no human appearance approval claimed. The one-off audit remains in Git history
+  and its CI artifact; final-head CI and acceptance remain required.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former

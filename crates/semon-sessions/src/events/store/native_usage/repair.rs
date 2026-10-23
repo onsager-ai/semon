@@ -161,6 +161,17 @@ fn prepare(store: &SqliteStore, path: &str, ledger: &Ledger, resume: Resume) -> 
             .as_mut()
             .expect("tree initialized")
             .observe_counted(record.as_ref(), &harness, !known);
+        if harness == "codex"
+            && let Some(record) = &record
+        {
+            batch
+                .index
+                .tree_summary
+                .as_mut()
+                .expect("tree initialized")
+                .codex_turn
+                .observe(record, batch.cursor);
+        }
         if let Some(observation) = observation {
             batch
                 .index

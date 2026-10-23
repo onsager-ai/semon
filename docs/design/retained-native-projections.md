@@ -95,6 +95,11 @@ an explicit incomplete observation, rather than a claim that the whole object
 was indexed. Archive locations, credentials and tenant policy do not enter the
 public read model.
 
+Exactly owned Codex turn outcomes remain recorded observations in current and
+retained metadata. They never inherit writer liveness or archive read authority.
+Parser 29 qualifies those lifecycle facts; current-source tree repair restores
+them from verified source slices without importing retired Semon storage.
+
 Semon reads only its current schema and parser contract. Normal writable
 producers discard recognized obsolete derived indexes and rebuild from supported
 native sources under the [current storage contract](session-source-reader.md#current-semon-storage-contract).

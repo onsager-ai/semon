@@ -136,6 +136,7 @@ impl Projection {
     ) -> Self {
         let details = json!({
             "state": session.state,
+            "turn_lifecycle": session.turn_lifecycle,
             "activity": session.activity.as_ref().map(|(tool, _, _, since)| json!({"tool": tool, "since": since})),
             "cwd": cwd,
             "turns": turns.iter().filter(|turn| turn.sid == key).count(),
@@ -367,7 +368,7 @@ pub(crate) fn update_current_observation(
     for field in ["name", "state"] {
         metadata[field] = current.session[field].clone();
     }
-    for field in ["state", "activity"] {
+    for field in ["state", "activity", "turn_lifecycle"] {
         metadata["details"][field] = current.session["details"][field].clone();
     }
     metadata["content_generation"] = json!(content_generation);

@@ -2192,6 +2192,7 @@ mod tests {
         fixture.codex(
             "run",
             &[
+                json!({"type":"event_msg","timestamp":"2026-09-24T00:00:10Z","payload":{"type":"task_started","turn_id":"watch-turn"}}),
                 json!({"type":"response_item","timestamp":"2026-09-24T00:00:10Z","payload":{"type":"message","role":"user",
                     "content":[{"type":"input_text","text":"watch the checks"}]}}),
                 json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"custom_tool_call","call_id":"start","name":"exec",

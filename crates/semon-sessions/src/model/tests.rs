@@ -1600,11 +1600,16 @@ fn codex_runs_link_by_marker_or_parent_thread_and_otherwise_stay_unlinked() {
         "run-alone",
         json!({}),
         &[
+            codex_line(
+                ts(3, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"failed-run"}),
+            ),
             codex_user(ts(3, 0), "Do it alone"),
             codex_line(
                 ts(3, 5),
                 "event_msg",
-                json!({"type":"task_complete","error":{"message":"boom"}}),
+                json!({"type":"task_complete","turn_id":"failed-run","error":{"message":"boom"}}),
             ),
         ],
     );
@@ -3413,11 +3418,36 @@ fn a_command_polled_in_a_later_turn_runs_in_the_turn_that_started_it() {
         "serving",
         json!({}),
         &[
+            codex_line(
+                ts(1, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"serve-1"}),
+            ),
             codex_user(ts(1, 0), "Start the server"),
             start,
             yielded(ts(1, 2), "start"),
+            codex_line(
+                ts(2, 0),
+                "event_msg",
+                json!({"type":"task_complete","turn_id":"serve-1"}),
+            ),
+            codex_line(
+                ts(2, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"serve-2"}),
+            ),
             codex_user(ts(2, 0), "Anything else?"),
             codex_reply(ts(2, 1), "No."),
+            codex_line(
+                ts(2, 1),
+                "event_msg",
+                json!({"type":"task_complete","turn_id":"serve-2"}),
+            ),
+            codex_line(
+                ts(3, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"serve-3"}),
+            ),
             codex_user(ts(3, 0), "Check on it"),
             poll,
         ],
@@ -3488,6 +3518,11 @@ fn same_name_codex_spawns_stay_unplaced_and_questions_wait_only_while_unanswered
         json!({}),
         &[
             codex_user(ts(22, 0), "Coordinate"),
+            codex_line(
+                ts(22, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"question-root"}),
+            ),
             call(1, "c1"),
             call(5, "c2"),
             ask(6, "followed", "Followed by a message?"),
@@ -5369,7 +5404,14 @@ fn copied_inputs_and_facts_preserve_native_query_semantics() {
     home.codex(
         "root",
         json!({"cwd": &cwd}),
-        &[codex_user(ts(18, 0), "run the suite")],
+        &[
+            codex_line(
+                ts(18, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"copied-owned-turn"}),
+            ),
+            codex_user(ts(18, 0), "run the suite"),
+        ],
     );
     hold_lock(&home, "root");
     // Never an input.
@@ -5949,6 +5991,11 @@ fn a_codex_question_is_time_waited_on_you() {
         "cx-open",
         json!({}),
         &[
+            codex_line(
+                ts(13, 0),
+                "event_msg",
+                json!({"type":"task_started","turn_id":"open-question-turn"}),
+            ),
             codex_user(ts(13, 0), "Go"),
             ask(13, 1, "open", "Still there?"),
             reply(13, 1, "open", "{\"accepted\":true}"),
