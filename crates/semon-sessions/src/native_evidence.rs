@@ -458,9 +458,11 @@ impl NativeEvidence {
                                 .into_owned()
                         })
                         .collect::<Vec<_>>();
-                    if cache
-                        .begin_semantic_stage(&paths, &query_runtime_generation(&self.options)?)?
-                        != crate::events::Outcome::Written
+                    if self.begin_catalog_stage(
+                        cache,
+                        &paths,
+                        &query_runtime_generation(&self.options)?,
+                    )? != crate::events::Outcome::Written
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -506,6 +508,20 @@ impl NativeEvidence {
                 .session_catalog_generation()
                 .ok_or_else(|| io::Error::other("backfill generation missing"))?,
         ))
+    }
+
+    fn begin_catalog_stage(
+        &self,
+        cache: &mut EventCache,
+        paths: &[String],
+        runtime: &str,
+    ) -> io::Result<crate::events::Outcome> {
+        // The store checks journal authority in the stage transaction.
+        if self.options.facts.is_some() {
+            cache.begin_semantic_stage_with_journal(paths, runtime, true)
+        } else {
+            cache.begin_semantic_stage(paths, runtime)
+        }
     }
 
     fn semantic_write_conflict(
@@ -558,7 +574,7 @@ impl NativeEvidence {
             return Ok(false);
         }
         let runtime = query_runtime_generation(&self.options)?;
-        match cache.begin_semantic_stage(&[], &runtime)? {
+        match self.begin_catalog_stage(cache, &[], &runtime)? {
             crate::events::Outcome::Conflict => return Ok(false),
             crate::events::Outcome::Written => {}
             _ => {
@@ -882,6 +898,16 @@ impl NativeEvidence {
         &self,
         work: &mut Work,
         now: i64,
+        before_build: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let complete = self.refresh_catalog_step(work, now, before_build)?;
+        Ok(complete && !work.usage_migration_pending)
+    }
+
+    fn refresh_catalog_step(
+        &self,
+        work: &mut Work,
+        now: i64,
         mut before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
         // Keep the existing receiver facts fence through derivation and the
@@ -897,6 +923,11 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
+        work.usage_migration_pending = work
+            .events
+            .as_mut()
+            .expect("event cache initialized")
+            .advance_native_usage_migration(&self.options)?;
         if work.events.as_ref().is_some_and(EventCache::is_scoped)
             && crate::events::store::recover_unsupported_catalog(&self.options)?
         {
@@ -1095,9 +1126,11 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            if cache
-                .begin_semantic_stage(&staged_paths, &query_runtime_generation(&self.options)?)?
-                != crate::events::Outcome::Written
+            if self.begin_catalog_stage(
+                cache,
+                &staged_paths,
+                &query_runtime_generation(&self.options)?,
+            )? != crate::events::Outcome::Written
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -1186,7 +1219,8 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
-                if cache.begin_semantic_stage(
+                if self.begin_catalog_stage(
+                    cache,
                     &staged_paths,
                     &query_runtime_generation(&self.options)?,
                 )? != crate::events::Outcome::Written
@@ -1290,14 +1324,20 @@ impl NativeEvidence {
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
-        work.cold_catalog.is_some()
+        work.usage_migration_pending
+            || work.cold_catalog.is_some()
             || work.audit.is_some()
             || (work.pending_sources
                 && self.audit_request.load(Ordering::Acquire) == work.audit_revision)
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
-        work.cold_catalog.is_some()
+        work.usage_migration_pending
+            || work
+                .events
+                .as_ref()
+                .is_some_and(EventCache::native_usage_migration_pending)
+            || work.cold_catalog.is_some()
             || work.pending_sources
             || work.audit.is_some()
             || self.audit_request.load(Ordering::Acquire) != work.audit_revision
@@ -1377,6 +1417,7 @@ pub(crate) struct Work {
     observed_catalog_generation: Option<String>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
+    usage_migration_pending: bool,
     audit: Option<CatalogAudit>,
     audit_revision: u64,
     /// When the last native preparation started.
@@ -1431,7 +1472,7 @@ pub(crate) fn query_runtime_generation(options: &Options) -> io::Result<String> 
             .unwrap_or_default();
         return recorded_runtime_fingerprint(options, &facts);
     }
-    legacy_runtime_generation(options)
+    local_runtime_generation(options)
 }
 
 /// Semantic hosted runtime fence. Source selection has its independent authority
@@ -1479,8 +1520,8 @@ pub(crate) fn recorded_runtime_fingerprint_excluding(
     ))
 }
 
-/// Qualification of pre-scoped Catalog recipes during an additive upgrade.
-pub(crate) fn legacy_runtime_generation(options: &Options) -> io::Result<String> {
+/// Aggregate generation for current local process and naming observations.
+fn local_runtime_generation(options: &Options) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut watched = BTreeMap::new();
     watch_tree(
@@ -1488,51 +1529,43 @@ pub(crate) fn legacy_runtime_generation(options: &Options) -> io::Result<String>
         &[".json"],
         &mut watched,
     );
-    for path in [&options.claude_json]
-        .into_iter()
-        .chain(options.facts.iter())
-    {
-        watched.insert(path.clone(), stamp(path));
-    }
+    watched.insert(options.claude_json.clone(), stamp(&options.claude_json));
     let mut processes = BTreeMap::new();
-    let mut locks = None;
-    if options.facts.is_none() {
-        let path = options.proc_root.join("sys/kernel/hostname");
+    let path = options.proc_root.join("sys/kernel/hostname");
+    watched.insert(path.clone(), stamp(&path));
+    for name in [
+        "session_index.jsonl",
+        "state_5.sqlite",
+        "state_5.sqlite-wal",
+    ] {
+        let path = options.codex_home.join(name);
         watched.insert(path.clone(), stamp(&path));
-        for name in [
-            "session_index.jsonl",
-            "state_5.sqlite",
-            "state_5.sqlite-wal",
-        ] {
-            let path = options.codex_home.join(name);
-            watched.insert(path.clone(), stamp(&path));
-        }
-        watch_tree(
-            &options.codex_home.join("thread-writer-locks"),
-            &[".lock"],
-            &mut watched,
+    }
+    watch_tree(
+        &options.codex_home.join("thread-writer-locks"),
+        &[".lock"],
+        &mut watched,
+    );
+    let ids = lock_ids(options);
+    let locks = writer_locks(options, &ids);
+    let machine = crate::facts::MachineFacts::Local;
+    let pids = model::pid_files(options, &machine)
+        .into_iter()
+        .map(|pid| pid.pid)
+        .chain(
+            machine
+                .codex_lock_pids(options)
+                .into_iter()
+                .flat_map(|pids| pids.into_values()),
         );
-        let ids = lock_ids(options);
-        locks = writer_locks(options, &ids);
-        let machine = crate::facts::MachineFacts::Local;
-        let pids = model::pid_files(options, &machine)
-            .into_iter()
-            .map(|pid| pid.pid)
-            .chain(
-                machine
-                    .codex_lock_pids(options)
-                    .into_iter()
-                    .flat_map(|pids| pids.into_values()),
-            );
-        for pid in pids {
-            processes.insert(
-                pid,
-                (
-                    proc_start(&options.proc_root, pid),
-                    machine.run(options, pid, None),
-                ),
-            );
-        }
+    for pid in pids {
+        processes.insert(
+            pid,
+            (
+                proc_start(&options.proc_root, pid),
+                machine.run(options, pid, None),
+            ),
+        );
     }
     let paths: Vec<_> = watched
         .into_iter()
@@ -2666,7 +2699,6 @@ mod catalog_owner_tests {
         fs::write(log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"owner\"}}\n").unwrap();
         let sources = SessionSources::with_machines(vec![(String::new(), options.clone())]);
         let evidence = &sources.machines[0].1;
-        let before = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let mut work = lock(&evidence.work);
         let mut complete = false;
         for _ in 0..16 {
@@ -2686,10 +2718,6 @@ mod catalog_owner_tests {
         assert_eq!(body["items"][0]["key"], "owner");
         assert!(sources.views.iter().all(|view| view.get().is_none()));
         assert!(read_lock(&evidence.query).is_none());
-        assert_eq!(
-            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-            before
-        );
         drop(work);
         drop(sources);
         fs::remove_dir_all(root).unwrap();

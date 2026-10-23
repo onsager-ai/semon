@@ -2,6 +2,7 @@
 // compare two served copies for pushed-data parity. Historical frame names
 // and regions remain a coverage contract; the mockup renderers are not loaded.
 import fs from 'node:fs';
+import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
@@ -689,6 +690,33 @@ async function navigate(page, route, referenceData) {
   else await navigateReference(page, route, referenceData);
 }
 
+async function holdSidebarOrder(page, phone) {
+  if (scope !== 'main' || phone) return;
+  // A real pointer in inert sidebar padding keeps the reader's idle reorder
+  // from firing at different moments in the two independently captured apps.
+  const point = await page.locator('#sidebar').evaluate((sidebar) => {
+    const box = sidebar.getBoundingClientRect(),
+      x = box.right - 2,
+      y = box.top + 2,
+      target = document.elementFromPoint(x, y);
+    if (!target || !sidebar.contains(target) || target.closest('button, a, input, select'))
+      throw new Error('Visual sidebar hold requires inert padding');
+    return { x, y };
+  });
+  await page.mouse.move(point.x, point.y);
+}
+
+async function sidebarOrder(page) {
+  return page.locator('#lanes .srow').evaluateAll((rows) =>
+    rows
+      .filter((row) => row.getClientRects().length)
+      .map((row) => ({
+        name: row.querySelector('.nm')?.textContent,
+        current: row.getAttribute('aria-current'),
+      })),
+  );
+}
+
 async function prepareFrame(page, phone, includePaintDiagnostics = false) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -708,11 +736,23 @@ async function prepareFrame(page, phone, includePaintDiagnostics = false) {
   const beforeScreenshot = includePaintDiagnostics
     ? await snapshotPhoneHarborPaint(page)
     : undefined;
-  const bytes = await page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
+  const bytes =
+    scope === 'main'
+      ? await captureStableFrame(page, { fullPage: phone, animations: 'allow', caret: 'hide' })
+      : await page.screenshot({ fullPage: phone, animations: 'disabled', caret: 'hide' });
   return { bytes, beforeScreenshot };
 }
 
 async function captureFrame(candidate, reference, key, phone) {
+  if (scope === 'main' && !phone) {
+    await Promise.all([holdSidebarOrder(candidate, phone), holdSidebarOrder(reference, phone)]);
+    const [candidateOrder, referenceOrder] = await Promise.all([
+      sidebarOrder(candidate),
+      sidebarOrder(reference),
+    ]);
+    if (JSON.stringify(candidateOrder) !== JSON.stringify(referenceOrder))
+      throw new Error(`${key}: independent readers have different visible sidebar order`);
+  }
   const images = [],
     artifactDigests = {},
     evidenceBySide = {},
@@ -731,20 +771,24 @@ async function captureFrame(candidate, reference, key, phone) {
     ['reference', reference],
   ]) {
     try {
-      const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
-        bytes = prepared.bytes;
-      save(key, name, bytes);
-      evidenceBySide[name] = await snapshot(page);
-      if (includePaintDiagnostics)
-        evidenceBySide[name].phoneHarborPaint = {
-          beforeScreenshot: prepared.beforeScreenshot,
-          afterScreenshot: await snapshotPhoneHarborPaint(page),
+      const capture = async () => {
+        const prepared = await prepareFrame(page, phone, includePaintDiagnostics),
+          bytes = prepared.bytes;
+        save(key, name, bytes);
+        evidenceBySide[name] = await snapshot(page);
+        if (includePaintDiagnostics)
+          evidenceBySide[name].phoneHarborPaint = {
+            beforeScreenshot: prepared.beforeScreenshot,
+            afterScreenshot: await snapshotPhoneHarborPaint(page),
+          };
+        artifactDigests[name] = {
+          image: sha256(bytes),
+          evidence: saveJson(key, name, evidenceBySide[name]),
         };
-      artifactDigests[name] = {
-        image: sha256(bytes),
-        evidence: saveJson(key, name, evidenceBySide[name]),
+        images.push(PNG.sync.read(bytes));
       };
-      images.push(PNG.sync.read(bytes));
+      if (scope === 'main') await withCapturePaint(page, capture);
+      else await capture();
     } catch (error) {
       report.errors.push(`${key} ${name} screenshot: ${error.message}`);
     }
@@ -1070,7 +1114,7 @@ try {
   report.candidateFingerprint = sha256(fs.readFileSync(candidateBinary));
   if (ENV.base === referenceBase)
     throw new Error('Candidate and reference servers must be independent');
-  browser = await launch();
+  browser = await launch({ baselineRaster: scope === 'main' });
   const D = await data(),
     original = sample('overhaul.json'),
     pinnedModel = selfParity ? null : await pinnedReferenceModel(referenceBase, referenceToken);
@@ -1156,6 +1200,7 @@ try {
     for (const frame of expectedFrames) {
       if (frame === 'drawer' && !phone) continue;
       const key = `${scheme}|${frame}`;
+      await Promise.all([holdSidebarOrder(candidate, phone), holdSidebarOrder(reference, phone)]);
       if (frame === 'drawer') {
         try {
           await goto(candidate, { v: 'home' }, D);

@@ -386,6 +386,90 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"native-call","content":output}]}}));
         home.top("long", &records);
         publish(&home);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let source_path: String = db
+            .query_row(
+                "SELECT source_path FROM session_catalog_sources WHERE session_key='long' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let raw = std::fs::read(&source_path).unwrap();
+        let generations = || -> (String, String, String) {
+            db.query_row("SELECT json_extract(c.metadata,'$.query.source_generation'),json_extract(o.summary,'$.source_generation'),t.source_generation FROM session_catalog c JOIN session_overview o USING(session_key) JOIN session_trace_headers t USING(session_key) WHERE c.session_key='long'",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap()
+        };
+        let before = generations();
+        assert_eq!(before.0, before.1);
+        assert_eq!(before.0, before.2);
+        db.execute_batch("UPDATE session_slot_projections SET version=5 WHERE session_key='long'; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
+        crate::invalidate_session_sources(
+            &home.options,
+            &[crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/-work-proj/long.jsonl".into(),
+            }],
+        )
+        .unwrap();
+        let revision: i64 = db
+            .query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&source_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            crate::overview_repair_sources(&home.options, "long")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            crate::session_transcript_range(
+                &home.options,
+                "local",
+                "sid=long&after=0&limit=1",
+                None
+            )
+            .status,
+            503
+        );
+        assert!(crate::request_session_projection_upgrade(&home.options, "long").unwrap());
+        assert_eq!(
+            db.query_row(
+                "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
+                [&source_path],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            revision
+        );
+        assert!(
+            crate::repair_session_overview(
+                &home.options,
+                "local",
+                "long",
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider
+            )
+            .unwrap()
+        );
+        assert!(
+            crate::overview_repair_sources(&home.options, "long")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM session_slot_projections WHERE session_key='long'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+            crate::slot_projection::VERSION
+        );
+        assert_eq!(generations(), before);
+        assert_eq!(std::fs::read(&source_path).unwrap(), raw);
+        eprintln!("slot_upgrade stage=selected_publication version=6 raw=unchanged");
         let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
         let started = Instant::now();
         let mut after = 0;

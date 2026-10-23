@@ -1752,7 +1752,6 @@ mod tests {
         assert!(html.contains("<summary>Read</summary>"), "{html}");
         assert!(html.contains("native tool output"), "{html}");
         assert!(!html.contains("<script") && !html.contains("secret-bootstrap"));
-        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), 0);
         assert_eq!(
             core.respond(
                 "GET",
@@ -1832,7 +1831,6 @@ mod tests {
         let sources =
             crate::SessionSources::with_machines(vec![(String::new(), fixture.options.clone())]);
         let evidence = &sources.machines[0].1;
-        let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let prepare = || {
             let mut work = lock(&evidence.work);
             for _ in 0..16 {
@@ -1873,10 +1871,6 @@ mod tests {
         assert_eq!(before["transcript"], after["transcript"]);
         assert_eq!(before["sources"], after["sources"]);
         assert_eq!(before_turns, turns());
-        assert_eq!(
-            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-            builds
-        );
         sources.close();
     }
 
@@ -1953,16 +1947,11 @@ mod tests {
     #[test]
     fn native_source_api_version_is_served_without_model_preparation() {
         let fixture = Fixture::new();
-        let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let core = ViewerCore::new(fixture.options.clone());
         let reply = core.respond("GET", "/api/session-sources", "", None);
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(body["api"], 1);
-        assert_eq!(
-            crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-            builds
-        );
         core.close();
     }
 
@@ -2844,7 +2833,6 @@ mod tests {
             model::now_ms(),
         )
         .unwrap();
-        let builds = model::COMPAT_BUILDS.with(std::cell::Cell::get);
         let reply = crate::session_transcript_range(
             core.options(),
             "fixture",
@@ -2852,7 +2840,6 @@ mod tests {
             None,
         );
         assert_eq!(reply.status, 200);
-        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
         let body = String::from_utf8(reply.body).unwrap();
         let page: Value = serde_json::from_str(&body).unwrap();
         assert!(!page["range"]["has_more"].as_bool().unwrap_or(false));
@@ -4424,7 +4411,6 @@ mod tests {
         );
         assert!(first.etag.is_none());
         let reads = crate::events::FILE_READS.with(std::cell::Cell::get);
-        let builds = model::COMPAT_BUILDS.with(std::cell::Cell::get);
         core.set_admin_link(crate::AdminLink::new("Manage machines", "/admin/machines"));
         let managed = body_of(&core.respond("GET", "/api/viewer/chrome", "", None));
         assert_eq!(
@@ -4448,7 +4434,6 @@ mod tests {
         assert!(own_model["admin"].is_null());
         assert!(own.etag.is_none());
         assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
-        assert_eq!(model::COMPAT_BUILDS.with(std::cell::Cell::get), builds);
         let shared = body_of(&core.respond("GET", "/api/viewer/chrome", "", None));
         assert_eq!(shared["account"]["name"], "Another account");
         assert_eq!(core.extras().clone(), {
@@ -4850,9 +4835,10 @@ mod tests {
                 fixture.claude(&sid, &lines);
             }
         }
-        // Semantic/memory reference fixture; no Viewer model owner exists.
+        // Measure the active native aggregator before output-window trimming.
+        fixture.options.all = true;
         let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
-        let built = model::build(
+        let built = model::build_query(
             &fixture.options,
             &mut cache,
             &mut false,
@@ -4860,7 +4846,13 @@ mod tests {
             now,
         )
         .unwrap();
-        let rows = &built.activity;
+        let rows = &crate::analytics::activity(
+            &built.sessions,
+            &built.tx,
+            &built.turns,
+            &built.handoffs,
+            now,
+        );
         let bytes = crate::analytics::heap_bytes(rows);
         let intervals: usize = rows.values().map(|row| row.busy.len()).sum();
         let turns: usize = rows.values().map(|row| row.turns.len()).sum();

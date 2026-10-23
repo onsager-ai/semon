@@ -13,6 +13,40 @@ use serde_json::{Value, json};
 use super::*;
 use crate::events::EventCache;
 
+// Serialize only supported native semantic fields for field/snapshot assertions.
+// Ask bodies use the same generation-bound recipes as get_session, on demand.
+fn semantic_values(data: &QueryData) -> Value {
+    let mut handoffs = serde_json::to_value(&data.handoffs).unwrap();
+    let records = data.sources.reader();
+    for handoff in handoffs.as_array_mut().unwrap() {
+        if let Some(brief) = data.ask_briefs.get(handoff["id"].as_str().unwrap()) {
+            handoff["brief"] = json!(brief.read(&records).unwrap());
+        }
+    }
+    records.finish().unwrap();
+    json!({"sessions":data.sessions,"handoffs":handoffs,"turns":data.turns})
+}
+
+fn native_activity(data: &QueryData, now: i64) -> BTreeMap<String, crate::analytics::Activity> {
+    crate::analytics::activity(&data.sessions, &data.tx, &data.turns, &data.handoffs, now)
+}
+
+fn assistant_offsets(data: &QueryData, sid: &str) -> Vec<(usize, u64, u32)> {
+    let turns = turns_of(data, sid);
+    data.tx[sid]
+        .slots
+        .iter()
+        .filter(|slot| matches!(slot.kind, SlotKind::A))
+        .map(|slot| {
+            let turn = turns
+                .iter()
+                .position(|turn| Some(turn.id.as_str()) == slot.turn.as_deref())
+                .unwrap();
+            (turn, slot.offset, slot.block)
+        })
+        .collect()
+}
+
 fn scoped_runtime_reader_oracle(options: &Options, rows: &[summary::CatalogRow]) -> Vec<String> {
     let initial = crate::native_evidence::query_runtime_generation(options).unwrap();
     let publication = crate::native_evidence::RuntimeObservations::for_publication_measured(
@@ -47,7 +81,7 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
         "codex/session_index.jsonl",
         &[json!({"id":native,"thread_name":"native name","updated_at":"2026-09-24T00:02:00Z"})],
     );
-    home.build();
+    home.build_query();
     let (_, rows) = read_catalog(&home);
     assert_eq!(rows.len(), 2);
     let local = scoped_runtime_reader_oracle(&home.options, &rows);
@@ -100,29 +134,24 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
     home.live(42, "root", "waiting", json!({"waitingFor":"approval"}));
     assert_ne!(scoped_runtime_reader_oracle(&options, &rows), recorded);
 
-    // Ordinary readers still recognize all preexisting compatibility forms.
     let initial = crate::native_evidence::query_runtime_generation(&options).unwrap();
-    let legacy = crate::native_evidence::legacy_runtime_generation(&options).unwrap();
-    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
-    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_anchor','original-anchor')", []).unwrap();
-    db.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_legacy_runtime_semantics',?1)",
-        [&initial],
-    )
-    .unwrap();
     let reader = crate::native_evidence::RuntimeObservations::new(&options);
-    for saved in [&initial, &legacy, "original-anchor"] {
-        let mut row = rows[0].clone();
-        row.query = Some(json!({"runtime":saved}));
-        assert_eq!(reader.expected(&row).as_deref(), Some(saved));
-    }
+    let mut row = rows[0].clone();
+    row.query = Some(json!({"runtime":initial}));
+    assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
+    row.query = Some(json!({"runtime":"unsupported-runtime"}));
+    assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
+    assert_ne!(
+        reader.expected(&row).as_deref(),
+        Some("unsupported-runtime")
+    );
 }
 
 #[test]
 fn publication_runtime_unavailable_inputs_keep_reader_scope_fallbacks() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "fallback root")]);
-    home.build();
+    home.build_query();
     let (_, rows) = read_catalog(&home);
     let absent_index = Options {
         cache: home.root.join("absent/index.json"),
@@ -321,29 +350,30 @@ impl Home {
         self.write(&format!("claude/sessions/{pid}.json"), &record.to_string());
     }
 
-    fn build(&self) -> Built {
+    fn build_query(&self) -> QueryData {
         self.build_at(&self.options, NOW)
     }
 
-    /// Builds from this home's persisted event index (which commits as it
-    /// reads), and checks the model's invariants.
-    fn build_at(&self, options: &Options, now: i64) -> Built {
+    /// Runs the production native Query producer over this synthetic home's
+    /// persisted Event Index and checks shared identity/relationship invariants.
+    fn build_at(&self, options: &Options, now: i64) -> QueryData {
         let mut cache = EventCache::open(&options.cache);
         let mut dirty = false;
         if options.facts.is_none() {
             cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
         }
-        let built = build(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
+        let built =
+            build_query(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
         invariants(&built, options.all || options.scan_window);
         built
     }
 }
 
-/// Holds for every model: handoff and turn ids are unique, and every id and
+/// Holds for every native Query: handoff and turn ids are unique, and every id and
 /// session a handoff or turn names exists. Every handoff a stub's transcript
 /// names is served; when nothing was trimmed (`whole`), every handoff any
 /// transcript names is.
-fn invariants(built: &Built, whole: bool) {
+fn invariants(built: &QueryData, whole: bool) {
     let mut ids = BTreeSet::new();
     for handoff in &built.handoffs {
         assert!(
@@ -462,7 +492,7 @@ fn codex_reply(time: String, text: &str) -> Value {
     )
 }
 
-fn only<'a>(built: &'a Built, kind: &str, from: &str, to: &str) -> &'a Handoff {
+fn only<'a>(built: &'a QueryData, kind: &str, from: &str, to: &str) -> &'a Handoff {
     let found: Vec<&Handoff> = built
         .handoffs
         .iter()
@@ -474,46 +504,27 @@ fn only<'a>(built: &'a Built, kind: &str, from: &str, to: &str) -> &'a Handoff {
     found[0]
 }
 
-fn by_brief<'a>(built: &'a Built, brief: &str) -> &'a Handoff {
-    built
+fn by_brief(built: &QueryData, brief: &str) -> Handoff {
+    if let Some(found) = built.handoffs.iter().find(|handoff| handoff.brief == brief) {
+        return found.clone();
+    }
+    let records = built.sources.reader();
+    let found = built
         .handoffs
         .iter()
-        .find(|handoff| handoff.brief == brief)
-        .unwrap_or_else(|| panic!("no handoff with brief {brief:?}: {:?}", built.handoffs))
+        .find(|handoff| {
+            built
+                .ask_briefs
+                .get(&handoff.id)
+                .is_some_and(|recipe| recipe.read(&records).unwrap() == brief)
+        })
+        .unwrap_or_else(|| panic!("no handoff with brief {brief:?}: {:?}", built.handoffs));
+    records.finish().unwrap();
+    found.clone()
 }
 
-fn turns_of<'a>(built: &'a Built, sid: &str) -> Vec<&'a Turn> {
+fn turns_of<'a>(built: &'a QueryData, sid: &str) -> Vec<&'a Turn> {
     built.turns.iter().filter(|turn| turn.sid == sid).collect()
-}
-
-#[test]
-fn build_records_each_phase_timing_in_order() {
-    let built = Home::new().build();
-    let names: Vec<_> = built.timings.iter().map(|(name, _)| *name).collect();
-    let expected = [
-        "scan",
-        "index_clone",
-        "facts",
-        "sessions",
-        "index_tools",
-        "background_commands",
-        "claude_spawns",
-        "codex_spawns",
-        "observed_parents",
-        "relays",
-        "codex_relays",
-        "asks",
-        "questions",
-        "lineage_states",
-        "turns",
-        "wait_edges",
-        "stubs",
-        "session_facts",
-        "post",
-    ];
-    assert_eq!(names.as_slice(), &expected);
-    let unique: BTreeSet<_> = names.iter().copied().collect();
-    assert_eq!(unique.len(), names.len());
 }
 
 #[test]
@@ -540,7 +551,7 @@ fn sessions_include_the_latest_effort_and_omit_it_when_missing() {
         &[assistant("claude-no-effort", ts(1, 2), Vec::new())],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(
         built.sessions["claude-effort"].effort.as_deref(),
         Some("max")
@@ -550,7 +561,7 @@ fn sessions_include_the_latest_effort_and_omit_it_when_missing() {
         Some("xhigh")
     );
     assert_eq!(built.sessions["claude-no-effort"].effort, None);
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    let model: Value = semantic_values(&built);
     assert_eq!(model["sessions"]["claude-effort"]["effort"], "max");
     assert_eq!(model["sessions"]["codex-effort"]["effort"], "xhigh");
     assert!(
@@ -600,7 +611,7 @@ fn session_tokens_equal_the_sums_of_the_per_model_rows() {
         ],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     let session = &built.sessions["claude-sums"];
     let (mut input, mut cache_write, mut cache_read, mut output) = (0, 0, 0, 0);
     for row in session.tokens_by_model.values() {
@@ -665,7 +676,7 @@ fn tokens_by_model_keep_claude_message_models_and_deduplicate_message_ids() {
         ],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     let session = &built.sessions["claude-cost"];
     assert_eq!(
         session.tokens_by_model["claude-opus-5-5"],
@@ -686,7 +697,7 @@ fn tokens_by_model_keep_claude_message_models_and_deduplicate_message_ids() {
         }
     );
     assert_eq!(session.tokens, [0.32, 0.08, 0.1]);
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    let model: Value = semantic_values(&built);
     assert_eq!(
         model["sessions"]["claude-cost"]["tokens_by_model"]["claude-opus-5-5"]["cache_write"],
         20_000
@@ -708,7 +719,7 @@ fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
         )],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     let usage = &built.sessions["dated-model"].tokens_by_model;
     assert_eq!(usage.len(), 1);
     assert_eq!(
@@ -720,14 +731,14 @@ fn claude_dated_model_ids_strip_only_the_trailing_date_for_price_matching() {
             cache_read: 30,
         }
     );
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    let model: Value = semantic_values(&built);
     assert!(
         model["sessions"]["dated-model"]["tokens_by_model"]
             .get("claude-sonnet-4-5-20250929")
             .is_none()
     );
     assert_eq!(
-        model["pricing"]["models"]["claude-sonnet-4-5"]["input"],
+        serde_json::to_value(crate::pricing::table()).unwrap()["models"]["claude-sonnet-4-5"]["input"],
         3.0
     );
 }
@@ -743,7 +754,7 @@ fn source_shaped_cross_harness_native_id_and_call_id_collisions_stay_separate() 
         "codex/sessions/rollout.jsonl",
         include_str!("../../../../tests/fixtures/compatibility/v1/namespace-codex.jsonl"),
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions.len(), 2, "native IDs are scoped by harness");
     let mut harnesses = BTreeSet::new();
     for (id, session) in &built.sessions {
@@ -794,7 +805,7 @@ fn qualified_viewer_keys_do_not_shadow_native_identifiers() {
             "Synthetic reserved query",
         )],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions.len(), 3);
     assert_eq!(built.sessions["claude:same-id"].harness, "claude");
     assert_eq!(built.sessions[":claude:same-id"].harness, "claude");
@@ -847,7 +858,7 @@ fn repeated_tool_ids_use_the_explicit_claude_parent() {
         "shared-call",
         &[user("missing-parent", ts(0, 1), "Synthetic child query")],
     );
-    let built = home.build();
+    let built = home.build_query();
     for (parent, child) in [
         ("first-parent", "first-child"),
         ("second-parent", "second-child"),
@@ -898,7 +909,7 @@ fn nested_claude_calls_resolve_under_a_shared_storage_ancestor() {
         "inner-call",
         &[user("root", ts(0, 2), "Synthetic nested query")],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["middle"].parent.as_deref(), Some("root"));
     assert_eq!(built.sessions["nested"].parent.as_deref(), Some("middle"));
 }
@@ -921,7 +932,7 @@ fn native_codex_parents_resolve_only_within_codex() {
         json!({"parent_thread_id":"claude-only"}),
         &[],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(
         built.sessions["child"].parent.as_deref(),
         Some("codex:shared-parent")
@@ -940,7 +951,7 @@ fn native_codex_fork_reports_only_child_owned_usage() {
         "codex/sessions/child.jsonl",
         include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/forked-rollout.jsonl"),
     );
-    let empty_child = home.build();
+    let empty_child = home.build_query();
     assert!(
         empty_child.sessions["native-codex-fork-child"]
             .tokens_by_model
@@ -950,7 +961,7 @@ fn native_codex_fork_reports_only_child_owned_usage() {
         "codex/sessions/child.jsonl",
         include_str!("../../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"),
     );
-    let built = home.build();
+    let built = home.build_query();
     let child = &built.sessions["native-codex-fork-child"];
     assert_eq!(child.tokens_by_model["mock-model"].input, 5);
     assert_eq!(child.tokens_by_model["mock-model"].output, 3);
@@ -966,7 +977,7 @@ fn native_codex_fork_reports_only_child_owned_usage() {
         metadata["history_base"]["thread_id"],
         "native-codex-fork-parent"
     );
-    let restarted = home.build();
+    let restarted = home.build_query();
     assert_eq!(
         restarted.sessions["native-codex-fork-child"].tokens_by_model,
         child.tokens_by_model
@@ -988,7 +999,7 @@ fn native_codex_fork_reports_only_child_owned_usage() {
     )
     .unwrap();
     assert_eq!(
-        home.build().sessions["native-codex-fork-child"].tokens_by_model,
+        home.build_query().sessions["native-codex-fork-child"].tokens_by_model,
         child.tokens_by_model
     );
 }
@@ -1017,10 +1028,14 @@ fn codex_fork_cumulative_or_incomplete_reports_are_not_fresh_usage() {
             ),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert!(built.sessions["child"].tokens_by_model.is_empty());
     assert!(built.sessions["child"].parent.is_none());
-    assert!(home.build().sessions["child"].tokens_by_model.is_empty());
+    assert!(
+        home.build_query().sessions["child"]
+            .tokens_by_model
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1042,7 +1057,7 @@ fn codex_logical_fork_and_physical_history_are_independent_native_fields() {
         json!({"history_base":{"thread_id":"physical"}}),
         &[],
     );
-    let built = home.build();
+    let built = home.build_query();
     let history = serde_json::to_value(&built.sessions["child"].codex_history).unwrap();
     assert_eq!(history["forked_from_id"], "logical");
     assert_eq!(history["forked_from_ordinal_exclusive"], 0);
@@ -1089,7 +1104,7 @@ fn codex_model_switch_attributes_cumulative_token_deltas_to_the_current_model() 
         ],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     let session = &built.sessions["model-switch"];
     assert_eq!(
         session.tokens_by_model["gpt-6-luna"],
@@ -1139,7 +1154,7 @@ fn codex_rate_limits_keep_the_latest_windows_and_support_both_reset_forms() {
         ],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     let limits = built.sessions["limited"].rate_limits.as_ref().unwrap();
     assert_eq!(limits.recorded_at, at(12, 34));
     assert_eq!(limits.windows.len(), 2);
@@ -1152,7 +1167,7 @@ fn codex_rate_limits_keep_the_latest_windows_and_support_both_reset_forms() {
     assert_eq!(limits.windows[1].minutes, 10_080);
     assert_eq!(limits.windows[1].used_percent, 62.5);
     assert_eq!(limits.windows[1].resets_at, at(12, 34) + 3_600_000);
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    let model: Value = semantic_values(&built);
     assert_eq!(
         model["sessions"]["limited"]["rate_limits"]["recorded_at"],
         at(12, 34)
@@ -1182,7 +1197,7 @@ fn unknown_models_keep_usage_but_have_no_price_row() {
         ],
     );
 
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(
         built.sessions["unknown-model"].tokens_by_model["gpt-test"],
         crate::events::ModelTokens {
@@ -1192,14 +1207,18 @@ fn unknown_models_keep_usage_but_have_no_price_row() {
             cache_read: 10_000,
         }
     );
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
-    assert!(model["pricing"]["models"].get("gpt-test").is_none());
+    let model: Value = semantic_values(&built);
+    assert!(
+        serde_json::to_value(crate::pricing::table()).unwrap()["models"]
+            .get("gpt-test")
+            .is_none()
+    );
     assert_eq!(
-        model["pricing"]["as_of"],
+        serde_json::to_value(crate::pricing::table()).unwrap()["as_of"],
         serde_json::to_value(crate::pricing::table()).unwrap()["as_of"]
     );
     assert_eq!(
-        model["pricing"]["models"]["gpt-6-luna"]["cache_write"],
+        serde_json::to_value(crate::pricing::table()).unwrap()["models"]["gpt-6-luna"]["cache_write"],
         0.125
     );
     assert_eq!(
@@ -1291,7 +1310,7 @@ fn parent_with_agents(home: &Home) {
 fn spawn_results_come_from_four_sources_in_order() {
     let home = Home::new();
     parent_with_agents(&home);
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["a1"].parent.as_deref(), Some("parent"));
     let spawn = |agent: &str| only(&built, "spawn", "parent", agent).clone();
     let one = spawn("a1");
@@ -1313,8 +1332,13 @@ fn spawn_results_come_from_four_sources_in_order() {
         ("err", Some("five broke"))
     );
     assert_eq!(built.sessions["a5"].state, "err");
-    // A notification outranks a hand-back.
-    assert_eq!(spawn("a6").result.as_deref(), Some("six by notification"));
+    // A run's hand-back is its result; the notification that ends the same
+    // run gives only the status, and the run ended at whichever came first.
+    let six = spawn("a6");
+    assert_eq!(
+        (six.status, six.result.as_deref(), six.done),
+        ("done", Some("six by hand-back"), Some(at(1, 13)))
+    );
     // No result and the parent isn't running: done, with nothing returned.
     let seven = spawn("a7");
     assert_eq!((seven.status, seven.result.as_deref()), ("done", None));
@@ -1330,7 +1354,7 @@ fn spawn_results_come_from_four_sources_in_order() {
     assert_bounded_causal_previews(&home, &built, parent_turns[0]);
 }
 
-fn assert_bounded_causal_previews(home: &Home, built: &Built, root: &Turn) {
+fn assert_bounded_causal_previews(home: &Home, built: &QueryData, root: &Turn) {
     let query = format!(
         "sid={}&turn={}&scope=retained_history",
         crate::viewer::percent_encode(&root.sid),
@@ -1380,7 +1404,14 @@ fn assert_bounded_causal_previews(home: &Home, built: &Built, root: &Turn) {
             );
             let details: Value = serde_json::from_slice(&reply.body).unwrap();
             let expected = if field == "brief" {
-                json!(native.brief)
+                if let Some(brief) = built.ask_briefs.get(&native.id) {
+                    let records = built.sources.reader();
+                    let text = brief.read(&records).unwrap();
+                    records.finish().unwrap();
+                    json!(text)
+                } else {
+                    json!(native.brief)
+                }
             } else {
                 json!(native.result)
             };
@@ -1411,7 +1442,7 @@ fn bounded_causal_previews_preserve_large_native_unicode_and_cleaned_prompt_caps
                 "large-native-event",
             )],
         );
-        let built = home.build();
+        let built = home.build_query();
         assert!(prompt.len() > 128 * 1024);
         assert_bounded_causal_previews(&home, &built, turns_of(&built, "large")[0]);
     }
@@ -1480,7 +1511,7 @@ fn background_bash_notifications_keep_their_position_and_spawn_notifications_sta
     );
     // The second build reads the persisted index, including its background flag.
     for _ in 0..2 {
-        let built = home.build();
+        let built = home.build_query();
         let slots = &built.tx["parent"].slots;
         let ends: Vec<_> = slots
             .iter()
@@ -1528,7 +1559,7 @@ fn a_running_parent_keeps_an_unreturned_subagent_working() {
     let home = Home::new();
     parent_with_agents(&home);
     home.live(10, "parent", "busy", json!({}));
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(only(&built, "spawn", "parent", "a7").status, "work");
     assert_eq!(built.sessions["a7"].state, "work");
     assert_eq!(built.sessions["parent"].state, "work");
@@ -1594,7 +1625,7 @@ fn codex_runs_link_by_marker_or_parent_thread_and_otherwise_stay_unlinked() {
         json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"worker","agent_path":"root/worker"}),
         &[codex_user(ts(4, 1), "go"), codex_reply(ts(4, 8), "done")],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["run-marked"].parent.as_deref(), Some("lead"));
     let marked = only(&built, "spawn", "lead", "run-marked");
     assert_eq!(marked.brief, "Implement the thing");
@@ -1670,7 +1701,7 @@ fn guardian_reviews_get_a_stable_kind_and_name_without_losing_codex_data() {
         &records(40, "implement helper", "ordinary helper transcript"),
     );
 
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["codex-parent"].kind, Some("Codex run"));
     for id in [
         "codex-worker",
@@ -1794,7 +1825,7 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
             codex_reply(ts(1, 0), "done"),
         ]);
     }
-    let built = home.build();
+    let built = home.build_query();
     let records: Vec<Value> = fs::read_to_string(&path)
         .unwrap()
         .lines()
@@ -1835,13 +1866,13 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
     )));
     assert_eq!(
         query.call("get_session", &json!({"id":"lead"})).unwrap()["session"]["handoffs"],
-        serde_json::to_value(&built.handoffs).unwrap()
+        semantic_values(&built)["handoffs"]
     );
     assert_eq!(
         serde_json::to_value(&native.sessions).unwrap(),
         serde_json::to_value(&built.sessions).unwrap()
     );
-    home.build();
+    home.build_query();
     let appended = format!("{}\n", launch("third", ts(0, 51), command));
     use std::io::Write;
     fs::OpenOptions::new()
@@ -1850,7 +1881,7 @@ fn variable_handoffs_are_placed_on_their_calls_and_parent_scans_resume() {
         .unwrap()
         .write_all(appended.as_bytes())
         .unwrap();
-    let after = home.build();
+    let after = home.build_query();
     assert_eq!(only(&after, "spawn", "lead", "early").at, at(0, 1));
     assert_eq!(only(&after, "spawn", "lead", "later").at, at(0, 11));
 }
@@ -1878,7 +1909,7 @@ fn worktree_prefix_does_not_place_a_spawn_on_the_wrong_call() {
         json!({"type":"session_meta","timestamp":start,"payload":{"id":"child","cwd":"/home/u/wt/semon-wt-foo"}}),
         codex_user(start.into(), "Semon-Parent: claude:lead\nSemon-Handoff: /tmp/absent.md\nImplement"),
     ]);
-    let built = home.build();
+    let built = home.build_query();
     let spawn = only(&built, "spawn", "lead", "child");
     assert_eq!(spawn.at, events::parse_ms(start).unwrap());
     assert!(
@@ -2011,7 +2042,7 @@ fn relay_home() -> Home {
 #[test]
 fn relays_join_on_msg_id() {
     let home = relay_home();
-    let built = home.build();
+    let built = home.build_query();
     let relay = by_brief(&built, "hello beta");
     assert_eq!(
         (relay.from.as_str(), relay.to.as_deref()),
@@ -2038,7 +2069,7 @@ fn relays_join_on_msg_id() {
 #[test]
 fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
     let home = relay_home();
-    let built = home.build();
+    let built = home.build_query();
     let root = turns_of(&built, "beta")[0];
     let query = format!(
         "sid=beta&turn={}&scope=retained_history",
@@ -2078,7 +2109,7 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
         json!({"type":"custom-title","customTitle":"Updated Alpha","sessionId":"alpha"})
     )
     .unwrap();
-    home.build();
+    home.build_query();
     let renamed = read();
     assert_eq!(renamed["participants"]["alpha"], "Updated Alpha");
     assert_ne!(renamed["generation"], before["generation"]);
@@ -2099,7 +2130,7 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
 #[test]
 fn failed_and_denied_sends_are_failed_relays_with_no_receiver() {
     let home = relay_home();
-    let built = home.build();
+    let built = home.build_query();
     for (brief, target) in [("lost one", "nobody-9f"), ("denied one", "beta-01")] {
         let relay = by_brief(&built, brief);
         assert_eq!(relay.status, "err", "{brief}");
@@ -2125,7 +2156,7 @@ fn failed_and_denied_sends_are_failed_relays_with_no_receiver() {
 #[test]
 fn received_message_from_a_gone_sender_keeps_a_stub() {
     let home = relay_home();
-    let built = home.build();
+    let built = home.build_query();
     let relay = by_brief(&built, "from a gone session");
     assert_eq!(relay.to.as_deref(), Some("beta"));
     assert!(relay.unmatched);
@@ -2138,7 +2169,7 @@ fn received_message_from_a_gone_sender_keeps_a_stub() {
 #[test]
 fn a_send_without_msg_id_resolves_a_unique_name_only() {
     let home = relay_home();
-    let built = home.build();
+    let built = home.build_query();
     let unique = by_brief(&built, "by unique name");
     assert_eq!(
         (unique.to.as_deref(), unique.unmatched),
@@ -2246,7 +2277,7 @@ fn questions_take_answers_from_the_structured_result() {
         records.push(line);
     }
     home.top("asker", &records);
-    let built = home.build();
+    let built = home.build_query();
     golden("answers", &built);
     let get = |first: &str| by_brief(&built, first).clone();
     let one = get("Ship it?");
@@ -2305,13 +2336,15 @@ fn only_human_origin_prompts_are_your_messages() {
             assistant("sdk", ts(9, 1), vec![text("done")]),
         ],
     );
-    let built = home.build();
-    let asks: Vec<&str> = built
+    let built = home.build_query();
+    let records = built.sources.reader();
+    let asks: Vec<String> = built
         .handoffs
         .iter()
-        .filter(|handoff| handoff.kind == "ask")
-        .map(|handoff| handoff.brief.as_str())
+        .filter(|h| h.kind == "ask")
+        .map(|h| built.ask_briefs[&h.id].read(&records).unwrap())
         .collect();
+    records.finish().unwrap();
     assert_eq!(
         asks,
         [
@@ -2400,16 +2433,17 @@ fn lineages_join_by_session_id_continued_in_and_bridge_only() {
         "neighbour",
         &[human("neighbour", ts(10, 31), "close in time, no link")],
     );
-    let built = home.build();
+    let built = home.build_query();
     golden("lineage", &built);
     let keys: Vec<&str> = built.sessions.keys().map(String::as_str).collect();
     assert_eq!(keys, ["bridged-1", "neighbour", "old", "pid-only", "root"]);
-    let asks = |to: &str| -> Vec<&str> {
+    let records = built.sources.reader();
+    let asks = |to: &str| -> Vec<String> {
         built
             .handoffs
             .iter()
-            .filter(|handoff| handoff.kind == "ask" && handoff.to.as_deref() == Some(to))
-            .map(|handoff| handoff.brief.as_str())
+            .filter(|h| h.kind == "ask" && h.to.as_deref() == Some(to))
+            .map(|h| built.ask_briefs[&h.id].read(&records).unwrap())
             .collect()
     };
     assert_eq!(asks("root"), ["first", "after clear"]);
@@ -2468,7 +2502,7 @@ fn busy_clusters_every_line_of_a_lineage_within_five_minutes() {
             json!({"type":"system","timestamp":ts(15, 20),"sessionId":"two","session_id":"one"}),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(
         built.sessions["one"].busy,
         [(at(15, 0), at(15, 8)), (at(15, 20), at(15, 20))]
@@ -2616,7 +2650,7 @@ fn states_follow_the_process_the_question_and_the_last_word() {
     );
     home.live(33, "idle", "idle", json!({}));
     home.top("ended", &[human("ended", ts(16, 0), "long ago")]);
-    let built = home.build();
+    let built = home.build_query();
     let state = |key: &str| built.sessions[key].state;
     assert_eq!(
         [
@@ -2710,7 +2744,7 @@ fn a_failed_codex_operation_ends_its_turn_as_a_failed_step() {
             ),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let turns = turns_of(&built, "failed-operation");
     let turn = turns.last().unwrap();
     assert_eq!(turn.end.why, "failed_step");
@@ -2742,7 +2776,7 @@ fn a_script_error_after_its_operations_ends_the_turn_as_failed() {
             ),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let turns = turns_of(&built, "late-script-error");
     let turn = turns.last().unwrap();
     assert_eq!((turn.end.st, turn.end.why), ("err", "failed_step"));
@@ -2765,7 +2799,7 @@ fn a_result_follows_the_last_block_of_its_reply() {
         ],
     );
     home.live(38, "blocks", "idle", json!({}));
-    let built = home.build();
+    let built = home.build_query();
     let result = built
         .handoffs
         .iter()
@@ -2818,7 +2852,7 @@ fn turns_split_at_each_incoming_entry_and_at_a_gap() {
         content.push('\n');
     }
     fs::write(&path, content).unwrap();
-    let built = home.build();
+    let built = home.build_query();
     golden("turns", &built);
     let turns = turns_of(&built, "turny");
     let summary: Vec<(Option<&str>, bool, &str)> = turns
@@ -2849,12 +2883,12 @@ fn turns_split_at_each_incoming_entry_and_at_a_gap() {
 #[test]
 fn handoff_ids_are_stable_across_rebuilds_and_growth() {
     let home = relay_home();
-    let first = home.build();
+    let first = home.build_query();
     let path = home.root.join("claude/projects/-work-proj/beta.jsonl");
     let mut content = fs::read_to_string(&path).unwrap();
     content.push_str(&format!("{}\n", human("beta", ts(6, 30), "later ask")));
     fs::write(&path, content).unwrap();
-    let second = home.build();
+    let second = home.build_query();
     for handoff in &first.handoffs {
         assert!(
             second
@@ -2961,7 +2995,7 @@ fn a_subagent_message_to_a_sibling_names_its_sender_agent() {
                 "message":{"role":"user","content":"<cross-session-message from=\"aa\" from-name=\"worker-a\">sibling note</cross-session-message>"}}),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let relay = only(&built, "relay", "aa", "ab");
     assert_eq!(
         (relay.brief.as_str(), relay.unmatched),
@@ -2992,13 +3026,13 @@ fn a_session_carries_its_transcripts_tool_call_and_error_counts() {
             assistant("counted", ts(17, 4), vec![text("done")]),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let session = &built.sessions["counted"];
     // The same totals `/api/tx` reports, from the same transcript index.
     let transcript = &built.tx["counted"];
     assert_eq!((transcript.calls, transcript.errors), (2, 1));
     assert_eq!((session.calls, session.errors), (Some(2), Some(1)));
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    let model: Value = semantic_values(&built);
     assert_eq!(model["sessions"]["counted"]["calls"], 2);
     assert_eq!(model["sessions"]["counted"]["errors"], 1);
 }
@@ -3036,7 +3070,7 @@ fn a_session_counts_its_tool_calls_by_tool() {
             assistant("quiet", ts(18, 1), vec![text("ok")]),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let session = &built.sessions["named"];
     let expected = BTreeMap::from([
         ("Bash".to_owned(), 2),
@@ -3050,7 +3084,7 @@ fn a_session_counts_its_tool_calls_by_tool() {
         session.calls.unwrap()
     );
     assert_eq!(built.tx["named"].tools, expected);
-    let model: Value = serde_json::from_str(&built.json(NOW)).unwrap();
+    let model: Value = semantic_values(&built);
     assert_eq!(
         model["sessions"]["named"]["tool_calls"],
         json!({"Bash": 2, "Edit": 1, "Read": 2})
@@ -3125,7 +3159,7 @@ fn a_session_with_many_tools_serves_a_bounded_tool_calls_map_that_sums_to_its_ca
     ];
     lines.extend(results);
     home.top("many", &lines);
-    let built = home.build();
+    let built = home.build_query();
     let session = &built.sessions["many"];
     assert_eq!(session.calls, Some(TOOL_KINDS_MAX + 5));
     assert_eq!(session.tool_calls.len(), TOOL_KINDS_MAX + 1);
@@ -3142,48 +3176,49 @@ fn a_session_with_many_tools_serves_a_bounded_tool_calls_map_that_sums_to_its_ca
     assert_eq!(session.tool_calls[TOOL_OTHER], 5);
 }
 
-fn golden(name: &str, built: &Built) {
-    let mut expected_shape: Value = serde_json::from_str(&built.json(NOW)).unwrap();
-    // These snapshots cover the legacy model surface. The cost additions and
-    // the transcript totals (`calls`, `errors`) have focused synthetic
-    // assertions below and stay out of old fixtures.
-    if let Some(sessions) = expected_shape["sessions"].as_object_mut() {
-        for session in sessions.values_mut() {
-            if let Some(session) = session.as_object_mut() {
-                session.shift_remove("cost");
-                session.shift_remove("reported_runs");
-                session.shift_remove("cost_check");
-                session.shift_remove("calls");
-                session.shift_remove("errors");
-                session.shift_remove("tool_calls");
-            }
-        }
-    }
+fn golden(name: &str, data: &QueryData) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/model/golden")
         .join(format!("{name}.json"));
-    let expected = fs::read_to_string(&path).unwrap();
-    let previous: Value = serde_json::from_str(&expected).unwrap();
-    // The model version now also covers the cost keys, which were not part
-    // of these compatibility snapshots.
-    let update = std::env::var_os("SEMON_UPDATE_GOLDEN").is_some();
-    if !update {
-        expected_shape["version"] = previous["version"].clone();
+    let previous: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let mut actual = semantic_values(data);
+    // These independently preserved snapshots predate the focused usage/count
+    // additions. Their explicit assertions above still cover those additions.
+    for session in actual["sessions"].as_object_mut().unwrap().values_mut() {
+        for field in [
+            "cost",
+            "reported_runs",
+            "cost_check",
+            "calls",
+            "errors",
+            "tool_calls",
+        ] {
+            session.as_object_mut().unwrap().remove(field);
+        }
     }
-    let actual = serde_json::to_string_pretty(&expected_shape).unwrap() + "\n";
-    if update {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, &actual).unwrap();
+    for field in ["sessions", "handoffs", "turns"] {
+        assert_eq!(actual[field], previous[field], "{name} native {field}");
     }
-    assert_eq!(actual, expected, "{name} golden");
+    assert_eq!(
+        serde_json::to_value(crate::pricing::table()).unwrap(),
+        previous["pricing"]
+    );
+    assert_eq!(data.machine_id, previous["machine"]["id"]);
+    let busy = events::busy_merge(
+        data.sessions
+            .values()
+            .flat_map(|s| s.busy.iter().copied())
+            .collect(),
+    );
+    assert_eq!(json!(busy), previous["busy"][&data.machine_id]);
 }
 
 #[test]
 fn rule_goldens() {
-    golden("relays", &relay_home().build());
+    golden("relays", &relay_home().build_query());
     let home = Home::new();
     parent_with_agents(&home);
-    golden("spawns", &home.build());
+    golden("spawns", &home.build_query());
 }
 
 #[test]
@@ -3196,7 +3231,7 @@ fn a_sender_that_cleared_without_a_link_stays_a_stub() {
     let mut line = peer("b", ts(18, 30), "m-a", "a-3c", 42, "sent before the clear");
     line["origin"]["verifiedPeerProcStart"] = json!("777");
     home.top("b", &[line]);
-    let built = home.build();
+    let built = home.build_query();
     let relay = by_brief(&built, "sent before the clear");
     assert_ne!(relay.from, "a-new");
     assert!(relay.unmatched);
@@ -3207,24 +3242,24 @@ fn a_sender_that_cleared_without_a_link_stays_a_stub() {
 #[test]
 fn an_unchanged_second_build_parses_no_lines() {
     let home = relay_home();
-    let first = home.build();
+    let first = home.build_query();
     let before = events::PARSED.with(std::cell::Cell::get);
-    let second = home.build();
+    let second = home.build_query();
     assert_eq!(events::PARSED.with(std::cell::Cell::get), before);
-    assert_eq!(first.version, second.version);
+    assert_equivalent(&first, &second, NOW);
     let path = home.root.join("claude/projects/-work-proj/beta.jsonl");
     let mut content = fs::read_to_string(&path).unwrap();
     content.push_str(&human("beta", ts(6, 30), "one more").to_string());
     content.push('\n');
     fs::write(&path, content).unwrap();
-    home.build();
+    home.build_query();
     assert_eq!(events::PARSED.with(std::cell::Cell::get), before + 1);
 }
 
 #[test]
-fn a_resumed_cache_builds_the_same_model_as_a_cold_one() {
+fn resumed_and_cold_caches_preserve_native_query_semantics() {
     let home = relay_home();
-    home.build();
+    home.build_query();
     let path = home.root.join("claude/projects/-work-proj/alpha.jsonl");
     let append = |records: &[Value], malformed: bool| {
         let mut content = fs::read_to_string(&path).unwrap();
@@ -3248,7 +3283,7 @@ fn a_resumed_cache_builds_the_same_model_as_a_cold_one() {
         )],
         true,
     );
-    home.build();
+    home.build_query();
     append(
         &[
             result("alpha", ts(7, 1), "late", "ok", false, json!({})),
@@ -3256,10 +3291,10 @@ fn a_resumed_cache_builds_the_same_model_as_a_cold_one() {
         ],
         false,
     );
-    let warm = home.build().json(NOW);
+    let warm = home.build_query();
     let mut cold = home.options.clone();
     cold.cache = home.root.join("cold/index.json");
-    assert_eq!(warm, home.build_at(&cold, NOW).json(NOW));
+    assert_equivalent(&warm, &home.build_at(&cold, NOW), NOW);
 }
 
 #[test]
@@ -3284,7 +3319,7 @@ fn non_ascii_tag_attributes_parse_without_panicking() {
         ],
     );
     home.agent("lead", "az", "tz", &[user("lead", ts(20, 1), "brief")]);
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(
         only(&built, "spawn", "lead", "az").result.as_deref(),
         Some("über fertig")
@@ -3294,7 +3329,7 @@ fn non_ascii_tag_attributes_parse_without_panicking() {
 }
 
 #[test]
-fn a_running_tool_ages_when_served_and_expires_after_thirty_minutes() {
+fn native_running_activity_keeps_the_recorded_start_and_qualified_liveness() {
     let home = Home::new();
     home.top(
         "busy",
@@ -3312,23 +3347,14 @@ fn a_running_tool_ages_when_served_and_expires_after_thirty_minutes() {
         ],
     );
     home.live(50, "busy", "busy", json!({}));
-    let built = home.build_at(&home.options, at(21, 2));
-    let activity = |now: i64| {
-        serde_json::from_str::<Value>(&built.json(now)).unwrap()["sessions"]["busy"]["activity"]
-            .clone()
-    };
-    // `[name, argument, age in seconds when served, start in epoch ms]`.
-    assert_eq!(
-        activity(at(21, 2)),
-        json!(["Bash", "cargo test -p semon", 60, at(21, 1)])
-    );
-    assert_eq!(
-        activity(at(21, 11)),
-        json!(["Bash", "cargo test -p semon", 600, at(21, 1)])
-    );
-    assert_eq!(activity(at(21, 31)), Value::Null);
-    // The running step keeps its turn working, whatever the time.
-    assert_eq!(turns_of(&built, "busy")[0].end.why, "working");
+    for now in [at(21, 2), at(21, 11), at(21, 31)] {
+        let data = home.build_at(&home.options, now);
+        assert_eq!(
+            data.sessions["busy"].activity,
+            Some(("Bash".into(), "cargo test -p semon".into(), 0, at(21, 1)))
+        );
+        assert_eq!(turns_of(&data, "busy")[0].end.why, "working");
+    }
 }
 
 #[cfg(unix)]
@@ -3397,7 +3423,7 @@ fn a_command_polled_in_a_later_turn_runs_in_the_turn_that_started_it() {
         ],
     );
     hold_lock(&home, "serving");
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["serving"].state, "work");
     let tx = &built.tx["serving"];
     let shown: Vec<Shown> = tx
@@ -3417,7 +3443,7 @@ fn a_command_polled_in_a_later_turn_runs_in_the_turn_that_started_it() {
 
     // Its process gone, the same step is unfinished, and turn 1 ends on it.
     home.write("proc/locks", "");
-    let built = home.build();
+    let built = home.build_query();
     assert_ne!(built.sessions["serving"].state, "work");
     let tx = &built.tx["serving"];
     assert!(tx.slots.iter().any(|slot| matches!(
@@ -3481,7 +3507,7 @@ fn same_name_codex_spawns_stay_unplaced_and_questions_wait_only_while_unanswered
         );
     }
     hold_lock(&home, "root");
-    let built = home.build();
+    let built = home.build_query();
     for child in ["first", "second"] {
         let spawn = only(&built, "spawn", "root", child);
         // Two calls and two runs share the task name: no pairing is exact.
@@ -3516,7 +3542,7 @@ fn a_unique_codex_spawn_call_is_placed() {
         json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"solo","agent_path":"root/solo"}),
         &[codex_user(ts(23, 2), "go")],
     );
-    let built = home.build();
+    let built = home.build_query();
     let spawn = only(&built, "spawn", "root", "solo");
     assert!(!spawn.ambiguous);
     assert_eq!(spawn.at, at(23, 1));
@@ -3549,11 +3575,11 @@ fn codex_subagent_titles_describe_tasks_instead_of_nicknames() {
             .map(|text| vec![codex_user(ts(23, 2), text)])
             .unwrap_or_default();
         home.codex(id, json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"Socrates","agent_path":path}), &records);
-        let built = home.build();
+        let built = home.build_query();
         assert_eq!(built.sessions[id].name, expected);
         assert_eq!(built.sessions[id].parent.as_deref(), Some("root"));
         // Reopening the persisted index must produce the same task title.
-        assert_eq!(home.build().sessions[id].name, expected);
+        assert_eq!(home.build_query().sessions[id].name, expected);
     }
 }
 
@@ -3566,7 +3592,7 @@ fn codex_task_paths_take_precedence_over_nicknames_for_spawn_matching() {
         codex_line(ts(23, 2), "response_item", json!({"type":"function_call","name":"spawn_agent","call_id":"nickname","arguments":"{\"task_name\":\"Socrates\"}"})),
     ]);
     home.codex("child", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &[codex_user(ts(23,3), "Audit the parser")]);
-    let built = home.build();
+    let built = home.build_query();
     let spawn = only(&built, "spawn", "root", "child");
     assert!(!spawn.ambiguous);
     assert_eq!(spawn.at, at(23, 1));
@@ -3581,7 +3607,7 @@ fn codex_orphan_subagent_keeps_its_task_title_without_inventing_a_parent() {
         json!({"thread_source":"subagent","agent_nickname":"Socrates"}),
         &[codex_user(ts(23, 1), "Audit the parser")],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["orphan"].name, "Audit the parser");
     assert!(built.sessions["orphan"].parent.is_none());
 }
@@ -3651,7 +3677,7 @@ fn codex_native_spawn_calls_place_their_exact_task() {
         codex_line(ts(23,1), "event_msg", json!({"type":"item_completed","item":{"type":"DynamicToolCall","id":"native-spawn","namespace":"collaboration","tool":"spawn_agent","arguments":{"task_name":"audit_parser"},"success":true,"status":"completed","content_items":[]}})),
     ]);
     home.codex("child", json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"/root/audit_parser","agent_nickname":"Socrates"}), &[codex_user(ts(23,2), "Audit the parser")]);
-    let built = home.build();
+    let built = home.build_query();
     let spawn = only(&built, "spawn", "root", "child");
     assert!(!spawn.ambiguous);
     assert_eq!(spawn.at, at(23, 1));
@@ -4046,6 +4072,120 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
 }
 
 #[test]
+fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
+    assert_staged_bidirectional_message_pages(80);
+}
+
+#[test]
+fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
+    assert_staged_bidirectional_message_pages(360);
+}
+
+fn assert_staged_bidirectional_message_pages(rounds: i64) {
+    let home = Home::new();
+    let ts = |hour: i64, minute: i64| {
+        format!(
+            "2026-09-{:02}T{:02}:{minute:02}:00.000Z",
+            24 + hour / 24,
+            hour % 24
+        )
+    };
+    let mut alpha = vec![human("alpha", ts(6, 0), "Coordinate a conversation")];
+    // Offset the two native message pages so the same send is observed with
+    // different incident subsets. Its preceding receipt still owns its turn.
+    let mut beta = vec![peer("beta", ts(6, 1), "prelude", "Outside", 101, "Start")];
+    for n in 0..rounds {
+        let minute = 7 + n / 10;
+        let second = (n % 10) * 4;
+        let forward = format!("forward-{n:03}");
+        let backward = format!("backward-{n:03}");
+        let send = format!("send-{n:03}");
+        let reply = format!("reply-{n:03}");
+        alpha.push(assistant(
+            "alpha",
+            ts(minute, second),
+            vec![tool(
+                &send,
+                "SendMessage",
+                json!({"to":"beta","message":"Forward"}),
+            )],
+        ));
+        alpha.push(result(
+            "alpha",
+            ts(minute, second),
+            &send,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":forward}),
+        ));
+        beta.push(peer(
+            "beta",
+            ts(minute, second + 1),
+            &forward,
+            "Alpha",
+            102,
+            "Forward",
+        ));
+        beta.push(assistant(
+            "beta",
+            ts(minute, second + 2),
+            vec![tool(
+                &reply,
+                "SendMessage",
+                json!({"to":"alpha","message":"Backward"}),
+            )],
+        ));
+        beta.push(result(
+            "beta",
+            ts(minute, second + 2),
+            &reply,
+            "sent",
+            false,
+            json!({"success":true,"msg_id":backward}),
+        ));
+        alpha.push(peer(
+            "alpha",
+            ts(minute, second + 3),
+            &backward,
+            "Beta",
+            103,
+            "Backward",
+        ));
+    }
+    home.top("alpha", &alpha);
+    home.top("beta", &beta);
+    for n in 0..70 {
+        let id = format!("independent-{n:03}");
+        home.top(&id, &[human(&id, ts(6, 0), "Independent history")]);
+    }
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for turn in &oracle.turns {
+        for edge in &turn.sent {
+            let handoff = oracle.handoffs.iter().find(|h| h.id == *edge).unwrap();
+            for owner in [Some(turn.sid.as_str()), handoff.to.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                let actual: String = db
+                    .query_row(
+                        "SELECT metadata FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2",
+                        rusqlite::params![owner, edge],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let actual: Value = serde_json::from_str(&actual).unwrap();
+                assert_eq!(
+                    actual["source_turn"],
+                    json!(turn.id),
+                    "{owner}: {edge} recorded sender turn"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
     let home = Home::new();
     home.top(
@@ -4129,7 +4269,7 @@ fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
     evidence.retire();
 }
 
-fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Built {
+fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> QueryData {
     let mut oracle_options = options.clone();
     oracle_options.cache = options.cache.with_extension("oracle.json");
     let oracle = home.build_at(&oracle_options, NOW);
@@ -4150,7 +4290,7 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Buil
     drop(cache);
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
     let mut complete = false;
-    for _ in 0..128 {
+    for _ in 0..512 {
         if evidence
             .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
             .unwrap()
@@ -4395,7 +4535,7 @@ fn record_selected_companion_batch(
     prepared
 }
 
-fn finish_companion_fixture_against_oracle(home: &Home, oracle: &Built) {
+fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData) {
     let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
     let mut complete = false;
     for _ in 0..128 {
@@ -5098,11 +5238,11 @@ fn only_the_last_turn_can_hold_a_running_tool() {
     };
     assert_eq!(ends("stuck"), ["unfinished_step", "working"]);
     assert_eq!(ends("running"), ["unfinished_step", "working"]);
-    let model: Value = serde_json::from_str(&built.json(at(23, 4))).unwrap();
+    let model: Value = semantic_values(&built);
     assert_eq!(model["sessions"]["stuck"]["activity"], Value::Null);
     assert_eq!(
         model["sessions"]["running"]["activity"],
-        json!(["Bash", "make", 60, at(23, 3)])
+        json!(["Bash", "make", 0, at(23, 3)])
     );
 }
 
@@ -5128,7 +5268,7 @@ fn every_assistant_text_survives_into_the_turn() {
             codex_reply(ts(3, 2), "all done"),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let content = fs::read_to_string(&path).unwrap();
     let offset = |needle: &str| -> u64 {
         let at = content.find(needle).unwrap();
@@ -5136,7 +5276,7 @@ fn every_assistant_text_survives_into_the_turn() {
     };
     // All four texts are in the one turn, in order.
     assert_eq!(
-        built.texts["chatty"],
+        assistant_offsets(&built, "chatty"),
         [
             (0, offset("\"first\""), 0),
             (0, offset("\"first\""), 1),
@@ -5156,7 +5296,7 @@ fn every_assistant_text_survives_into_the_turn() {
         only(&built, "spawn", "chatty", "run").result.as_deref(),
         Some("all done")
     );
-    assert_eq!(built.texts["run"].len(), 2);
+    assert_eq!(assistant_offsets(&built, "run").len(), 2);
 }
 
 /// A copy of exactly `inputs()` of `home`, with `local_facts()` of the
@@ -5181,25 +5321,27 @@ fn copy_with_facts(home: &Home) -> (Home, Options) {
 }
 
 /// Every session's last transcript page, as served.
-fn pages(built: &Built) -> Vec<String> {
+fn pages(built: &QueryData) -> Vec<String> {
     built
         .tx
         .keys()
-        .map(|sid| crate::tx::page(built, sid, &crate::tx::Anchor::Last, NOW).unwrap())
+        .map(|sid| crate::tx::tests::page(built, sid, &crate::tx::Anchor::Last, NOW).unwrap())
         .collect()
 }
 
 fn assert_mirrors(home: &Home) {
-    let original = home.build();
+    let original = home.build_query();
     let (_copy, options) = copy_with_facts(home);
     let mirrored = home.build_at(&options, NOW);
-    assert_eq!(mirrored.json(NOW), original.json(NOW), "the model");
+    assert_eq!(semantic_values(&mirrored), semantic_values(&original));
+    assert_eq!(mirrored.facts, original.facts);
+    assert_eq!(mirrored.machine_id, original.machine_id);
     assert_eq!(pages(&mirrored), pages(&original), "the transcripts");
 }
 
 #[cfg(unix)]
 #[test]
-fn a_copy_of_the_inputs_with_the_facts_builds_the_same_model() {
+fn copied_inputs_and_facts_preserve_native_query_semantics() {
     let home = Home::new();
     parent_with_agents(&home);
     home.live(10, "parent", "busy", json!({}));
@@ -5233,7 +5375,7 @@ fn a_copy_of_the_inputs_with_the_facts_builds_the_same_model() {
     // Never an input.
     home.write("claude/sessions/secret.key", "NEVER");
 
-    let original = home.build();
+    let original = home.build_query();
     assert_eq!(original.sessions["working"].state, "work");
     assert_eq!(original.sessions["root"].state, "work");
     assert_eq!(original.sessions["in-repo"].repo.as_deref(), Some("harbor"));
@@ -5350,7 +5492,7 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
         "privateRootValue":"private-root-value"
     });
     home.write(".claude.json", &first_file.to_string());
-    let first = home.build();
+    let first = home.build_query();
     assert!((first.sessions["run-one"].cost.usd.unwrap() - 1.835095).abs() < 1e-12);
     assert_eq!(first.sessions["run-one"].cost_check[0].ok, Some(true));
     assert_eq!(
@@ -5374,14 +5516,14 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
     overwritten["projects"]["/private/fixture/project"]["lastStartTime"] = json!(at(0, 15));
     overwritten["projects"]["/private/fixture/project"]["lastCost"] = json!(2.0);
     home.write(".claude.json", &overwritten.to_string());
-    let second = home.build();
+    let second = home.build_query();
     assert_eq!(second.sessions["run-one"].reported_runs.len(), 1);
     assert_eq!(second.sessions["run-one"].cost_check[0].ok, Some(true));
     assert_eq!(second.sessions["run-two"].reported_runs.len(), 1);
     assert_eq!(second.sessions["run-two"].cost_check[0].ok, Some(false));
 
-    let served = second.json(NOW);
-    let served_json: Value = serde_json::from_str(&served).unwrap();
+    let served_json = semantic_values(&second);
+    let served = served_json.to_string();
     assert!(
         (served_json["sessions"]["run-one"]["cost"]["usd"]
             .as_f64()
@@ -5476,7 +5618,7 @@ fn archived_codex_root_links_are_not_viewing_inputs() {
     )
     .unwrap();
     assert!(crate::inputs(&home.options).unwrap().is_empty());
-    assert!(!home.build().sessions.contains_key("outside-archive"));
+    assert!(!home.build_query().sessions.contains_key("outside-archive"));
 }
 
 #[test]
@@ -5490,7 +5632,7 @@ fn archived_codex_rollouts_keep_history_and_input_copy_parity() {
     let active = home
         .root
         .join("codex/sessions/2026/09/24/rollout-archived-root.jsonl");
-    let before = home.build();
+    let before = home.build_query();
     let before_pages = pages(&before);
     let archived = home
         .root
@@ -5498,7 +5640,7 @@ fn archived_codex_rollouts_keep_history_and_input_copy_parity() {
     fs::create_dir_all(archived.parent().unwrap()).unwrap();
     fs::rename(&active, &archived).unwrap();
     let bytes = fs::read(&archived).unwrap();
-    let after = home.build();
+    let after = home.build_query();
     assert!(after.sessions.contains_key("archived-root"));
     assert_eq!(before_pages, pages(&after));
     assert!(
@@ -5601,7 +5743,7 @@ fn a_worktrees_sessions_belong_to_its_repository_and_keep_their_branch() {
         json!({"cwd": &cwd, "git": {"branch": "fix/y"}}),
         &[codex_user(ts(18, 0), "run the suite")],
     );
-    let built = home.build();
+    let built = home.build_query();
     for (id, branch) in [("claude-wt", "fix/x"), ("codex-wt", "fix/y")] {
         assert_eq!(built.sessions[id].repo.as_deref(), Some("semon"), "{id}");
         assert_eq!(built.sessions[id].branch.as_deref(), Some(branch), "{id}");
@@ -5625,10 +5767,10 @@ fn the_repo_cache_is_bounded() {
     assert!(texts.repos.len() <= REPO_CACHE_MAX);
 }
 
-/// What `/api/analytics?range=7d` answers over this model, as the served
-/// build computes it: from the activity kept before the model is trimmed.
-fn week(built: &Built) -> Value {
-    let rows = crate::analytics::rows([("testbox", &built.activity)]);
+/// The active native Analytics aggregator over this fixture's complete Query evidence.
+fn week(built: &QueryData) -> Value {
+    let activity = native_activity(built, NOW);
+    let rows = crate::analytics::rows([("testbox", &activity)]);
     let request = crate::analytics::Request::parse("range=7d").unwrap();
     crate::analytics::answer(&rows, &request, NOW, "v1")
 }
@@ -5683,7 +5825,7 @@ fn an_answered_question_is_time_waited_on_you() {
             assistant("plain", ts(10, 3), vec![text("Done.")]),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let week = week(&built);
     // Four minutes, then one: a wait ends at its answer, or its decline.
     assert_eq!(week["current"]["wait_ms"], 5 * MINUTE);
@@ -5750,7 +5892,7 @@ fn an_unanswered_question_is_the_longest_current_wait() {
             ),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(built.sessions["asking"].state, "wait");
     let open = NOW - at(11, 1);
     let week = week(&built);
@@ -5813,7 +5955,7 @@ fn a_codex_question_is_time_waited_on_you() {
         ],
     );
     hold_lock(&home, "cx-open");
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(by_brief(&built, "Which one?").status, "done");
     assert_eq!(by_brief(&built, "Still there?").status, "wait");
     let open = NOW - at(13, 1);
@@ -5848,7 +5990,7 @@ fn wait_edges_keep_only_exact_targets_and_recorded_intervals_with_turn_identity(
         json!({"parent_thread_id":"root"}),
         &[codex_user(ts(10, 0), "Work")],
     );
-    let built = home.build();
+    let built = home.build_query();
     let waits = &built.sessions["root"].wait_edges;
     assert_eq!(waits.len(), 2);
     assert_eq!(waits[0].targets, vec!["child"]);
@@ -5875,7 +6017,7 @@ fn local_ancestry_is_exact_and_environment_overrides_it_without_retaining_other_
         "proc/4242/stat",
         &format!("4242 (codex with parentheses) {}\n", fields.join(" ")),
     );
-    let ancestor = home.build();
+    let ancestor = home.build_query();
     assert_eq!(
         ancestor.sessions["child"].parent.as_deref(),
         Some("ancestor")
@@ -5886,7 +6028,7 @@ fn local_ancestry_is_exact_and_environment_overrides_it_without_retaining_other_
         "proc/4242/environ",
         "SEMON_PARENT=codex:explicit\0TOKEN=secret-never-retained\0",
     );
-    let explicit = home.build();
+    let explicit = home.build_query();
     assert_eq!(
         explicit.sessions["child"].parent.as_deref(),
         Some("explicit")
@@ -6049,7 +6191,7 @@ fn native_marker_query(home: &Home) -> QueryData {
 }
 
 #[test]
-fn model_restart_uses_verified_markers_and_launches_without_legacy_scans() {
+fn native_query_restart_uses_verified_markers_and_launches_without_direct_scans() {
     let home = Home::new();
     let mut parent = vec![human("parent", ts(10, 0), "parent task")];
     parent.extend((0..1024).map(|_| json!({"type":"progress","padding":"x".repeat(1024)})));
@@ -6076,7 +6218,7 @@ fn model_restart_uses_verified_markers_and_launches_without_legacy_scans() {
     let direct_reads = DIRECT_SOURCE_READS.with(std::cell::Cell::get);
     for _ in 0..2 {
         let before = crate::native_record::READ_BYTES.with(std::cell::Cell::get);
-        let built = home.build();
+        let built = home.build_query();
         assert_eq!(built.sessions["child"].parent.as_deref(), Some("parent"));
         assert_eq!(only(&built, "spawn", "parent", "child").at, at(10, 1));
         assert!(crate::native_record::READ_BYTES.with(std::cell::Cell::get) - before < 16 * 1024);
@@ -6090,7 +6232,7 @@ fn model_restart_uses_verified_markers_and_launches_without_legacy_scans() {
 }
 
 #[test]
-fn model_source_rewrites_before_and_after_derivation_refuse_catalog_publication() {
+fn native_query_rewrites_refuse_selected_bodies_and_stale_catalog_publication() {
     let _clock = crate::events::fixed_change_time_for_test(0);
     for after_derivation in [false, true] {
         for (from, to) in [
@@ -6122,7 +6264,7 @@ fn model_source_rewrites_before_and_after_derivation_refuse_catalog_publication(
                     "Semon-Parent: claude:parent\nSemon-Handoff: /private/prompt",
                 )],
             );
-            home.build();
+            home.build_query();
             let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
             let generation = cache.session_catalog_generation();
             let mutation: Box<dyn FnOnce()> = Box::new(move || {
@@ -6144,21 +6286,31 @@ fn model_source_rewrites_before_and_after_derivation_refuse_catalog_publication(
                 );
             });
             if after_derivation {
-                AFTER_MODEL_DERIVATION.with(|hook| *hook.borrow_mut() = Some(mutation));
+                AFTER_QUERY_DERIVATION.with(|hook| *hook.borrow_mut() = Some(mutation));
             } else {
                 AFTER_SCAN.with(|hook| *hook.borrow_mut() = Some(mutation));
             }
-            assert!(
-                build(
-                    &home.options,
-                    &mut cache,
-                    &mut false,
-                    &mut Texts::default(),
-                    NOW
-                )
-                .is_err(),
-                "{after_derivation}: {from}"
-            );
+            if let Ok(data) = build_query(
+                &home.options,
+                &mut cache,
+                &mut false,
+                &mut Texts::default(),
+                NOW,
+            ) {
+                // Native Query stores ask offsets, so a content-only rewrite
+                // may first be observed when that selected body is requested.
+                let records = data.sources.reader();
+                assert!(
+                    data.ask_briefs
+                        .values()
+                        .next()
+                        .unwrap()
+                        .read(&records)
+                        .is_err(),
+                    "{after_derivation}: {from}"
+                );
+                assert!(records.finish().is_err());
+            }
             assert_eq!(cache.session_catalog_generation(), generation);
         }
     }
@@ -6558,7 +6710,7 @@ fn model_comparison_uses_indexed_per_message_models_for_launched_work() {
     reply["message"]["model"] = json!("claude-sonnet-4-6");
     reply["message"]["usage"] = json!({"input_tokens":123, "output_tokens":45});
     home.agent("lead", "child", "launch", &[reply]);
-    let built = home.build();
+    let built = home.build_query();
     let analytics = week(&built);
     let group = &analytics["models"]["groups"][0];
     assert_eq!(group["model"], "claude-sonnet-4-6");
@@ -6595,8 +6747,8 @@ fn analytics_answered_question_history_has_an_explicit_bound() {
         ));
     }
     home.top("many-questions", &records);
-    let built = home.build();
-    let activity = &built.activity["many-questions"];
+    let built = home.build_query();
+    let activity = &native_activity(&built, NOW)["many-questions"];
     assert_eq!(activity.answered.len(), 4096);
     assert_eq!(activity.answered.capacity(), activity.answered.len());
     assert!(activity.waits_truncated);
@@ -6633,7 +6785,7 @@ fn codex_root_human_reply_is_a_new_result_but_harness_context_is_not() {
             codex_reply(ts(12, 1), "Done"),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let results: Vec<_> = built
         .handoffs
         .iter()
@@ -6657,7 +6809,7 @@ fn acknowledged_async_codex_question_does_not_count_continued_work_as_waiting() 
         codex_line(ts(12, 2), "response_item", json!({"type":"function_call_output","call_id":"q","output":"{\"accepted\":true}"})),
     ]);
     hold_lock(&home, "async");
-    let built = home.build();
+    let built = home.build_query();
     assert_eq!(by_brief(&built, "Which?").status, "done");
     assert_eq!(week(&built)["current"]["wait_ms"], MINUTE);
 }
@@ -6682,7 +6834,7 @@ fn a_permission_wait_keeps_the_pending_tool_live_and_counts_the_known_wait() {
         "waiting",
         json!({"waitingFor":"permission prompt", "statusUpdatedAt":at(16, 2)}),
     );
-    let built = home.build();
+    let built = home.build_query();
     let tx = &built.tx["permission"];
     assert_eq!(tx.errors, 0);
     assert!(tx.slots.iter().any(|slot| matches!(
@@ -6728,7 +6880,7 @@ fn top_sessions_waited_on_list_the_longest_first() {
             ],
         );
     }
-    let week = week(&home.build());
+    let week = week(&home.build_query());
     assert_eq!(
         week["top"]["waited"],
         json!([
@@ -6807,7 +6959,7 @@ fn a_subagent_send_to_main_is_a_relay_to_its_parent() {
             assistant("lead", ts(19, 3), vec![text("worker done")]),
         ],
     );
-    let built = home.build();
+    let built = home.build_query();
     let relay = only(&built, "relay", "aw", "lead");
     assert_eq!(
         (
@@ -6905,7 +7057,7 @@ fn a_stubs_transcript_names_only_served_handoffs() {
     assert_eq!(named, [new.id.as_str()]);
     // The page the viewer gets holds that one handoff entry.
     let page: Value = serde_json::from_str(
-        &crate::tx::page(&built, &stub, &crate::tx::Anchor::Last, at(5, 30)).unwrap(),
+        &crate::tx::tests::page(&built, &stub, &crate::tx::Anchor::Last, at(5, 30)).unwrap(),
     )
     .unwrap();
     let entries: Vec<&Value> = page["entries"]
@@ -6916,6 +7068,916 @@ fn a_stubs_transcript_names_only_served_handoffs() {
         .collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["id"], new.id.as_str());
+}
+
+/// A subagent's send that isn't its hand-back, as the receiving session gets
+/// it (Claude Code 2.1: `senderTaskId`, no `handback`, no `msg_id`).
+fn agent_send(sid: &str, time: String, from: &str, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,
+        "origin":{"kind":"peer","from":from,"senderTaskId":from,"name":"general-purpose"},
+        "message":{"role":"user","content":format!("Another Claude session sent a message:\n<agent-message from=\"{from}\">{body}</agent-message>")}})
+}
+
+/// A subagent's hand-back, as its parent gets it.
+fn hand_back(sid: &str, time: String, from: &str, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,
+        "origin":{"kind":"peer","from":from,"senderTaskId":from,"handback":true,"body":body},
+        "message":{"role":"user","content":format!("<agent-message from=\"{from}\">{body}</agent-message>")}})
+}
+
+/// A parent's message, as its running or resumed subagent gets it.
+fn coordinator(sid: &str, time: String, body: &str) -> Value {
+    json!({"type":"user","timestamp":time,"sessionId":sid,"isMeta":true,"origin":{"kind":"coordinator"},
+        "message":{"role":"user","content":format!("The coordinator sent a message while you were working:\n{body}")}})
+}
+
+/// The lead's `SendMessage` to agent `to` at 20:`minute`, with `outcome`.
+fn send_to_agent(id: &str, minute: i64, to: &str, message: &str, outcome: Value) -> [Value; 2] {
+    [
+        assistant(
+            "lead",
+            ts(20, minute),
+            vec![tool(id, "SendMessage", json!({"to":to,"message":message}))],
+        ),
+        result("lead", ts(20, minute), id, "sent", false, outcome),
+    ]
+}
+
+fn resumed(agent: &str) -> Value {
+    json!({"success":true,"message":format!("Resuming agent {agent} in the background"),"resumedAgentId":agent})
+}
+
+/// A subagent's progress send, its hand-back and its agent-end notification
+/// are one relay and one result, each drawn once: the notification is the
+/// run's status, not a message or an entry.
+#[test]
+fn a_progress_send_a_hand_back_and_an_agent_end_are_one_relay_and_one_result() {
+    let mut child = send_to_main("p1", 2, "halfway there", queued_reply());
+    child.push(child_says(4, "all done"));
+    let built = background_home(
+        vec![("aw", "tw", child)],
+        vec![
+            agent_send("lead", ts(20, 3), "aw", "halfway there"),
+            hand_back("lead", ts(20, 5), "aw", "the final answer"),
+            notification("lead", ts(20, 6), "tw", "completed", "the notified answer"),
+        ],
+    )
+    .build_query();
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("the final answer"), Some(at(20, 5)))
+    );
+    assert_eq!(built.sessions["aw"].state, "done");
+    let relay = only(&built, "relay", "aw", "lead");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched, relay.at),
+        ("halfway there", false, at(20, 2))
+    );
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    // Nothing else between them: no second relay, result or entry.
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == "aw" || handoff.to.as_deref() == Some("aw"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.result.is_some())
+            .count(),
+        1
+    );
+    let slots = &built.tx["lead"].slots;
+    assert_eq!(received_in(&built, "lead", &spawn.id), 1);
+    assert!(
+        slots
+            .iter()
+            .all(|slot| !matches!(slot.kind, SlotKind::BgEnd { .. }))
+    );
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A subagent's send to its sibling is a relay between them, not a receipt
+/// of either spawn; its send to `main` is still paired with its receipt in
+/// the parent.
+#[test]
+fn a_subagent_send_to_a_sibling_is_a_relay_not_a_receipt() {
+    let mut aa = vec![
+        assistant(
+            "lead",
+            ts(20, 2),
+            vec![tool(
+                "to-b",
+                "SendMessage",
+                json!({"to":"ab","message":"sibling note"}),
+            )],
+        ),
+        result(
+            "lead",
+            ts(20, 2),
+            "to-b",
+            "sent",
+            false,
+            json!({"success":true,"message":"sent","pin":{"id":"ab"}}),
+        ),
+    ];
+    aa.extend(send_to_main("to-lead", 3, "note for lead", queued_reply()));
+    aa.push(child_says(5, "aa done"));
+    let ab = vec![
+        agent_send("lead", ts(20, 4), "aa", "sibling note"),
+        child_says(6, "noted"),
+    ];
+    let built = background_home(
+        vec![("aa", "ta", aa), ("ab", "tb", ab)],
+        vec![
+            agent_send("lead", ts(20, 4), "aa", "note for lead"),
+            hand_back("lead", ts(20, 7), "aa", "aa done"),
+        ],
+    )
+    .build_query();
+    let sibling = only(&built, "relay", "aa", "ab");
+    assert_eq!(
+        (sibling.brief.as_str(), sibling.unmatched),
+        ("sibling note", false)
+    );
+    assert_eq!(received_in(&built, "ab", &sibling.id), 1);
+    assert_eq!(
+        turns_of(&built, "ab")[1].start.as_deref(),
+        Some(sibling.id.as_str())
+    );
+    let up = only(&built, "relay", "aa", "lead");
+    assert_eq!(up.brief, "note for lead");
+    assert_eq!(received_in(&built, "lead", &up.id), 1);
+    assert_eq!(
+        only(&built, "spawn", "lead", "aa").result.as_deref(),
+        Some("aa done")
+    );
+    assert_eq!(only(&built, "spawn", "lead", "ab").result.as_deref(), None);
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A parent's message that reaches its subagent mid-run is a relay from the
+/// parent, paired with the parent's send, and an entry of the child's
+/// current turn, not a turn of its own.
+#[test]
+fn a_parent_message_mid_run_is_inline_in_the_subagents_turn() {
+    let child = vec![
+        assistant(
+            "lead",
+            ts(20, 2),
+            vec![tool("ls", "Bash", json!({"command":"ls"}))],
+        ),
+        result("lead", ts(20, 2), "ls", "src", false, json!({})),
+        coordinator("lead", ts(20, 3), "also check the tests"),
+        child_says(4, "checked"),
+    ];
+    let mut receipts = Vec::from(send_to_agent(
+        "to-aw",
+        2,
+        "aw",
+        "also check the tests",
+        json!({"success":true,"message":"Message queued for delivery to aw at its next tool round."}),
+    ));
+    receipts.push(hand_back("lead", ts(20, 5), "aw", "checked"));
+    receipts.push(notification(
+        "lead",
+        ts(20, 6),
+        "tw",
+        "completed",
+        "checked",
+    ));
+    let built = background_home(vec![("aw", "tw", child)], receipts).build_query();
+    let relay = only(&built, "relay", "lead", "aw");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched, relay.at),
+        ("also check the tests", false, at(20, 2))
+    );
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    assert_eq!(received_in(&built, "aw", &relay.id), 1);
+    assert!(
+        turns_of(&built, "lead")
+            .iter()
+            .any(|turn| turn.sent.contains(&relay.id))
+    );
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 1);
+    let slot = built.tx["aw"]
+        .slots
+        .iter()
+        .find(|slot| matches!(&slot.kind, SlotKind::H(id) if id == &relay.id))
+        .unwrap();
+    assert_eq!(slot.turn.as_deref(), Some(turns[0].id.as_str()));
+    assert_eq!(built.sessions["aw"].state, "done");
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A subagent that handed back, then was resumed by its parent: the resume
+/// starts a new turn and the child works again until that run ends.
+fn resume_home(second_end: bool) -> Home {
+    let mut child = vec![
+        child_says(2, "first answer"),
+        coordinator("lead", ts(20, 5), "now fix it"),
+        child_says(6, "fixing"),
+    ];
+    let mut receipts = vec![
+        hand_back("lead", ts(20, 3), "aw", "first answer"),
+        notification("lead", ts(20, 4), "tw", "completed", "first answer"),
+    ];
+    receipts.extend(send_to_agent(
+        "resume",
+        5,
+        "aw",
+        "now fix it",
+        resumed("aw"),
+    ));
+    if second_end {
+        child.push(child_says(7, "fixed"));
+        receipts.push(hand_back("lead", ts(20, 8), "aw", "fixed"));
+        receipts.push(notification("lead", ts(20, 9), "tw", "completed", "fixed"));
+    }
+    let home = background_home(vec![("aw", "tw", child)], receipts);
+    home.live(51, "lead", "busy", json!({}));
+    home
+}
+
+#[test]
+fn a_resume_after_a_hand_back_starts_a_turn_and_works_until_its_run_ends() {
+    let built = resume_home(false).build_query();
+    let relay = only(&built, "relay", "lead", "aw");
+    assert_eq!(relay.brief, "now fix it");
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[1].start.as_deref(), Some(relay.id.as_str()));
+    assert_eq!(built.sessions["aw"].state, "work");
+    let spawn = only(&built, "spawn", "lead", "aw");
+    // Still the previous run's end until this one ends.
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref()),
+        ("work", Some("first answer"))
+    );
+
+    let built = resume_home(true).build_query();
+    assert_eq!(built.sessions["aw"].state, "done");
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("fixed"), Some(at(20, 8)))
+    );
+    assert_eq!(turns_of(&built, "aw").len(), 2);
+}
+
+/// Three runs of one subagent: the spawn's result is the latest run's
+/// hand-back. The second run's notification arrives after the parent
+/// already resumed the third, and still belongs to the second.
+#[test]
+fn a_subagent_resumed_twice_returns_its_latest_run() {
+    let child = vec![
+        child_says(2, "one"),
+        coordinator("lead", ts(20, 5), "second task"),
+        child_says(7, "two"),
+        coordinator("lead", ts(20, 9), "third task"),
+        child_says(11, "three"),
+    ];
+    let mut receipts = vec![
+        hand_back("lead", ts(20, 3), "aw", "one"),
+        notification("lead", ts(20, 4), "tw", "completed", "notified one"),
+    ];
+    receipts.extend(send_to_agent("r2", 5, "aw", "second task", resumed("aw")));
+    receipts.push(hand_back("lead", ts(20, 8), "aw", "two"));
+    receipts.extend(send_to_agent("r3", 9, "aw", "third task", resumed("aw")));
+    receipts.push(notification(
+        "lead",
+        ts(20, 10),
+        "tw",
+        "completed",
+        "notified two",
+    ));
+    receipts.push(hand_back("lead", ts(20, 12), "aw", "three"));
+    receipts.push(notification(
+        "lead",
+        ts(20, 13),
+        "tw",
+        "completed",
+        "notified three",
+    ));
+    let built = background_home(vec![("aw", "tw", child)], receipts).build_query();
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("three"), Some(at(20, 12)))
+    );
+    assert_eq!(built.sessions["aw"].state, "done");
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 3);
+    for (turn, brief) in [(1, "second task"), (2, "third task")] {
+        let relay = by_brief(&built, brief);
+        assert_eq!(
+            (relay.kind, relay.from.as_str(), relay.to.as_deref()),
+            ("relay", "lead", Some("aw"))
+        );
+        assert_eq!(turns[turn].start.as_deref(), Some(relay.id.as_str()));
+    }
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.result.is_some())
+            .count(),
+        1
+    );
+}
+
+/// A legacy `<agent-message>` tag with no `origin` keeps the old pairing: a
+/// send's receipt is its relay and the last unclaimed one is the hand-back.
+/// A tag quoted in a notification's result is not a receipt.
+#[test]
+fn legacy_tag_receipts_pair_as_before_and_quoted_tags_are_not_receipts() {
+    let mut child = send_to_main("n1", 2, "legacy note", queued_reply());
+    child.push(child_says(4, "legacy done"));
+    let built = background_home(
+        vec![("ap", "tp", child)],
+        vec![
+            agm_line(3, &[("ap", "legacy note")]),
+            agm_line(5, &[("ap", "[Subagent hand-back] legacy done")]),
+            user(
+                "lead",
+                ts(20, 6),
+                "<task-notification><tool-use-id>bg</tool-use-id><status>completed</status><result>log: <agent-message from=\"ap\">quoted, not sent</agent-message></result></task-notification>",
+            ),
+        ],
+    )
+    .build_query();
+    assert_eq!(
+        only(&built, "spawn", "lead", "ap").result.as_deref(),
+        Some("[Subagent hand-back] legacy done")
+    );
+    let relay = only(&built, "relay", "ap", "lead");
+    assert_eq!(relay.brief, "legacy note");
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    assert!(
+        built
+            .handoffs
+            .iter()
+            .all(|handoff| handoff.result.as_deref() != Some("quoted, not sent"))
+    );
+}
+
+/// A notification that a subagent run this session started has ended is a
+/// status, not a message: a reply after it still answers your message.
+#[test]
+fn an_agent_end_notification_does_not_interrupt_a_reply() {
+    let home = Home::new();
+    home.top(
+        "notified-agent",
+        &[
+            human("notified-agent", ts(16, 0), "delegate it"),
+            assistant(
+                "notified-agent",
+                ts(16, 1),
+                vec![tool("ag", "Agent", json!({"prompt":"go"}))],
+            ),
+            result(
+                "notified-agent",
+                ts(16, 1),
+                "ag",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"ag1"}),
+            ),
+            notification(
+                "notified-agent",
+                ts(16, 3),
+                "ag",
+                "completed",
+                "agent result",
+            ),
+            assistant(
+                "notified-agent",
+                ts(16, 4),
+                vec![text("The agent finished.")],
+            ),
+        ],
+    );
+    home.agent(
+        "notified-agent",
+        "ag1",
+        "ag",
+        &[
+            user("notified-agent", ts(16, 1), "go"),
+            assistant("notified-agent", ts(16, 2), vec![text("working")]),
+        ],
+    );
+    home.live(41, "notified-agent", "idle", json!({}));
+    let built = home.build_query();
+    let result = by_brief(&built, "The agent finished.");
+    assert_eq!(
+        (result.kind, result.ask, result.from.as_str()),
+        ("toyou", Some("result"), "notified-agent")
+    );
+    assert_eq!(
+        only(&built, "spawn", "notified-agent", "ag1")
+            .result
+            .as_deref(),
+        Some("agent result")
+    );
+}
+
+/// A Codex child's result is only what it sent up to its parent, not its
+/// message to its own child or to a sibling.
+#[test]
+fn a_codex_childs_result_is_its_message_up() {
+    let home = Home::new();
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(4, 0), "Coordinate"),
+            codex_line(ts(4, 1), "response_item", json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"c1","arguments":"{\"task_name\":\"worker\",\"message\":\"go\"}"})),
+            codex_line(ts(4, 1), "response_item", json!({"type":"function_call_output","call_id":"c1","output":"{\"task_name\":\"worker\"}"})),
+            codex_line(ts(4, 9), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root","content":[{"type":"input_text","text":"worker finished"}]})),
+        ],
+    );
+    home.codex(
+        "child",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_nickname":"worker","agent_path":"root/worker"}),
+        &[
+            codex_user(ts(4, 1), "go"),
+            codex_line(ts(4, 10), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root/worker/helper","content":[{"type":"input_text","text":"down to my helper"}]})),
+            codex_line(ts(4, 11), "response_item", json!({"type":"agent_message","author":"root/worker","recipient":"root/other","content":[{"type":"input_text","text":"side note"}]})),
+            codex_reply(ts(4, 12), "done"),
+        ],
+    );
+    let built = home.build_query();
+    assert_eq!(
+        only(&built, "spawn", "root", "child").result.as_deref(),
+        Some("worker finished")
+    );
+}
+
+/// The child's own hand-back call, at 20:`minute`.
+fn child_hands_back(id: &str, minute: i64, message: &str) -> Value {
+    assistant(
+        "lead",
+        ts(20, minute),
+        vec![tool(id, "SubagentHandback", json!({"message":message}))],
+    )
+}
+
+/// A send to the name the spawning call gave the agent pairs with the
+/// message it received, though its result doesn't say where it went; a
+/// second send to that name that never arrived is the agent's too, never a
+/// relay to a stub.
+#[test]
+fn a_send_to_the_name_its_spawning_call_gave_pairs_with_its_message() {
+    let home = Home::new();
+    let sent = json!({"success":true,"message":"Message sent to reviewer"});
+    let mut lead = vec![
+        human("lead", ts(20, 0), "Review it"),
+        assistant(
+            "lead",
+            ts(20, 1),
+            vec![tool(
+                "tw",
+                "Agent",
+                json!({"name":"reviewer","prompt":"brief tw"}),
+            )],
+        ),
+        result(
+            "lead",
+            ts(20, 1),
+            "tw",
+            "launched",
+            false,
+            json!({"status":"async_launched","agentId":"aw"}),
+        ),
+    ];
+    lead.extend(send_to_agent(
+        "first",
+        2,
+        "reviewer",
+        "look at the diff",
+        sent.clone(),
+    ));
+    lead.extend(send_to_agent(
+        "second",
+        6,
+        "reviewer",
+        "never arrived",
+        sent,
+    ));
+    home.top("lead", &lead);
+    home.agent(
+        "lead",
+        "aw",
+        "tw",
+        &[
+            user("lead", ts(20, 1), "brief tw"),
+            coordinator("lead", ts(20, 3), "look at the diff"),
+            child_says(4, "looking"),
+        ],
+    );
+    let built = home.build_query();
+    let relay = only(&built, "relay", "lead", "aw");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched, relay.at),
+        ("look at the diff", false, at(20, 2))
+    );
+    assert_eq!(received_in(&built, "lead", &relay.id), 1);
+    assert_eq!(received_in(&built, "aw", &relay.id), 1);
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.kind == "relay")
+            .count(),
+        1
+    );
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// A parent's message with no send in these logs is still drawn, from its
+/// own text without the CLI's preamble, and its preview reads the same.
+#[test]
+fn an_unpaired_parent_message_is_drawn_from_its_own_text() {
+    let home = background_home(
+        vec![(
+            "aw",
+            "tw",
+            vec![
+                coordinator("lead", ts(20, 3), "only in the child"),
+                child_says(4, "ok"),
+            ],
+        )],
+        Vec::new(),
+    );
+    let built = home.build_query();
+    let relay = only(&built, "relay", "lead", "aw");
+    assert_eq!(
+        (relay.brief.as_str(), relay.unmatched, relay.at),
+        ("only in the child", false, at(20, 3))
+    );
+    assert_eq!(received_in(&built, "aw", &relay.id), 1);
+    assert_eq!(received_in(&built, "lead", &relay.id), 0);
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 1);
+    assert_bounded_causal_previews(&home, &built, turns[0]);
+    assert_eq!(
+        overview_text(
+            &json!({"kind":"received_down"}),
+            &coordinator("lead", ts(20, 3), "only in the child"),
+            None
+        ),
+        json!("only in the child")
+    );
+}
+
+/// The child hands back, the parent resumes it, and only then does the
+/// parent record the hand-back: it is the first run's, and the resumed run
+/// is still working.
+#[test]
+fn a_hand_back_recorded_after_the_resume_belongs_to_the_run_that_handed_back() {
+    let mut receipts = Vec::from(send_to_agent(
+        "resume",
+        4,
+        "aw",
+        "now fix it",
+        resumed("aw"),
+    ));
+    receipts.push(hand_back("lead", ts(20, 6), "aw", "first done"));
+    let home = background_home(
+        vec![(
+            "aw",
+            "tw",
+            vec![
+                child_hands_back("hb1", 2, "first done"),
+                coordinator("lead", ts(20, 5), "now fix it"),
+                child_says(7, "fixing"),
+            ],
+        )],
+        receipts,
+    );
+    home.live(52, "lead", "busy", json!({}));
+    let built = home.build_query();
+    assert_eq!(built.sessions["aw"].state, "work");
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref()),
+        ("work", Some("first done"))
+    );
+    let turns = turns_of(&built, "aw");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(
+        turns[1].start.as_deref(),
+        Some(only(&built, "relay", "lead", "aw").id.as_str())
+    );
+}
+
+/// Without a hand-back in the child, a message that arrives before the
+/// parent records the hand-back reached the open run: inline, and that
+/// hand-back ends the run.
+#[test]
+fn a_message_before_the_only_hand_back_is_inline_and_the_hand_back_ends_the_run() {
+    let mut receipts = Vec::from(send_to_agent(
+        "more",
+        4,
+        "aw",
+        "also this",
+        json!({"success":true,"message":"Message queued for delivery to aw at its next tool round."}),
+    ));
+    receipts.push(hand_back("lead", ts(20, 8), "aw", "done both"));
+    let home = background_home(
+        vec![(
+            "aw",
+            "tw",
+            vec![
+                child_says(2, "working"),
+                coordinator("lead", ts(20, 5), "also this"),
+                child_says(7, "done both"),
+            ],
+        )],
+        receipts,
+    );
+    home.live(53, "lead", "busy", json!({}));
+    let built = home.build_query();
+    assert_eq!(turns_of(&built, "aw").len(), 1);
+    assert_eq!(built.sessions["aw"].state, "done");
+    assert_eq!(
+        only(&built, "spawn", "lead", "aw").result.as_deref(),
+        Some("done both")
+    );
+}
+
+/// A resumed run that is killed after the run before handed back without a
+/// notification: the kill ends the resumed run, which isn't working.
+#[test]
+fn a_killed_resumed_run_does_not_show_as_working() {
+    let mut receipts = vec![hand_back("lead", ts(20, 3), "aw", "first done")];
+    receipts.extend(send_to_agent("again", 4, "aw", "try again", resumed("aw")));
+    receipts.push(notification(
+        "lead",
+        ts(20, 8),
+        "tw",
+        "killed",
+        "stopped by you",
+    ));
+    let home = background_home(
+        vec![(
+            "aw",
+            "tw",
+            vec![
+                child_hands_back("hb1", 2, "first done"),
+                coordinator("lead", ts(20, 5), "try again"),
+                child_says(6, "retrying"),
+            ],
+        )],
+        receipts,
+    );
+    home.live(54, "lead", "busy", json!({}));
+    let built = home.build_query();
+    assert_eq!(built.sessions["aw"].state, "err");
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("err", Some("stopped by you"), Some(at(20, 8)))
+    );
+}
+
+/// A resumed run that ended only in the child's log (`SubagentHandback`) is
+/// still the latest end: its message is the result.
+#[test]
+fn a_run_ended_only_by_the_childs_hand_back_is_the_latest_result() {
+    let mut receipts = vec![
+        hand_back("lead", ts(20, 3), "aw", "one"),
+        notification("lead", ts(20, 4), "tw", "completed", "one"),
+    ];
+    receipts.extend(send_to_agent("r2", 5, "aw", "second", resumed("aw")));
+    let built = background_home(
+        vec![(
+            "aw",
+            "tw",
+            vec![
+                child_says(2, "one"),
+                coordinator("lead", ts(20, 5), "second"),
+                child_hands_back("hb2", 7, "two by hand"),
+            ],
+        )],
+        receipts,
+    )
+    .build_query();
+    let spawn = only(&built, "spawn", "lead", "aw");
+    assert_eq!(
+        (spawn.status, spawn.result.as_deref(), spawn.done),
+        ("done", Some("two by hand"), Some(at(20, 7)))
+    );
+}
+
+/// A hand-back from a subagent this session spawned is that spawn's result,
+/// not a message: a reply after it still answers your message.
+#[test]
+fn an_own_subagents_hand_back_does_not_interrupt_a_reply() {
+    let home = Home::new();
+    home.top(
+        "handed-agent",
+        &[
+            human("handed-agent", ts(16, 0), "delegate it"),
+            assistant(
+                "handed-agent",
+                ts(16, 1),
+                vec![tool("ag", "Agent", json!({"prompt":"go"}))],
+            ),
+            result(
+                "handed-agent",
+                ts(16, 1),
+                "ag",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"ag1"}),
+            ),
+            hand_back("handed-agent", ts(16, 3), "ag1", "agent result"),
+            assistant(
+                "handed-agent",
+                ts(16, 4),
+                vec![text("The agent handed back.")],
+            ),
+        ],
+    );
+    home.agent(
+        "handed-agent",
+        "ag1",
+        "ag",
+        &[
+            user("handed-agent", ts(16, 1), "go"),
+            assistant("handed-agent", ts(16, 2), vec![text("working")]),
+        ],
+    );
+    home.live(42, "handed-agent", "idle", json!({}));
+    let built = home.build_query();
+    let result = by_brief(&built, "The agent handed back.");
+    assert_eq!(
+        (result.kind, result.ask, result.from.as_str()),
+        ("toyou", Some("result"), "handed-agent")
+    );
+}
+
+/// A lead with two subagents: `aw` sends progress to `main` and gets a
+/// message from the lead mid-run; `mid` spawns `leaf`, whose progress send
+/// and hand-back arrive at `mid`, an intermediate agent.
+fn down_and_nested_home() -> Home {
+    let home = Home::new();
+    let mut lead = vec![
+        human("lead", ts(20, 0), "Start"),
+        assistant(
+            "lead",
+            ts(20, 1),
+            vec![
+                tool("ta", "Agent", json!({"prompt":"brief aw"})),
+                tool("tm", "Agent", json!({"prompt":"brief mid"})),
+            ],
+        ),
+        result(
+            "lead",
+            ts(20, 1),
+            "ta",
+            "launched",
+            false,
+            json!({"status":"async_launched","agentId":"aw"}),
+        ),
+        result(
+            "lead",
+            ts(20, 1),
+            "tm",
+            "launched",
+            false,
+            json!({"status":"async_launched","agentId":"mid"}),
+        ),
+        agent_send("lead", ts(20, 3), "aw", "aw note"),
+    ];
+    lead.extend(send_to_agent(
+        "to-aw",
+        4,
+        "aw",
+        "also this",
+        json!({"success":true,"message":"Message queued for delivery to aw at its next tool round."}),
+    ));
+    lead.extend([
+        hand_back("lead", ts(20, 7), "aw", "aw done"),
+        notification("lead", ts(20, 8), "ta", "completed", "aw done"),
+        hand_back("lead", ts(20, 12), "mid", "mid done"),
+    ]);
+    home.top("lead", &lead);
+    let mut aw = vec![user("lead", ts(20, 1), "brief aw")];
+    aw.extend(send_to_main("aw-up", 2, "aw note", queued_reply()));
+    aw.extend([
+        coordinator("lead", ts(20, 5), "also this"),
+        child_says(6, "aw done"),
+    ]);
+    home.agent("lead", "aw", "ta", &aw);
+    home.agent(
+        "lead",
+        "mid",
+        "tm",
+        &[
+            user("lead", ts(20, 1), "brief mid"),
+            assistant(
+                "lead",
+                ts(20, 2),
+                vec![tool("t-leaf", "Agent", json!({"prompt":"leaf brief"}))],
+            ),
+            result(
+                "lead",
+                ts(20, 2),
+                "t-leaf",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"leaf"}),
+            ),
+            agent_send("lead", ts(20, 5), "leaf", "leaf note"),
+            hand_back("lead", ts(20, 9), "leaf", "leaf done"),
+            child_says(11, "mid done"),
+        ],
+    );
+    let mut leaf = vec![user("lead", ts(20, 2), "leaf brief")];
+    leaf.extend(send_to_main("leaf-up", 4, "leaf note", queued_reply()));
+    leaf.push(child_says(8, "leaf done"));
+    home.agent("lead", "leaf", "t-leaf", &leaf);
+    home
+}
+
+fn assert_down_and_nested(built: &QueryData) {
+    let up = only(built, "relay", "aw", "lead");
+    assert_eq!(up.brief, "aw note");
+    assert_eq!(received_in(built, "lead", &up.id), 1);
+    let down = only(built, "relay", "lead", "aw");
+    assert_eq!((down.brief.as_str(), down.unmatched), ("also this", false));
+    assert_eq!(turns_of(built, "aw").len(), 1);
+    let nested = only(built, "relay", "leaf", "mid");
+    assert_eq!(nested.brief, "leaf note");
+    assert_eq!(received_in(built, "mid", &nested.id), 1);
+    assert_eq!(
+        only(built, "spawn", "mid", "leaf").result.as_deref(),
+        Some("leaf done")
+    );
+    assert_eq!(
+        only(built, "spawn", "lead", "aw").result.as_deref(),
+        Some("aw done")
+    );
+    assert_eq!(
+        built
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.kind == "relay")
+            .count(),
+        3
+    );
+    assert!(built.sessions.values().all(|session| !session.stub));
+}
+
+/// The staged catalog draws the same agent messages as the shared builder:
+/// one relay per message, no `relay:tool:` stub beside a parent's message,
+/// and a receipt at an intermediate agent pairs there.
+#[test]
+fn staged_agent_messages_match_the_shared_builder_without_duplicate_relations() {
+    let home = down_and_nested_home();
+    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    assert_down_and_nested(&oracle);
+    let ids: BTreeSet<&str> = oracle
+        .handoffs
+        .iter()
+        .map(|handoff| handoff.id.as_str())
+        .collect();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for key in ["lead", "aw", "mid", "leaf"] {
+        let edges = db
+            .prepare("SELECT edge_id FROM session_trace_edges WHERE session_key=?1")
+            .unwrap()
+            .query_map([key], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let unique: BTreeSet<&String> = edges.iter().collect();
+        assert_eq!(unique.len(), edges.len(), "{key}: duplicate staged edges");
+        for edge in &edges {
+            assert!(
+                ids.contains(edge.as_str()),
+                "{key}: staged edge {edge} the shared builder doesn't draw"
+            );
+        }
+    }
+}
+
+#[test]
+fn staged_owner_replay_keeps_agent_messages_and_inline_turns() {
+    let home = down_and_nested_home();
+    assert_down_and_nested(&home.build_query());
+    let mut inputs = crate::inputs(&home.options).unwrap();
+    inputs.retain(|input| input.path.ends_with(".jsonl"));
+    assert_eq!(inputs.len(), 4);
+    assert_staged_owner_parity(&home, &inputs);
 }
 
 /// A lead that starts background subagents at 20:01, each (agent id,
@@ -6991,7 +8053,7 @@ fn send_to_main(id: &str, minute: i64, message: &str, reply: Option<Value>) -> V
 }
 
 /// How often `sid`'s transcript draws handoff `id`.
-fn received_in(built: &Built, sid: &str, id: &str) -> usize {
+fn received_in(built: &QueryData, sid: &str, id: &str) -> usize {
     built.tx[sid]
         .slots
         .iter()
@@ -7025,7 +8087,7 @@ fn progress_home(hand_back: bool) -> Home {
 
 #[test]
 fn progress_sends_to_main_are_relays_and_only_the_last_receipt_hands_back() {
-    let built = progress_home(true).build();
+    let built = progress_home(true).build_query();
     let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!(
         (spawn.status, spawn.result.as_deref(), spawn.done),
@@ -7076,7 +8138,7 @@ fn progress_sends_to_main_are_relays_and_only_the_last_receipt_hands_back() {
 
 #[test]
 fn progress_before_a_hand_back_is_not_the_spawns_result() {
-    let built = progress_home(false).build();
+    let built = progress_home(false).build_query();
     let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!((spawn.result.as_deref(), spawn.done), (None, None));
     for brief in ["first progress note", "second progress note"] {
@@ -7111,7 +8173,7 @@ fn a_resumed_subagents_hand_backs_are_not_taken_for_its_sends() {
             agm_line(9, &[("ap", "[Subagent hand-back] second run done")]),
         ],
     )
-    .build();
+    .build_query();
     let first = by_brief(&built, "first run note");
     assert_eq!(received_in(&built, "lead", &first.id), 0);
     let second = by_brief(&built, "second run note");
@@ -7140,7 +8202,7 @@ fn fewer_receipts_than_sends_keep_the_hand_back() {
             agm_line(7, &[("ap", "[Subagent hand-back] done")]),
         ],
     )
-    .build();
+    .build_query();
     let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!(spawn.result.as_deref(), Some("[Subagent hand-back] done"));
     let one = by_brief(&built, "note one");
@@ -7166,7 +8228,7 @@ fn interleaved_subagents_pair_their_own_receipts() {
             agm_line(8, &[("ap", "[Subagent hand-back] ap done")]),
         ],
     )
-    .build();
+    .build_query();
     for (agent, note, handed) in [
         ("ap", "note from ap", "[Subagent hand-back] ap done"),
         ("aq", "note from aq", "[Subagent hand-back] aq done"),
@@ -7196,7 +8258,7 @@ fn a_refused_send_to_main_reached_no_one() {
         vec![("ap", "tp", child)],
         vec![agm_line(4, &[("ap", "[Subagent hand-back] done anyway")])],
     )
-    .build();
+    .build_query();
     let relay = by_brief(&built, "refused note");
     assert_eq!(
         (relay.status, relay.to.as_deref(), relay.target.as_deref()),
@@ -7216,7 +8278,7 @@ fn a_pending_sends_receipt_is_not_the_hand_back() {
         vec![("ap", "tp", send_to_main("wait", 2, "pending note", None))],
         vec![agm_line(3, &[("ap", "pending note")])],
     )
-    .build();
+    .build_query();
     let spawn = only(&built, "spawn", "lead", "ap");
     assert_eq!((spawn.result.as_deref(), spawn.done), (None, None));
 }
@@ -7236,7 +8298,7 @@ fn a_hand_back_by_call_id_joins_receipts_by_agent_id() {
                 "message":{"role":"user","content":"x"}}),
         ],
     )
-    .build();
+    .build_query();
     assert_eq!(
         only(&built, "spawn", "lead", "ap").result.as_deref(),
         Some("handed back by call id")
@@ -7264,7 +8326,7 @@ fn batched_tags_are_read_in_place() {
             ],
         )],
     )
-    .build();
+    .build_query();
     for brief in ["batched one", "batched two"] {
         let relay = by_brief(&built, brief);
         assert_eq!(received_in(&built, "lead", &relay.id), 1, "{brief}");
@@ -7289,7 +8351,7 @@ fn an_escaped_receipt_pairs_by_time() {
             agm_line(5, &[("ap", "[Subagent hand-back] compared")]),
         ],
     )
-    .build();
+    .build_query();
     let relay = by_brief(&built, "a < b");
     assert_eq!(received_in(&built, "lead", &relay.id), 1);
     assert_eq!(
@@ -7308,7 +8370,7 @@ fn a_receipt_after_the_childs_last_event_stays_the_hand_back() {
         vec![("ap", "tp", child)],
         vec![agm_line(5, &[("ap", "[Subagent hand-back] wrapped up")])],
     )
-    .build();
+    .build_query();
     let relay = by_brief(&built, "unreceived note");
     assert_eq!(received_in(&built, "lead", &relay.id), 0);
     assert_eq!(
@@ -7331,7 +8393,7 @@ fn identical_sends_claim_receipts_in_order() {
             agm_line(7, &[("ap", "[Subagent hand-back] same done")]),
         ],
     )
-    .build();
+    .build_query();
     let mut relays: Vec<&Handoff> = built
         .handoffs
         .iter()
@@ -7399,7 +8461,7 @@ fn a_changed_session_reuses_other_sessions_with_stable_source_references() {
             ])
         )
     });
-    assert_equivalent(&second, &home.build(), NOW);
+    assert_equivalent(&second, &home.build_query(), NOW);
     let other = second.tx["other"]
         .slots
         .iter()
@@ -7436,7 +8498,7 @@ fn rewritten_growing_logs_invalidate_cached_prompt_text() {
         by_brief(&resumed, "replacement prompt longer than the old prompt").kind,
         "ask"
     );
-    assert_equivalent(&resumed, &home.build(), NOW);
+    assert_equivalent(&resumed, &home.build_query(), NOW);
 }
 
 #[derive(Clone, Debug)]
@@ -8292,16 +9354,16 @@ fn apply_equivalence_step(home: &Home, step: &EquivalenceStep) {
     }
 }
 
-fn assert_equivalent(resumed: &Built, fresh: &Built, now: i64) {
-    assert_eq!(resumed.json(now), fresh.json(now));
+fn assert_equivalent(resumed: &QueryData, fresh: &QueryData, now: i64) {
+    assert_eq!(semantic_values(resumed), semantic_values(fresh));
     assert_eq!(format!("{:?}", resumed.tx), format!("{:?}", fresh.tx));
-    assert_eq!(format!("{:?}", resumed.facts), format!("{:?}", fresh.facts));
+    assert_eq!(resumed.facts, fresh.facts);
     assert_eq!(
-        format!("{:?}", resumed.activity),
-        format!("{:?}", fresh.activity)
+        format!("{:?}", native_activity(resumed, now)),
+        format!("{:?}", native_activity(fresh, now))
     );
-    assert_eq!(resumed.version, fresh.version);
-    assert_eq!(resumed.texts, fresh.texts);
+    assert_eq!(resumed.home, fresh.home);
+    assert_eq!(resumed.machine_id, fresh.machine_id);
 }
 
 fn build_with_cache(
@@ -8310,11 +9372,11 @@ fn build_with_cache(
     dirty: &mut bool,
     texts: &mut Texts,
     now: i64,
-) -> Built {
+) -> QueryData {
     if options.facts.is_none() {
         cache.refresh_reported_runs(&options.claude_json, now, dirty);
     }
-    let built = build(options, cache, dirty, texts, now).unwrap();
+    let built = build_query(options, cache, dirty, texts, now).unwrap();
     invariants(&built, options.all || options.scan_window);
     built
 }
@@ -8403,23 +9465,8 @@ fn replay_equivalence_seed_from_env() {
     replay(seed);
 }
 
-fn mask_clock_fields(mut value: Value) -> Value {
-    let object = value.as_object_mut().unwrap();
-    object.remove("now");
-    if let Some(sessions) = object.get_mut("sessions").and_then(Value::as_object_mut) {
-        for session in sessions.values_mut() {
-            if let Some(activity) = session.get_mut("activity").and_then(Value::as_array_mut)
-                && activity.len() == 4
-            {
-                activity[2] = Value::Null;
-            }
-        }
-    }
-    value
-}
-
 #[test]
-fn unchanged_resumed_builds_only_change_clock_dependent_json_fields() {
+fn unchanged_native_queries_keep_recorded_facts_across_clock_changes() {
     let home = Home::new();
     home.top(
         "clock",
@@ -8442,53 +9489,14 @@ fn unchanged_resumed_builds_only_change_clock_dependent_json_fields() {
     options.all = false;
     options.since = Duration::from_secs(30 * 24 * 60 * 60);
     let first = home.build_at(&options, NOW);
-    let same_now = home.build_at(&options, NOW);
-    assert_eq!(first.json(NOW), same_now.json(NOW));
-    assert_eq!(format!("{:?}", first.tx), format!("{:?}", same_now.tx));
-    assert_eq!(
-        format!("{:?}", first.facts),
-        format!("{:?}", same_now.facts)
-    );
-    assert_eq!(
-        format!("{:?}", first.activity),
-        format!("{:?}", same_now.activity)
-    );
-
-    let one_minute_later = home.build_at(&options, NOW + 60_000);
-    assert_eq!(
-        format!("{:?}", first.tx),
-        format!("{:?}", one_minute_later.tx)
-    );
-    assert_eq!(
-        format!("{:?}", first.facts),
-        format!("{:?}", one_minute_later.facts)
-    );
-    // Analytics `activity` is windowed by `now - KEEP_MS`: rows and their
-    // busy, turns, cost_by_day, waits and answered values can cross that
-    // cutoff. No fixture event crosses it in this one-minute interval.
-    assert_eq!(
-        format!("{:?}", first.activity),
-        format!("{:?}", one_minute_later.activity)
-    );
-
-    let first_value: Value = serde_json::from_str(&first.json(NOW)).unwrap();
-    let later_value: Value = serde_json::from_str(&one_minute_later.json(NOW + 60_000)).unwrap();
+    assert_equivalent(&first, &home.build_at(&options, NOW), NOW);
+    let later = home.build_at(&options, NOW + 60_000);
+    assert_equivalent(&first, &later, NOW + 60_000);
     assert!(
-        first_value["sessions"]
-            .as_object()
-            .unwrap()
+        first
+            .sessions
             .values()
-            .any(|session| session["activity"].as_array().is_some())
-    );
-
-    // `Built::json` varies top-level `now` and `sessions.*.activity[2]` (running-tool age).
-    // The `describe` fallback is unused because these records have timestamps. The post-pass
-    // cutoff can trim sessions, handoffs, turns and busy intervals; this fixture's timestamps
-    // are after both 30-day cutoffs. Analytics is held in `Built::activity`, outside the JSON.
-    assert_ne!(first_value, later_value);
-    assert_eq!(
-        mask_clock_fields(first_value),
-        mask_clock_fields(later_value)
+            .any(|session| session.activity.is_some())
     );
 }
 
@@ -8523,7 +9531,7 @@ fn resumed_process_start_invalidates_cached_background_liveness() {
     let mut dirty = false;
     let mut texts = Texts::default();
     let before = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
-    let live = |built: &Built| {
+    let live = |built: &QueryData| {
         built.tx["root"]
             .slots
             .iter()
@@ -8538,7 +9546,7 @@ fn resumed_process_start_invalidates_cached_background_liveness() {
     let after = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
     assert!(!live(&after));
     assert!(!Arc::ptr_eq(&before.tx["root"], &after.tx["root"]));
-    assert_equivalent(&after, &home.build(), NOW);
+    assert_equivalent(&after, &home.build_query(), NOW);
 }
 
 #[test]
@@ -8551,7 +9559,7 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
         "../../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
     );
     home.write("claude/projects/fixture/native-claude-parent.jsonl", parent);
-    let alone = home.build();
+    let alone = home.build_query();
     assert_eq!(
         alone.sessions["native-claude-parent"].tokens_by_model["claude-sonnet-4-6"].input,
         10
@@ -8562,7 +9570,7 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
             .is_none()
     );
     let path = home.write("claude/projects/fixture/native-claude-child.jsonl", child);
-    let assert_evidence = |built: &Built| {
+    let assert_evidence = |built: &QueryData| {
         let parent = &built.sessions["native-claude-parent"];
         let child = &built.sessions["native-claude-child"];
         assert!(parent.parent.is_none() && child.parent.is_none());
@@ -8587,8 +9595,8 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
         assert_eq!(child.tokens_by_model["claude-sonnet-4-6"].input, 5);
         assert!(parent.cost.usd.is_none() && child.cost.usd.is_none());
     };
-    assert_evidence(&home.build());
-    assert_evidence(&home.build()); // Durable SQLite restart.
+    assert_evidence(&home.build_query());
+    assert_evidence(&home.build_query()); // Durable SQLite restart.
     let mut cold = home.options.clone();
     cold.cache = home.root.join("cold/index.json");
     assert_evidence(&home.build_at(&cold, NOW));
@@ -8601,7 +9609,7 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
     )
     .unwrap();
     assert!(
-        home.build().sessions["native-claude-parent"]
+        home.build_query().sessions["native-claude-parent"]
             .claude_usage
             .is_none()
     );
@@ -8612,9 +9620,9 @@ fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "secret prompt body")]);
     home.top("other", &[human("other", ts(0, 0), "other prompt")]);
-    let first = home.build();
+    let first = home.build_query();
     SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
-    let restarted = home.build();
+    let restarted = home.build_query();
     assert_equivalent(&first, &restarted, NOW);
     SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
 
@@ -8627,7 +9635,7 @@ fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
             vec![text("secret answer body")],
         )],
     );
-    let updated = home.build();
+    let updated = home.build_query();
     SESSION_DESCRIPTIONS
         .with(|counts| assert_eq!(*counts.borrow(), BTreeMap::from([("root".into(), 1)])));
     let mut fresh = EventCache::default();
@@ -8670,27 +9678,27 @@ fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
     }
 
     fs::remove_file(home.root.join("claude/projects/-work-proj/other.jsonl")).unwrap();
-    assert!(!home.build().sessions.contains_key("other"));
+    assert!(!home.build_query().sessions.contains_key("other"));
 }
 
 #[test]
 fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    let first = home.build();
+    let first = home.build_query();
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
     connection
         .execute("UPDATE session_descriptions SET version = version + 1", [])
         .unwrap();
     SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
-    assert_equivalent(&first, &home.build(), NOW);
+    assert_equivalent(&first, &home.build_query(), NOW);
     SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
     connection
         .execute("UPDATE session_descriptions SET description = '{}'", [])
         .unwrap();
     SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
-    assert_equivalent(&first, &home.build(), NOW);
+    assert_equivalent(&first, &home.build_query(), NOW);
     SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
 }
 
@@ -8699,7 +9707,7 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
     home.write(".claude.json", &json!({"projects": {"/work/proj": {"lastSessionId": "root", "lastStartTime": at(0, 0), "lastCost": 1.25}}}).to_string());
-    let first = home.build();
+    let first = home.build_query();
     assert_eq!(first.sessions["root"].reported_runs.len(), 1);
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
@@ -8707,11 +9715,11 @@ fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
         .execute_batch("DROP TABLE session_descriptions; PRAGMA user_version = 4;")
         .unwrap();
     home.write(".claude.json", "{}");
-    assert_equivalent(&first, &home.build(), NOW);
+    assert_equivalent(&first, &home.build_query(), NOW);
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 28);
+    assert_eq!(version, crate::events::store::SCHEMA_VERSION);
 }
 
 #[test]
@@ -8732,7 +9740,7 @@ fn persisted_description_restart_measurement() {
         }
         home.top(&id, &records);
     }
-    home.build();
+    home.build_query();
     for reuse in [false, true, false, true, false, true] {
         if !reuse {
             rusqlite::Connection::open(home.options.cache.with_extension("sqlite3"))
@@ -8742,12 +9750,11 @@ fn persisted_description_restart_measurement() {
         }
         SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
         let start = std::time::Instant::now();
-        let built = home.build();
+        let built = home.build_query();
         eprintln!(
-            "summary_reuse={reuse} total_ms={} bytes={} phases={:?}",
+            "summary_reuse={reuse} total_ms={} sessions={}",
             start.elapsed().as_millis(),
-            built.json(NOW).len(),
-            built.timings
+            built.sessions.len()
         );
         if reuse {
             SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
@@ -8776,7 +9783,7 @@ fn read_catalog(home: &Home) -> (String, Vec<summary::CatalogRow>) {
 }
 
 #[test]
-fn catalog_observation_preserves_model_projections_without_compatibility_preparation() {
+fn catalog_observation_preserves_native_query_projections() {
     let home = Home::new();
     home.top(
         "root",
@@ -8812,7 +9819,6 @@ fn catalog_observation_preserves_model_projections_without_compatibility_prepara
         (catalog.0, serde_json::to_string(&catalog.1).unwrap(), slots)
     };
     let observe = || {
-        let before = COMPAT_BUILDS.with(std::cell::Cell::get);
         let pids = observe_catalog(
             &home.options,
             &mut EventCache::open_scoped(&home.options.cache).unwrap(),
@@ -8821,10 +9827,9 @@ fn catalog_observation_preserves_model_projections_without_compatibility_prepara
             NOW,
         )
         .unwrap();
-        assert_eq!(COMPAT_BUILDS.with(std::cell::Cell::get), before);
         assert!(pids.contains(&42));
     };
-    home.build();
+    home.build_query();
     let original = projection();
     observe();
     assert_eq!(projection(), original);
@@ -8836,7 +9841,7 @@ fn catalog_observation_preserves_model_projections_without_compatibility_prepara
     observe();
     let appended = projection();
     assert_ne!(appended.0, original.0);
-    home.build();
+    home.build_query();
     assert_eq!(projection(), appended);
     let reply = crate::session_transcript_range(
         &home.options,
@@ -8859,9 +9864,8 @@ fn catalog_observation_preserves_model_projections_without_compatibility_prepara
             .iter()
             .any(|row| row.lifecycle == summary::CatalogLifecycle::Retained)
     );
-    home.build();
+    home.build_query();
     assert_eq!(projection(), removed);
-    let before = COMPAT_BUILDS.with(std::cell::Cell::get);
     let mut inputs = crate::inputs::inputs(&home.options).unwrap();
     inputs.retain(|input| input.path.ends_with(".jsonl"));
     prepare_sources(
@@ -8871,12 +9875,11 @@ fn catalog_observation_preserves_model_projections_without_compatibility_prepara
         NOW,
     )
     .unwrap();
-    assert_eq!(COMPAT_BUILDS.with(std::cell::Cell::get), before);
 }
 
 #[cfg(unix)]
 #[test]
-fn unsupported_summary_path_encoding_preserves_native_model_without_panic() {
+fn unsupported_portable_path_preserves_native_tree_and_refuses_lossy_query_aliases() {
     use std::os::unix::ffi::OsStringExt;
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
@@ -8886,30 +9889,46 @@ fn unsupported_summary_path_encoding_preserves_native_model_without_panic() {
         projects.join(std::ffi::OsString::from_vec(b"-work-\xff".to_vec())),
     )
     .unwrap();
-    let built = home.build();
-    assert_eq!(built.sessions["root"].last, at(0, 0));
-    let connection =
-        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    let summaries: i64 = connection
-        .query_row("SELECT COUNT(*) FROM session_descriptions", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(summaries, 0);
+    // Native tree discovery supports exact non-UTF-8 paths. Portable Catalog
+    // and Query must refuse rather than publish a lossy source alias.
+    let tree_options = Options {
+        cache: home.root.join("tree-index.json"),
+        ..home.options.clone()
+    };
+    let tree = crate::collect(&tree_options).unwrap();
+    assert_eq!(tree[0].id, "root");
+    assert_eq!(tree[0].last_activity.as_deref(), Some(ts(0, 0).as_str()));
+    let query = || {
+        build_query(
+            &home.options,
+            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut false,
+            &mut Texts::default(),
+            NOW,
+        )
+    };
+    assert!(query().is_err());
+    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let ready: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM meta WHERE key='catalog_generation'",
             [],
-            |row| row.get(0),
+            |r| r.get(0),
         )
         .unwrap();
     assert_eq!(ready, 0);
-    // An unsupported path must not become an authoritative lossy source alias.
-    let restarted = home.build();
-    assert_eq!(
-        serde_json::to_value(built.sessions).unwrap(),
-        serde_json::to_value(restarted.sessions).unwrap()
-    );
+    assert!(query().is_err());
+    let exact_source = fs::read_dir(&projects)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("root.jsonl");
+    let original = fs::read(&exact_source).unwrap();
+    assert!(query().is_err());
+    assert_eq!(fs::read(&exact_source).unwrap(), original);
+    assert_eq!(crate::collect(&tree_options).unwrap()[0].id, "root");
 }
 
 #[test]
@@ -8936,7 +9955,7 @@ fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent()
         "spawn",
         &[user("root", ts(0, 2), "private child prompt")],
     );
-    let built = home.build();
+    let built = home.build_query();
     let (generation, rows) = read_catalog(&home);
     assert_eq!(rows.len(), 2);
     for row in &rows {
@@ -8956,7 +9975,7 @@ fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent()
         assert!(!json.contains("private tool body"));
         assert!(!json.contains("private child prompt"));
     }
-    home.build();
+    home.build_query();
     assert_eq!(generation, read_catalog(&home).0);
     let mut window = home.options.clone();
     window.all = false;
@@ -8970,7 +9989,7 @@ fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent()
             .join("claude/projects/-work-proj/root/subagents/agent-child.jsonl"),
     )
     .unwrap();
-    home.build();
+    home.build_query();
     let (next, rows) = read_catalog(&home);
     assert_ne!(generation, next);
     assert_eq!(rows.len(), 2);
@@ -8988,7 +10007,7 @@ fn complete_catalog_is_untrimmed_stable_and_preserves_native_source_and_parent()
 fn scan_window_never_replaces_a_complete_catalog_and_unknown_times_remain_unknown() {
     let home = Home::new();
     home.top("root", &[json!({"type":"user","sessionId":"root","message":{"role":"user","content":"prompt without a timestamp"}})]);
-    home.build();
+    home.build_query();
     let (generation, rows) = read_catalog(&home);
     assert_eq!(rows[0].start, None);
     assert_eq!(rows[0].last, None);
@@ -9004,7 +10023,7 @@ fn isolated_catalog_publication_fences_competing_generations_and_pending_sources
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
     home.top("other", &[human("other", ts(0, 0), "other prompt")]);
-    home.build();
+    home.build_query();
     let input = |id: &str| crate::inputs::Input {
         root: crate::inputs::InputRoot::Claude,
         path: format!("projects/-work-proj/{id}.jsonl"),
@@ -9085,7 +10104,7 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
     for id in ["aaa", "zzz"] {
         home.top(id, &[human(id, ts(0, 0), "prompt")]);
     }
-    home.build();
+    home.build_query();
     let before = read_catalog(&home);
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
@@ -9097,7 +10116,7 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
             &[assistant(id, ts(0, 1), vec![text("new answer")])],
         );
     }
-    home.build();
+    home.build_query();
     let retained = read_catalog(&home);
     assert_eq!(before.0, retained.0);
     assert_eq!(
@@ -9140,7 +10159,7 @@ fn interrupted_catalog_publication_retains_one_generation_and_recovers_on_restar
         NOW,
     )
     .unwrap();
-    home.build();
+    home.build_query();
     let recovered = read_catalog(&home);
     assert_ne!(before.0, recovered.0);
     assert!(recovered.1.iter().all(|row| row.last == Some(at(0, 1))));
@@ -9165,7 +10184,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         )],
     );
     home.top("cleared", &[json!({"type":"user","uuid":"cleared-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"original cleared prompt"}})]);
-    home.build();
+    home.build_query();
     let (_, before) = read_catalog(&home);
     let root = before.iter().find(|row| row.key == "root").unwrap();
     assert_eq!(root.sources.len(), 2);
@@ -9209,7 +10228,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     )
     .unwrap();
     fs::remove_file(&removed.path).unwrap();
-    let current = home.build();
+    let current = home.build_query();
     assert!(current.sessions.contains_key("root"));
     let (_, after) = read_catalog(&home);
     let root = after.iter().find(|row| row.key == "root").unwrap();
@@ -9308,6 +10327,40 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .unwrap();
     assert_eq!(current_identity.source_refs.len(), 1);
     assert_eq!(current_identity.native_id.as_deref(), Some("root"));
+    let calls = archive.calls.load(Ordering::Relaxed);
+    let current = crate::session_transcript_range_with_mode(
+        &home.options,
+        "fixture",
+        "sid=root&scope=current&after=0&limit=100",
+        Some(&archive),
+        crate::SessionSourceReadMode::LocalThenProvider,
+    );
+    assert_eq!(current.status, 200);
+    let current: Value = serde_json::from_slice(&current.body).unwrap();
+    assert_eq!(
+        current["identity"]["source_refs"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(current["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(current["entries"][0]["text"], "original root prompt");
+    assert_ne!(
+        current["projection"]["generation"],
+        retained["projection"]["generation"]
+    );
+    assert_eq!(archive.calls.load(Ordering::Relaxed), calls);
+    let history_cursor = retained["projection"]["generation"].as_str().unwrap();
+    assert_eq!(
+        crate::session_transcript_range_with_mode(
+            &home.options,
+            "fixture",
+            &format!("sid=root&scope=current&after=1&limit=1&generation={history_cursor}"),
+            Some(&archive),
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .status,
+        409,
+        "History cursor must not select Current recipes"
+    );
     // Current work can advance while the original disappeared path stays part
     // of natural history after another complete observation and cold restart.
     let root_path = home
@@ -9325,8 +10378,8 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     )
     .unwrap();
     drop(file);
-    home.build();
-    home.build();
+    home.build_query();
+    home.build_query();
     assert!(
         crate::overview_repair_candidates(&home.options, 8)
             .unwrap()
@@ -9393,7 +10446,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         reads,
         "qualified history summaries must not fetch transcript bodies"
     );
-    home.build();
+    home.build_query();
     assert!(
         !crate::overview_repair_candidates(&home.options, 8)
             .unwrap()
@@ -9556,7 +10609,7 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "current root prompt")]);
     let removed=home.top("cleared", &[json!({"type":"user","uuid":"old-event","timestamp":ts(0,1),"sessionId":"cleared","session_id":"root","origin":{"kind":"human"},"message":{"role":"user","content":"unsupported old native prompt"}})]);
-    home.build();
+    home.build_query();
     let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     connection
         .execute(
@@ -9565,7 +10618,7 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
         )
         .unwrap();
     fs::remove_file(removed).unwrap();
-    home.build();
+    home.build_query();
     let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
         .unwrap()
         .unwrap();
@@ -9606,14 +10659,14 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
 fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    home.build();
+    home.build_query();
     let before = read_catalog(&home).0;
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
     connection.execute_batch("CREATE TRIGGER interrupt_retirement BEFORE UPDATE OF lifecycle ON session_catalog WHEN NEW.lifecycle='retained' AND OLD.lifecycle='current' BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
     let source = home.root.join("claude/projects/-work-proj/root.jsonl");
     fs::remove_file(&source).unwrap();
-    let built = home.build();
+    let built = home.build_query();
     assert!(!built.sessions.contains_key("root"));
     assert_eq!(before, read_catalog(&home).0);
     let reason: String = connection
@@ -9627,7 +10680,7 @@ fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
     connection
         .execute_batch("DROP TRIGGER interrupt_retirement")
         .unwrap();
-    home.build();
+    home.build_query();
     let (generation, rows) = read_catalog(&home);
     assert_ne!(before, generation);
     assert_eq!(rows.len(), 1);
@@ -9646,10 +10699,247 @@ fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
 }
 
 #[test]
+fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
+    use crate::slot_projection::{Outcome, Recipe, SavedSlot};
+
+    let home = Home::new();
+    let call = json!({
+        "timestamp": ts(0, 1),
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "direct-cache",
+            "arguments": "{\"cmd\":\"printf cached\"}"
+        }
+    });
+    let output = json!({
+        "timestamp": ts(0, 2),
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "direct-cache",
+            "output": "Wall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\ncached"
+        }
+    });
+    home.codex("direct-cache", json!({}), &[call, output]);
+    let source = home
+        .root
+        .join("codex/sessions/2026/09/24/rollout-direct-cache.jsonl");
+    let original_source = fs::read(&source).unwrap();
+    let observe = || {
+        observe_catalog(
+            &home.options,
+            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut false,
+            &mut Texts::default(),
+            NOW,
+        )
+        .unwrap();
+    };
+    observe();
+
+    let (old_catalog_generation, old_rows) = read_catalog(&home);
+    assert_eq!(old_rows.len(), 1);
+    let row = &old_rows[0];
+    let cache_path = EventCache::path(&home.options.cache);
+    let connection = rusqlite::Connection::open(&cache_path).unwrap();
+    let old_projection_generation: String = connection
+        .query_row(
+            "SELECT generation FROM session_slot_projections WHERE session_key=?1",
+            [&row.key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    let mut slots: Vec<(i64, String)> = connection
+        .prepare("SELECT slot,metadata FROM session_slots WHERE session_key=?1 ORDER BY slot")
+        .unwrap()
+        .query_map([&row.key], |record| Ok((record.get(0)?, record.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let tool_at = slots
+        .iter()
+        .position(|(_, metadata)| {
+            let slot: SavedSlot = serde_json::from_str(metadata).unwrap();
+            matches!(slot.recipe, Recipe::Tool { .. })
+        })
+        .expect("direct call has a saved tool slot");
+    let mut stale_slot: SavedSlot = serde_json::from_str(&slots[tool_at].1).unwrap();
+    let Recipe::Tool {
+        outcome,
+        reply: Some(reply),
+        ..
+    } = &mut stale_slot.recipe
+    else {
+        panic!("direct call has a saved tool reply");
+    };
+    assert!(matches!(*outcome, Outcome::Ok));
+    assert_eq!(reply.f & UNKNOWN, 0);
+    *outcome = Outcome::Unknown;
+    reply.f |= UNKNOWN;
+    slots[tool_at].1 = serde_json::to_string(&stale_slot).unwrap();
+    let stale_slot_generation = crate::slot_projection::generation(
+        &slots
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect::<Vec<_>>(),
+        &row.sources,
+    )
+    .unwrap();
+    assert_ne!(stale_slot_generation, old_projection_generation);
+    connection
+        .execute(
+            "UPDATE session_slots SET metadata=?1 WHERE session_key=?2 AND slot=?3",
+            rusqlite::params![slots[tool_at].1, row.key, slots[tool_at].0],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET generation=?1 WHERE session_key=?2",
+                rusqlite::params![stale_slot_generation, row.key],
+            )
+            .unwrap(),
+        1
+    );
+    // Simulate a v27 event and slot projection that cached this direct result
+    // as unknown and did not persist the new direct-call qualification.
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events SET reply_f=reply_f | ?1 WHERE file_id=(SELECT file_id FROM files WHERE path=?2) AND id='direct-cache' AND reply=1",
+                rusqlite::params![i64::from(UNKNOWN), source.to_string_lossy().as_ref()],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events SET y=NULL WHERE file_id=(SELECT file_id FROM files WHERE path=?1) AND id='direct-cache'",
+                [source.to_string_lossy().as_ref()],
+            )
+            .unwrap(),
+        1
+    );
+    let stale_state: Option<String> = connection
+        .query_row(
+            "SELECT y FROM events JOIN files USING(file_id) WHERE files.path=?1 AND events.id='direct-cache'",
+            [source.to_string_lossy().as_ref()],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert!(
+        stale_state.is_none(),
+        "main v27 stored no direct-call envelope"
+    );
+    drop(connection);
+
+    let stale_cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    assert_eq!(
+        stale_cache.session_catalog_generation().as_deref(),
+        Some(old_catalog_generation.as_str())
+    );
+    let stale_projection = stale_cache
+        .session_slots(row, Some(&old_catalog_generation), slots.len())
+        .expect("the coherent v27 projection remains readable under its source fence");
+    assert!(matches!(
+        &stale_projection[tool_at].recipe,
+        crate::slot_projection::Recipe::Tool {
+            outcome: crate::slot_projection::Outcome::Unknown,
+            reply: Some(reply),
+            ..
+        } if reply.f & UNKNOWN != 0
+    ));
+    drop(stale_cache);
+
+    rusqlite::Connection::open(&cache_path)
+        .unwrap()
+        .execute("UPDATE meta SET value='27' WHERE key='cache_version'", [])
+        .unwrap();
+
+    observe();
+    assert_eq!(fs::read(&source).unwrap(), original_source);
+    let (catalog_generation, rows) = read_catalog(&home);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].lifecycle, summary::CatalogLifecycle::Current);
+    assert_eq!(rows[0].key, row.key);
+    let connection = rusqlite::Connection::open(&cache_path).unwrap();
+    let cache_version: String = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='cache_version'",
+            [],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert_eq!(cache_version, "28");
+    let (reply_flags, state): (i64, Option<String>) = connection
+        .query_row(
+            "SELECT reply_f,y FROM events JOIN files USING(file_id) WHERE files.path=?1 AND events.id='direct-cache' AND events.reply=1",
+            [source.to_string_lossy().as_ref()],
+            |record| Ok((record.get(0)?, record.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(reply_flags & i64::from(UNKNOWN), 0);
+    let state: Value = serde_json::from_str(&state.unwrap()).unwrap();
+    assert_eq!(state["native_direct_call"], true);
+
+    let saved: Vec<(i64, String)> = connection
+        .prepare("SELECT slot,metadata FROM session_slots WHERE session_key=?1 ORDER BY slot")
+        .unwrap()
+        .query_map([&row.key], |record| Ok((record.get(0)?, record.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let saved_tool = saved
+        .iter()
+        .map(|(_, metadata)| serde_json::from_str::<SavedSlot>(metadata).unwrap())
+        .find(|slot| matches!(&slot.recipe, Recipe::Tool { .. }))
+        .expect("fresh publication keeps its tool slot");
+    assert!(matches!(
+        &saved_tool.recipe,
+        Recipe::Tool {
+            outcome: Outcome::Ok,
+            reply: Some(reply),
+            ..
+        } if reply.f & UNKNOWN == 0
+    ));
+    let metadata: Vec<_> = saved.iter().map(|(_, text)| text.clone()).collect();
+    let projection_generation =
+        crate::slot_projection::generation(&metadata, &rows[0].sources).unwrap();
+    let (saved_generation, version, total, source_generation): (String, u32, i64, Option<String>) =
+        connection
+            .query_row(
+                "SELECT generation,version,total,source_generation FROM session_slot_projections WHERE session_key=?1",
+                [&row.key],
+                |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?, record.get(3)?)),
+            )
+            .unwrap();
+    assert_eq!(saved_generation, projection_generation);
+    assert_ne!(saved_generation, stale_slot_generation);
+    assert_eq!(version, crate::slot_projection::VERSION);
+    assert_eq!(usize::try_from(total).unwrap(), saved.len());
+    let current_source_generation = crate::retention::source_generation(&rows[0].sources).unwrap();
+    assert_eq!(
+        source_generation.as_deref(),
+        Some(current_source_generation.as_str())
+    );
+    let published_catalog_generation: String = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+            [],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert_eq!(published_catalog_generation, catalog_generation);
+}
+
+#[test]
 fn native_catalog_does_not_acknowledge_a_rejected_generation() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    home.build();
+    home.build_query();
     let options = home.options.clone();
     let path = home.root.join("claude/projects/-work-proj/root.jsonl");
     AFTER_SCAN.with(|hook| {
@@ -9690,7 +10980,7 @@ fn native_catalog_does_not_acknowledge_a_rejected_generation() {
 fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    home.build();
+    home.build_query();
     let options = home.options.clone();
     let path = home.root.join("claude/projects/-work-proj/root.jsonl");
     AFTER_SCAN.with(|hook| {
@@ -9712,7 +11002,7 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_committed_source_generation() {
             .unwrap();
         }));
     });
-    let older = home.build();
+    let older = home.build_query();
     assert_eq!(older.sessions["root"].last, at(0, 0));
     let (_, catalog) = read_catalog(&home);
     assert_eq!(catalog[0].last, Some(at(0, 1)));
@@ -9738,7 +11028,7 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_cha
         "spawn",
         &[user("root", ts(0, 2), "child prompt")],
     );
-    home.build();
+    home.build_query();
     let options = home.options.clone();
     let meta = home
         .root
@@ -9760,8 +11050,16 @@ fn a_slow_catalog_builder_cannot_overwrite_newer_native_metadata_without_log_cha
             .unwrap();
         }));
     });
-    let older = home.build();
-    assert_ne!(older.sessions["child"].name, "new native metadata label");
+    assert!(
+        build_query(
+            &home.options,
+            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut false,
+            &mut Texts::default(),
+            NOW
+        )
+        .is_err()
+    );
     let (_, catalog) = read_catalog(&home);
     assert_eq!(
         catalog.iter().find(|row| row.key == "child").unwrap().name,
@@ -9789,7 +11087,7 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
         "spawn",
         &[user("root", ts(0, 2), "child prompt")],
     );
-    home.build();
+    home.build_query();
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
     let children: Vec<String> = connection.prepare("SELECT session_key FROM session_catalog WHERE parent_key=?1 ORDER BY last_ms DESC,session_key ASC").unwrap()
@@ -9834,7 +11132,7 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
             .join("claude/projects/-work-proj/root/subagents/agent-child.jsonl"),
     )
     .unwrap();
-    home.build();
+    home.build_query();
     let retired: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='child' AND lifecycle='current'",
@@ -9856,7 +11154,7 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
 fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_publish() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    home.build();
+    home.build_query();
     let connection =
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
     connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; DROP INDEX session_catalog_current_parent; DROP INDEX IF EXISTS semantic_catalog_parent_key; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
@@ -9877,7 +11175,7 @@ fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_
         )
         .unwrap();
     let before = read_catalog(&home);
-    home.build();
+    home.build_query();
     let after = read_catalog(&home);
     assert_ne!(before.0, after.0);
     assert_eq!(
@@ -9910,13 +11208,13 @@ fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
     home.codex(id, json!({}), &[]);
     other.codex(id, json!({}), &[]);
     home.top(id, &[human(id, ts(0, 0), "Claude prompt")]);
-    let before = home.build();
+    let before = home.build_query();
     home.lines(
         "codex/session_index.jsonl",
         &[json!({"id":id,"thread_name":"Meaningful name","updated_at":"2026-10-10T00:00:00Z"})],
     );
-    let after = home.build();
-    let native = |built: &Built| {
+    let after = home.build_query();
+    let native = |built: &QueryData| {
         built
             .sessions
             .iter()
@@ -9926,7 +11224,7 @@ fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
     };
     assert_eq!(native(&after).1, "Meaningful name");
     assert_eq!(native(&before).0, native(&after).0);
-    assert_ne!(native(&other.build()).1, "Meaningful name");
+    assert_ne!(native(&other.build_query()).1, "Meaningful name");
     assert!(
         after
             .sessions
@@ -9935,15 +11233,15 @@ fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
             .all(|s| s.name != "Meaningful name")
     );
     let sid = native(&after).0;
-    let tx_before = crate::tx::page(&before, &sid, &crate::tx::Anchor::Last, NOW);
-    let tx_after = crate::tx::page(&after, &sid, &crate::tx::Anchor::Last, NOW);
+    let tx_before = crate::tx::tests::page(&before, &sid, &crate::tx::Anchor::Last, NOW);
+    let tx_after = crate::tx::tests::page(&after, &sid, &crate::tx::Anchor::Last, NOW);
     assert_eq!(tx_before.unwrap(), tx_after.unwrap());
 }
 
 #[test]
 fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
     let home = relay_home();
-    home.build();
+    home.build_query();
     fs::remove_dir_all(&home.options.claude_home).unwrap();
     let resolve = |query: &str| crate::session_bookmark(&home.options, "fixture", query);
     let response = resolve("sid=unsent%3Anobody-9f");

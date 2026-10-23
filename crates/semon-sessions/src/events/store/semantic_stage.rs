@@ -4,9 +4,11 @@ use super::*;
 use crate::model::relation_stage::{
     Batch, Context, Endpoint, Phase, Relation, Selection, Selector, Withdrawal,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
-const RECIPE: &str = "recorded-origin-turn-v1";
+// Earlier stages may contain parent turns derived from partial receipt sets.
+// Rebuild their witnesses using complete physical sender receipt boundaries.
+const RECIPE: &str = "recorded-origin-turn-complete-receipts-v3";
 fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -1020,6 +1022,7 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
     let mut seen = BTreeSet::new();
     let mut used = 0usize;
     let mut end = after.clone();
+    let mut sender_sources = HashMap::<(String, String), Vec<String>>::new();
     while let Some(row) = rows.next()? {
         let key: String = row.get(0)?;
         let text: Option<String> = row.get(1)?;
@@ -1040,7 +1043,10 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
         let mut overflow = false;
         if let Some(id) = msg {
             for kind in ["xsm", "send"] {
-                let paired:Option<Option<String>>=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind=?2 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",params![id,kind],|r|r.get(0)).optional()?;
+                let paired: Option<Option<String>> = c
+                    .prepare_cached("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind=?2 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1")?
+                    .query_row(params![id, kind], |r| r.get(0))
+                    .optional()?;
                 if let Some(text) = paired {
                     match decode_event(c, text, &mut candidate_used) {
                         Ok(peer) => linked.push(peer),
@@ -1057,8 +1063,50 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
             break;
         }
         let mut candidate = paths.clone();
+        // A subagent's send that isn't its hand-back names no message id:
+        // the model pairs it with the sender's own `SendMessage`, so the
+        // sender's log joins the page.
+        if own.event.k == super::super::Kind::Agm
+            && own.event.script & super::super::AGM_PROGRESS != 0
+            && let Some(sender) = own
+                .event
+                .peer
+                .as_ref()
+                .and_then(|peer| peer.sock.as_deref())
+                .or(own.event.id.as_deref())
+        {
+            // The stage's own inputs, not the published catalog: a first
+            // build has no catalog yet when relations are matched.
+            let root = path
+                .find("/subagents/")
+                .map(|at| &path[..at])
+                .or_else(|| path.strip_suffix(".jsonl"))
+                .unwrap_or(path);
+            let key = (root.to_owned(), sender.to_owned());
+            let sources = if let Some(sources) = sender_sources.get(&key) {
+                sources.clone()
+            } else {
+                let expected = format!("{root}/subagents/agent-{sender}.jsonl");
+                let exact = c
+                    .prepare_cached("SELECT source_path FROM catalog_semantic_inputs WHERE source_path=?1 AND harness='claude' AND is_top=0")?
+                    .query_row([&expected], |r| r.get::<_, String>(0))
+                    .optional()?;
+                let sources = if let Some(source) = exact {
+                    vec![source]
+                } else {
+                    c.prepare_cached("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND native_id=?1 AND is_top=0 ORDER BY source_path LIMIT 8")?
+                        .query_map([sender], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                sender_sources.insert(key, sources.clone());
+                sources
+            };
+            for source in sources {
+                candidate.extend(owner_closure(c, &source)?);
+            }
+        }
         for peer in &linked {
-            let mut sources=c.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
+            let mut sources = c.prepare_cached("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?;
             for source in sources.query_map([&peer.owner], |r| r.get::<_, String>(0))? {
                 candidate.insert(source?);
             }
@@ -1119,24 +1167,18 @@ fn load_context(
     let mut selected = owners.clone();
     let mut out = Context {
         epoch: Some(epoch),
+        replay_owners: if p == Phase::Publication {
+            owners.iter().cloned().collect()
+        } else {
+            Vec::new()
+        },
         ..Context::default()
     };
     let mut used = 0;
     for owner in &owners {
         if p == Phase::Publication {
-            let mut q=c.prepare("SELECT relation_id,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_relations WHERE from_key=?1 OR to_key=?1 ORDER BY relation_id")?;
-            for r in q.query_map([owner], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-            })? {
-                let (id, text) = r?;
-                if out.relations.contains_key(&id) {
-                    continue;
-                }
-                let relation: Relation = bounded(text, &mut used)?;
-                selected.insert(relation.from.clone());
-                selected.extend(relation.to.iter().cloned());
-                out.relations.insert(relation.id.clone(), relation);
-            }
+            // Incident edges can exceed one metadata page for a single owner.
+            // Replay them after releasing this writer, through read-only pages.
             let mut q=c.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE parent_key=?1 ORDER BY session_key")?;
             let mut children = Vec::new();
             for child in q.query_map([owner], |r| r.get::<_, String>(0))? {
@@ -1318,10 +1360,20 @@ fn relation_scope(
 }
 
 impl SqliteStore {
+    #[cfg(test)]
     pub(super) fn semantic_begin(
         &mut self,
         paths: &[String],
         runtime: &str,
+    ) -> Result<Outcome, StoreError> {
+        self.semantic_begin_with_journal(paths, runtime, false)
+    }
+
+    pub(super) fn semantic_begin_with_journal(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+        journaled_runtime: bool,
     ) -> Result<Outcome, StoreError> {
         if paths.len() > 64 {
             return Err(StoreError::Data(
@@ -1359,8 +1411,21 @@ impl SqliteStore {
                     r.get(0)
                 })
                 .map_err(failure)?;
-            if old != runtime || !recipe_current(&tx).map_err(failure)? {
+            let journaled: bool = journaled_runtime && tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_push_driven' AND value='1')", [], |r| r.get(0)).map_err(failure)?;
+            // Journaled Facts/Raw writes invalidate the actual staged native
+            // and PID dependencies, including owners not yet published. The
+            // next batch still checks every consumed source witness. Unrelated
+            // machine activity must not discard this component's progress.
+            // Local/unobserved runtime and negative custody keep their original
+            // conservative epoch fence.
+            if !recipe_current(&tx).map_err(failure)?
+                || (old != runtime
+                    && (!journaled || withdrawal_authority(&tx).map_err(failure)?.is_some()))
+            {
                 reset(&tx, runtime).map_err(failure)?;
+            } else if old != runtime {
+                tx.execute("UPDATE catalog_semantic_stage SET runtime=?1", [runtime])
+                    .map_err(failure)?;
             }
         } else {
             if paths.is_empty() {
@@ -1386,6 +1451,85 @@ impl SqliteStore {
         tx.commit().map_err(failure)?;
         Ok(Outcome::Written)
     }
+    pub(super) fn semantic_replay(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> Result<Context, StoreError> {
+        if owners.len() > 64 {
+            return Err(StoreError::Data(
+                "semantic replay owner budget exceeded".into(),
+            ));
+        }
+        // A read snapshot prevents a concurrent reset from mixing epochs. It
+        // never reserves the writer while loading a high-degree owner's edges.
+        let tx = self.connection.transaction().map_err(failure)?;
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE epoch=?1 AND phase='publication' AND resetting=0)",
+            [epoch], |r|r.get(0),
+        ).map_err(failure)?;
+        if !current {
+            return Err(StoreError::Data("stale semantic replay epoch".into()));
+        }
+        let mut keys = BTreeSet::new();
+        for owner in owners {
+            for column in ["from_key", "to_key"] {
+                let mut q = tx.prepare(&format!("SELECT relation_id FROM catalog_semantic_relations WHERE {column}=?1 AND relation_id>?2 ORDER BY relation_id LIMIT 64")).map_err(failure)?;
+                for key in q
+                    .query_map(params![owner, after], |r| r.get::<_, String>(0))
+                    .map_err(failure)?
+                {
+                    keys.insert(key.map_err(failure)?);
+                    if keys.len() > 64 {
+                        keys.pop_last();
+                    }
+                }
+            }
+        }
+        let mut out = Context {
+            epoch: Some(epoch),
+            ..Context::default()
+        };
+        let mut used = 0;
+        for key in keys {
+            let mut candidate_used = used;
+            let candidate = (|| -> rusqlite::Result<_> {
+                let text: Option<String> = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_relations WHERE relation_id=?1",[&key],|r|r.get(0))?;
+                let relation: Relation = bounded(text, &mut candidate_used)?;
+                let mut endpoints = std::collections::BTreeMap::new();
+                for key in std::iter::once(&relation.from).chain(relation.to.iter()) {
+                    if out.endpoints.contains_key(key) || endpoints.contains_key(key) {
+                        continue;
+                    }
+                    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE session_key=?1)",[key],|r|r.get(0))?;
+                    if exists {
+                        endpoints.insert(
+                            key.clone(),
+                            normalized_endpoint(&tx, key, &mut candidate_used)?,
+                        );
+                    }
+                }
+                Ok((relation, endpoints))
+            })();
+            match candidate {
+                Ok((relation, endpoints)) => {
+                    used = candidate_used;
+                    out.endpoints.extend(endpoints);
+                    out.relations.insert(key, relation);
+                }
+                Err(_) if !out.relations.is_empty() => break,
+                Err(error) => {
+                    return Err(StoreError::Data(format!(
+                        "semantic relationship replay item cannot fit a 1 MiB metadata page: {error}"
+                    )));
+                }
+            }
+        }
+        tx.commit().map_err(failure)?;
+        Ok(out)
+    }
+
     pub(super) fn semantic_next(&mut self, limit: usize) -> Result<Option<Batch>, StoreError> {
         let tx = self
             .connection
@@ -1830,7 +1974,14 @@ impl SqliteStore {
                     }
                 }
             }
-            for (_, harness, id) in &prepared.indexed_native_parents {
+            for (path, harness, id) in &prepared.indexed_native_parents {
+                // Runtime invalidation must not introduce relationship-discovery
+                // edges before the corresponding owner is published.
+                tx.execute(
+                    "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,?2,?3)",
+                    params![path, format!("runtime:native:{harness}"), id],
+                )
+                .map_err(failure)?;
                 native_frontier(&tx, harness, id).map_err(failure)?;
             }
             for (harness, id) in &prepared.lineage_dependencies {
@@ -1896,6 +2047,21 @@ impl SqliteStore {
                     native_frontier(&tx, &endpoint.row.harness, id).map_err(failure)?;
                 }
                 for source in &endpoint.row.sources {
+                    if let Some(pid) = endpoint.pid {
+                        tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)", params![source.path.to_string_lossy().as_ref(),pid.to_string()]).map_err(failure)?;
+                    }
+                    if let Some(observations) = endpoint
+                        .row
+                        .query
+                        .as_ref()
+                        .and_then(|query| query["rows"].as_object())
+                    {
+                        for observation in observations.values() {
+                            if let Some(pid) = observation["summary"]["pid"].as_u64() {
+                                tx.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'runtime:pid',?2)", params![source.path.to_string_lossy().as_ref(),pid.to_string()]).map_err(failure)?;
+                            }
+                        }
+                    }
                     tx.execute(
                         "INSERT OR IGNORE INTO catalog_semantic_owner_sources VALUES(?1,?2)",
                         params![endpoint.row.key, source.path.to_string_lossy().as_ref()],
@@ -1977,9 +2143,28 @@ impl SqliteStore {
                     prior.source_turn = Default::default();
                     merged.source_turn = Default::default();
                     if json(&prior).map_err(failure)? != json(&merged).map_err(failure)? {
-                        return Err(StoreError::Data(
-                            "conflicting staged native relationship".into(),
-                        ));
+                        // Name the differing fields only: no identities or
+                        // content.
+                        let fields = |relation: &Relation| {
+                            serde_json::to_value(relation)
+                                .ok()
+                                .and_then(|value| value.as_object().cloned())
+                                .unwrap_or_default()
+                        };
+                        let (before, after) = (fields(&prior), fields(&merged));
+                        let differing: Vec<&str> = before
+                            .keys()
+                            .chain(after.keys())
+                            .filter(|key| before.get(*key) != after.get(*key))
+                            .map(String::as_str)
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
+                        return Err(StoreError::Data(format!(
+                            "conflicting staged native relationship: kind={} fields={}",
+                            merged.kind,
+                            differing.join(",")
+                        )));
                     }
                     merged.source_turn = witness;
                 }
@@ -2215,6 +2400,21 @@ impl SqliteStore {
                 ..Selection::default()
             });
         }
+        if let Selector::ClaudeReceipt { id } = s {
+            let text: Option<Option<String>> = self.connection.query_row(
+                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",
+                [id], |r| r.get(0),
+            ).optional().map_err(failure)?;
+            let Some(text) = text else {
+                return Ok(Selection::default());
+            };
+            let native = decode_event(&self.connection, text, &mut 0).map_err(failure)?;
+            return Ok(Selection {
+                count: 1,
+                location: Some(native.at),
+                ..Selection::default()
+            });
+        }
         if let Selector::ClaudeCall { id } = s {
             let keys=self.connection.prepare("SELECT source_path,event_key FROM catalog_semantic_events WHERE kind='call' AND tool_id=?1 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2").map_err(failure)?.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
             if keys.len() != 1 {
@@ -2286,7 +2486,8 @@ impl SqliteStore {
         let (sql, first, target, endpoint) = match s {
             Selector::NativeKey { .. }
             | Selector::ClaudeName { .. }
-            | Selector::ClaudeCall { .. } => {
+            | Selector::ClaudeCall { .. }
+            | Selector::ClaudeReceipt { .. } => {
                 unreachable!("Claude selectors returned above")
             }
             Selector::CodexSibling { parent, task } => (
@@ -2454,7 +2655,7 @@ mod tests {
             prefix: sha2::Sha256::digest(b"").into(),
             tail: sha2::Sha256::digest(b"").into(),
         };
-        let (mut store, _) = SqliteStore::attempt(&root.join("index.sqlite3"), None)
+        let (mut store, _) = SqliteStore::attempt(&root.join("index.sqlite3"))
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             store
@@ -2521,6 +2722,92 @@ mod tests {
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
         }
+    }
+
+    #[test]
+    fn catalog_runtime_semantic_replay_pages_preserve_bounds_and_do_not_reserve_writer() {
+        let (root, mut store, _) = header_repair_store("replay-pages");
+        store
+            .connection
+            .execute("UPDATE catalog_semantic_stage SET phase='publication'", [])
+            .unwrap();
+        let epoch: i64 = store
+            .connection
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+            .unwrap();
+        for n in 0..100 {
+            let relation = Relation {
+                id: format!("edge-{n:03}"),
+                kind: "relay".into(),
+                from: "owner".into(),
+                source_turn: crate::model::relation_stage::OriginTurn::Known("turn".into()),
+                to: None,
+                target: Some("x".repeat(32 * 1024)),
+                at: 0,
+                done: None,
+                status: "waiting".into(),
+                has_result: false,
+                unmatched: true,
+                ambiguous: false,
+                placements: Vec::new(),
+                heads: Vec::new(),
+                after: Vec::new(),
+                previews: Default::default(),
+                order: (2, 0, String::new(), n, 0),
+                explicit_previews: false,
+                stubs: Vec::new(),
+                inline: false,
+            };
+            store.connection.execute("INSERT INTO catalog_semantic_relations(relation_id,from_key,metadata) VALUES(?1,'owner',?2)",params![relation.id,json(&relation).unwrap()]).unwrap();
+        }
+        let writer = Connection::open(&store.path).unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE; INSERT INTO meta(key,value) VALUES('replay_writer_probe','1')",
+            )
+            .unwrap();
+        let mut after = String::new();
+        let mut all = Vec::new();
+        loop {
+            let page = store
+                .semantic_replay(epoch, &["owner".into()], &after)
+                .unwrap();
+            if page.relations.is_empty() {
+                break;
+            }
+            assert!(
+                page.relations.len() < 64,
+                "byte bound must stop before the row bound"
+            );
+            assert!(
+                page.relations
+                    .values()
+                    .map(|r| json(r).unwrap().len())
+                    .sum::<usize>()
+                    <= MAX_CONTEXT
+            );
+            after = page.relations.keys().next_back().unwrap().clone();
+            all.extend(page.relations.into_keys());
+        }
+        assert_eq!(
+            all,
+            (0..100).map(|n| format!("edge-{n:03}")).collect::<Vec<_>>()
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+        store
+            .connection
+            .execute("UPDATE catalog_semantic_stage SET epoch=epoch+1", [])
+            .unwrap();
+        assert!(store.semantic_replay(epoch, &["owner".into()], "").is_err());
+        assert!(
+            store
+                .semantic_replay(epoch + 1, &vec!["owner".into(); 65], "")
+                .is_err()
+        );
+        drop(writer);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2685,7 +2972,10 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
+            .execute(
+                "UPDATE meta SET value='recorded-origin-turn-journaled-runtime-v2' WHERE key='catalog_semantic_recipe'",
+                [],
+            )
             .unwrap();
         let epoch: i64 = store
             .connection

@@ -2,6 +2,7 @@
 // The reference binary is the exact gitlink of the captured compat=1 UI.
 // Pause removals are never painted back into either UI or silently exempted.
 import fs from 'node:fs';
+import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { compare } from './pixel-diff.mjs';
@@ -378,26 +379,26 @@ async function capture(candidate, reference, key) {
         throw new Error(`${key} ${name} lost the shared open/focus/top-scroll state`);
     }
   }
-  for (const [name, page] of pages) {
-    const bytes = await page.screenshot({ fullPage: false, animations: 'disabled', caret: 'hide' });
-    fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
-    evidenceBySide[name] = await snapshot(page);
-    const evidence = Buffer.from(JSON.stringify(evidenceBySide[name], null, 2) + '\n');
-    fs.writeFileSync(path.join(out, key + '-' + name + '.json'), evidence);
-    artifactDigests[name] = { image: sha256(bytes), evidence: sha256(evidence) };
-    images.push(PNG.sync.read(bytes));
-  }
   const includeChromeDiagnostics =
     /^(390|820)-(light|dark)-(?:session-harbor|harbor-tools-open|harbor-tool-output-open)$/.test(
       key,
     );
-  if (includeChromeDiagnostics) {
-    for (const [name, page] of pages) {
-      evidenceBySide[name].chromeDiagnostics = await snapshotChromeDiagnostics(page);
+  for (const [name, page] of pages) {
+    await withCapturePaint(page, async () => {
+      const bytes = await captureStableFrame(page, {
+        fullPage: false,
+        animations: 'allow',
+        caret: 'hide',
+      });
+      fs.writeFileSync(path.join(out, key + '-' + name + '.png'), bytes);
+      evidenceBySide[name] = await snapshot(page);
+      if (includeChromeDiagnostics)
+        evidenceBySide[name].chromeDiagnostics = await snapshotChromeDiagnostics(page);
       const evidence = Buffer.from(JSON.stringify(evidenceBySide[name], null, 2) + '\n');
       fs.writeFileSync(path.join(out, key + '-' + name + '.json'), evidence);
-      artifactDigests[name].evidence = sha256(evidence);
-    }
+      artifactDigests[name] = { image: sha256(bytes), evidence: sha256(evidence) };
+      images.push(PNG.sync.read(bytes));
+    });
   }
   recordDomDiffSummary(
     report.domDiffSummary,
@@ -475,7 +476,7 @@ try {
     throw new Error('Both candidate and selected-reference servers are required');
   if (ENV.base === process.env.SEMON_PRESERVATION_BASE.replace(/\/$/, ''))
     throw new Error('Candidate and selected-reference servers must be independent');
-  browser = await launch();
+  browser = await launch({ baselineRaster: true });
   if (!/^[a-f0-9]{40}$/.test(report.candidate ?? ''))
     throw new Error('Candidate commit SHA is required for exact visual evidence');
   const candidateBinary = process.env.SEMON_VISUAL_CANDIDATE_BIN ?? process.env.SEMON_BIN;

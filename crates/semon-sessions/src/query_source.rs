@@ -40,10 +40,12 @@ impl ProofChunks {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Sources {
     proofs: BTreeMap<PathBuf, Proof>,
     paths: BTreeMap<(String, String), PathBuf>,
+    diagnostic_scope: PathBuf,
+    #[cfg(feature = "test-hooks")]
+    cache: PathBuf,
 }
 
 fn unavailable() -> io::Error {
@@ -51,6 +53,14 @@ fn unavailable() -> io::Error {
         io::ErrorKind::InvalidData,
         "native query source generation unavailable",
     )
+}
+
+fn note_focused_source_interest(scope: &Path, source: &CatalogSource) {
+    crate::source_carrier::note_diagnostic_interest(
+        scope,
+        &source.path.to_string_lossy(),
+        &crate::source_carrier::ledger(source),
+    );
 }
 
 // Cold checkpoints describe a complete prefix of a larger, unchanged physical
@@ -68,6 +78,16 @@ fn same_physical_generation(ledger: &Ledger, physical: &Stat) -> bool {
 }
 
 impl Sources {
+    pub(crate) fn new(options: &Options) -> Self {
+        Self {
+            proofs: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            diagnostic_scope: crate::events::EventCache::path(&options.cache),
+            #[cfg(feature = "test-hooks")]
+            cache: options.cache.clone(),
+        }
+    }
+
     pub(crate) fn capture(
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
@@ -85,11 +105,42 @@ impl Sources {
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
     ) -> io::Result<Self> {
-        Self::capture_inner(
-            options,
-            sources.map(|(source, chunks)| (source, chunks.map(ProofChunks::Complete))),
-            false,
-        )
+        let cache_path = crate::events::EventCache::path(&options.cache);
+        let mut db = None;
+        let mut proofs = Vec::new();
+        for (source, chunks) in sources {
+            let chunks = if let Some(chunks) = chunks {
+                ProofChunks::Complete(chunks)
+            } else {
+                if db.is_none() {
+                    let c = crate::events::store::focused_connection(&cache_path)?;
+                    c.busy_timeout(std::time::Duration::from_millis(100))
+                        .map_err(io::Error::other)?;
+                    db = Some(crate::events::store::chunk_proofs::Snapshot::new(c));
+                }
+                let ledger = Ledger {
+                    stat: Stat {
+                        dev: source.dev,
+                        ino: source.ino,
+                        size: source.size,
+                        modified_ns: source.modified_ns,
+                        changed_ns: source.changed_ns,
+                    },
+                    offset: source.offset,
+                    prefix: source.prefix_sha256,
+                    tail: source.tail_sha256,
+                };
+                let focused = crate::events::store::chunk_proofs::Focused::with_db(
+                    db.as_ref().expect("proof connection opened").clone(),
+                    &cache_path,
+                    source.path.to_str().ok_or_else(unavailable)?,
+                    &ledger,
+                )?;
+                ProofChunks::Focused(Box::new(focused))
+            };
+            proofs.push((source, Some(chunks)));
+        }
+        Self::capture_inner(options, proofs.into_iter(), false)
     }
 
     fn capture_inner(
@@ -97,7 +148,7 @@ impl Sources {
         sources: impl Iterator<Item = (CatalogSource, Option<ProofChunks>)>,
         require_references: bool,
     ) -> io::Result<Self> {
-        let mut captured = Self::default();
+        let mut captured = Self::new(options);
         for (source, chunks) in sources {
             let chunks = chunks
                 .filter(|chunks| match chunks {
@@ -167,6 +218,7 @@ impl Sources {
         Ok(captured)
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_focused(
         options: &Options,
         sources: &[CatalogSource],
@@ -175,10 +227,36 @@ impl Sources {
             return Err(unavailable());
         }
         let cache_path = crate::events::EventCache::path(&options.cache);
-        let db = crate::events::store::focused_connection(&cache_path)?;
+        let db = crate::events::store::focused_connection(&cache_path).map_err(|error| {
+            for source in sources.iter().take(16) {
+                note_focused_source_interest(&cache_path, source);
+            }
+            crate::source_carrier::FailureStage::ProofOpenDb.wrap(error)
+        })?;
         db.busy_timeout(std::time::Duration::from_millis(100))
-            .map_err(io::Error::other)?;
-        let db = Arc::new(Mutex::new(db));
+            .map_err(|error| {
+                crate::source_carrier::FailureStage::ProofOpenDb.wrap(io::Error::other(error))
+            })?;
+        Self::capture_focused_snapshot(options, sources, db)
+    }
+
+    /// Take ownership of the connection which selected the Catalog recipes.
+    /// Its open read transaction pins even proof generations collected between
+    /// selection and the first lazy proof read.
+    pub(crate) fn capture_focused_snapshot(
+        options: &Options,
+        sources: &[CatalogSource],
+        db: rusqlite::Connection,
+    ) -> io::Result<Self> {
+        if sources.len() > 64 {
+            return Err(unavailable());
+        }
+        let cache_path = crate::events::EventCache::path(&options.cache);
+        let db = crate::events::store::chunk_proofs::Snapshot::new(db);
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_FOCUSED_CAPTURE.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         let proofs = sources
             .iter()
             .map(|source| {
@@ -199,7 +277,12 @@ impl Sources {
                     &cache_path,
                     source.path.to_str().ok_or_else(unavailable)?,
                     &ledger,
-                )?;
+                )
+                .inspect_err(|error| {
+                    if crate::source_carrier::FailureStage::of(error).is_some() {
+                        note_focused_source_interest(&cache_path, source);
+                    }
+                })?;
                 Ok((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))))
             })
             .collect::<io::Result<Vec<_>>>()?;
@@ -214,20 +297,38 @@ impl Sources {
         &'a self,
         provider: Option<(&'a dyn SessionSourceReader, crate::SessionSourceReadMode)>,
     ) -> Records<'a> {
-        Records {
-            sources: self,
-            provider: provider.map(|value| value.0),
-            mode: provider.map_or(crate::SessionSourceReadMode::LocalThenProvider, |value| {
+        self.reader_with_mode(
+            provider.map(|value| value.0),
+            provider.map_or(crate::SessionSourceReadMode::LocalThenProvider, |value| {
                 value.1
             }),
+        )
+    }
+
+    pub(crate) fn reader_with_mode<'a>(
+        &'a self,
+        provider: Option<&'a dyn SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+    ) -> Records<'a> {
+        Records {
+            sources: self,
+            provider,
+            mode,
             remote: Mutex::default(),
             checked: Mutex::default(),
             checked_chunks: Mutex::default(),
             checked_evidence: Mutex::default(),
             prepared: Mutex::default(),
             failed: Mutex::new(false),
+            revision: Mutex::new(None),
+            failure_stage: Mutex::new(None),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_FOCUSED_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The verification cache belongs to one read, never the shared query cohort.
@@ -244,6 +345,8 @@ pub(crate) struct Records<'a> {
     // block on every read. Completion reopens and checks every used source.
     prepared: Mutex<Option<PreparedBlock>>,
     failed: Mutex<bool>,
+    revision: Mutex<Option<crate::source_carrier::RevisionReason>>,
+    failure_stage: Mutex<Option<crate::source_carrier::FailureStage>>,
 }
 
 struct PreparedBlock {
@@ -257,6 +360,75 @@ struct PreparedBlock {
 }
 
 impl Records<'_> {
+    // Preserve the first physical revision failure even when a presentation
+    // parser tolerates a missing record. No partial answer may hide this fence.
+    fn reject_revision(&self, reason: crate::source_carrier::RevisionReason) -> io::Error {
+        if let Ok(mut revision) = self.revision.lock() {
+            revision.get_or_insert(reason);
+        }
+        reason.error()
+    }
+
+    fn recheck(&self, path: &Path, file: &LogFile, before: &Stat) -> io::Result<()> {
+        crate::source_carrier::recheck(path, file, before).map_err(|_| {
+            let reason = file
+                .metadata()
+                .ok()
+                .and_then(|metadata| Stat::from_metadata(&metadata).ok())
+                .and_then(|after| crate::source_carrier::mismatch(before, &after))
+                .unwrap_or(crate::source_carrier::RevisionReason::Identity);
+            self.reject_revision(reason)
+        })
+    }
+
+    fn proof_failure(&self, path: &Path, error: io::Error) -> io::Error {
+        if let Some(stage) = crate::source_carrier::FailureStage::of(&error) {
+            if let Ok(mut first) = self.failure_stage.lock() {
+                first.get_or_insert(stage);
+            }
+            if let Some(proof) = self.sources.proofs.get(path) {
+                crate::source_carrier::note_diagnostic_interest(
+                    &self.sources.diagnostic_scope,
+                    &path.to_string_lossy(),
+                    &proof.ledger,
+                );
+            }
+        }
+        error
+    }
+
+    pub(crate) fn query_error(&self, error: impl std::fmt::Display) -> crate::QueryError {
+        if let Some(stage) = self.failure_stage.lock().ok().and_then(|stage| *stage) {
+            return crate::QueryError::source_failure(stage);
+        }
+        match self.revision.lock().ok().and_then(|revision| *revision) {
+            Some(reason) => crate::QueryError::local_revision(reason),
+            None => crate::QueryError::new("io", error.to_string()),
+        }
+    }
+
+    fn pinned_provider(&self, path: &Path) -> io::Result<bool> {
+        Ok(matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        ) && self
+            .remote
+            .lock()
+            .map_err(|_| unavailable())?
+            .contains_key(path))
+    }
+
+    fn may_fallback(&self, path: &Path) -> io::Result<bool> {
+        Ok(!matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        ) || !self
+            .checked
+            .lock()
+            .map_err(|_| unavailable())?
+            .contains_key(path))
+    }
+
     pub(crate) fn source_ref(&self, path: &Path) -> Option<&SessionSourceRef> {
         self.sources.proofs.get(path)?.source.as_ref()
     }
@@ -319,13 +491,23 @@ impl Records<'_> {
             self.verify(path, proof)?;
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
-            if before.dev != proof.ledger.stat.dev
-                || before.ino != proof.ledger.stat.ino
+            let qualified = matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            );
+            if (!qualified
+                && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
+                || before.size < proof.ledger.offset
                 || record.end().is_none_or(|end| end > before.size)
+                || (qualified
+                    && self.checked.lock().map_err(|_| unavailable())?.get(path) != Some(&before))
             {
                 return Err(unavailable());
             }
             let value = read(&mut file)?;
+            if qualified {
+                self.recheck(path, &file, &before)?;
+            }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
             }
@@ -443,13 +625,18 @@ impl Records<'_> {
 
     fn verify(&self, path: &Path, proof: &Proof) -> io::Result<()> {
         if self.provider.is_some()
-            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+            && (matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+                || self.pinned_provider(path)?)
         {
             self.provider_block(path, proof, 0)?;
             return Ok(());
         }
         let mut file = match LogFile::open(path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && self.provider.is_some()
+                    && self.may_fallback(path)? =>
+            {
                 self.provider_block(path, proof, 0)?;
                 return Ok(());
             }
@@ -457,10 +644,42 @@ impl Records<'_> {
         };
         let before = Stat::from_metadata(&file.metadata()?)?;
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
+        if let Some(prior) = checked.get(path)
+            && matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            )
+            && prior != &before
+        {
+            return Err(self.reject_revision(
+                crate::source_carrier::mismatch(prior, &before)
+                    .unwrap_or(crate::source_carrier::RevisionReason::MissingChangeToken),
+            ));
+        }
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
                 || checked.get(path) == Some(&before));
-        if (!unchanged && !proof.ledger.resumes(&before, &mut file))
+        if matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        ) {
+            if before.size < proof.ledger.offset {
+                return Err(self.reject_revision(crate::source_carrier::RevisionReason::SizeShrank));
+            }
+            if !unchanged && proof.ledger.offset != 0 {
+                proof
+                    .chunks
+                    .read(&mut file, 0)
+                    .map_err(|error| self.proof_failure(path, error))?;
+                self.checked_chunks
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .entry(path.to_owned())
+                    .or_default()
+                    .insert(0);
+            }
+            self.recheck(path, &file, &before)?;
+        } else if (!unchanged && !proof.ledger.resumes(&before, &mut file))
             || Stat::from_metadata(&file.metadata()?)? != before
         {
             return Err(unavailable());
@@ -512,12 +731,17 @@ impl Records<'_> {
     /// Recheck touched sources before returning an answer, including native
     /// records served from the pager's short-lived line cache.
     pub(crate) fn finish(&self) -> io::Result<()> {
+        if let Some(reason) = *self.revision.lock().map_err(|_| unavailable())? {
+            return Err(reason.error());
+        }
         if *self.failed.lock().map_err(|_| unavailable())? {
             return Err(unavailable());
         }
-        for proof in self.sources.proofs.values() {
+        for (path, proof) in &self.sources.proofs {
             if let ProofChunks::Focused(chunks) = &proof.chunks {
-                chunks.clear_cache()?;
+                chunks
+                    .clear_cache()
+                    .map_err(|error| self.proof_failure(path, error))?;
             }
         }
         let paths: Vec<_> = self
@@ -552,14 +776,26 @@ impl Records<'_> {
             }
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
-            if before.dev != proof.ledger.stat.dev
-                || before.ino != proof.ledger.stat.ino
-                || before.size < proof.ledger.offset
+            let qualified = matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            );
+            if before.size < proof.ledger.offset
+                || (!qualified
+                    && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
+                || (qualified
+                    && self.checked.lock().map_err(|_| unavailable())?.get(path) != Some(&before))
             {
                 return Err(unavailable());
             }
             for index in indices {
-                proof.chunks.read(&mut file, *index)?;
+                proof
+                    .chunks
+                    .read(&mut file, *index)
+                    .map_err(|error| self.proof_failure(path, error))?;
+            }
+            if qualified {
+                self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -574,11 +810,22 @@ impl Records<'_> {
             let proof = self.sources.proofs.get(path).ok_or_else(unavailable)?;
             let mut file = LogFile::open(path)?;
             let before = Stat::from_metadata(&file.metadata()?)?;
-            if before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino {
+            let qualified = matches!(
+                self.mode,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            );
+            if (!qualified
+                && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
+                || (qualified
+                    && self.checked.lock().map_err(|_| unavailable())?.get(path) != Some(&before))
+            {
                 return Err(unavailable());
             }
             for record in records {
                 record.verify(&mut file)?;
+            }
+            if qualified {
+                self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
                 return Err(unavailable());
@@ -625,7 +872,8 @@ impl Records<'_> {
             return Err(unavailable());
         }
         if self.provider.is_some()
-            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+            && (matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
+                || self.pinned_provider(path)?)
         {
             return self.provider_range(path, proof, offset, max, prepare);
         }
@@ -637,7 +885,11 @@ impl Records<'_> {
             .and_then(|block| block.file.take());
         let reused = cached_file.is_some();
         let mut file = match cached_file.map(Ok).unwrap_or_else(|| LogFile::open(path)) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() => {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && self.provider.is_some()
+                    && self.may_fallback(path)? =>
+            {
                 drop(prepared);
                 return self.provider_range(path, proof, offset, max, prepare);
             }
@@ -647,7 +899,9 @@ impl Records<'_> {
         if reused {
             let named = match std::fs::symlink_metadata(path) {
                 Err(error)
-                    if error.kind() == io::ErrorKind::NotFound && self.provider.is_some() =>
+                    if error.kind() == io::ErrorKind::NotFound
+                        && self.provider.is_some()
+                        && self.may_fallback(path)? =>
                 {
                     drop(prepared);
                     return self.provider_range(path, proof, offset, max, prepare);
@@ -658,17 +912,33 @@ impl Records<'_> {
                 return Err(unavailable());
             }
         }
-        if before.dev != proof.ledger.stat.dev
-            || before.ino != proof.ledger.stat.ino
-            || before.size < proof.ledger.offset
+        let qualified = matches!(
+            self.mode,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider
+        );
+        if qualified && before.size < proof.ledger.offset {
+            return Err(self.reject_revision(crate::source_carrier::RevisionReason::SizeShrank));
+        }
+        if before.size < proof.ledger.offset
+            || (!qualified
+                && (before.dev != proof.ledger.stat.dev || before.ino != proof.ledger.stat.ino))
         {
             return Err(unavailable());
         }
         let mut checked = self.checked.lock().map_err(|_| unavailable())?;
+        if qualified
+            && let Some(prior) = checked.get(path)
+            && prior != &before
+        {
+            return Err(self.reject_revision(
+                crate::source_carrier::mismatch(prior, &before)
+                    .unwrap_or(crate::source_carrier::RevisionReason::MissingChangeToken),
+            ));
+        }
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
                 || checked.get(path) == Some(&before));
-        if !unchanged && !proof.ledger.resumes(&before, &mut file) {
+        if !qualified && !unchanged && !proof.ledger.resumes(&before, &mut file) {
             return Err(unavailable());
         }
         let first = usize::try_from(offset / crate::source_chunks::SIZE as u64)
@@ -685,7 +955,12 @@ impl Records<'_> {
             {
                 block.bytes.clone()
             } else {
-                let part: Arc<[u8]> = Arc::from(proof.chunks.read(&mut file, index)?);
+                let part: Arc<[u8]> = Arc::from(
+                    proof
+                        .chunks
+                        .read(&mut file, index)
+                        .map_err(|error| self.proof_failure(path, error))?,
+                );
                 if let Some(prepared) = prepared.as_deref_mut() {
                     *prepared = Some(PreparedBlock {
                         path: path.to_owned(),
@@ -701,8 +976,15 @@ impl Records<'_> {
             let hi = (end - start).min(part.len() as u64) as usize;
             bytes.extend_from_slice(&part[lo..hi]);
         }
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::run_cache(&self.sources.cache, "query_source_after_read");
+        if qualified {
+            self.recheck(path, &file, &before)?;
+        }
         if Stat::from_metadata(&file.metadata()?)? != before
-            || (before.changed_ns.is_none() && !proof.ledger.resumes(&before, &mut file))
+            || (!qualified
+                && before.changed_ns.is_none()
+                && !proof.ledger.resumes(&before, &mut file))
         {
             return Err(unavailable());
         }
@@ -775,7 +1057,10 @@ impl Records<'_> {
             remote.insert(path.to_owned(), (part.generation, part.length));
             bytes.extend_from_slice(&part.bytes);
         }
-        proof.chunks.verify(index, &bytes)?;
+        proof
+            .chunks
+            .verify(index, &bytes)
+            .map_err(|error| self.proof_failure(path, error))?;
         self.checked_chunks
             .lock()
             .map_err(|_| unavailable())?
@@ -844,7 +1129,13 @@ impl SessionSourceReader for Records<'_> {
         max: usize,
     ) -> io::Result<SessionSourceRange> {
         let result = self.range(source, expected, offset, max, false);
-        if result.is_err() {
+        if let Err(error) = &result {
+            if let Some(stage) = crate::source_carrier::FailureStage::of(error) {
+                self.failure_stage
+                    .lock()
+                    .map_err(|_| unavailable())?
+                    .get_or_insert(stage);
+            }
             *self.failed.lock().map_err(|_| unavailable())? = true;
         }
         result
@@ -909,6 +1200,7 @@ impl Seek for RangeFile<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::fs;
 
     struct Fixture {
@@ -946,7 +1238,10 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
-            let mut sources = Sources::default();
+            let mut sources = Sources::new(&Options {
+                cache: self.root.join("index.json"),
+                ..Options::default()
+            });
             sources.paths.insert(
                 (reference.root.clone(), reference.path.clone()),
                 self.path.clone(),
@@ -983,6 +1278,315 @@ mod tests {
                 "every captured stamp field must match"
             );
             after
+        }
+    }
+
+    #[test]
+    fn index_l2_with_selected_l1_and_stable_raw_reports_header_ledger() {
+        use std::io::Write;
+        let fixture = Fixture::new("index-leading-catalog");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"original\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let l1_offset = selected.offset;
+        let captured = Sources::capture_focused(&options, std::slice::from_ref(&selected)).unwrap();
+        let publish_scope = crate::events::EventCache::path(&options.cache);
+        assert_eq!(captured.diagnostic_scope, publish_scope);
+        let selected_digest =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&selected));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(b"{\"type\":\"user\",\"message\":{\"content\":\"append\"}}\n")
+            .unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let l2_offset = cache.source(&fixture.path, "lead").unwrap().offset;
+        assert!(l2_offset > l1_offset);
+        let before = Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap();
+        let error = match Sources::capture_focused(&options, &[selected]) {
+            Ok(_) => panic!("L2 must expose the pre-repair proof lifetime gap"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::HeaderLedger)
+        );
+        let reply = crate::QueryError::io(&error).to_json();
+        assert_eq!(reply["stage"], "header_ledger");
+        let interests = crate::source_carrier::diagnostic_publish_interests(&publish_scope);
+        let interest = interests
+            .iter()
+            .find(|interest| interest.path.as_str() == fixture.path.to_string_lossy().as_ref())
+            .expect("focused failure must register an interest for the publish scope");
+        assert_eq!(
+            interest.scope.as_str(),
+            publish_scope.to_string_lossy().as_ref()
+        );
+        assert_eq!(interest.catalog_ledger_digest, selected_digest);
+        assert_eq!(interest.catalog_offset, l1_offset);
+        assert_eq!(
+            before,
+            Stat::from_metadata(&fs::metadata(&fixture.path).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn focused_proof_store_schema_mismatch_has_its_own_stage() {
+        let fixture = Fixture::new("proof-store-schema-stage");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let selected_digest =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&selected));
+        let selected_offset = selected.offset;
+        let publish_scope = crate::events::EventCache::path(&options.cache);
+        drop(cache);
+
+        crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow_mut().clear());
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.pragma_update(None, "user_version", 0).unwrap();
+        drop(db);
+        let error = match Sources::capture_focused(&options, &[selected]) {
+            Ok(_) => panic!("a schema-mismatched proof store must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::ProofOpenDb)
+        );
+        let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow().clone());
+        assert!(logs.is_empty(), "the proof header was never opened");
+        assert!(
+            !error
+                .to_string()
+                .contains(fixture.path.to_string_lossy().as_ref())
+        );
+        let interests = crate::source_carrier::diagnostic_publish_interests(&publish_scope);
+        let interest = interests
+            .iter()
+            .find(|interest| interest.path.as_str() == fixture.path.to_string_lossy().as_ref())
+            .expect("a database-open failure must retain the selected source interest");
+        assert_eq!(
+            interest.scope.as_str(),
+            publish_scope.to_string_lossy().as_ref()
+        );
+        assert_eq!(interest.catalog_ledger_digest, selected_digest);
+        assert_eq!(interest.catalog_offset, selected_offset);
+    }
+
+    #[test]
+    fn focused_header_parse_rejection_logs_independent_raw_stats() {
+        let fixture = Fixture::new("proof-header-parse-diagnostic");
+        fs::write(
+            &fixture.path,
+            b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+        )
+        .unwrap();
+        let options = Options {
+            claude_home: fixture.root.clone(),
+            cache: fixture.root.join("index.json"),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
+        let selected = cache.source(&fixture.path, "lead").unwrap();
+        let ledger = crate::source_carrier::ledger(&selected);
+        let before = fs::metadata(&fixture.path).unwrap().len();
+        drop(cache);
+
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.execute(
+            "UPDATE meta SET value='{' WHERE key GLOB 'native_source_chunks:*:header'",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow_mut().clear());
+        // MCP opens without touching Raw; Web later opens the same selected
+        // ledger/cache with Raw observations. That upgrade must not be deduped.
+        let mcp_error = match Sources::capture_focused(&options, std::slice::from_ref(&selected)) {
+            Ok(_) => panic!("a malformed proof header must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&mcp_error),
+            Some(crate::source_carrier::FailureStage::HeaderVersion)
+        );
+        let result = crate::events::store::chunk_proofs::Focused::open_with_raw(
+            &crate::events::EventCache::path(&options.cache),
+            fixture.path.to_str().unwrap(),
+            &ledger,
+            Some(before),
+        );
+        let error = match result {
+            Ok(_) => panic!("a malformed proof header must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::HeaderVersion)
+        );
+        let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+            .with(|lines| lines.borrow().clone());
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].contains("raw=not_collected"));
+        assert!(logs[1].contains("stage=header_version"));
+        assert!(logs[1].contains(&format!("raw_before={before}")));
+        assert!(logs[1].contains(&format!("raw_after=Some({before})")));
+        assert!(logs[1].contains("sample=independent_statements"));
+        for line in &logs {
+            assert!(!line.contains(fixture.path.to_string_lossy().as_ref()));
+        }
+        // Neither another MCP open nor another Web open emits a downgrade or
+        // a second upgrade for the same failure transition.
+        assert!(Sources::capture_focused(&options, std::slice::from_ref(&selected)).is_err());
+        assert!(
+            crate::events::store::chunk_proofs::Focused::open_with_raw(
+                &crate::events::EventCache::path(&options.cache),
+                fixture.path.to_str().unwrap(),
+                &ledger,
+                Some(before),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+                .with(|lines| lines.borrow().len()),
+            2
+        );
+    }
+
+    #[test]
+    fn records_query_error_keeps_unstaged_messages_and_sanitizes_staged_failures() {
+        let sources = Sources::new(&Options::default());
+        let records = sources.reader();
+        assert_eq!(
+            records.query_error("original caller message").to_json(),
+            serde_json::json!({"error":{"code":"io","message":"original caller message"}})
+        );
+        let original = crate::source_carrier::FailureStage::PageHash
+            .wrap(io::Error::other("private provider cause"));
+        let error = records.proof_failure(Path::new("synthetic-source"), original);
+        assert_eq!(
+            crate::source_carrier::FailureStage::of(&error),
+            Some(crate::source_carrier::FailureStage::PageHash)
+        );
+        assert_eq!(
+            records.query_error("private caller message").to_json(),
+            serde_json::json!({"error":{"code":"io","message":"Original native transcript proofs are unavailable"},
+                "stage":"page_hash"})
+        );
+    }
+
+    #[test]
+    fn local_only_proofs_qualify_changed_carriers_with_bounded_reads() {
+        use std::io::Write;
+        for mutation in ["append", "copy", "touch", "legacy", "rewrite", "truncate"] {
+            let fixture = Fixture::new(&format!("proof-carrier-{mutation}"));
+            let original = vec![b'x'; 3 * 1024 * 1024];
+            fs::write(&fixture.path, &original).unwrap();
+            let (mut sources, reference, generation) = fixture.sources();
+            match mutation {
+                "append" => fs::OpenOptions::new()
+                    .append(true)
+                    .open(&fixture.path)
+                    .unwrap()
+                    .write_all(b"tail")
+                    .unwrap(),
+                "copy" => {
+                    fs::rename(&fixture.path, fixture.path.with_extension("old")).unwrap();
+                    fs::write(&fixture.path, &original).unwrap();
+                }
+                "touch" => fs::File::options()
+                    .write(true)
+                    .open(&fixture.path)
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+                    .unwrap(),
+                "legacy" => {
+                    sources
+                        .proofs
+                        .get_mut(&fixture.path)
+                        .unwrap()
+                        .ledger
+                        .stat
+                        .changed_ns = None
+                }
+                "rewrite" => {
+                    let mut changed = original.clone();
+                    changed[17] = b'y';
+                    fs::write(&fixture.path, changed).unwrap();
+                }
+                "truncate" => fs::write(&fixture.path, b"short").unwrap(),
+                _ => unreachable!(),
+            }
+            let records =
+                sources.reader_with_mode(None, crate::SessionSourceReadMode::LocalOrPinnedProvider);
+            crate::source_chunks::READ_BYTES.with(|n| n.set(0));
+            crate::events::HASHED_BYTES.with(|n| n.set(0));
+            let result = records.read_range(&reference, Some(&generation), 17, 1);
+            if matches!(mutation, "rewrite" | "truncate") {
+                assert!(result.is_err(), "{mutation}");
+            } else {
+                assert_eq!(&*result.unwrap().bytes, b"x", "{mutation}");
+                records.finish().unwrap();
+                assert_eq!(
+                    crate::source_chunks::READ_BYTES.with(std::cell::Cell::get),
+                    2 * crate::source_chunks::SIZE as u64
+                );
+                // The first accepted carrier remains fixed across chunks.
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&fixture.path)
+                    .unwrap()
+                    .write_all(b"race")
+                    .unwrap();
+                assert!(
+                    records
+                        .read_range(&reference, Some(&generation), 18, 1)
+                        .is_err()
+                );
+                assert!(records.finish().is_err());
+                let rejected = records
+                    .query_error("presentation omitted a failed record")
+                    .to_json();
+                assert_eq!(rejected["error"]["code"], "stale_projection");
+                assert_eq!(rejected["status"], 409);
+                assert_eq!(rejected["fence_reason"], "local_source_revision");
+                assert_eq!(rejected["local_revision_reason"], "size_grew");
+                assert!(rejected.get("entries").is_none());
+            }
+            assert!(
+                records
+                    .read_range(&reference, Some("wrong"), 17, 1)
+                    .is_err()
+            );
+            assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
         }
     }
 

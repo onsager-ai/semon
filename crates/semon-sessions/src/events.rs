@@ -80,7 +80,12 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v19: ledgers verify the full consumed prefix instead of just two windows.
 /// v23: native connector completions and tool search are tools, including
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
-const CACHE_VERSION: u32 = 24;
+/// v25: agent messages carry their direction; coordinator messages and unknown origin kinds are indexed; relay tags count only at the start of a prompt.
+/// v26: a subagent's non-final send (`senderTaskId`, no `handback`) is an up agent message flagged [`AGM_PROGRESS`], not a relay; relay tags nested in another relay block are not their own events.
+/// v27: rebuild derived billing usage after a pricing-table restoration.
+/// v28: source-qualified code-mode output/terminal attribution and direct formatter
+/// outcomes; event-state envelopes preserve bounded selected output evidence.
+const CACHE_VERSION: u32 = 28;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,15 +147,27 @@ pub(crate) struct CodexUsageEvent {
 /// Native thread counters can include a fork's inherited context.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CodexNativeUsage {
+    #[serde(default)]
     seen: BTreeSet<String>,
     tokens: Tokens,
+    #[serde(default)]
     by_model: BTreeMap<String, ModelTokens>,
+    #[serde(default)]
     events: Vec<CodexUsageEvent>,
+    #[serde(skip)]
+    cost: Option<crate::pricing::CostBuild>,
 }
 
 impl CodexNativeUsage {
     pub(crate) fn tokens(&self) -> Tokens {
         self.tokens.clone()
+    }
+
+    pub(crate) fn compact(&self) -> Self {
+        Self {
+            tokens: self.tokens.clone(),
+            ..Self::default()
+        }
     }
 
     pub(crate) fn observe(
@@ -159,13 +176,42 @@ impl CodexNativeUsage {
         model: String,
         time: Option<i64>,
     ) {
-        let Some(usage) = payload.get("usage") else {
+        let Some((key, tokens, counts)) = Self::decode(payload) else {
             return;
         };
+        let native = slot.get_or_insert_with(Default::default);
+        if !native.seen.insert(key) {
+            return;
+        }
+        native.tokens.input += tokens.input;
+        native.tokens.cached_input += tokens.cached_input;
+        native.tokens.output += tokens.output;
+        native.tokens.total += tokens.total;
+        native.tokens.reasoning_output += tokens.reasoning_output;
+        native
+            .by_model
+            .entry(model.clone())
+            .or_default()
+            .add(&counts);
+        let event = CodexUsageEvent {
+            model,
+            tokens: counts,
+            timestamp: time,
+        };
+        if let Some(cost) = &mut native.cost {
+            cost.codex(&event);
+        } else {
+            native.events.push(event);
+        }
+    }
+
+    /// Shared validation for indexing and receipt-checked representation migration.
+    pub(crate) fn decode(payload: &Value) -> Option<(String, Tokens, ModelTokens)> {
+        let usage = payload.get("usage")?;
         let identity =
             ["thread_id", "session_id", "turn_id", "response_id"].map(|key| field(payload, key));
         if identity.iter().any(|id| id.is_none_or(str::is_empty)) {
-            return;
+            return None;
         }
         let [
             Some(input),
@@ -184,35 +230,27 @@ impl CodexNativeUsage {
         ]
         .map(|key| usage.get(key).and_then(Value::as_u64))
         else {
-            return;
+            return None;
         };
-        let native = slot.get_or_insert_with(Default::default);
         // Serialize the exact tuple, avoiding delimiter collisions or timing joins.
         let key = serde_json::to_string(&identity).expect("string tuple serializes");
-        if !native.seen.insert(key) {
-            return;
-        }
         let counts = ModelTokens {
             input: input.saturating_sub(cache_read),
             output,
             cache_read,
             cache_write,
         };
-        native.tokens.input += input;
-        native.tokens.cached_input += cache_read;
-        native.tokens.output += output;
-        native.tokens.total += total;
-        native.tokens.reasoning_output += reasoning;
-        native
-            .by_model
-            .entry(model.clone())
-            .or_default()
-            .add(&counts);
-        native.events.push(CodexUsageEvent {
-            model,
-            tokens: counts,
-            timestamp: time,
-        });
+        Some((
+            key,
+            Tokens {
+                input,
+                cached_input: cache_read,
+                output,
+                total,
+                reasoning_output: reasoning,
+            },
+            counts,
+        ))
     }
 }
 
@@ -287,6 +325,8 @@ impl DirtyRows {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileIndex {
     pub(crate) dirty_rows: Option<DirtyRows>,
+    /// Only this parse batch; durable facts and identities stay in the Event Index.
+    pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
     pub(crate) tree_summary: Option<crate::native_tree::Summary>,
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker_index: Option<crate::native_marker::Index>,
@@ -726,6 +766,26 @@ impl FileIndex {
             .map_or(&self.codex_usage_events, |usage| &usage.events)
     }
 
+    #[cfg(test)]
+    pub(crate) fn native_usage_history_sizes(&self) -> Option<(usize, usize)> {
+        self.codex_native_usage
+            .as_ref()
+            .map(|native| (native.seen.len(), native.events.len()))
+    }
+
+    pub(crate) fn codex_cost(&self) -> crate::pricing::CostBuild {
+        if let Some(native) = &self.codex_native_usage
+            && let Some(cost) = &native.cost
+        {
+            return cost.clone();
+        }
+        let mut cost = crate::pricing::CostBuild::default();
+        for event in self.codex_usage_events() {
+            cost.codex(event);
+        }
+        cost
+    }
+
     pub(crate) fn tokens(&self, harness: &str) -> Tokens {
         if harness == "copilot" {
             return self
@@ -830,6 +890,7 @@ thread_local! {
     pub(crate) static AFTER_CATALOG_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static CATALOG_DERIVED_SOURCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static CATALOG_PUBLISHED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static INDEX_WRITTEN_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -1042,8 +1103,9 @@ pub(crate) trait IndexStore: Send {
         &mut self,
         paths: &[String],
         runtime: &str,
+        journaled_runtime: bool,
     ) -> Result<Outcome, StoreError> {
-        let _ = (paths, runtime);
+        let _ = (paths, runtime, journaled_runtime);
         Err(StoreError::Data("semantic staging unavailable".into()))
     }
     fn semantic_batch(
@@ -1087,11 +1149,51 @@ pub(crate) trait IndexStore: Send {
         Err(StoreError::Data("semantic staging unavailable".into()))
     }
 
+    fn semantic_replay_page(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> Result<crate::model::relation_stage::Context, StoreError> {
+        let _ = (epoch, owners, after);
+        Err(StoreError::Data("semantic replay unavailable".into()))
+    }
+
     /// `path`'s ledger as committed now.
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError>;
 
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
+
+    fn native_usage_seen(
+        &self,
+        _path: &str,
+        _ledger: &Ledger,
+        _identity: &str,
+    ) -> Result<store::native_usage::Seen, StoreError> {
+        Ok(store::native_usage::Seen::default())
+    }
+
+    fn advance_native_usage_migration(
+        &mut self,
+        _options: &crate::Options,
+    ) -> io::Result<(bool, Option<String>)> {
+        Ok((false, None))
+    }
+    fn native_usage_migration_pending(&self) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn queue_tree_repair(
+        &mut self,
+        _path: &str,
+        _ledger: &Ledger,
+        _harness: &str,
+    ) -> io::Result<()> {
+        Err(io::Error::other(
+            "native tree repair requires a durable store",
+        ))
+    }
 
     /// A committed tree summary and its evidence, without event/signal rows.
     fn load_tree(
@@ -1317,13 +1419,9 @@ impl EventCache {
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
-        v1_cache.with_extension("sqlite3")
-    }
-
-    /// The retired JSON event cache, `sessions-index.events.json`: its
-    /// reported runs are imported when the store opens, and it is removed.
-    pub(crate) fn legacy_path(v1_cache: &Path) -> PathBuf {
-        v1_cache.with_extension("events.json")
+        let path = v1_cache.with_extension("sqlite3");
+        crate::pricing::runtime::register_index(path.clone());
+        path
     }
 
     /// Opens the index beside `v1_cache` and reads all of it. When the
@@ -1333,8 +1431,9 @@ impl EventCache {
         #[cfg(test)]
         CACHE_READS.with(|reads| reads.set(reads.get() + 1));
         let path = Self::path(v1_cache);
-        let mut cache = match store::open(&path, &Self::legacy_path(v1_cache)) {
+        let mut cache = match store::open(&path) {
             Ok((store, loaded)) => {
+                crate::pricing::runtime::register_index(path.clone());
                 let mut cache = Self::from_loaded(loaded);
                 cache.store = Some(store);
                 cache
@@ -1354,8 +1453,7 @@ impl EventCache {
     /// Writable producer cache with lazy, exact-path FileIndex loads. Never falls
     /// back to a full restore or an in-memory producer after an open failure.
     pub(crate) fn open_scoped(v1_cache: &Path) -> Result<Self, String> {
-        let (store, loaded) =
-            store::open_scoped(&Self::path(v1_cache), &Self::legacy_path(v1_cache))?;
+        let (store, loaded) = store::open_scoped(&Self::path(v1_cache))?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
         cache.scoped = true;
@@ -1363,7 +1461,7 @@ impl EventCache {
         Ok(cache)
     }
 
-    /// Only the complete compatibility/background scan owns disappearance
+    /// Only the complete native background scan owns disappearance
     /// reconciliation. Capture ledger metadata before discovery so a concurrent
     /// newly committed source cannot be mistaken for a disappeared source.
     pub(crate) fn begin_full_scan(&mut self) -> io::Result<()> {
@@ -1607,15 +1705,37 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    pub(crate) fn semantic_replay_page(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> io::Result<crate::model::relation_stage::Context> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_replay_page(epoch, owners, after)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
     pub(crate) fn begin_semantic_stage(
         &mut self,
         paths: &[String],
         runtime: &str,
     ) -> io::Result<Outcome> {
+        self.begin_semantic_stage_with_journal(paths, runtime, false)
+    }
+
+    pub(crate) fn begin_semantic_stage_with_journal(
+        &mut self,
+        paths: &[String],
+        runtime: &str,
+        journaled_runtime: bool,
+    ) -> io::Result<Outcome> {
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .begin_semantic_stage(paths, runtime)
+            .begin_semantic_stage(paths, runtime, journaled_runtime)
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
@@ -1978,7 +2098,7 @@ impl EventCache {
         let Some(v1_cache) = self.v1_cache.clone() else {
             return;
         };
-        match store::open(&Self::path(&v1_cache), &Self::legacy_path(&v1_cache)) {
+        match store::open(&Self::path(&v1_cache)) {
             Ok((store, loaded)) => {
                 let runs: Vec<_> = self.reported_runs().cloned().collect();
                 let stamp = self.claude_json_stamp.take();
@@ -2070,6 +2190,26 @@ impl EventCache {
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
+    }
+
+    pub(crate) fn advance_native_usage_migration(
+        &mut self,
+        options: &crate::Options,
+    ) -> io::Result<bool> {
+        let Some(store) = self.store.as_mut() else {
+            return Ok(false);
+        };
+        let (pending, changed) = store.advance_native_usage_migration(options)?;
+        if let Some(path) = changed {
+            self.files.remove(&path);
+        }
+        Ok(pending)
+    }
+
+    pub(crate) fn native_usage_migration_pending(&self) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|store| store.native_usage_migration_pending().unwrap_or(true))
     }
 
     pub(crate) fn indexed_stat(&self, path: &Path) -> Option<Stat> {
@@ -2295,9 +2435,20 @@ impl EventCache {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
             && let Some(index) = &entry.index
+            && index
+                .codex_native_usage
+                .as_ref()
+                .and_then(|native| native.cost.as_ref())
+                .is_none_or(|cost| {
+                    cost.pricing_fingerprint == crate::pricing::snapshot().fingerprint
+                })
         {
             return Base::Found(Arc::clone(index));
         }
+        // A pricing-only fingerprint mismatch falls through to the committed
+        // SQLite index below. `load_file` restores retained facts/dimensions;
+        // it does not open the native log body. Ordinary ledger movement still
+        // follows the existing bounded append/rebuild path.
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
         match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),
@@ -2308,6 +2459,29 @@ impl EventCache {
                 Base::Unreadable
             }
         }
+    }
+
+    fn require_usage_store(&self, index: &FileIndex) -> io::Result<()> {
+        // Either consumer can accept usage first: Tree also accepts it before
+        // the first model. Their compact checkpoints keep historical identities
+        // only in SQLite, so neither can become an in-memory append base.
+        let tree_checkpoint = index.native_usage_observations.is_some()
+            && index
+                .tree_summary
+                .as_ref()
+                .is_some_and(|tree| tree.stored.is_some());
+        if self.store.is_none()
+            && (tree_checkpoint
+                || index
+                    .codex_native_usage
+                    .as_ref()
+                    .is_some_and(|native| native.cost.is_some()))
+        {
+            return Err(io::Error::other(
+                "normalized native usage store unavailable",
+            ));
+        }
+        Ok(())
     }
 
     /// Parsing happens before the write reservation. Cold complete new files
@@ -2419,6 +2593,9 @@ pub(crate) fn scan_file(
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
+    if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
+        cache.require_usage_store(index)?;
+    }
     let started = cache.scan_measurements.start();
     let _source_lock = cache
         .lock_cache
@@ -2511,6 +2688,7 @@ pub(crate) fn scan_file(
             if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
                 match cache.base(&key, ledger) {
                     Base::Found(index) => {
+                        cache.require_usage_store(&index)?;
                         trusted_append = evidence
                             && index
                                 .source_chunks
@@ -2594,6 +2772,9 @@ pub(crate) fn scan_file(
         let clone_started = Instant::now();
         let shared = Arc::strong_count(&index) > 1;
         let writable = Arc::make_mut(&mut index);
+        if !append && harness == "codex" {
+            writable.native_usage_observations = Some(Vec::new());
+        }
         if shared {
             cache.index_clone += clone_started.elapsed();
         }
@@ -2629,7 +2810,26 @@ pub(crate) fn scan_file(
         if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
-        if harness != "copilot" && writable.tree_summary.is_none() {
+        let deferred_tree =
+            harness != "copilot" && writable.tree_summary.is_none() && from > 1024 * 1024;
+        if deferred_tree {
+            // Small compatibility repairs have a fixed byte ceiling. Large
+            // retained sources resume through the verified projection worker;
+            // never rebuild a historical Summary in the foreground reader.
+            if let (Some(store), Some(ledger)) = (cache.store.as_mut(), recorded.as_ref()) {
+                store.queue_tree_repair(&key, ledger, harness)?;
+            }
+            if recorded.as_ref().is_some_and(|ledger| ledger.stat == stat) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "native tree projection repair pending",
+                ));
+            }
+            // Advancing the Index receipt for a real append lets the worker
+            // resume its verified prefix. Tree stays explicitly unavailable
+            // until that worker commits a complete replacement projection.
+        }
+        if harness != "copilot" && writable.tree_summary.is_none() && !deferred_tree {
             let started = cache.scan_measurements.start();
             let (summary, observed) =
                 crate::native_tree::Summary::repair(&mut file, from, harness)?;
@@ -2668,8 +2868,22 @@ pub(crate) fn scan_file(
             handoffs.begin_append();
         }
         let parse_started = cache.scan_timing.then(Instant::now);
-        let (offset, parsed, bounded) =
-            parse(&mut file, from, harness, writable, cache.scan_byte_budget)?;
+        let (offset, parsed, bounded) = parse(
+            &mut file,
+            from,
+            harness,
+            writable,
+            cache.scan_byte_budget,
+            append
+                .then(|| {
+                    cache
+                        .store
+                        .as_deref()
+                        .zip(recorded.as_ref())
+                        .map(|(store, ledger)| (store, key.as_str(), ledger))
+                })
+                .flatten(),
+        )?;
         if let Some(started) = parse_started {
             cache.parse_duration += started.elapsed();
         }
@@ -2850,6 +3064,17 @@ pub(crate) fn scan_file(
                 .ok_or_else(|| io::Error::other("bounded source requires a durable store"))?;
             super::events::store::checkpoint_source_scan(stem, &key, &ledger, &stat)?;
         }
+        if cache.store.is_some() && !cache.unpersisted.contains(&key) {
+            store::native_usage::checkpoint(Arc::make_mut(&mut index));
+            if let Some(store) = cache.store.as_ref()
+                && let Some((stored, metadata)) = store
+                    .load_tree(&key, &ledger.stat)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+                && stored == ledger
+            {
+                Arc::make_mut(&mut index).tree_summary = Some(metadata.summary);
+            }
+        }
         cache.files.insert(
             key,
             CachedFile {
@@ -2870,6 +3095,7 @@ fn parse(
     harness: &str,
     index: &mut FileIndex,
     budget: Option<u64>,
+    stored: Option<(&dyn IndexStore, &str, &Ledger)>,
 ) -> io::Result<(u64, [u8; 32], bool)> {
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
@@ -2910,8 +3136,47 @@ fn parse(
             SOURCE_HASHED_BYTES.with(|bytes| bytes.set(bytes.get() + length as u64));
         }
         let record = serde_json::from_slice::<Value>(&line);
+        // Only a touched message needs its old report for the Tree delta.
+        if harness == "claude"
+            && let Some(summary) = &mut index.tree_summary
+            && summary.usage_total.is_some()
+            && let Some(message) = record.as_ref().ok().and_then(|r| r.get("message"))
+            && message.get("usage").is_some()
+            && let Some(id) = field(message, "id")
+            && !summary.usage_by_id.contains_key(id)
+            && let Some(old) = index.usage_by_id.get(id)
+        {
+            summary
+                .usage_by_id
+                .insert(id.to_owned(), old.tokens.clone());
+        }
+        let observation = if harness == "codex" {
+            record.as_ref().ok().and_then(|record| {
+                store::native_usage::Observation::capture(
+                    record,
+                    &line,
+                    line_offset,
+                    index.last_model.as_deref(),
+                )
+            })
+        } else {
+            None
+        };
+        let known = if let (Some(observation), Some((store, path, ledger))) = (&observation, stored)
+        {
+            store
+                .native_usage_seen(path, ledger, observation.identity())
+                .map_err(|error| io::Error::other(error.to_string()))?
+        } else {
+            store::native_usage::Seen::default()
+        };
+        if let (Some(observation), Some(observations)) =
+            (observation, &mut index.native_usage_observations)
+        {
+            observations.push(observation);
+        }
         if let Some(summary) = &mut index.tree_summary {
-            summary.observe(record.as_ref().ok(), harness);
+            summary.observe_counted(record.as_ref().ok(), harness, !known.tree);
         }
         match record {
             Ok(record) if record.is_object() => {
@@ -2925,8 +3190,10 @@ fn parse(
                     copilot(index, &record, line_offset);
                 } else if harness == "claude" {
                     claude(index, &record, line_offset);
-                } else {
+                } else if !known.model {
                     codex(index, &record, line_offset);
+                } else {
+                    activity(index, record_time(&record));
                 }
             }
             _ => gap(index, line_offset),
@@ -2958,8 +3225,9 @@ pub(crate) enum Kind {
     /// A relay received (`origin.kind == "peer"`, or a
     /// `<cross-session-message>` block).
     Xsm,
-    /// A subagent handing back (`origin.handback`, an `<agent-message>`
-    /// block, or a Codex `agent_message`).
+    /// A message between a session and its own agent: a subagent's hand-back
+    /// or `<agent-message>` (up), a coordinator message (down), or a Codex
+    /// `agent_message`, its direction in `script`.
     Agm,
     /// A `<task-notification>` block.
     Tn,
@@ -2970,6 +3238,8 @@ pub(crate) enum Kind {
     /// Harness text added before a Codex prompt, `n` its tag (in `extras`
     /// only).
     Harness,
+    /// A user-side record whose `origin.kind` semon doesn't classify, `n` that kind (in `extras` only).
+    Other,
 }
 
 /// Result flags on a tool call.
@@ -3010,6 +3280,30 @@ pub(crate) const SENDS: u8 = 2;
 pub(crate) const BACKGROUND: u8 = 4;
 /// A task notification reports failure by status or a nonzero summary exit code.
 pub(crate) const BACKGROUND_FAILED: u8 = 8;
+/// An agent message sent by an agent to the session that receives it: a
+/// subagent's hand-back or send, or a Codex child's message to its parent.
+pub(crate) const AGM_UP: u8 = 16;
+/// An agent message sent down: a parent's message to its running or
+/// resumed subagent (`origin.kind == "coordinator"`), or a Codex parent's
+/// message to its child.
+pub(crate) const AGM_DOWN: u8 = 32;
+/// A Codex agent message between agents where neither is the other's ancestor.
+pub(crate) const AGM_SIDE: u8 = 64;
+/// The agent's final report for its run (`origin.handback == true`).
+pub(crate) const AGM_FINAL: u8 = 128;
+/// Agm only (`script` bits are per kind; [`STDIN`] shares the value on tool
+/// calls): a Claude subagent's send that isn't its hand-back (`senderTaskId`
+/// without `handback`), always with [`AGM_UP`]. An up message with neither
+/// this nor [`AGM_FINAL`] is a legacy `<agent-message>` tag: which it is, the
+/// log doesn't say.
+pub(crate) const AGM_PROGRESS: u8 = 1;
+/// A code-mode script calls `tools.exec_command`.
+const EXEC_COMMAND: u8 = 16;
+/// The source contains multiple or mixed command operations whose outputs
+/// have no exact nested call identity.
+const AMBIGUOUS_COMMANDS: u8 = 32;
+/// A code-mode poll names its target with a literal session id.
+const LITERAL_SESSION: u8 = 64;
 
 /// Open yielded commands kept per file; past this the oldest is dropped.
 const YIELDS_MAX: usize = 64;
@@ -3054,16 +3348,23 @@ pub(crate) struct Event {
     pub(crate) b: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) t: Option<i64>,
-    /// tool: the tool_use / call id. xsm: `msg_id`. agm: the agent id.
-    /// tn: the tool-use id.
+    /// tool: the tool_use / call id. xsm: `msg_id`. agm: Claude, the sender's
+    /// `origin.senderTaskId` (the agent id or its spawning call's id), else
+    /// the tag's `from`; none for a coordinator message. Codex, the
+    /// `author` path. tn: the tool-use id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) id: Option<String>,
-    /// tool: the tool name. xsm: the sender's `origin.name`. tn: the status.
+    /// tool: the tool name. xsm: the sender's `origin.name`. agm (Claude):
+    /// `origin.from` when it differs from `id`. tn: the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) n: Option<String>,
     /// A Codex `custom_tool_call` named `exec`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode: bool,
+    /// An unnamespaced Codex `function_call` named `exec_command` or
+    /// `write_stdin`, eligible for direct formatter outcome evidence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) native_direct_call: bool,
     /// Still open for operation attribution within the current turn.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode_open: bool,
@@ -3071,11 +3372,21 @@ pub(crate) struct Event {
     /// code-mode call, the only one open when the item completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<usize>,
-    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`]), or a
+    /// Call flags: code-mode source calls ([`STDIN`], [`SENDS`],
+    /// [`EXEC_COMMAND`], [`AMBIGUOUS_COMMANDS`], [`LITERAL_SESSION`]), or a
     /// Claude Bash call launched in the [`BACKGROUND`], or a task notification
-    /// with a [`BACKGROUND_FAILED`] outcome.
+    /// with a [`BACKGROUND_FAILED`] outcome; Agm direction/finality uses
+    /// [`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`] and [`AGM_PROGRESS`].
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
+    /// A bounded literal code-mode `write_stdin` target. Retained so an
+    /// output arriving after the terminal event can still be checked exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) poll_target: Option<String>,
+    /// The one awaited command result is printed directly in a recognized
+    /// straight-line form; arbitrary text output cannot claim its identity.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) result_source: bool,
     /// Code-mode call: a command it started outlived its yield.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) y: Option<Box<Yield>>,
@@ -3380,13 +3691,22 @@ pub(crate) fn attributes(tag: &str) -> BTreeMap<String, String> {
     result
 }
 
-/// The opening-tag attribute strings of every `<name ...>` block in `text`.
-pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
+/// The block kinds a relay or notification prompt is made of.
+const RELAY_TAGS: [&str; 3] = [
+    "cross-session-message",
+    "agent-message",
+    "task-notification",
+];
+
+/// Every `<name ...>` opening tag in `text`: where its `<` is, its attribute
+/// string, and where the tag ends.
+fn opening_tags<'a>(text: &'a str, name: &str) -> Vec<(usize, &'a str, usize)> {
     let open = format!("<{name}");
     let mut result = Vec::new();
     let mut from = 0;
     while let Some(found) = text[from..].find(&open) {
-        let start = from + found + open.len();
+        let at = from + found;
+        let start = at + open.len();
         let next = text[start..].chars().next();
         if !matches!(next, Some(' ' | '>' | '\n' | '\t')) {
             from = start;
@@ -3395,10 +3715,91 @@ pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
         let Some(close) = text[start..].find('>') else {
             break;
         };
-        result.push((&text[start..start + close], start + close + 1));
+        result.push((at, &text[start..start + close], start + close + 1));
         from = start + close + 1;
     }
     result
+}
+
+/// The span of every relay block in `text`, from its `<` to the end of its
+/// closing tag; an opening tag with no later close spans only its opening tag,
+/// so it hides nothing after it.
+fn relay_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for name in RELAY_TAGS {
+        let length = format!("</{name}>").len();
+        let opens = opening_tags(text, name);
+        for ((at, _, end), close) in opens.iter().zip(closes(text, name, &opens)) {
+            spans.push((*at, close.map_or(*end, |close| close + length)));
+        }
+    }
+    spans
+}
+
+/// Where each of `opens` (`<name ...>` tags in `text`) is closed: the start
+/// of the `</name>` that balances it, counting `<name>` blocks quoted inside
+/// it, so a quoted block's close doesn't end the one around it. If nested
+/// openings leave it unbalanced, fall back to the first close after its
+/// opening tag. `None` only when no close follows the opening tag.
+fn closes(text: &str, name: &str, opens: &[(usize, &str, usize)]) -> Vec<Option<usize>> {
+    let close = format!("</{name}>");
+    let mut marks: Vec<(usize, bool)> = opens.iter().map(|(at, _, _)| (*at, true)).collect();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(&close) {
+        marks.push((from + found, false));
+        from += found + close.len();
+    }
+    marks.sort_unstable();
+    opens
+        .iter()
+        .map(|(at, _, end)| {
+            let first = marks.partition_point(|(position, _)| position < at);
+            let mut depth = 0usize;
+            for (position, open) in &marks[first..] {
+                if *open {
+                    depth += 1;
+                } else {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(*position);
+                    }
+                }
+            }
+            text[*end..].find(&close).map(|found| *end + found)
+        })
+        .collect()
+}
+
+/// Whether a block starting at `at` lies inside another block's span: quoted
+/// in its body, not a block of the prompt.
+fn nested(spans: &[(usize, usize)], at: usize) -> bool {
+    spans.iter().any(|(start, end)| *start < at && at < *end)
+}
+
+/// The opening-tag attribute strings of every top-level `<name ...>` block in
+/// `text`, each with where its tag ends. A block quoted inside another relay
+/// block (a notification's `<result>` quoting an `<agent-message>`, say)
+/// isn't one.
+pub(crate) fn tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
+    let spans = relay_spans(text);
+    opening_tags(text, name)
+        .into_iter()
+        .filter(|(at, _, _)| !nested(&spans, *at))
+        .map(|(_, attributes, end)| (attributes, end))
+        .collect()
+}
+
+fn starts_with_relay_tag(text: &str) -> bool {
+    let head = strip_reminders(text);
+    let head = match head.split_once('\n') {
+        Some((line, rest)) if line.trim() == "Another Claude session sent a message:" => rest,
+        _ if head.trim() == "Another Claude session sent a message:" => "",
+        _ => head.as_str(),
+    }
+    .trim_start();
+    head.starts_with("<cross-session-message")
+        || head.starts_with("<agent-message")
+        || head.starts_with("<task-notification>")
 }
 
 /// The text inside `<name>…</name>`, first occurrence.
@@ -3421,18 +3822,22 @@ pub(crate) fn notification_exit(summary: &str) -> Option<i64> {
         .ok()
 }
 
-/// Task-notification blocks: `(tool-use id, status, body)`.
+/// Top-level task-notification blocks: `(tool-use id, status, body)`. A
+/// block quoted inside another relay block isn't one.
 pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str)> {
+    let spans = relay_spans(text);
+    let opens = opening_tags(text, "task-notification");
+    let ends = closes(text, "task-notification", &opens);
     let mut result = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<task-notification>") {
-        let body_start = start + "<task-notification>".len();
-        let Some(length) = rest[body_start..].find("</task-notification>") else {
-            break;
+    for ((at, _, start), close) in opens.iter().zip(ends) {
+        let Some(close) = close else {
+            continue;
         };
-        let body = &rest[body_start..body_start + length];
+        if nested(&spans, *at) {
+            continue;
+        }
+        let body = &text[*start..close];
         result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
-        rest = &rest[body_start + length..];
     }
     result
 }
@@ -3451,6 +3856,39 @@ fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
             n: from
                 .filter(|from| task.is_some_and(|task| task != *from))
                 .map(str::to_owned),
+            script: AGM_UP | AGM_FINAL,
+            ..Event::default()
+        };
+    }
+    let peer = Peer {
+        sock: field(origin, "from").map(str::to_owned),
+        pid: origin.get("verifiedPeerPid").and_then(Value::as_u64),
+        start: origin
+            .get("verifiedPeerProcStart")
+            .and_then(|value| match value {
+                Value::String(text) => Some(text.clone()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }),
+    };
+    if let Some(task) = field(origin, "senderTaskId")
+        && field(origin, "msg_id").is_none()
+    {
+        // A subagent's send that isn't its hand-back: to its parent (a
+        // progress receipt) or to another agent. Which one, the model
+        // decides from the tree. `peer.sock` keeps `from` (the agent id), as
+        // when this was a relay, so the sender resolves the same way. One
+        // with a `msg_id` went over the peer network and joins its send by
+        // that id: it stays a relay.
+        let from = field(origin, "from");
+        return Event {
+            k: Kind::Agm,
+            o: offset,
+            t: time,
+            id: Some(task.to_owned()),
+            n: from.filter(|from| *from != task).map(str::to_owned),
+            script: AGM_UP | AGM_PROGRESS,
+            peer: Some(peer),
             ..Event::default()
         };
     }
@@ -3460,17 +3898,7 @@ fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
         t: time,
         id: field(origin, "msg_id").map(str::to_owned),
         n: field(origin, "name").map(str::to_owned),
-        peer: Some(Peer {
-            sock: field(origin, "from").map(str::to_owned),
-            pid: origin.get("verifiedPeerPid").and_then(Value::as_u64),
-            start: origin
-                .get("verifiedPeerProcStart")
-                .and_then(|value| match value {
-                    Value::String(text) => Some(text.clone()),
-                    Value::Number(number) => Some(number.to_string()),
-                    _ => None,
-                }),
-        }),
+        peer: Some(peer),
         ..Event::default()
     }
 }
@@ -3510,63 +3938,93 @@ fn prompt_events(
             }
             return;
         }
+        Some("coordinator") => {
+            push(
+                summary,
+                Event {
+                    k: Kind::Agm,
+                    o: offset,
+                    t: time,
+                    script: AGM_DOWN,
+                    ..Event::default()
+                },
+            );
+            return;
+        }
+        Some("task-notification") => {}
+        Some(kind) => {
+            extra(
+                summary,
+                Event {
+                    k: Kind::Other,
+                    o: offset,
+                    t: time,
+                    n: Some(kind.to_owned()),
+                    ..Event::default()
+                },
+            );
+            return;
+        }
         _ => {}
     }
     let mut found = false;
-    for (tag, _) in tags(text, "cross-session-message") {
-        let attributes = attributes(tag);
-        push(
-            summary,
-            Event {
-                k: Kind::Xsm,
-                o: offset,
-                t: time,
-                n: attributes.get("from-name").cloned(),
-                peer: Some(Peer {
-                    sock: attributes.get("from").cloned(),
-                    ..Peer::default()
-                }),
-                ..Event::default()
-            },
-        );
-        found = true;
-    }
-    for (tag, _) in tags(text, "agent-message") {
-        push(
-            summary,
-            Event {
-                k: Kind::Agm,
-                o: offset,
-                t: time,
-                id: attributes(tag).get("from").cloned(),
-                ..Event::default()
-            },
-        );
-        found = true;
-    }
-    for (id, status, body) in notifications(text) {
-        push(
-            summary,
-            Event {
-                k: Kind::Tn,
-                o: offset,
-                t: time,
-                id: id.map(str::to_owned),
-                n: status.map(str::to_owned),
-                script: if !matches!(status, Some("killed" | "stopped"))
-                    && (status == Some("failed")
-                        || inner(body, "summary")
-                            .and_then(notification_exit)
-                            .is_some_and(|exit| exit != 0))
-                {
-                    BACKGROUND_FAILED
-                } else {
-                    0
+    if starts_with_relay_tag(text) {
+        for (tag, _) in tags(text, "cross-session-message") {
+            let attributes = attributes(tag);
+            push(
+                summary,
+                Event {
+                    k: Kind::Xsm,
+                    o: offset,
+                    t: time,
+                    n: attributes.get("from-name").cloned(),
+                    peer: Some(Peer {
+                        sock: attributes.get("from").cloned(),
+                        ..Peer::default()
+                    }),
+                    ..Event::default()
                 },
-                ..Event::default()
-            },
-        );
-        found = true;
+            );
+            found = true;
+        }
+        for (tag, _) in tags(text, "agent-message") {
+            push(
+                summary,
+                Event {
+                    k: Kind::Agm,
+                    o: offset,
+                    t: time,
+                    id: attributes(tag).get("from").cloned(),
+                    script: AGM_UP,
+                    ..Event::default()
+                },
+            );
+            found = true;
+        }
+        for (id, status, body) in notifications(text) {
+            push(
+                summary,
+                Event {
+                    k: Kind::Tn,
+                    o: offset,
+                    t: time,
+                    id: id.map(str::to_owned),
+                    n: status.map(str::to_owned),
+                    script: if !matches!(status, Some("killed" | "stopped"))
+                        && (status == Some("failed")
+                            || inner(body, "summary")
+                                .and_then(notification_exit)
+                                .is_some_and(|exit| exit != 0))
+                    {
+                        BACKGROUND_FAILED
+                    } else {
+                        0
+                    },
+                    ..Event::default()
+                },
+            );
+            found = true;
+        }
     }
     if found || meta {
         return;
@@ -3714,9 +4172,107 @@ pub(crate) enum ScriptArg {
     Absent,
     /// A plain string literal, unescaped.
     Literal(String),
+    /// A nonnegative integer literal, as used by numeric exec session ids.
+    Number(u64),
     /// Anything else: a variable, an expression, a template with `${…}`, or
     /// a call whose argument isn't an object literal this reader can follow.
     Other,
+}
+
+/// One native text block, with its source-array ordinal and type retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutputBlock<'a> {
+    pub(crate) ordinal: usize,
+    pub(crate) kind: Option<&'a str>,
+    pub(crate) content: OutputBlockContent<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputBlockContent<'a> {
+    Text { text: &'a str, header: bool },
+    Image,
+    Unknown,
+}
+
+/// The native output's original scalar or ordered content blocks. It keeps
+/// boundaries until a caller explicitly needs a text rendering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OutputContentView<'a> {
+    Text(&'a str),
+    Blocks(Vec<OutputBlock<'a>>),
+}
+
+fn text_content_type(kind: Option<&str>) -> bool {
+    matches!(kind, Some("text" | "input_text" | "output_text"))
+}
+
+fn successful_script_header(text: &str) -> bool {
+    let text = text.trim_start();
+    if text == "Script completed" {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix("Script completed\n") else {
+        return false;
+    };
+    let Some((wall_time, rest)) = rest.split_once('\n') else {
+        return false;
+    };
+    let Some(wall_time) = wall_time.strip_prefix("Wall time ") else {
+        return false;
+    };
+    let success_header = if let Some(seconds) = wall_time.strip_suffix(" seconds") {
+        finite_seconds(seconds, true)
+    } else if let Some((total, timings)) = wall_time.split_once(" seconds (code-mode ") {
+        let Some((host, overhead)) = timings.split_once(" seconds; overhead ") else {
+            return false;
+        };
+        let Some(overhead) = overhead.strip_suffix(" seconds)") else {
+            return false;
+        };
+        finite_seconds(total, true) && finite_seconds(host, true) && finite_seconds(overhead, false)
+    } else {
+        false
+    };
+    success_header && (rest == "Output:" || rest == "Output:\n")
+}
+
+fn finite_seconds(text: &str, nonnegative: bool) -> bool {
+    text.parse::<f64>()
+        .is_ok_and(|seconds| seconds.is_finite() && (!nonnegative || seconds >= 0.0))
+}
+
+pub(crate) fn output_content_view(output: &Value) -> Option<OutputContentView<'_>> {
+    match output {
+        Value::String(text) => Some(OutputContentView::Text(text)),
+        Value::Array(parts) => Some(OutputContentView::Blocks(
+            parts
+                .iter()
+                .enumerate()
+                .map(|(ordinal, part)| {
+                    let kind = field(part, "type");
+                    let content = if text_content_type(kind) {
+                        match field(part, "text") {
+                            Some(text) => OutputBlockContent::Text {
+                                text,
+                                header: ordinal == 0 && successful_script_header(text),
+                            },
+                            None => OutputBlockContent::Unknown,
+                        }
+                    } else if matches!(kind, Some("image" | "input_image")) {
+                        OutputBlockContent::Image
+                    } else {
+                        OutputBlockContent::Unknown
+                    };
+                    OutputBlock {
+                        ordinal,
+                        kind,
+                        content,
+                    }
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
 }
 
 fn ident_char(c: char) -> bool {
@@ -3805,6 +4361,17 @@ fn read_literal(text: &str, start: usize) -> (Option<String>, usize) {
 fn script_value(text: &str, start: usize) -> ScriptArg {
     let rest = text[start..].trim_start();
     if !rest.starts_with(['"', '\'', '`']) {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let boundary = rest[digits..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '}' | ']'));
+        if digits > 0
+            && boundary
+            && let Ok(number) = rest[..digits].parse::<u64>()
+        {
+            return ScriptArg::Number(number);
+        }
         return ScriptArg::Other;
     }
     match read_literal(text, text.len() - rest.len()).0 {
@@ -3813,12 +4380,19 @@ fn script_value(text: &str, start: usize) -> ScriptArg {
     }
 }
 
-/// Where the source's first call to `tool` opens its arguments: `tool` as a
-/// whole identifier followed by `(`, outside comments and string literals.
-fn call_open(script: &str, tool: &str) -> Option<usize> {
+#[derive(Default)]
+struct CallMatches {
+    first: Option<usize>,
+    multiple: bool,
+}
+
+/// The first one or two source calls to `tool`, outside comments and string
+/// literals. The scanner only distinguishes zero, one and multiple calls.
+fn call_matches(script: &str, tool: &str) -> CallMatches {
     if tool.is_empty() {
-        return None;
+        return CallMatches::default();
     }
+    let mut found = CallMatches::default();
     let mut at = 0;
     while let Some(c) = script[at..].chars().next() {
         match c {
@@ -3844,7 +4418,11 @@ fn call_open(script: &str, tool: &str) -> Option<usize> {
                 at = end;
                 let rest = script[at..].trim_start();
                 if word == tool && rest.starts_with('(') {
-                    return Some(script.len() - rest.len() + 1);
+                    if found.first.is_some() {
+                        found.multiple = true;
+                        return found;
+                    }
+                    found.first = Some(script.len() - rest.len() + 1);
                 }
                 continue;
             }
@@ -3852,7 +4430,13 @@ fn call_open(script: &str, tool: &str) -> Option<usize> {
         }
         at += c.len_utf8();
     }
-    None
+    found
+}
+
+/// Where the source's first call to `tool` opens its arguments: `tool` as a
+/// whole identifier followed by `(`, outside comments and string literals.
+fn call_open(script: &str, tool: &str) -> Option<usize> {
+    call_matches(script, tool).first
 }
 
 /// What a code-mode script gives `key` in its first call to `tool`
@@ -3940,40 +4524,427 @@ pub(crate) fn script_command(script: &str) -> Option<String> {
     }
 }
 
-/// [`STDIN`] and [`SENDS`] for a code-mode script's source. `chars` that
-/// can't be read count as input sent, so a poll is never hidden on a guess.
-/// A script that starts a command is never a poll, even one that goes on to
-/// poll what it started.
-fn script_flags(script: &str) -> u8 {
-    if script_arg(script, "exec_command", "cmd").is_some() {
-        return 0;
-    }
-    match script_arg(script, "write_stdin", "chars") {
-        None => 0,
-        Some(ScriptArg::Absent) => STDIN,
-        Some(ScriptArg::Literal(chars)) if chars.is_empty() => STDIN,
-        Some(_) => STDIN | SENDS,
+fn script_session_target(script: &str) -> Option<String> {
+    match script_arg(script, "write_stdin", "session_id")? {
+        ScriptArg::Literal(session) if !session.is_empty() && session.len() <= 64 => Some(session),
+        ScriptArg::Number(session) => Some(session.to_string()),
+        _ => None,
     }
 }
 
-/// A code-mode script's output that is one exec result: the harness header
-/// and the script's text, a JSON object with the command's `output` and
-/// `wall_time_seconds`, as `text(JSON.stringify(r))` prints it.
-pub(crate) fn yield_json(output: Option<&Value>) -> Option<Value> {
-    let text = match output? {
-        Value::String(text) => text.as_str(),
-        Value::Array(parts) => {
-            let texts: Vec<&str> = parts
-                .iter()
-                .filter_map(|part| field(part, "text"))
-                .collect();
-            match texts.as_slice() {
-                [header, body] if header.trim_start().starts_with("Script completed") => *body,
-                [body] => *body,
-                _ => return None,
+/// Code-mode command operations visible in a script. Poll links require one
+/// literal `write_stdin` target; mixed or multiple operations stay unowned.
+fn script_flags(script: &str) -> u8 {
+    let exec = call_matches(script, "exec_command");
+    let stdin = call_matches(script, "write_stdin");
+    let mut flags = 0;
+    if exec.first.is_some() {
+        flags |= EXEC_COMMAND;
+    }
+    if stdin.first.is_some() {
+        flags |= STDIN;
+    }
+    if exec.multiple || stdin.multiple || (exec.first.is_some() && stdin.first.is_some()) {
+        flags |= AMBIGUOUS_COMMANDS;
+    }
+    if stdin.first.is_some() {
+        match script_arg(script, "write_stdin", "chars") {
+            Some(ScriptArg::Absent) => {}
+            Some(ScriptArg::Literal(chars)) if chars.is_empty() => {}
+            _ => flags |= SENDS,
+        }
+        if matches!(
+            script_arg(script, "write_stdin", "session_id"),
+            Some(ScriptArg::Literal(_) | ScriptArg::Number(_))
+        ) {
+            flags |= LITERAL_SESSION;
+        }
+    }
+    flags
+}
+
+const RESULT_SOURCE_BYTES_MAX: usize = 64 * 1024;
+const RESULT_SOURCE_TOKENS_MAX: usize = 4096;
+
+fn source_tokens(script: &str) -> Option<Vec<String>> {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return None;
+    }
+    let bytes = script.as_bytes();
+    let mut at = 0;
+    let mut tokens = Vec::new();
+    while at < bytes.len() {
+        let c = script[at..].chars().next()?;
+        if c.is_whitespace() {
+            at += c.len_utf8();
+            continue;
+        }
+        if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'/') {
+            at += 2;
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
+            let end = script[at + 2..].find("*/")?;
+            at += end + 4;
+            continue;
+        }
+        if matches!(bytes[at], b'\'' | b'"') {
+            let quote = bytes[at];
+            at += 1;
+            let mut closed = false;
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'\\' => at = (at + 2).min(bytes.len()),
+                    byte if byte == quote => {
+                        at += 1;
+                        closed = true;
+                        break;
+                    }
+                    _ => at += 1,
+                }
+            }
+            if !closed {
+                return None;
+            }
+            push_source_token(&mut tokens, "s".to_owned(), RESULT_SOURCE_TOKENS_MAX)?;
+            continue;
+        }
+        if bytes[at] == b'`' {
+            // Template literals may interpolate arbitrary code; this narrow
+            // source recognizer does not try to model them.
+            return None;
+        }
+        if c.is_alphabetic() || matches!(c, '_' | '$') {
+            let start = at;
+            at += c.len_utf8();
+            while at < bytes.len() {
+                let next = script[at..].chars().next()?;
+                if !ident_char(next) {
+                    break;
+                }
+                at += next.len_utf8();
+            }
+            push_source_token(
+                &mut tokens,
+                format!("i:{}", &script[start..at]),
+                RESULT_SOURCE_TOKENS_MAX,
+            )?;
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let start = at;
+            at += c.len_utf8();
+            while at < bytes.len() && bytes[at].is_ascii_digit() {
+                at += 1;
+            }
+            push_source_token(
+                &mut tokens,
+                format!("n:{}", &script[start..at]),
+                RESULT_SOURCE_TOKENS_MAX,
+            )?;
+            continue;
+        }
+        push_source_token(&mut tokens, format!("p:{c}"), RESULT_SOURCE_TOKENS_MAX)?;
+        at += c.len_utf8();
+    }
+    Some(tokens)
+}
+
+fn push_source_token(tokens: &mut Vec<String>, token: String, max: usize) -> Option<()> {
+    if tokens.len() >= max {
+        return None;
+    }
+    tokens.push(token);
+    Some(())
+}
+
+fn matching_call_end(tokens: &[String], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.as_str() {
+            "p:(" => depth += 1,
+            "p:)" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn exact_statement(tokens: &[String], mut at: usize) -> bool {
+    if tokens.get(at).is_some_and(|token| token == "p:;") {
+        at += 1;
+    }
+    at == tokens.len()
+}
+
+/// A literal value in the narrow call-source grammar. Identifiers, calls,
+/// spreads and operators are rejected; only JSON-like scalar/object/array
+/// data can be shown to have no evaluation side effects.
+fn literal_value(tokens: &[String], at: &mut usize, depth: usize) -> bool {
+    if depth > 24 {
+        return false;
+    }
+    match tokens.get(*at).map(String::as_str) {
+        Some("s") | Some("i:true" | "i:false" | "i:null") => {
+            *at += 1;
+            true
+        }
+        Some(token) if token.starts_with("n:") => {
+            *at += 1;
+            true
+        }
+        Some("p:{") => {
+            *at += 1;
+            if tokens.get(*at).map(String::as_str) == Some("p:}") {
+                *at += 1;
+                return true;
+            }
+            let mut keys = BTreeSet::new();
+            loop {
+                // Quoted, escaped and computed keys are outside this source
+                // grammar; duplicate unquoted keys are rejected because JS
+                // evaluates the last value while the lexical scanner sees the
+                // first one.
+                let Some(key) = tokens
+                    .get(*at)
+                    .and_then(|key| key.strip_prefix("i:"))
+                    .filter(|key| !key.is_empty())
+                else {
+                    return false;
+                };
+                if !keys.insert(key.to_owned()) {
+                    return false;
+                }
+                *at += 1;
+                if tokens.get(*at).map(String::as_str) != Some("p::") {
+                    return false;
+                }
+                *at += 1;
+                if !literal_value(tokens, at, depth + 1) {
+                    return false;
+                }
+                match tokens.get(*at).map(String::as_str) {
+                    Some("p:}") => {
+                        *at += 1;
+                        return true;
+                    }
+                    Some("p:,") => {
+                        *at += 1;
+                        if tokens.get(*at).map(String::as_str) == Some("p:}") {
+                            *at += 1;
+                            return true;
+                        }
+                    }
+                    _ => return false,
+                }
             }
         }
-        _ => return None,
+        Some("p:[") => {
+            *at += 1;
+            if tokens.get(*at).map(String::as_str) == Some("p:]") {
+                *at += 1;
+                return true;
+            }
+            loop {
+                if !literal_value(tokens, at, depth + 1) {
+                    return false;
+                }
+                match tokens.get(*at).map(String::as_str) {
+                    Some("p:]") => {
+                        *at += 1;
+                        return true;
+                    }
+                    Some("p:,") => {
+                        *at += 1;
+                        if tokens.get(*at).map(String::as_str) == Some("p:]") {
+                            *at += 1;
+                            return true;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The call receives one statically literal object, with no argument
+/// expression that can print or replace the awaited result.
+fn literal_call_arguments(tokens: &[String], open: usize) -> bool {
+    if tokens.get(open).map(String::as_str) != Some("p:(") {
+        return false;
+    }
+    let Some(close) = matching_call_end(tokens, open) else {
+        return false;
+    };
+    let mut at = open + 1;
+    literal_value(tokens, &mut at, 0) && at == close
+}
+
+fn directly_prints_call(tokens: &[String], operation: &str, stringify: bool) -> bool {
+    let mut prefix = vec!["i:text", "p:("];
+    if stringify {
+        prefix.extend(["i:JSON", "p:.", "i:stringify", "p:("]);
+    }
+    prefix.extend(["i:await", "i:tools", "p:."]);
+    if tokens.len() < prefix.len() + 2 {
+        return false;
+    }
+    if tokens[..prefix.len()]
+        .iter()
+        .map(String::as_str)
+        .ne(prefix.iter().copied())
+    {
+        return false;
+    }
+    let operation_at = prefix.len();
+    if tokens[operation_at] != format!("i:{operation}")
+        || tokens.get(operation_at + 1).map(String::as_str) != Some("p:(")
+        || !literal_call_arguments(tokens, operation_at + 1)
+    {
+        return false;
+    }
+    let Some(close) = matching_call_end(tokens, operation_at + 1) else {
+        return false;
+    };
+    let suffix = if stringify { 2 } else { 1 };
+    let end = close + 1 + suffix;
+    if end > tokens.len() {
+        return false;
+    }
+    (0..suffix).all(|index| tokens[close + 1 + index] == "p:)") && exact_statement(tokens, end)
+}
+
+fn assigned_result_is_printed(tokens: &[String], operation: &str, stringify: bool) -> bool {
+    if tokens.len() < 10
+        || !matches!(tokens[0].as_str(), "i:const" | "i:let")
+        || !tokens[1].starts_with("i:")
+        || ["p:=", "i:await", "i:tools", "p:."]
+            .iter()
+            .enumerate()
+            .any(|(offset, expected)| tokens.get(offset + 2).map(String::as_str) != Some(*expected))
+    {
+        return false;
+    }
+    let variable = &tokens[1];
+    let operation_at = 6;
+    if tokens[operation_at] != format!("i:{operation}")
+        || tokens.get(operation_at + 1).map(String::as_str) != Some("p:(")
+        || !literal_call_arguments(tokens, operation_at + 1)
+    {
+        return false;
+    }
+    let Some(close) = matching_call_end(tokens, operation_at + 1) else {
+        return false;
+    };
+    let mut at = close + 1;
+    if tokens.get(at).map(String::as_str) != Some("p:;") {
+        return false;
+    }
+    at += 1;
+    if tokens.get(at).map(String::as_str) != Some("i:text")
+        || tokens.get(at + 1).map(String::as_str) != Some("p:(")
+    {
+        return false;
+    }
+    at += 2;
+    if stringify {
+        if tokens.get(at).map(String::as_str) != Some("i:JSON")
+            || tokens.get(at + 1).map(String::as_str) != Some("p:.")
+            || tokens.get(at + 2).map(String::as_str) != Some("i:stringify")
+            || tokens.get(at + 3).map(String::as_str) != Some("p:(")
+        {
+            return false;
+        }
+        at += 4;
+    }
+    if tokens.get(at) != Some(variable) {
+        return false;
+    }
+    at += 1;
+    let closes = if stringify { 2 } else { 1 };
+    for _ in 0..closes {
+        if tokens.get(at).map(String::as_str) != Some("p:)") {
+            return false;
+        }
+        at += 1;
+    }
+    exact_statement(tokens, at)
+}
+
+fn result_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return false;
+    }
+    let flags = script_flags(script);
+    if flags & AMBIGUOUS_COMMANDS != 0 {
+        return false;
+    }
+    let operation = match flags & (EXEC_COMMAND | STDIN) {
+        EXEC_COMMAND => {
+            if script_command(script).is_none() {
+                return false;
+            }
+            "exec_command"
+        }
+        STDIN => {
+            if script_session_target(script).is_none() {
+                return false;
+            }
+            "write_stdin"
+        }
+        _ => return false,
+    };
+    let Some(tokens) = source_tokens(script) else {
+        return false;
+    };
+    directly_prints_call(&tokens, operation, false)
+        || directly_prints_call(&tokens, operation, true)
+        || assigned_result_is_printed(&tokens, operation, false)
+        || assigned_result_is_printed(&tokens, operation, true)
+}
+
+/// A code-mode script's output that is one exec result. Unknown and non-text
+/// blocks make the result ambiguous instead of disappearing from the parse.
+pub(crate) fn yield_json(output: Option<&Value>) -> Option<Value> {
+    let text = match output_content_view(output?)? {
+        OutputContentView::Text(text) => text,
+        OutputContentView::Blocks(parts) => match parts.as_slice() {
+            [
+                OutputBlock {
+                    content:
+                        OutputBlockContent::Text {
+                            text,
+                            header: false,
+                        },
+                    ..
+                },
+            ] => *text,
+            [
+                OutputBlock {
+                    content: OutputBlockContent::Text { header: true, .. },
+                    ..
+                },
+                OutputBlock {
+                    content:
+                        OutputBlockContent::Text {
+                            text,
+                            header: false,
+                        },
+                    ..
+                },
+            ] => *text,
+            _ => return None,
+        },
     };
     let value: Value = serde_json::from_str(text.trim()).ok()?;
     (value.get("output").is_some_and(Value::is_string)
@@ -3993,6 +4964,7 @@ fn exec_session(value: Option<&Value>) -> Option<String> {
 
 /// The exec session a code-mode script's output leaves running: the
 /// command outlived its yield, so there is a session id and no exit code.
+#[cfg(test)]
 fn yielded_session(output: Option<&Value>) -> Option<String> {
     let value = yield_json(output)?;
     if value.get("exit_code").is_some_and(|code| !code.is_null()) {
@@ -4001,29 +4973,64 @@ fn yielded_session(output: Option<&Value>) -> Option<String> {
     exec_session(value.get("session_id"))
 }
 
-/// Links a code-mode call whose output just arrived to a yielded command:
-/// as the script that started it, or as one of its polls. A script with
-/// operations of its own, or one that failed, stays a step of its own, but
-/// the chunk it printed of an open command is still that command's output.
+/// Links one source-qualified code-mode command result to a yielded command.
+/// Mixed/multiple operations and printed output without a matching source
+/// operation stay visible and unowned.
 fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, offset: u64) {
     let Some(event) = summary.events.get(index) else {
         return;
     };
-    let (call_offset, flags, linked) = (event.o, event.script, event.poll);
+    let (call_offset, flags, linked, result_source) =
+        (event.o, event.script, event.poll, event.result_source);
     let failed = event.r.as_ref().is_some_and(|reply| reply.e);
+    let starts_command = result_source && flags & EXEC_COMMAND != 0 && flags & STDIN == 0;
+    let polls_command = flags & STDIN != 0
+        && flags & (EXEC_COMMAND | AMBIGUOUS_COMMANDS | LITERAL_SESSION) == LITERAL_SESSION
+        && result_source;
+    if flags & AMBIGUOUS_COMMANDS != 0 || (!starts_command && !polls_command) {
+        summary.event_mut(index).expect("event exists").poll = None;
+        return;
+    }
     let operations = summary
         .extras
         .iter()
         .rev()
         .take_while(|extra| extra.o > call_offset)
         .any(|extra| extra.k == Kind::Operation && extra.parent == Some(index));
-    let session = yielded_session(output);
-    // A poll of an open command, by the session id its output names.
-    let known = session
+    let decoded = yield_json(output);
+    let output_session = decoded
         .as_ref()
-        .filter(|_| flags & STDIN != 0)
+        .and_then(|value| exec_session(value.get("session_id")));
+    let session = decoded.as_ref().and_then(|value| {
+        (!value.get("exit_code").is_some_and(|code| !code.is_null()))
+            .then(|| exec_session(value.get("session_id")))
+            .flatten()
+    });
+    if polls_command {
+        // A completed poll can end a previously matched command, but only a
+        // single qualifying result block may join to that command. Opaque or
+        // multi-body output stays on its wrapper, even if a terminal item
+        // arrived while it ran.
+        if decoded.is_none() {
+            summary.event_mut(index).expect("event exists").poll = None;
+            return;
+        }
+        if output_session
+            .as_deref()
+            .is_some_and(|session| Some(session) != summary.events[index].poll_target.as_deref())
+        {
+            summary.event_mut(index).expect("event exists").poll = None;
+            return;
+        }
+    }
+    // A poll is owned only when the literal source target and the exact
+    // output session id resolve to the same previously observed command.
+    let known_session = session
+        .as_ref()
+        .filter(|_| polls_command)
         .and_then(|session| summary.yields.get(session).copied())
         .filter(|start| *start < index);
+    let known = linked.filter(|start| Some(*start) == known_session);
     if operations || failed {
         summary.event_mut(index).expect("event exists").poll = None;
         if let Some(start) = known {
@@ -4044,9 +5051,9 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         None => ended_here,
         Some(_) if known.is_some() => known,
         Some(_) if ended_here.is_some() => ended_here,
+        Some(_) if polls_command => None,
         // A command these logs haven't seen yet: a new start, whether this
-        // script started it or polls one started where these logs can't
-        // see.
+        // single source call started it.
         Some(session) => {
             if summary.yields.len() >= YIELDS_MAX
                 && !summary.yields.contains_key(&session)
@@ -4086,13 +5093,21 @@ fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
     }
 }
 
-/// The yielded command a poll that hasn't answered yet is taken to poll:
-/// the only one still open. Its output settles it.
-fn open_poll(summary: &FileIndex, flags: u8) -> Option<usize> {
-    if flags & STDIN == 0 || summary.yields.len() != 1 {
+/// A poll's literal source target can narrow the open set, but never create
+/// an identity or choose the only unrelated session by elimination.
+fn open_poll(
+    summary: &FileIndex,
+    flags: u8,
+    target: Option<String>,
+    result_source: bool,
+) -> Option<usize> {
+    if !result_source
+        || flags & STDIN == 0
+        || flags & (EXEC_COMMAND | AMBIGUOUS_COMMANDS | LITERAL_SESSION) != LITERAL_SESSION
+    {
         return None;
     }
-    summary.yields.values().next().copied()
+    summary.yields.get(&target?).copied()
 }
 
 fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Option<i64>) {
@@ -4605,6 +5620,37 @@ fn codex_exit(output: Option<&Value>) -> Option<i64> {
     value.get("metadata")?.get("exit_code")?.as_i64()
 }
 
+/// A formatted direct-exec exit is evidence only for the exact native
+/// function-call pair that owns this output. The shared formatter decoder
+/// qualifies the header; a session ID by itself never establishes a result.
+fn codex_direct_exec_exit(index: &FileIndex, call_id: &str, output: Option<&Value>) -> Option<i64> {
+    // A repeated source ID has no unique owner, even if `pending` currently
+    // points at one of its calls. Keep this guard scoped to formatter evidence;
+    // legacy structured exit metadata retains its existing matching behavior.
+    if !index
+        .tool_ids
+        .get(call_id)
+        .is_some_and(|indices| indices.len() == 1)
+    {
+        return None;
+    }
+    let call = index
+        .pending
+        .get(call_id)
+        .and_then(|at| index.events.get(*at))?;
+    if call.k != Kind::Tool
+        || !call.native_direct_call
+        || !matches!(call.n.as_deref(), Some("exec_command" | "write_stdin"))
+    {
+        return None;
+    }
+    match crate::exec_response::decode_exec_response(output?.as_str()?)?.native_outcome()? {
+        crate::exec_response::ExecResponseOutcome::Exited(code) => Some(i64::from(code)),
+        crate::exec_response::ExecResponseOutcome::SessionOnly
+        | crate::exec_response::ExecResponseOutcome::NoExit => None,
+    }
+}
+
 /// Text Codex adds before a prompt, by its tag. Any other text is a prompt,
 /// even one that starts with `<`.
 const HARNESS_TAGS: [&str; 5] = [
@@ -4727,39 +5773,27 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 || field(item, "status") == Some("failed")
                 || field(item, "type") == Some("FileChange");
             // A yielded command's end: its `process_id` is the session id
-            // the starting script answered with. It arrives inside a poll,
-            // or while no script runs. Inside a script that isn't a poll the
-            // id was used again: that script's own command, and the old
-            // process is gone.
+            // the starting script answered with. A startup source and an open
+            // exec wrapper do not identify a new native invocation: the old
+            // startup's exit watcher can finish during a different wrapper.
+            // Preserve the exact process-id join without guessing reuse.
             let yielded = if field(item, "type") == Some("CommandExecution") && !legacy_tool {
-                exec_session(item.get("process_id")).and_then(|session| {
-                    let start = summary.yields.remove(&session)?;
-                    let own = open.is_some_and(|open| {
-                        summary
-                            .events
-                            .get(open)
-                            .is_some_and(|event| event.script & STDIN == 0)
-                    });
-                    (!own).then_some(start)
-                })
+                exec_session(item.get("process_id"))
+                    .and_then(|session| summary.yields.remove(&session))
             } else {
                 None
             };
-            if let Some(start) = yielded {
-                if let Some(found) = summary.event_mut(start)
-                    && let Some(started) = found.y.as_mut()
-                {
-                    started.done = Some(Reply {
-                        o: offset,
-                        t: time,
-                        e: failed,
-                        f: if known { 0 } else { UNKNOWN },
-                        ..Reply::default()
-                    });
-                }
-                if let Some(poll) = open.and_then(|open| summary.event_mut(open)) {
-                    poll.poll = Some(start);
-                }
+            if let Some(start) = yielded
+                && let Some(found) = summary.event_mut(start)
+                && let Some(started) = found.y.as_mut()
+            {
+                started.done = Some(Reply {
+                    o: offset,
+                    t: time,
+                    e: failed,
+                    f: if known { 0 } else { UNKNOWN },
+                    ..Reply::default()
+                });
             }
             // An item is a step of its own only when exactly one code-mode
             // call is open to own it. Otherwise it is a plain call's item, or
@@ -4903,12 +5937,15 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             ) => {
                 let code_mode = field(payload, "type") == Some("custom_tool_call")
                     && field(payload, "name") == Some("exec");
-                let script = if code_mode {
-                    field(payload, "input").map_or(0, script_flags)
+                let script_text = if code_mode {
+                    field(payload, "input")
                 } else {
-                    0
+                    None
                 };
-                let poll = open_poll(summary, script);
+                let script = script_text.map_or(0, script_flags);
+                let poll_target = script_text.and_then(script_session_target);
+                let printed_result = script_text.is_some_and(result_source);
+                let poll = open_poll(summary, script, poll_target.clone(), printed_result);
                 tool_event(
                     summary,
                     Event {
@@ -4928,8 +5965,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                                 .to_owned(),
                         ),
                         code_mode,
+                        native_direct_call: field(payload, "type") == Some("function_call")
+                            && field(payload, "call_id").is_some()
+                            && matches!(
+                                field(payload, "name"),
+                                Some("exec_command" | "write_stdin")
+                            )
+                            && payload.get("namespace").is_none_or(Value::is_null),
                         code_mode_open: code_mode,
                         script,
+                        poll_target,
+                        result_source: printed_result,
                         poll,
                         ..Event::default()
                     },
@@ -4938,7 +5984,12 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             Some("function_call_output" | "custom_tool_call_output" | "tool_search_output") => {
                 if let Some(id) = field(payload, "call_id") {
                     let output = payload.get("output").or_else(|| payload.get("tools"));
-                    let code = codex_exit(output);
+                    let direct_code = if field(payload, "type") == Some("function_call_output") {
+                        codex_direct_exec_exit(summary, id, output)
+                    } else {
+                        None
+                    };
+                    let code = codex_exit(output).or(direct_code);
                     let mut flags = if code.is_none() { UNKNOWN } else { 0 };
                     if acknowledgement(output) {
                         flags |= ACK;
@@ -4986,15 +6037,35 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     },
                 );
             }
-            Some("agent_message") => push(
-                summary,
-                Event {
-                    k: Kind::Agm,
-                    o: offset,
-                    t: time,
-                    ..Event::default()
-                },
-            ),
+            Some("agent_message") => {
+                let author = field(payload, "author");
+                let recipient = field(payload, "recipient");
+                let script = match (author, recipient) {
+                    (Some(author), Some(recipient)) => {
+                        let up_prefix = format!("{recipient}/");
+                        let down_prefix = format!("{author}/");
+                        if author.starts_with(up_prefix.as_str()) {
+                            AGM_UP
+                        } else if recipient.starts_with(down_prefix.as_str()) {
+                            AGM_DOWN
+                        } else {
+                            AGM_SIDE
+                        }
+                    }
+                    _ => 0,
+                };
+                push(
+                    summary,
+                    Event {
+                        k: Kind::Agm,
+                        o: offset,
+                        t: time,
+                        id: author.map(str::to_owned),
+                        script,
+                        ..Event::default()
+                    },
+                );
+            }
             _ => {}
         },
         _ => {}
@@ -5242,6 +6313,7 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tx::Lines;
 
     #[test]
     fn busy_clusters_within_five_minutes_in_any_order() {
@@ -5326,6 +6398,22 @@ mod tests {
         serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":id,"arguments":"{}"}})
     }
 
+    fn direct_call(id: &str, name: &str) -> Value {
+        let arguments = match name {
+            "exec_command" => serde_json::json!({"cmd":"printf fixture"}).to_string(),
+            "write_stdin" => {
+                let session_id = match id {
+                    "negative" => 5151,
+                    "running" => 6151,
+                    _ => 1,
+                };
+                serde_json::json!({"session_id":session_id,"chars":""}).to_string()
+            }
+            _ => "{}".to_owned(),
+        };
+        serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":arguments}})
+    }
+
     fn output(id: &str, output: Value) -> Value {
         serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":output}})
     }
@@ -5355,6 +6443,110 @@ mod tests {
             serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"item","exit_code":1}}}),
         ]);
         assert_eq!(replies, [Some(false), None, Some(true), Some(true)]);
+    }
+
+    #[test]
+    fn direct_formatter_outcomes_need_a_qualified_matching_native_call() {
+        let valid_zero = "Chunk ID: a\nWall time: 0.1000 seconds\nProcess exited with code 0\nOriginal token count: 7\nOutput:\nfinished";
+        let valid_nonzero =
+            "Wall time: 0.2000 seconds\nProcess exited with code 3\nOutput:\nfailed";
+        let valid_negative_and_running = "Chunk ID: b\nWall time: 0.3000 seconds\nProcess exited with code -7\nProcess running with session ID 5151\nOutput:\nfailed";
+        let running_only =
+            "Wall time: 0.4000 seconds\nProcess running with session ID 6151\nOutput:\nrunning";
+        let no_process_fields =
+            "Wall time: 0.4500 seconds\nOriginal token count: 2\nOutput:\nunknown";
+        let both_optionals = "Wall time: 0.5000 seconds\nProcess exited with code 0\nProcess running with session ID 6161\nOutput:\nfinished";
+        let body_headers = "Wall time: 0.6000 seconds\nProcess exited with code 0\nOutput:\nbody\nProcess exited with code 99\nProcess running with session ID 8888\nWall time: 9.0000 seconds\nOutput:\nopaque";
+        let malformed = [
+            "Wall time: 0.7000 seconds\nOriginal token count: 8\nProcess exited with code 0\nOutput:\nignored",
+            "Wall time: 0.8000 seconds\nProcess exited with code 0\nProcess exited with code 1\nOutput:\nignored",
+            "Wall time: 0.9000 seconds\nProcess exited with code nope\nOutput:\nignored",
+            "Wall time: NaN seconds\nProcess exited with code 0\nOutput:\nignored",
+            "Wall time: 1.0000 seconds\nProcess exited with code 0\nmissing boundary",
+            "Wall time: 1.1000 seconds\nProcess exited with code 2147483648\nOutput:\nignored",
+            "Process exited with code 0\nOutput:\nignored",
+        ];
+        let mut records = Vec::new();
+        for (id, name, formatted) in [
+            ("zero", "exec_command", valid_zero),
+            ("nonzero", "exec_command", valid_nonzero),
+            ("negative", "write_stdin", valid_negative_and_running),
+            ("running", "write_stdin", running_only),
+            ("no-fields", "exec_command", no_process_fields),
+            ("both", "exec_command", both_optionals),
+            ("opaque", "exec_command", body_headers),
+        ] {
+            records.push(direct_call(id, name));
+            records.push(output(id, serde_json::json!(formatted)));
+        }
+        let mut null_namespace = direct_call("null-namespace", "exec_command");
+        null_namespace["payload"]["namespace"] = serde_json::Value::Null;
+        records.push(null_namespace);
+        records.push(output("null-namespace", serde_json::json!(valid_zero)));
+        for (ordinal, formatted) in malformed.iter().enumerate() {
+            let id = format!("malformed-{ordinal}");
+            records.push(direct_call(&id, "exec_command"));
+            records.push(output(&id, serde_json::json!(formatted)));
+        }
+        let oversized_prefix = format!(
+            "Chunk ID: {}\nWall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\nignored",
+            "x".repeat(2048)
+        );
+        records.push(direct_call("oversized-prefix", "exec_command"));
+        records.push(output(
+            "oversized-prefix",
+            serde_json::json!(oversized_prefix),
+        ));
+        records.push(direct_call("unrelated", "shell"));
+        records.push(output("unrelated", serde_json::json!(valid_nonzero)));
+        records.push(direct_call("wrong-carrier", "exec_command"));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"wrong-carrier","output":valid_nonzero}}));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"code-mode","input":"text('fixture')"}}));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"code-mode","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":valid_nonzero}]}}));
+        let mut namespaced = direct_call("namespaced", "exec_command");
+        namespaced["payload"]["namespace"] = serde_json::json!("mcp__fixture__exec");
+        records.push(namespaced);
+        records.push(output("namespaced", serde_json::json!(valid_zero)));
+
+        let mut expected = vec![
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+        ];
+        expected.extend(std::iter::repeat_n(None, malformed.len() + 5));
+        assert_eq!(codex_reply(&records), expected);
+    }
+
+    #[test]
+    fn direct_formatter_refuses_a_reused_pending_call_id() {
+        let mut index = FileIndex::default();
+        let records = [
+            direct_call("reused", "exec_command"),
+            direct_call("reused", "exec_command"),
+            output(
+                "reused",
+                serde_json::json!(
+                    "Wall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\nfinished"
+                ),
+            ),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            codex(&mut index, record, offset as u64);
+        }
+        assert_eq!(index.events.len(), 2);
+        assert!(index.events.iter().all(|event| event.native_direct_call));
+        assert!(index.events[0].r.is_none());
+        let reply = index.events[1]
+            .r
+            .as_ref()
+            .expect("the output resolves the latest call");
+        assert_eq!(reply.o, 2);
+        assert_ne!(reply.f & UNKNOWN, 0, "the duplicate ID has no unique owner");
     }
 
     #[test]
@@ -6198,8 +7390,8 @@ mod tests {
             .get(key.as_ref())
             .expect("the rollout is stored");
         assert_eq!(
-            format!("{:?}", entry.index.as_ref().unwrap()),
-            format!("{fresh_index:?}")
+            index_snapshot(entry.index.as_ref().unwrap()),
+            index_snapshot(&fresh_index)
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -6407,6 +7599,242 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_back_is_up_and_final() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","handback":true,"from":"lead","senderTaskId":"a1","body":"done"},"message":{"role":"user","content":"x"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        assert_eq!(index.events[0].script, AGM_UP | AGM_FINAL);
+    }
+
+    #[test]
+    fn a_coordinator_message_is_a_down_agent_message() {
+        for record in [
+            serde_json::json!({"type":"user","isMeta":true,"origin":{"kind":"coordinator"},"message":{"role":"user","content":"The coordinator sent a message while you were working:\nrebase and push"}}),
+            serde_json::json!({"type":"user","origin":{"kind":"coordinator"},"message":{"role":"user","content":"The coordinator sent a message while you were working:\nrebase and push"}}),
+        ] {
+            let mut index = FileIndex::default();
+            claude(&mut index, &record, 0);
+            assert_eq!(index.events.len(), 1);
+            assert_eq!(index.events[0].k, Kind::Agm);
+            assert_eq!(index.events[0].script, AGM_DOWN);
+        }
+    }
+
+    #[test]
+    fn an_unknown_origin_kind_is_kept_as_other() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","isMeta":true,"origin":{"kind":"future-thing"},"message":{"role":"user","content":"synthetic unknown-origin record"}}),
+            0,
+        );
+        assert!(index.events.is_empty());
+        assert_eq!(index.extras.len(), 1);
+        assert_eq!(index.extras[0].k, Kind::Other);
+        assert_eq!(index.extras[0].n.as_deref(), Some("future-thing"));
+    }
+
+    #[test]
+    fn a_task_notification_origin_still_parses_its_block() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn a_prompt_quoting_relay_tags_stays_a_prompt() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"Review this log:\n<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification>\n<agent-message from=\"a1\">x</agent-message>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        assert_eq!(index.events[0].k, Kind::U);
+        assert!(
+            !index
+                .events
+                .iter()
+                .any(|event| matches!(event.k, Kind::Tn | Kind::Agm))
+        );
+    }
+
+    #[test]
+    fn a_prompt_starting_with_tags_still_classifies() {
+        let mut agent = FileIndex::default();
+        claude(
+            &mut agent,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a1\">done</agent-message>"}}),
+            0,
+        );
+        assert_eq!(agent.events.len(), 1);
+        assert_eq!(agent.events[0].k, Kind::Agm);
+        assert_eq!(agent.events[0].script, AGM_UP);
+
+        let mut notifications = FileIndex::default();
+        claude(
+            &mut notifications,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification><task-notification><tool-use-id>t2</tool-use-id><status>failed</status></task-notification>"}}),
+            0,
+        );
+        assert_eq!(notifications.events.len(), 2);
+        assert!(notifications.events.iter().all(|event| event.k == Kind::Tn));
+    }
+
+    #[test]
+    fn a_subagent_send_that_is_not_its_hand_back_is_up_progress() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","from":"agent-7","senderTaskId":"agent-7","name":"general-purpose"},"message":{"role":"user","content":"<agent-message from=\"agent-7\">halfway</agent-message>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1);
+        let event = &index.events[0];
+        assert_eq!(event.k, Kind::Agm);
+        assert_eq!(event.script, AGM_UP | AGM_PROGRESS);
+        assert_eq!(event.id.as_deref(), Some("agent-7"));
+        // `from` is kept only when it differs from `senderTaskId`.
+        assert_eq!(event.n, None);
+        assert_eq!(
+            event.peer.as_ref().and_then(|peer| peer.sock.as_deref()),
+            Some("agent-7")
+        );
+
+        let mut differs = FileIndex::default();
+        claude(
+            &mut differs,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","from":"agent-7","senderTaskId":"call-7"},"message":{"role":"user","content":"x"}}),
+            0,
+        );
+        assert_eq!(differs.events[0].k, Kind::Agm);
+        assert_eq!(differs.events[0].script, AGM_UP | AGM_PROGRESS);
+        assert_eq!(differs.events[0].id.as_deref(), Some("call-7"));
+        assert_eq!(differs.events[0].n.as_deref(), Some("agent-7"));
+
+        // A socket peer without `senderTaskId` is still a relay.
+        let mut relay = FileIndex::default();
+        claude(
+            &mut relay,
+            &serde_json::json!({"type":"user","origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/5.sock","name":"peer","msg_id":"m5"},"message":{"role":"user","content":"x"}}),
+            0,
+        );
+        assert_eq!(relay.events[0].k, Kind::Xsm);
+        assert_eq!(relay.events[0].id.as_deref(), Some("m5"));
+        assert_eq!(relay.events[0].script, 0);
+    }
+
+    #[test]
+    fn a_relay_tag_quoted_inside_another_block_is_not_its_own_event() {
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>The log said <agent-message from=\"x\">quoted</agent-message> and <task-notification><tool-use-id>t9</tool-use-id><status>failed</status></task-notification></result></task-notification>"}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+        assert!(index.events.iter().all(|event| event.k != Kind::Agm));
+
+        // Top-level blocks side by side are each their own.
+        let text = "<agent-message from=\"a\">one</agent-message>\n<agent-message from=\"b\">two <cross-session-message from=\"s\">quoted</cross-session-message></agent-message>";
+        let found: Vec<_> = tags(text, "agent-message")
+            .into_iter()
+            .map(|(tag, _)| attributes(tag)["from"].clone())
+            .collect();
+        assert_eq!(found, ["a", "b"]);
+        assert!(tags(text, "cross-session-message").is_empty());
+    }
+
+    #[test]
+    fn a_block_quoted_after_a_same_name_block_inside_a_notification_stays_quoted() {
+        // The inner notification's close doesn't end the outer one, so the
+        // agent message quoted after it is still inside.
+        let text = "<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>quoted <task-notification><tool-use-id>t9</tool-use-id><status>failed</status></task-notification> then <agent-message from=\"x\">leak</agent-message></result></task-notification>";
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":text}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+        let found = notifications(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].0, found[0].1), (Some("t1"), Some("completed")));
+        assert!(found[0].2.ends_with("</agent-message></result>"));
+    }
+
+    #[test]
+    fn an_unclosed_quoted_notification_keeps_the_outer_notification() {
+        let text = "<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>quoted <task-notification></result></task-notification>";
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":text}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Tn);
+        assert_eq!(index.events[0].id.as_deref(), Some("t1"));
+        assert_eq!(index.events[0].n.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn an_unclosed_quoted_agent_message_keeps_the_outer_sender() {
+        let text = "<agent-message from=\"a1\">quoted <agent-message from=\"x\">unfinished</agent-message>";
+        let mut index = FileIndex::default();
+        claude(
+            &mut index,
+            &serde_json::json!({"type":"user","message":{"role":"user","content":text}}),
+            0,
+        );
+        assert_eq!(index.events.len(), 1, "{:?}", index.events);
+        assert_eq!(index.events[0].k, Kind::Agm);
+        assert_eq!(index.events[0].id.as_deref(), Some("a1"));
+    }
+
+    #[test]
+    fn a_codex_agent_message_has_a_direction() {
+        for (record, direction, author) in [
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"agent_message","author":"root/worker","recipient":"root","message":"done"}}),
+                AGM_UP,
+                "root/worker",
+            ),
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"agent_message","author":"root","recipient":"root/worker","message":"continue"}}),
+                AGM_DOWN,
+                "root",
+            ),
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"agent_message","author":"root/a","recipient":"root/b","message":"side note"}}),
+                AGM_SIDE,
+                "root/a",
+            ),
+        ] {
+            let mut index = FileIndex::default();
+            codex(&mut index, &record, 0);
+            assert_eq!(index.events.len(), 1);
+            assert_eq!(index.events[0].k, Kind::Agm);
+            assert_eq!(index.events[0].script, direction);
+            assert_eq!(index.events[0].id.as_deref(), Some(author));
+        }
+    }
+
+    #[test]
     fn only_a_whole_compact_command_is_skipped() {
         for (text, skipped) in [
             ("/compact", true),
@@ -6433,6 +7861,12 @@ mod tests {
                 "write_stdin",
                 "chars",
                 literal("y\n"),
+            ),
+            (
+                "tools.write_stdin({session_id: 26789, chars: \"\"})",
+                "write_stdin",
+                "session_id",
+                Some(ScriptArg::Number(26789)),
             ),
             (
                 "tools.write_stdin({session_id:1})",
@@ -6528,28 +7962,95 @@ mod tests {
         }
         assert_eq!(
             script_flags("tools.write_stdin({session_id:1,chars:\"\"})"),
-            STDIN
+            STDIN | LITERAL_SESSION
         );
         assert_eq!(
             script_flags("tools.write_stdin({session_id:1,chars:\"q\"})"),
-            STDIN | SENDS
+            STDIN | SENDS | LITERAL_SESSION
         );
         assert_eq!(
             script_flags("tools.write_stdin({session_id:1,chars:keys})"),
-            STDIN | SENDS
+            STDIN | SENDS | LITERAL_SESSION
         );
-        assert_eq!(script_flags("tools.exec_command({cmd:\"ls\"})"), 0);
-        // A script that starts a command and then polls it starts it.
+        assert_eq!(
+            script_flags("tools.exec_command({cmd:\"ls\"})"),
+            EXEC_COMMAND
+        );
+        // Mixed operations are both classified and left ambiguous.
         assert_eq!(
             script_flags(
                 "let r = await tools.exec_command({cmd:\"ls\"}); r = await tools.write_stdin({session_id: r.session_id, chars: \"\"});"
             ),
-            0
+            STDIN | EXEC_COMMAND | AMBIGUOUS_COMMANDS
         );
     }
 
+    #[test]
+    fn command_result_sources_must_print_the_direct_single_result() {
+        assert!(result_source("text(await tools.exec_command({cmd:'ls'}));"));
+        assert!(result_source(
+            "text(JSON.stringify(await tools.write_stdin({session_id:26789,chars:''})));"
+        ));
+        assert!(result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); text(JSON.stringify(result));"
+        ));
+        assert!(result_source(
+            "let result = await tools.write_stdin({session_id:26789,chars:''}); text(result);"
+        ));
+        assert!(result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); /* print it */ text(JSON.stringify(result));"
+        ));
+
+        assert!(!result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); text(JSON.stringify({wall_time_seconds:1,session_id:99999,output:'fake'}));"
+        ));
+        assert!(!result_source(
+            "const result = await tools.write_stdin({session_id:26789,chars:''}); text(JSON.stringify({wall_time_seconds:1,session_id:26789,output:'fake'}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.exec_command({cmd:(text=()=>{},'ls')}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({session_id:26789,chars:'',extra:text('fake')}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({session_id:26789,session_id:95583,chars:''}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({'session_id':26789,session_id:95583,chars:''}));"
+        ));
+        assert!(!result_source(
+            "text(await tools.write_stdin({session_id:26789,'chars':''}));"
+        ));
+        let oversized = format!(
+            "{}text(await tools.exec_command({{cmd:'ls'}}));",
+            " ".repeat(64 * 1024)
+        );
+        assert!(!result_source(&oversized));
+        let over_token_limit = format!(
+            "text(await tools.exec_command({{cmd:'ls',extra:[{}]}}));",
+            vec!["0"; 4100].join(",")
+        );
+        assert!(!result_source(&over_token_limit));
+        assert!(!result_source(
+            "let result = await tools.exec_command({cmd:'ls'}); while (result.session_id) { result = await tools.write_stdin({session_id:result.session_id,chars:''}); } text(JSON.stringify(result));"
+        ));
+        assert!(!result_source(
+            "const result = await tools.exec_command({cmd:'ls'}); text(JSON.stringify(result)); text('extra');"
+        ));
+    }
+
     fn exec_line(id: &str, script: &str) -> Value {
-        serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":id,"name":"exec","input":script}})
+        let script = script.trim();
+        let input = if (script.starts_with("await tools.exec_command(")
+            || script.starts_with("await tools.write_stdin("))
+            && !script.contains(';')
+        {
+            format!("const result = {script}; text(JSON.stringify(result));")
+        } else {
+            script.to_owned()
+        };
+        serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":id,"name":"exec","input":input}})
     }
 
     fn yielded_line(id: &str, session: u64) -> Value {
@@ -6620,6 +8121,244 @@ mod tests {
     }
 
     #[test]
+    fn exact_process_completion_survives_unrelated_wrapper_without_source_evidence() {
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start-26789", "await tools.exec_command({cmd:\"old\"})"),
+                yielded_line("start-26789", 26789),
+                exec_line("unrelated-wrapper", "text('hello')"),
+                serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"terminal-26789","process_id":"26789","exit_code":0}}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"unrelated-wrapper","output":[{"type":"input_text","text":"hello"}]}}),
+            ],
+        );
+        assert!(
+            summary.events[0]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+        assert!(!summary.yields.contains_key("26789"));
+        let unrelated = &summary.events[1];
+        assert!(unrelated.r.is_some());
+        assert!(unrelated.y.is_none());
+        assert!(unrelated.poll.is_none());
+        assert!(summary.extras.iter().all(|extra| {
+            extra.parent != Some(1) || extra.id.as_deref() != Some("terminal-26789")
+        }));
+    }
+
+    // These synthetic Codex fixtures have no historical Tree accounting.
+    // Check that before compacting so unexpected metadata cannot be hidden.
+    fn codex_fixture_snapshot(index: &FileIndex) -> String {
+        let summary = index.tree_summary.as_ref().expect("fixture Tree metadata");
+        assert!(summary.usage_by_id.is_empty());
+        assert!(summary.usage_records.is_empty());
+        assert!(summary.usage_models.is_empty());
+        assert!(summary.closed_tools.is_empty());
+        assert!(summary.codex_native_usage.is_none());
+        assert!(summary.marker.is_none());
+        index_snapshot(index)
+    }
+
+    #[test]
+    fn delayed_startup_completion_during_different_exec_preserves_exact_join_and_cache_parity() {
+        use std::io::Write;
+        // Source-shaped synthetic Paginated records, qualified by the adjacent
+        // manifest's a9b0815 pin. The startup exit watcher retains the old
+        // native invocation while the later single-exec wrapper is open.
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/delayed-startup.jsonl"
+        );
+        let root = scratch("delayed-startup");
+        let log = root.join("delayed-startup.jsonl");
+        let cache_path = root.join("index.json");
+        let boundary = FIXTURE
+            .split_inclusive('\n')
+            .take(2)
+            .map(str::len)
+            .sum::<usize>();
+        fs::write(&log, &FIXTURE[..boundary]).unwrap();
+        let mut cache = EventCache::open(&cache_path);
+        let initial = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        assert_eq!(initial.yields.get("26789"), Some(&0));
+        assert!(initial.events[0].y.as_ref().unwrap().done.is_none());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .unwrap()
+            .write_all(&FIXTURE.as_bytes()[boundary..])
+            .unwrap();
+        let appended = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&appended),
+            codex_fixture_snapshot(&cold)
+        );
+        let old = &appended.events[0];
+        assert_eq!(old.id.as_deref(), Some("start-26789"));
+        assert_eq!(old.o, 0);
+        assert_eq!(old.r.as_ref().unwrap().o, 197);
+        let done = old.y.as_ref().unwrap().done.as_ref().unwrap();
+        let terminal_offset = FIXTURE
+            .split_inclusive('\n')
+            .take(3)
+            .map(str::len)
+            .sum::<usize>() as u64;
+        assert_eq!(done.o, terminal_offset);
+        assert_eq!(done.o, 690);
+        assert!(done.e);
+        assert_eq!(done.f, 0);
+        assert!(!appended.yields.contains_key("26789"));
+        assert_eq!(appended.yields.get("95583"), Some(&1));
+        let later = &appended.events[1];
+        assert_eq!(later.id.as_deref(), Some("start-95583"));
+        assert_eq!(later.o, boundary as u64);
+        assert!(later.result_source);
+        assert_eq!(later.script, EXEC_COMMAND);
+        assert!(later.poll.is_none());
+        assert!(later.y.as_ref().unwrap().done.is_none());
+        assert_eq!(later.r.as_ref().unwrap().o, 1009);
+        assert!(old.parent.is_none());
+        assert!(later.parent.is_none());
+        assert!(
+            appended
+                .extras
+                .iter()
+                .all(|extra| extra.id.as_deref() != Some("terminal-26789"))
+        );
+        drop(cache);
+        let reopened = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&reopened),
+            codex_fixture_snapshot(&cold)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_poll_links_require_one_literal_target_and_one_source_operation() {
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start-95583", "await tools.exec_command({cmd:\"new\"})"),
+                yielded_line("start-95583", 95583),
+                exec_line("start-26789", "await tools.exec_command({cmd:\"old\"})"),
+                yielded_line("start-26789", 26789),
+                exec_line(
+                    "poll-26789",
+                    "await tools.write_stdin({session_id:26789,chars:\"\"})",
+                ),
+                yielded_line("poll-26789", 26789),
+                exec_line(
+                    "poll-95583",
+                    "await tools.write_stdin({session_id:95583,chars:\"\"})",
+                ),
+                yielded_line("poll-95583", 95583),
+            ],
+        );
+        assert_eq!(summary.events[2].poll, Some(1));
+        assert_eq!(summary.events[3].poll, Some(0));
+        assert_eq!(summary.events[0].y.as_ref().unwrap().polls.len(), 1);
+        assert_eq!(summary.events[1].y.as_ref().unwrap().polls.len(), 1);
+
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("sole-26789", "await tools.exec_command({cmd:\"old\"})"),
+                yielded_line("sole-26789", 26789),
+                exec_line(
+                    "mismatch-95583",
+                    "await tools.write_stdin({session_id:95583,chars:\"\"})",
+                ),
+                serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"terminal-26789","process_id":"26789","exit_code":0,"aggregated_output":"done"}}}),
+                yielded_line("mismatch-95583", 26789),
+            ],
+        );
+        assert!(summary.events[0].y.as_ref().unwrap().done.is_some());
+        assert!(summary.events[0].y.as_ref().unwrap().polls.is_empty());
+        assert_eq!(summary.events[1].poll, None);
+        assert!(summary.events[1].r.is_some());
+
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start", "await tools.exec_command({cmd:\"serve\"})"),
+                yielded_line("start", 26789),
+                exec_line(
+                    "mixed",
+                    "await tools.exec_command({cmd:\"other\"}); await tools.write_stdin({session_id:26789,chars:\"\"})",
+                ),
+                yielded_line("mixed", 26789),
+                exec_line(
+                    "multiple",
+                    "await tools.write_stdin({session_id:26789,chars:\"\"}); await tools.write_stdin({session_id:26789,chars:\"\"})",
+                ),
+                yielded_line("multiple", 26789),
+                exec_line(
+                    "variable",
+                    "await tools.write_stdin({session_id:session,chars:\"\"})",
+                ),
+                yielded_line("variable", 26789),
+                exec_line(
+                    "printed",
+                    "text(JSON.stringify({wall_time_seconds:1,session_id:99999,output:\"printed\"}))",
+                ),
+                yielded_line("printed", 99999),
+            ],
+        );
+        assert!(summary.events[1].y.is_none());
+        assert_eq!(summary.events[1].poll, None);
+        assert_eq!(summary.events[2].poll, None);
+        assert_eq!(summary.events[3].poll, None);
+        assert_eq!(summary.events[4].y, None);
+        assert_eq!(summary.events[4].poll, None);
+        assert!(summary.events[4].r.is_some());
+        assert_eq!(summary.events[0].y.as_ref().unwrap().polls.len(), 0);
+        assert_eq!(summary.yields.len(), 1);
+    }
+
+    #[test]
+    fn nonempty_input_remains_a_visible_literal_poll() {
+        let mut summary = FileIndex::default();
+        let mut next = 0;
+        feed(
+            &mut summary,
+            &mut next,
+            &[
+                exec_line("start", "await tools.exec_command({cmd:\"serve\"})"),
+                yielded_line("start", 26789),
+                exec_line(
+                    "send",
+                    "await tools.write_stdin({session_id:26789,chars:\"q\"})",
+                ),
+                yielded_line("send", 26789),
+            ],
+        );
+        assert_eq!(summary.events[1].poll, Some(0));
+        assert_eq!(summary.events[1].script & SENDS, SENDS);
+    }
+
+    #[test]
     fn a_yielded_output_is_a_session_id_without_an_exit_code() {
         use serde_json::json;
         let output = |body: Value| {
@@ -6643,6 +8382,593 @@ mod tests {
             output(json!({"wall_time_seconds": 1.0, "session_id": "x".repeat(65), "output": ""}));
         assert_eq!(yielded_session(Some(&long)), None);
         assert_eq!(yielded_session(Some(&json!("done"))), None);
+    }
+
+    #[test]
+    fn yielded_json_keeps_the_native_text_boundaries() {
+        use serde_json::{Value, json};
+
+        let body = json!({"wall_time_seconds":1.0,"session_id":95583,"output":"ready"});
+        let header = "Script completed\nWall time 1.0 seconds\nOutput:\n";
+        let overhead_header = "Script completed\nWall time 0.100 seconds (code-mode 0.010 seconds; overhead 0.090 seconds)\nOutput:\n";
+        let wrapped = json!([
+            {"type":"input_text","text":header},
+            {"type":"input_text","text":body.to_string()},
+        ]);
+        assert_eq!(
+            yield_json(Some(&Value::String(body.to_string()))),
+            Some(body.clone())
+        );
+        assert_eq!(yield_json(Some(&wrapped)), Some(body.clone()));
+        let overhead_wrapped = json!([
+            {"type":"input_text","text":overhead_header},
+            {"type":"input_text","text":body.to_string()},
+        ]);
+        assert_eq!(yield_json(Some(&overhead_wrapped)), Some(body.clone()));
+        let negative_overhead_wrapped = json!([
+            {"type":"input_text","text":"Script completed\nWall time 0.100 seconds (code-mode 0.101 seconds; overhead -0.001 seconds)\nOutput:\n"},
+            {"type":"input_text","text":body.to_string()},
+        ]);
+        assert_eq!(
+            yield_json(Some(&negative_overhead_wrapped)),
+            Some(body.clone())
+        );
+        let OutputContentView::Blocks(overhead_blocks) =
+            output_content_view(&overhead_wrapped).unwrap()
+        else {
+            panic!("expected code-mode output blocks");
+        };
+        assert!(matches!(
+            &overhead_blocks[0].content,
+            OutputBlockContent::Text { header: true, .. }
+        ));
+        assert_eq!(
+            yield_json(Some(
+                &json!([{"type":"output_text","text":body.to_string()}])
+            )),
+            Some(body.clone())
+        );
+
+        for output in [
+            json!([
+                {"type":"input_text","text":header},
+                {"type":"input_text","text":body.to_string()},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":header},
+                {"type":"image","data":"omitted"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":header},
+                {"type":"future_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":"Script completed with unknown header"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":"Script completed\nWall time 0.100 seconds (code-mode NaN seconds; overhead 0.090 seconds)\nOutput:\n"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+            json!([
+                {"type":"input_text","text":"Script completed\nWall time 0.100 seconds (code-mode 0.010 seconds; overhead -Infinity seconds)\nOutput:\n"},
+                {"type":"input_text","text":body.to_string()},
+            ]),
+        ] {
+            assert_eq!(yield_json(Some(&output)), None, "{output}");
+        }
+
+        let source = json!([
+            {"type":"input_text","text":header},
+            {"type":"image","data":"must not escape"},
+            {"type":"future_text","text":"private payload"},
+        ]);
+        let view = output_content_view(&source).unwrap();
+        let OutputContentView::Blocks(blocks) = view else {
+            panic!("expected source blocks");
+        };
+        assert_eq!(blocks.len(), 3);
+        assert_eq!((blocks[0].ordinal, blocks[0].kind), (0, Some("input_text")));
+        assert_eq!(blocks[1].content, OutputBlockContent::Image);
+        assert_eq!(blocks[2].content, OutputBlockContent::Unknown);
+    }
+
+    #[test]
+    fn codex_native_fixture_checks_exact_links_offsets_and_cache_replay() {
+        const FIXTURE: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
+        );
+        const MANIFEST: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
+        );
+        let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+        assert_eq!(
+            manifest["upstream"]["revision"],
+            "a9b0815167c27ab13719dd12d13b63e02b70d221"
+        );
+        assert_eq!(manifest["origin"]["kind"], "source-shaped synthetic");
+        assert_eq!(manifest["origin"]["real_runtime_capture"], false);
+        assert!(manifest["origin"]["version"].is_null());
+        assert!(manifest["origin"]["build"].is_null());
+        assert_eq!(
+            manifest["carriers"]["legacy"]["dropped_completed_items"],
+            serde_json::json!(["CommandExecution", "FileChange"])
+        );
+        assert_eq!(
+            manifest["carriers"]["paginated"]["aggregated_output_limit_bytes"],
+            65_536
+        );
+
+        let root = scratch("codex-native-fixture");
+        let log = root.join("rollout-parser-cases.jsonl");
+        let cache_path = root.join("index.json");
+        fs::write(&log, FIXTURE).unwrap();
+        let mut cold_cache = EventCache::default();
+        let cold = scan_file(&log, "codex", &mut cold_cache, &mut false).unwrap();
+        let cold_debug = codex_fixture_snapshot(&cold);
+
+        let by_id = |index: &FileIndex, id: &str| {
+            index
+                .events
+                .iter()
+                .position(|event| event.id.as_deref() == Some(id))
+                .unwrap_or_else(|| panic!("fixture call {id} is indexed"))
+        };
+        for expected in manifest["expected_calls"].as_array().unwrap() {
+            let id = expected["id"].as_str().unwrap();
+            let event = &cold.events[by_id(&cold, id)];
+            assert_eq!(event.o, expected["offset"].as_u64().unwrap(), "{id}");
+            assert!(event.r.is_some(), "{id} has its source output");
+            match expected["relation"].as_str().unwrap() {
+                "yielded" => {
+                    let yielded = event.y.as_ref().unwrap_or_else(|| panic!("{id} yielded"));
+                    assert!(event.poll.is_none(), "{id} starts, it does not poll");
+                    if let Some(done) = expected["terminal_offset"].as_u64() {
+                        assert_eq!(
+                            yielded.done.as_ref().map(|reply| reply.o),
+                            Some(done),
+                            "{id}"
+                        );
+                    }
+                    if let Some(polls) = expected["poll_offsets"].as_array() {
+                        let offsets = polls.iter().map(Value::as_u64).collect::<Option<Vec<_>>>();
+                        assert_eq!(yielded.polls, offsets.unwrap(), "{id}");
+                    }
+                }
+                "poll" => {
+                    let start_id = expected["start_id"].as_str().unwrap();
+                    assert_eq!(event.poll, Some(by_id(&cold, start_id)), "{id}");
+                    assert!(event.y.is_none(), "{id} does not become a start");
+                    if expected["input_remains_visible"] == true {
+                        assert_ne!(event.script & SENDS, 0, "{id} remains an input event");
+                    }
+                }
+                "visible" => {
+                    assert!(event.y.is_none(), "{id} stays on its wrapper");
+                    assert!(event.poll.is_none(), "{id} has no guessed poll relation");
+                }
+                other => panic!("unexpected fixture relation {other}"),
+            }
+            if let Some(native_direct_call) = expected["native_direct_call"].as_bool() {
+                assert_eq!(event.native_direct_call, native_direct_call, "{id}");
+            }
+            if let Some(outcome) = expected["outcome"].as_str() {
+                let reply = event.r.as_ref().expect("expected direct output");
+                assert_eq!(reply.o, expected["reply_offset"].as_u64().unwrap(), "{id}");
+                let output = Lines::default().get(&log, reply.o).unwrap();
+                assert_eq!(output["payload"]["call_id"], id, "{id}");
+                match outcome {
+                    "ok" => {
+                        assert_eq!(reply.f & UNKNOWN, 0, "{id}");
+                        assert!(!reply.e, "{id}");
+                    }
+                    "err" => {
+                        assert_eq!(reply.f & UNKNOWN, 0, "{id}");
+                        assert!(reply.e, "{id}");
+                    }
+                    "unknown" => assert_ne!(reply.f & UNKNOWN, 0, "{id}"),
+                    other => panic!("unexpected direct outcome {other}"),
+                }
+            }
+        }
+
+        let reused = &manifest["reused_id_contract"];
+        let reused_id = reused["id"].as_str().unwrap();
+        let reused_calls: Vec<_> = cold
+            .events
+            .iter()
+            .filter(|event| event.id.as_deref() == Some(reused_id))
+            .collect();
+        assert_eq!(reused_calls.len(), 2);
+        let expected_offsets = reused["call_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            reused_calls.iter().map(|event| event.o).collect::<Vec<_>>(),
+            expected_offsets
+        );
+        assert!(reused_calls.iter().all(|event| event.native_direct_call));
+        let expected_replies = reused["reply_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(expected_replies.len(), reused_calls.len());
+        for (ordinal, event) in reused_calls.iter().enumerate() {
+            let reply = event.r.as_ref().unwrap();
+            assert_eq!(reply.o, expected_replies[ordinal]);
+            let output = Lines::default().get(&log, reply.o).unwrap();
+            assert_eq!(output["payload"]["call_id"], reused_id);
+            match reused["expected_outcomes"][ordinal].as_str().unwrap() {
+                "ok" => {
+                    assert_eq!(reply.f & UNKNOWN, 0);
+                    assert!(!reply.e);
+                }
+                "unknown" => assert_ne!(reply.f & UNKNOWN, 0),
+                other => panic!("unexpected reused-id outcome {other}"),
+            }
+        }
+
+        let mixed = &cold.events[by_id(&cold, "multi-output")];
+        assert_ne!(mixed.script & AMBIGUOUS_COMMANDS, 0);
+        let exact_poll = &cold.events[by_id(&cold, "poll-95583")];
+        assert_eq!(exact_poll.poll_target.as_deref(), Some("95583"));
+        assert!(exact_poll.result_source);
+        let unrelated_index = by_id(&cold, "unrelated-wrapper");
+        let unrelated = &cold.events[unrelated_index];
+        assert!(unrelated.r.is_some());
+        assert!(unrelated.y.is_none());
+        assert!(unrelated.poll.is_none());
+        assert!(cold.extras.iter().all(|extra| {
+            extra.parent != Some(unrelated_index) || extra.id.as_deref() != Some("terminal-26789")
+        }));
+        assert!(
+            cold.events[by_id(&cold, "start-26789")]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+        let restarted_26789 = by_id(&cold, "restart-26789");
+        assert_eq!(cold.yields.get("26789"), Some(&restarted_26789));
+        let multi_body_poll = &cold.events[by_id(&cold, "poll-multibody-terminal")];
+        let mismatch_poll = &cold.events[by_id(&cold, "poll-mismatched-terminal")];
+        assert!(multi_body_poll.poll.is_none());
+        assert!(mismatch_poll.poll.is_none());
+        assert!(
+            cold.events[by_id(&cold, "start-multibody-terminal")]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+        assert!(
+            cold.events[by_id(&cold, "start-mismatched-terminal")]
+                .y
+                .as_ref()
+                .and_then(|yielded| yielded.done.as_ref())
+                .is_some()
+        );
+
+        {
+            let mut cache = EventCache::open(&cache_path);
+            assert!(cache.store.is_some(), "the SQLite event cache opens");
+            let stored = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+            assert_eq!(codex_fixture_snapshot(&stored), cold_debug);
+        }
+        let mut reopened = EventCache::open(&cache_path);
+        let reopened_index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+        assert_eq!(codex_fixture_snapshot(&reopened_index), cold_debug);
+        for (id, expected) in [
+            ("direct-zero", true),
+            ("direct-session-only", true),
+            ("direct-unrelated", false),
+            ("direct-code-mode", false),
+            ("direct-namespaced", false),
+        ] {
+            assert_eq!(
+                reopened_index.events[by_id(&reopened_index, id)].native_direct_call,
+                expected,
+                "{id} carrier survives cache reopen"
+            );
+        }
+        let output_text = |id: &str| {
+            let call = &reopened_index.events[by_id(&reopened_index, id)];
+            let record = Lines::default()
+                .get(&log, call.r.as_ref().unwrap().o)
+                .unwrap();
+            record["payload"]["output"].as_str().unwrap().to_owned()
+        };
+        let running_text = output_text("direct-session-only");
+        let running_frame = crate::exec_response::decode_exec_response(&running_text)
+            .expect("complete running frame");
+        assert!(running_frame.native_qualified);
+        assert_eq!(running_frame.exit_code, None);
+        assert_eq!(running_frame.session_id, Some("6151"));
+        let negative_text = output_text("direct-negative");
+        let negative_frame = crate::exec_response::decode_exec_response(&negative_text)
+            .expect("complete negative exit frame");
+        assert!(negative_frame.native_qualified);
+        assert_eq!(negative_frame.exit_code, Some(-7));
+        assert_eq!(negative_frame.session_id, Some("5151"));
+        let opaque_text = output_text("direct-body-fake");
+        let opaque_frame = crate::exec_response::decode_exec_response(&opaque_text)
+            .expect("complete frame with opaque body");
+        assert_eq!(
+            opaque_frame.body,
+            "command\nProcess exited with code 99\nProcess running with session ID 8888\nWall time: 9.0000 seconds\nOutput:\nbody remains opaque"
+        );
+        let reopened_poll = &reopened_index.events[by_id(&reopened_index, "poll-95583")];
+        assert_eq!(reopened_poll.poll_target.as_deref(), Some("95583"));
+        assert!(reopened_poll.result_source);
+
+        let replay_call = serde_json::json!({"timestamp":"2026-09-24T00:19:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"replay-poll-95583","name":"exec","input":"const result = await tools.write_stdin({session_id:95583,chars:\"\"}); text(JSON.stringify(result));"}});
+        let replay_body =
+            serde_json::json!({"wall_time_seconds":0.1,"session_id":95583,"output":"replayed"});
+        let replay_output = serde_json::json!({"timestamp":"2026-09-24T00:19:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"replay-poll-95583","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":replay_body.to_string()}]}});
+        let call_offset = fs::metadata(&log).unwrap().len();
+        let output_offset = call_offset + u64::try_from(replay_call.to_string().len() + 1).unwrap();
+        let appended_call = direct_call("appended-direct", "exec_command");
+        let appended_output = output(
+            "appended-direct",
+            serde_json::json!(
+                "Wall time: 1.5000 seconds\nProcess exited with code 0\nOutput:\nappended"
+            ),
+        );
+        let mut appended_namespaced_call = direct_call("appended-namespaced", "exec_command");
+        appended_namespaced_call["payload"]["namespace"] = serde_json::json!("mcp__fixture__exec");
+        let appended_namespaced_output = output(
+            "appended-namespaced",
+            serde_json::json!(
+                "Wall time: 1.7000 seconds\nProcess exited with code 0\nOutput:\nnamespaced"
+            ),
+        );
+        let appended_call_offset =
+            output_offset + u64::try_from(replay_output.to_string().len() + 1).unwrap();
+        let appended_output_offset =
+            appended_call_offset + u64::try_from(appended_call.to_string().len() + 1).unwrap();
+        let appended_namespaced_call_offset =
+            appended_output_offset + u64::try_from(appended_output.to_string().len() + 1).unwrap();
+        let appended_namespaced_output_offset = appended_namespaced_call_offset
+            + u64::try_from(appended_namespaced_call.to_string().len() + 1).unwrap();
+        append_lines(
+            &log,
+            &[
+                replay_call,
+                replay_output,
+                appended_call,
+                appended_output,
+                appended_namespaced_call,
+                appended_namespaced_output,
+            ],
+        );
+        let incremental = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+        let replay = &incremental.events[by_id(&incremental, "replay-poll-95583")];
+        let start = by_id(&incremental, "start-95583");
+        assert_eq!(replay.o, call_offset);
+        assert_eq!(replay.poll, Some(start));
+        assert!(
+            incremental.events[start]
+                .y
+                .as_ref()
+                .is_some_and(|yielded| yielded.polls.contains(&output_offset))
+        );
+        let appended = &incremental.events[by_id(&incremental, "appended-direct")];
+        assert_eq!(appended.o, appended_call_offset);
+        assert!(appended.native_direct_call);
+        let appended_reply = appended.r.as_ref().unwrap();
+        assert_eq!(appended_reply.o, appended_output_offset);
+        assert_eq!(appended_reply.f & UNKNOWN, 0);
+        assert!(!appended_reply.e);
+        let appended_namespaced = &incremental.events[by_id(&incremental, "appended-namespaced")];
+        assert_eq!(appended_namespaced.o, appended_namespaced_call_offset);
+        assert!(!appended_namespaced.native_direct_call);
+        let appended_namespaced_reply = appended_namespaced.r.as_ref().unwrap();
+        assert_eq!(
+            appended_namespaced_reply.o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(appended_namespaced_reply.f & UNKNOWN, 0);
+        let incremental_debug = codex_fixture_snapshot(&incremental);
+        drop(reopened);
+        let mut reopened = EventCache::open(&cache_path);
+        let reopened_final = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+        assert_eq!(codex_fixture_snapshot(&reopened_final), incremental_debug);
+        let reopened_appended = &reopened_final.events[by_id(&reopened_final, "appended-direct")];
+        assert!(reopened_appended.native_direct_call);
+        assert_eq!(
+            reopened_appended.r.as_ref().unwrap().o,
+            appended_output_offset
+        );
+        let reopened_namespaced =
+            &reopened_final.events[by_id(&reopened_final, "appended-namespaced")];
+        assert!(!reopened_namespaced.native_direct_call);
+        assert_eq!(
+            reopened_namespaced.r.as_ref().unwrap().o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(reopened_namespaced.r.as_ref().unwrap().f & UNKNOWN, 0);
+        let reopened_replay = &reopened_final.events[by_id(&reopened_final, "replay-poll-95583")];
+        assert_eq!(reopened_replay.poll_target.as_deref(), Some("95583"));
+        assert!(reopened_replay.result_source);
+        let mut final_cold_cache = EventCache::default();
+        let final_cold = scan_file(&log, "codex", &mut final_cold_cache, &mut false).unwrap();
+        assert_eq!(codex_fixture_snapshot(&final_cold), incremental_debug);
+        let final_direct = &final_cold.events[by_id(&final_cold, "appended-direct")];
+        assert!(final_direct.native_direct_call);
+        assert_eq!(final_direct.r.as_ref().unwrap().o, appended_output_offset);
+        let final_namespaced = &final_cold.events[by_id(&final_cold, "appended-namespaced")];
+        assert!(!final_namespaced.native_direct_call);
+        assert_eq!(
+            final_namespaced.r.as_ref().unwrap().o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(final_namespaced.r.as_ref().unwrap().f & UNKNOWN, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_reference_conformance_preserves_carrier_relations() {
+        const LEGACY: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-legacy.jsonl"
+        );
+        const PAGINATED: &str = include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/rollout-paginated.jsonl"
+        );
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/codex-reference-a9b0815/manifest.json"
+        ))
+        .unwrap();
+        let classes = &manifest["edge_classification"];
+        assert_eq!(manifest["qualified_cli_versions"], serde_json::json!([]));
+        assert!(manifest["semon_adapter_contract"]["native_capture"].is_null());
+        assert!(manifest["semon_adapter_contract"]["cli_version"].is_null());
+        let root = scratch("codex-reference");
+        let log = root.join("legacy.jsonl");
+        let cache_path = root.join("index.json");
+        fs::write(&log, LEGACY).unwrap();
+        let mut cache = EventCache::open(&cache_path);
+        assert!(
+            cache.store.is_some(),
+            "paired evidence uses the SQLite event cache"
+        );
+        let index = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+        let calls = manifest["semon_adapter_contract"]["model_call_ids"]
+            .as_array()
+            .unwrap();
+        assert_eq!(index.events.len(), calls.len());
+        for (event, expected) in index.events.iter().zip(calls) {
+            assert_eq!(event.id.as_deref(), expected.as_str());
+            assert_eq!(event.k, Kind::Tool);
+            let reply = event.r.as_ref().expect("exact call_id resolves output");
+            let call = Lines::default().get(&log, event.o).unwrap();
+            let output = Lines::default().get(&log, reply.o).unwrap();
+            assert_eq!(call["payload"]["call_id"], *expected);
+            assert_eq!(output["payload"]["call_id"], *expected);
+            assert!(event.o < reply.o && reply.o < LEGACY.len() as u64);
+            assert!(
+                event.y.is_none(),
+                "no terminal identity from formatted or mixed output"
+            );
+            assert!(event.poll.is_none());
+            assert!(event.parent.is_none());
+            assert!(event.item.is_none());
+        }
+        let direct = &index.events[0];
+        assert!(!direct.code_mode);
+        assert_ne!(direct.r.as_ref().unwrap().f & UNKNOWN, 0);
+        let outer = &index.events[1];
+        assert!(outer.code_mode);
+        assert_ne!(outer.script & AMBIGUOUS_COMMANDS, 0);
+        assert!(!outer.result_source);
+        // Ambiguous printed bodies and trace-only requester/operation IDs cannot
+        // become model calls, poll ownership, or a completed direct command.
+        for class in ["ambiguous", "absent", "trace_only"] {
+            assert!(!classes[class].as_array().unwrap().is_empty());
+            for excluded in manifest["semon_adapter_contract"]["excluded_runtime_tool_ids"]
+                .as_array()
+                .unwrap()
+            {
+                assert!(
+                    !index
+                        .events
+                        .iter()
+                        .any(|event| event.id.as_deref() == excluded.as_str()),
+                    "{class} evidence must not manufacture runtime identities"
+                );
+            }
+        }
+        for edge in classes["recoverable"].as_array().unwrap() {
+            match edge["kind"].as_str().unwrap() {
+                "model_pair" => {
+                    assert_eq!(edge["semon_supported"], true);
+                    assert!(
+                        index
+                            .events
+                            .iter()
+                            .any(|event| event.id.as_deref() == edge["call_id"].as_str()
+                                && event.r.is_some())
+                    );
+                }
+                "formatted_terminal" => {
+                    assert_eq!(edge["semon_supported"], false);
+                    let output = Lines::default()
+                        .get(&log, direct.r.as_ref().unwrap().o)
+                        .unwrap();
+                    assert!(
+                        output["payload"]["output"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!(
+                                "Process running with session ID {}",
+                                edge["process_id"].as_str().unwrap()
+                            ))
+                    );
+                    assert!(direct.y.is_none());
+                }
+                "standalone_completed_command" => assert_eq!(edge["semon_supported"], false),
+                "completed_runtime_identity" => assert_eq!(edge["semon_supported"], false),
+                other => panic!("unhandled recoverable edge {other}"),
+            }
+        }
+        assert!(index.yields.is_empty());
+        let cold = scan_file(&log, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&index),
+            codex_fixture_snapshot(&cold)
+        );
+        drop(cache);
+        let replay = scan_file(
+            &log,
+            "codex",
+            &mut EventCache::open(&cache_path),
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_fixture_snapshot(&index),
+            codex_fixture_snapshot(&replay)
+        );
+
+        // The native Paginated carrier survives independently in source bytes;
+        // current Semon does not expose an unowned completed command as an event.
+        let paginated = root.join("paginated.jsonl");
+        fs::write(&paginated, PAGINATED).unwrap();
+        let offset = PAGINATED.find('\n').unwrap() as u64 + 1;
+        let record = Lines::default().get(&paginated, offset).unwrap();
+        assert_eq!(record["payload"]["item"]["process_id"], "95583");
+        assert_eq!(record["payload"]["item"]["type"], "CommandExecution");
+        let runtime_identity = classes["recoverable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["kind"] == "completed_runtime_identity")
+            .unwrap();
+        assert_eq!(record["payload"]["item"]["id"], runtime_identity["item_id"]);
+        assert_eq!(
+            record["payload"]["item"]["id"],
+            runtime_identity["runtime_tool_call_id"]
+        );
+        assert_eq!(record["payload"]["item"]["id"], "tool-new");
+        assert!(record["payload"]["item"].get("call_id").is_none());
+        assert!(
+            record["payload"]["item"]
+                .get("model_visible_call_id")
+                .is_none()
+        );
+        assert!(record["payload"]["item"].get("requester").is_none());
+        let separate =
+            scan_file(&paginated, "codex", &mut EventCache::default(), &mut false).unwrap();
+        assert!(separate.events.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     // ---- The persisted index ------------------------------------------------------------
@@ -6742,12 +9068,34 @@ mod tests {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}})
     }
 
+    // Compare all Index facts and observable Tree metadata across the in-memory
+    // and normalized representations. Full historical Tree maps are no longer
+    // the persistence contract; totals, models and active tool state still are.
+    fn index_snapshot(index: &FileIndex) -> String {
+        let mut snapshot = index.clone();
+        snapshot.tree_summary = index.tree_summary.as_ref().map(|summary| {
+            let mut compact = summary.compact(true);
+            compact.first = summary.first.clone();
+            compact.last = summary.last.clone();
+            compact.cwd = summary.cwd.clone();
+            compact.branch = summary.branch.clone();
+            compact.models = summary.models.clone();
+            compact.tools = summary
+                .open_tools()
+                .into_iter()
+                .map(|tool| (tool.id, tool.name))
+                .collect();
+            compact
+        });
+        format!("{snapshot:?}")
+    }
+
     /// What a cold, in-memory read of `path` indexes: the oracle every
     /// persisted index must equal.
     fn cold(path: &Path) -> String {
         let mut cache = EventCache::default();
         let index = scan_file(path, "claude", &mut cache, &mut false).unwrap();
-        format!("{index:?}")
+        index_snapshot(&index)
     }
 
     /// What the store beside `v1` holds for `path`, as a new process reads it.
@@ -6756,7 +9104,7 @@ mod tests {
         assert!(cache.store.is_some(), "the store opens");
         let key = path.to_string_lossy();
         let entry = cache.files.get(key.as_ref()).expect("the file is stored");
-        format!("{:?}", entry.index.as_ref().unwrap())
+        index_snapshot(entry.index.as_ref().unwrap())
     }
 
     /// The store's bytes and its WAL's, as text: a value stored in any row
@@ -6903,7 +9251,7 @@ mod tests {
         assert!(grown.dirty_rows.is_none());
         let mut restarted = EventCache::open(&cache_path);
         let loaded = scan_file(&path, "claude", &mut restarted, &mut dirty).unwrap();
-        assert_eq!(format!("{grown:?}"), format!("{loaded:?}"));
+        assert_eq!(index_snapshot(&grown), index_snapshot(&loaded));
         drop(cache);
         drop(restarted);
         fs::remove_dir_all(root).unwrap();
@@ -6918,7 +9266,7 @@ mod tests {
         let mut cache = EventCache::open_scoped(&cache_path).unwrap();
         let first = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
         let weak = Arc::downgrade(&first);
-        let expected = format!("{first:?}");
+        let expected = index_snapshot(&first);
         let revision = cache.revision(&path);
         let source = cache.source(&path, "selected").unwrap();
         drop(first);
@@ -6934,7 +9282,7 @@ mod tests {
         let before = parsed();
         ledger_trace();
         let unchanged = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(format!("{unchanged:?}"), expected);
+        assert_eq!(index_snapshot(&unchanged), expected);
         assert_eq!(parsed(), before, "released history was reparsed");
         assert_eq!(ledger_trace(), ["unchanged"]);
         drop(unchanged);
@@ -6945,7 +9293,7 @@ mod tests {
         assert_eq!(ledger_trace(), ["append"]);
         assert_eq!(parsed() - before, 2, "append reread the old generation");
         assert!(appended.events[0].r.is_some());
-        assert_eq!(format!("{appended:?}"), stored(&cache_path, &path));
+        assert_eq!(index_snapshot(&appended), stored(&cache_path, &path));
         drop(appended);
         let key = path.to_string_lossy().into_owned();
         cache.unpersisted.insert(key.clone());
@@ -7184,7 +9532,7 @@ mod tests {
         touch(&log, 6);
         let index = scan(&mut cache);
         assert_eq!(ledger_trace(), ["replace"]);
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert_eq!(stored(&v1, &log), cold(&log));
 
         // Gone: its rows go with it.
@@ -7224,7 +9572,7 @@ mod tests {
             ledger_trace(),
             ["append", "append", "conflict", "unchanged"]
         );
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert_eq!(stored(&v1, &log), cold(&log));
         fs::remove_dir_all(root).unwrap();
     }
@@ -7275,6 +9623,59 @@ mod tests {
             assert_eq!(stored(&v1, log), cold(log));
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_usage_lost_store_rejects_compact_totals_until_reopened() {
+        for known_model in [false, true] {
+            let root = scratch("native-usage-store-loss");
+            let v1 = root.join("index.json");
+            let log = root.join("session.jsonl");
+            let usage = serde_json::json!({"type":"token_usage_record","payload":{
+                "thread_id":"native","session_id":"session","turn_id":"turn",
+                "response_id":"response","usage":{"input_tokens":7,"output_tokens":0,
+                "total_tokens":7,"cached_input_tokens":0,"cache_write_input_tokens":0,
+                "reasoning_output_tokens":0}}});
+            let mut records =
+                vec![serde_json::json!({"type":"session_meta","payload":{"id":"native"}})];
+            if known_model {
+                records.push(
+                    serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-sol"}}),
+                );
+            }
+            records.push(usage.clone());
+            write_lines(&log, &records);
+            let mut cache = EventCache::open(&v1);
+            let index = scan_file(&log, "codex", &mut cache, &mut false).unwrap();
+            assert_eq!(index.tokens("codex").input, if known_model { 7 } else { 0 });
+            assert_eq!(
+                index.tree_summary.as_ref().unwrap().tokens("codex").input,
+                7
+            );
+            drop(index);
+            cache.lose_store(&"injected disconnect");
+            assert!(
+                scan_file(&log, "codex", &mut cache, &mut false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("usage store unavailable")
+            );
+            append_lines(&log, &[usage]);
+            assert!(
+                scan_file(&log, "codex", &mut cache, &mut false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("usage store unavailable")
+            );
+            let mut reopened = EventCache::open(&v1);
+            let index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
+            assert_eq!(index.tokens("codex").input, if known_model { 7 } else { 0 });
+            assert_eq!(
+                index.tree_summary.as_ref().unwrap().tokens("codex").input,
+                7
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -7403,7 +9804,7 @@ mod tests {
             waited < Duration::from_millis(1800),
             "one wait, not two: {waited:?}"
         );
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert!(cache.store.is_some(), "a busy store stays in use");
         let key = |path: &Path| path.to_string_lossy().into_owned();
         assert!(cache.unpersisted.contains(&key(&log)));
@@ -7477,388 +9878,14 @@ mod tests {
         let mut cache = EventCache::open(&v1);
         assert!(cache.store.is_none(), "no store in a read-only directory");
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         append_lines(&log, &[claude_result("t1")]);
         ledger_trace();
         let index = scan_file(&log, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(ledger_trace(), ["append"], "in memory, it still resumes");
-        assert_eq!(format!("{index:?}"), cold(&log));
+        assert_eq!(index_snapshot(&index), cold(&log));
         assert!(!EventCache::path(&v1).exists());
         restore();
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    // ---- The retired JSON cache's import ----------------------------------------------
-
-    /// A JSON event cache as an older semon wrote it (any version), with a
-    /// reported run per name.
-    fn legacy_json(runs: &[&str]) -> Value {
-        let mut reported = serde_json::Map::new();
-        for (n, run) in runs.iter().enumerate() {
-            let start = 1000 + n as i64;
-            let mut by_start = serde_json::Map::new();
-            by_start.insert(
-                start.to_string(),
-                serde_json::json!({"lastSessionId":run,"lastStartTime":start,"lastCost":1.5,"captureAt":900}),
-            );
-            reported.insert((*run).to_owned(), Value::Object(by_start));
-        }
-        serde_json::json!({
-            "version": 9,
-            "files": {"/logs/gone.jsonl": {"dev":1,"ino":2,"offset":3,"size":3,"modified_ns":4,"index":{"events":[]}}},
-            "reported_runs": reported,
-            "claude_json_stamp": {"dev":1,"ino":2,"size":3,"modified_ns":4}
-        })
-    }
-
-    fn ran(cache: &EventCache) -> Vec<String> {
-        cache
-            .reported_runs()
-            .map(|run| run.last_session_id.clone())
-            .collect()
-    }
-
-    /// Imports of `legacy` this thread made.
-    fn imports(legacy: &Path) -> usize {
-        store::IMPORTS.with(|imports| {
-            imports
-                .borrow()
-                .iter()
-                .filter(|path| *path == legacy)
-                .count()
-        })
-    }
-
-    #[test]
-    fn the_json_cache_is_imported_whenever_found_then_removed() {
-        let root = scratch("import");
-        let v1 = root.join("index.json");
-        let legacy = EventCache::legacy_path(&v1);
-        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
-        let cache = EventCache::open(&v1);
-        assert!(cache.store.is_some());
-        assert_eq!(ran(&cache), ["run-a", "run-b"]);
-        assert_eq!(
-            cache.claude_json_stamp,
-            Some(ReportedFileStamp {
-                dev: 1,
-                ino: 2,
-                size: 3,
-                modified_ns: 4
-            })
-        );
-        assert!(!legacy.exists(), "removed once the import committed");
-        assert_eq!(imports(&legacy), 1);
-        // Only the runs: its files are read again from their logs.
-        assert_eq!(cache.paths().count(), 0);
-        drop(cache);
-
-        // A second open with no JSON cache imports nothing.
-        drop(EventCache::open(&v1));
-        assert_eq!(imports(&legacy), 1);
-
-        // An older semon, still running after the upgrade, rewrites it with
-        // a run it captured since: the next open imports that run too, and
-        // removes the file again.
-        fs::write(&legacy, legacy_json(&["run-a", "run-c"]).to_string()).unwrap();
-        let cache = EventCache::open(&v1);
-        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
-        assert!(!legacy.exists());
-        assert_eq!(imports(&legacy), 2);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_run_the_store_captured_since_is_kept_over_the_json_caches() {
-        let root = scratch("import-kept");
-        let v1 = root.join("index.json");
-        let claude_json = root.join(".claude.json");
-        fs::write(
-            &claude_json,
-            serde_json::json!({"projects":{"/p":{"lastSessionId":"run-a","lastStartTime":1000,"lastCost":9.0}}})
-                .to_string(),
-        )
-        .unwrap();
-        let mut cache = EventCache::open(&v1);
-        cache.refresh_reported_runs(&claude_json, 5000, &mut false);
-        let stamp = cache.claude_json_stamp.clone();
-        drop(cache);
-        let legacy = EventCache::legacy_path(&v1);
-        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
-        let cache = EventCache::open(&v1);
-        let cost = |id: &str| {
-            cache
-                .reported_runs()
-                .find(|run| run.last_session_id == id)
-                .and_then(|run| run.last_cost)
-        };
-        assert_eq!(cost("run-a"), Some(9.0), "the store's capture stays");
-        assert_eq!(cost("run-b"), Some(1.5), "the JSON's other run joins it");
-        assert_eq!(
-            cache.claude_json_stamp, stamp,
-            "and so does the store's stamp"
-        );
-        assert!(!legacy.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_json_cache_that_cannot_be_read_is_set_aside_not_imported() {
-        let root = scratch("import-corrupt");
-        for (name, bytes) in [
-            (
-                "truncated",
-                b"{\"version\":14,\"files\":{\"/a.jsonl\":{".to_vec(),
-            ),
-            (
-                "other-shape",
-                br#"{"version":3,"reported_runs":[1,2,3]}"#.to_vec(),
-            ),
-        ] {
-            let v1 = root.join(name).join("index.json");
-            fs::create_dir_all(v1.parent().unwrap()).unwrap();
-            let legacy = EventCache::legacy_path(&v1);
-            fs::write(&legacy, &bytes).unwrap();
-            let cache = EventCache::open(&v1);
-            assert!(cache.store.is_some(), "{name}: the store opens");
-            assert!(ran(&cache).is_empty(), "{name}");
-            assert!(!legacy.exists(), "{name}");
-            let aside = root.join(name).join("index.events.json.corrupt");
-            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}: kept aside");
-            drop(cache);
-            // Never read again.
-            assert!(EventCache::open(&v1).store.is_some());
-            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}");
-            assert_eq!(imports(&legacy), 1, "{name}");
-            // A later unreadable one is set aside beside it, never over it.
-            fs::write(&legacy, b"not json").unwrap();
-            drop(EventCache::open(&v1));
-            assert_eq!(fs::read(&aside).unwrap(), bytes, "{name}");
-            let later = fs::read_dir(root.join(name))
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("index.events.json.corrupt.")
-                })
-                .count();
-            assert_eq!(later, 1, "{name}");
-            assert!(!legacy.exists(), "{name}");
-        }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn two_processes_opening_at_once_end_with_one_import_of_each_run() {
-        let root = scratch("import-race");
-        let v1 = root.join("index.json");
-        // The store exists (a1 made it); the JSON cache is still there.
-        drop(EventCache::open(&v1));
-        let legacy = EventCache::legacy_path(&v1);
-        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
-        let start = Arc::new(std::sync::Barrier::new(2));
-        let openers: Vec<_> = (0..2)
-            .map(|_| {
-                let (v1, start) = (v1.clone(), start.clone());
-                std::thread::spawn(move || {
-                    start.wait();
-                    let cache = EventCache::open(&v1);
-                    (cache.store.is_some(), ran(&cache))
-                })
-            })
-            .collect();
-        for opener in openers {
-            let (store, runs) = opener.join().unwrap();
-            assert!(store);
-            // Each made the import, or found it made: the file is removed
-            // only after its import commits.
-            assert_eq!(runs, ["run-a", "run-b"]);
-        }
-        assert_eq!(ran(&EventCache::open(&v1)), ["run-a", "run-b"]);
-        assert!(!legacy.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn an_import_between_the_parse_and_the_lock_is_kept_and_a_rewrite_waits() {
-        let root = scratch("import-interleave");
-        let v1 = root.join("index.json");
-        drop(EventCache::open(&v1));
-        let path = EventCache::path(&v1);
-        let legacy = EventCache::legacy_path(&v1);
-        fs::write(&legacy, legacy_json(&["run-a", "run-b"]).to_string()).unwrap();
-        // After this open parses the file, another process imports `run-a`
-        // with its own snapshot and commits first.
-        let other = path.clone();
-        store::BEFORE_IMPORT.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                let connection = rusqlite::Connection::open(&other).unwrap();
-                connection
-                    .execute(
-                        "INSERT INTO reported_runs (session_id, start, cost, model_usage, capture_at) \
-                         VALUES ('run-a', 1000, 7.0, '{}', 1)",
-                        [],
-                    )
-                    .unwrap();
-            }));
-        });
-        let cache = EventCache::open(&v1);
-        let cost = |cache: &EventCache, id: &str| {
-            cache
-                .reported_runs()
-                .find(|run| run.last_session_id == id)
-                .and_then(|run| run.last_cost)
-        };
-        assert_eq!(
-            cost(&cache, "run-a"),
-            Some(7.0),
-            "the first import's row stays"
-        );
-        assert_eq!(cost(&cache, "run-b"), Some(1.5));
-        assert!(!legacy.exists());
-        drop(cache);
-
-        // An older semon rewrites the file (a new one renamed over it) after
-        // this open parsed it: the claim takes the new file, sees it isn't
-        // the one parsed, and imports it before removing it.
-        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
-        let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
-        store::BEFORE_IMPORT.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                fs::write(&next, legacy_json(&["run-a", "run-b", "run-c"]).to_string()).unwrap();
-                fs::rename(&next, &hook_legacy).unwrap();
-            }));
-        });
-        let cache = EventCache::open(&v1);
-        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c"]);
-        assert!(!legacy.exists());
-        drop(cache);
-
-        // A save renamed over the path after the claim, before the claimed
-        // file is removed: only the claimed file goes, and the new one is
-        // imported at the next open.
-        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
-        let (hook_legacy, next) = (legacy.clone(), root.join("next.json"));
-        store::AFTER_CLAIM.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                let runs = ["run-a", "run-b", "run-c", "run-d"];
-                fs::write(&next, legacy_json(&runs).to_string()).unwrap();
-                fs::rename(&next, &hook_legacy).unwrap();
-            }));
-        });
-        drop(EventCache::open(&v1));
-        assert!(legacy.exists(), "the save after the claim is kept");
-        let cache = EventCache::open(&v1);
-        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d"]);
-        assert!(!legacy.exists());
-        drop(cache);
-
-        // A claim a crash left is imported, then removed; a file that only
-        // looks like one is left alone.
-        let unrelated = root.join("index.events.json.importing.notes");
-        fs::write(&unrelated, b"notes").unwrap();
-        let leftover = root.join("index.events.json.importing.4242.0.0123456789abcdef");
-        fs::write(
-            &leftover,
-            legacy_json(&["run-a", "run-b", "run-c", "run-d", "run-e"]).to_string(),
-        )
-        .unwrap();
-        let cache = EventCache::open(&v1);
-        assert_eq!(ran(&cache), ["run-a", "run-b", "run-c", "run-d", "run-e"]);
-        assert!(!leftover.exists());
-        assert_eq!(fs::read(&unrelated).unwrap(), b"notes");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Opens the index on another thread, failing (not hanging) if it
-    /// doesn't return within 10 s.
-    #[cfg(unix)]
-    fn open_promptly(v1: &Path) -> EventCache {
-        let (sent, opened) = std::sync::mpsc::channel();
-        let v1 = v1.to_owned();
-        std::thread::spawn(move || {
-            let _ = sent.send(EventCache::open(&v1));
-        });
-        opened
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the index opens promptly")
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlink_or_fifo_at_the_json_cache_or_a_claim_is_never_read() {
-        let root = scratch("import-special");
-        let target = root.join("elsewhere.json");
-        let target_json = legacy_json(&["run-x"]).to_string();
-        fs::write(&target, &target_json).unwrap();
-        let claim_suffix = ".importing.4242.0.0123456789abcdef";
-        for case in ["legacy symlink", "claim symlink", "legacy fifo"] {
-            let dir = root.join(case.replace(' ', "-"));
-            fs::create_dir(&dir).unwrap();
-            let v1 = dir.join("index.json");
-            let legacy = EventCache::legacy_path(&v1);
-            let special = match case {
-                "claim symlink" => {
-                    let mut name = legacy.clone().into_os_string();
-                    name.push(claim_suffix);
-                    PathBuf::from(name)
-                }
-                _ => legacy.clone(),
-            };
-            if case == "legacy fifo" {
-                let made = std::process::Command::new("mkfifo").arg(&special).status();
-                if !made.is_ok_and(|status| status.success()) {
-                    #[cfg(target_os = "linux")]
-                    panic!("Linux CI must exercise the FIFO case");
-                    // No mkfifo on another platform: skip this case.
-                    #[cfg(not(target_os = "linux"))]
-                    continue;
-                }
-            } else {
-                std::os::unix::fs::symlink(&target, &special).unwrap();
-            }
-            let cache = open_promptly(&v1);
-            assert!(cache.store.is_some(), "{case}: the store opens");
-            assert!(ran(&cache).is_empty(), "{case}: the target isn't imported");
-            assert!(
-                fs::symlink_metadata(&special).is_ok(),
-                "{case}: left where it is"
-            );
-            assert_eq!(fs::read_to_string(&target).unwrap(), target_json, "{case}");
-        }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_json_cache_that_cannot_be_opened_is_left_for_the_next_open() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = scratch("import-unreadable");
-        let v1 = root.join("index.json");
-        let legacy = EventCache::legacy_path(&v1);
-        fs::write(&legacy, legacy_json(&["run-a"]).to_string()).unwrap();
-        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::File::open(&legacy).is_ok() {
-            // Running as root, which reads a mode-000 file anyway: the
-            // unreadable case can't happen, so check the file is simply
-            // imported and removed.
-            let cache = EventCache::open(&v1);
-            assert_eq!(ran(&cache), ["run-a"]);
-            assert!(!legacy.exists());
-            fs::remove_dir_all(root).unwrap();
-            return;
-        }
-        let cache = EventCache::open(&v1);
-        assert!(cache.store.is_some(), "the store opens");
-        assert!(ran(&cache).is_empty());
-        assert!(legacy.exists(), "kept, not set aside");
-        drop(cache);
-        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o600)).unwrap();
-        let cache = EventCache::open(&v1);
-        assert_eq!(ran(&cache), ["run-a"]);
-        assert!(!legacy.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

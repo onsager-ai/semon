@@ -46,6 +46,14 @@ Live Claude statuses observed so far are `busy`, `idle`, `shell` (a finished tur
 
 JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every node has `id`, `harness`, `kind`, `label`, `state`, `pid`, `models`, `cwd`, `branch`, `first_activity`, `last_activity`, `last_activity_age_seconds`, `tokens`, `malformed_lines`, `open_tools`, `claude_link`, `via_tool`, `unlinked`, and `children`. Nullable fields use `null`, `tokens` contains `input`, `cached_input`, `output`, `reasoning_output`, and `total`, and each tool has `id` and `name`. Timestamps are RFC 3339 strings from source records. `malformed_lines` counts complete lines that are not JSON objects; they are skipped, and text output shows `malformed:N` when the count is nonzero. The view includes metadata only; it never prints prompts, transcript text, tool inputs, or tool outputs.
 
+Native `.jsonl.zst` history is included in normal `push` and `push --watch` runs,
+with no manual decompression. The sender verifies archives in bounded slices,
+redacts the logical records, and keeps the existing `.jsonl` mirror paths and
+cursors. It continues discovering new archives and following live logs after
+catchup. A private transport cache beside the cursor avoids decompressing the
+same archive after every batch or restart; see the
+[archive transport contract](docs/native-archive-transport.md) for limits and measurements.
+
 ## Receive pushes from your other machines
 
 `semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
@@ -106,7 +114,7 @@ They read a window of recent logs: only the log files modified in the last 30 da
 |---|---|---|
 | `list_sessions` | `state`, `repo`, `since`, `parent`, `harness`, `limit` | session summaries, most recently active first |
 | `get_session` | `id` | the summary, busy intervals, turns (each incoming message and how the turn ended) and every handoff to or from it |
-| `read_transcript` | `id`, one of `before` / `after` / `turn`, `limit` | a page of the transcript, exactly as the viewer's `/api/tx` serves it |
+| `read_transcript` | `id`, one of `before` / `after` / `turn`, `limit` | a source-backed native transcript page, sharing Viewer slot ordering and rendering |
 | `stalls` | `idle_minutes`, `since` | sessions quiet for that long that are working, wait on a question, or whose process died while its pid file said busy, each with a `stall_reason` |
 
 A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub`), `name`, `model`, `repo`, `branch`, `machine`, `parent`, `children`, `state`, `start`, `last_activity`, `pid`, `alive`, `exit`, `open_question`, `tokens` (`input` uncached, `cached`, `output`), `run` and `turns_truncated`. Times are epoch milliseconds. `state` is one of `working`, `waiting-question`, `idle`, `ended`, `error` and `unknown`; `stall_reason` is one of `waiting-question`, `no-output` and `process-gone`, and every `stalls` answer states its rule. A field Semon can't know exactly is `null`: `pid` and `alive` come only from a Claude pid file checked against its process's start time, or from a held Codex writer lock. `run` holds a live session process's run ids, read from `/proc/<pid>/environ` by exact name: `OSTROM_RUN_ID` and `OSTROM_WORK_ORDER_ID` ([Ostrom's run environment contract](https://github.com/onsager-ai/ostrom/blob/main/docs/loops.md)), and nothing else. Every other entry of the environment is dropped as it is parsed, never kept or logged. `run` is `{}` when the process has neither variable, and `null` when there is no live process (a subagent has none of its own) or its environment can't be read whole: unreadable, over 256 KB, or a run id that isn't UTF-8. The facts `semon push` sends carry each live process's run ids, so a mirror answers `run` without reading `/proc`. `exit` is `null`: no log records a run's exit status (a Codex `task_complete` error is a turn's outcome, shown as the state `error`), and none is inferred. Turns and handoffs use the same native identities across Query, Transcript and Viewer reads. `since` is a duration back from now (`90m`, `2h`, `7d`) or an RFC 3339 time. A failure has a closed `code` (`unknown_session`, `unknown_turn`, `invalid_arguments`, `outside_window`, …): `semon query` exits nonzero, and `semon mcp` returns a tool result with `isError`.
@@ -174,3 +182,6 @@ repository's Apache-2.0 license.
 Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.
 
 SSH onboarding, testing, installation/bootstrap/update, tunneling and SSH-mediated collection/execution are paused. Public transport calls refuse before credentials or network admission. [SSH bootstrap](docs/ssh-bootstrap.md) records the retained private transport and deferred qualification; existing credentials, installations and history are preserved.
+
+Model reference prices refresh automatically in long-running processes; see
+[runtime pricing](docs/runtime-pricing.md) for offline fallback and configuration.

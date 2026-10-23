@@ -19,11 +19,107 @@ const CANDIDATES: &str = "SELECT substr(key,17) FROM meta WHERE key>'overview_ne
 type EvidenceRead<'a> =
     Box<dyn Fn(&Path, &crate::native_record::Record) -> io::Result<Vec<u8>> + 'a>;
 type NativeRead<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Value> + 'a>;
+type NativeBytes<'a> = Box<dyn Fn(&Path, u64) -> io::Result<Vec<u8>> + 'a>;
+
+// One already-qualified window per admitted source, owned by this preparation.
+// Preserve the rest of an 8 KiB read after a newline instead of asking the
+// provider again for every short record or every field in that record.
+#[derive(Default)]
+struct RecordWindows(std::sync::Mutex<BTreeMap<(String, String), RecordWindow>>);
+struct RecordWindow {
+    source: crate::SessionSourceRef,
+    part: crate::SessionSourceRange,
+}
+struct WindowReader<'a> {
+    reader: &'a dyn SessionSourceReader,
+    windows: &'a RecordWindows,
+}
+impl SessionSourceReader for WindowReader<'_> {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<crate::SessionSourceRange> {
+        crate::selected_read::check()?;
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "Native recipe window changed");
+        if max == 0 || offset >= source.offset {
+            return Err(invalid());
+        }
+        let key = (source.root.clone(), source.path.clone());
+        let mut windows = self.windows.0.lock().map_err(|_| invalid())?;
+        let prior = windows.get(&key);
+        if let Some(prior) = prior {
+            if prior.source != *source
+                || expected.is_some_and(|value| value != prior.part.generation)
+            {
+                return Err(invalid());
+            }
+            if let Some(start) = offset.checked_sub(prior.part.offset)
+                && let Ok(start) = usize::try_from(start)
+                && start < prior.part.bytes.len()
+            {
+                let end = start + max.min(prior.part.bytes.len() - start);
+                return Ok(crate::SessionSourceRange {
+                    generation: prior.part.generation.clone(),
+                    length: prior.part.length,
+                    offset,
+                    bytes: std::sync::Arc::from(&prior.part.bytes[start..end]),
+                    cached: true,
+                });
+            }
+        } else if windows.len() >= SOURCES_MAX {
+            return Err(invalid());
+        }
+        let max = max
+            .min(8 * 1024)
+            .min((source.offset - offset).min(8192) as usize);
+        let part = self.reader.read_range(
+            source,
+            prior
+                .map(|prior| prior.part.generation.as_str())
+                .or(expected),
+            offset,
+            max,
+        )?;
+        if part.offset != offset
+            || part.bytes.is_empty()
+            || part.bytes.len() > max
+            || part.length < source.offset
+            || part.generation.is_empty()
+            || part.generation.len() > 4096
+            || expected.is_some_and(|value| value != part.generation)
+            || prior.is_some_and(|prior| {
+                prior.part.generation != part.generation || prior.part.length != part.length
+            })
+        {
+            return Err(invalid());
+        }
+        // Charge retained bytes before storing them. At most 64 * 8 KiB are
+        // resident; replacements also share the unchanged preparation budget.
+        crate::selected_read::charge(0, part.bytes.len())?;
+        windows.insert(
+            key,
+            RecordWindow {
+                source: source.clone(),
+                part: part.clone(),
+            },
+        );
+        Ok(part)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 pub(crate) struct NativeRecords<'a> {
     full: BTreeMap<PathBuf, Vec<u8>>,
     selected: Option<&'a EventCache>,
     read: Option<NativeRead<'a>>,
+    raw: Option<NativeBytes<'a>>,
     evidence: Option<EvidenceRead<'a>>,
     error: std::cell::RefCell<Option<io::Error>>,
     fields: BTreeMap<(PathBuf, u64, u32), crate::native_field::NativeField>,
@@ -44,6 +140,15 @@ impl NativeRecords<'_> {
         self.fields.get(&(path.to_owned(), offset, block)).cloned()
     }
     pub(crate) fn record_bytes(&self, path: &Path, offset: u64) -> Option<Vec<u8>> {
+        if let Some(read) = &self.raw {
+            return match read(path, offset) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    self.error.replace(Some(error));
+                    None
+                }
+            };
+        }
         let rest = self.bytes(path)?.get(usize::try_from(offset).ok()?..)?;
         let end = rest.iter().position(|byte| *byte == b'\n')? + 1;
         (end <= 32 * 1024 * 1024).then(|| rest[..end].to_vec())
@@ -203,6 +308,9 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         return Ok(false);
     }
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    if !projection_ready(db, row)? {
+        return Ok(false);
+    }
     if row
         .query
         .as_ref()
@@ -211,6 +319,42 @@ fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
         return Ok(false);
     }
     db.query_row("SELECT EXISTS(SELECT 1 FROM session_overview o JOIN session_trace_headers t USING(session_key) WHERE o.session_key=?1 AND json_extract(o.summary,'$.source_generation')=?2 AND t.source_generation=?2)",rusqlite::params![row.key,source],|row|row.get(0)).map_err(failure)
+}
+
+fn projection_ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
+    let exists = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_slot_projections')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(failure)?;
+    if !exists {
+        return Ok(false);
+    }
+    if crate::history_projection::catalog(db, &row.key)
+        .map_err(failure)?
+        .is_some()
+    {
+        return crate::history_projection::qualified(db, row).map_err(failure);
+    }
+    let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    db.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND version=?2 AND source_generation=?3)",rusqlite::params![row.key,crate::slot_projection::VERSION,source],|row|row.get(0)).map_err(failure)
+}
+
+/// Demand an ordinary producer upgrade for an exact selected owner. This only
+/// schedules work; publication still requires the producer's source proofs.
+pub fn request_session_projection_upgrade(options: &Options, key: &str) -> io::Result<bool> {
+    let db = connection(options)?;
+    let Some(row) = catalog(&db, key)? else {
+        return Ok(false);
+    };
+    if projection_ready(&db, &row)? {
+        return Ok(false);
+    }
+    source_refs(options, std::slice::from_ref(&row))?;
+    crate::events::store::prioritize_projection_sources(options, &row.sources)?;
+    Ok(true)
 }
 
 struct Selection {
@@ -687,7 +831,7 @@ pub(crate) fn candidates_after(
 
 /// Complete one selected original source closure under a catalog generation
 /// CAS. Bounds: 64 sources, 64 MiB native input, 1,024 provider requests. Bodies
-/// die with this call; only the existing Home/Trace metadata tables change.
+/// die with this call; only derived Home/Trace and transcript recipes change.
 /// The embedding host owns publication/custody fences and authorization checks.
 pub fn repair_session_overview(
     options: &Options,
@@ -735,19 +879,22 @@ pub fn repair_session_overview_with_control(
         let tx = writable
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(failure)?;
-        if let Some(current) = catalog(&tx, key)?
-            && ready(&tx, &current)?
-        {
-            tx.execute(
-                "DELETE FROM meta WHERE key=?1",
-                [format!("overview_needed:{key}")],
-            )
-            .map_err(failure)?;
+        let Some(current) = catalog(&tx, key)? else {
+            return Err(publication_changed());
+        };
+        if !ready(&tx, &current)? {
+            return Err(publication_changed());
         }
+        tx.execute(
+            "DELETE FROM meta WHERE key=?1",
+            [format!("overview_needed:{key}")],
+        )
+        .map_err(failure)?;
         crate::selected_read::checkpoint("selected_publication")?;
         tx.commit().map_err(failure)?;
         return Ok(false);
     }
+    let upgrade = !projection_ready(&tx, &rows[0])?;
     let generation: String = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_generation'",
@@ -765,6 +912,7 @@ pub fn repair_session_overview_with_control(
     let prepared = with_records(options, &rows, provider, mode, tx, |native| {
         crate::model::prepare_history(&producer_options, &rows, native, crate::model::now_ms())
     })?;
+    let transcripts = prepared.transcripts;
     let mut repaired = Vec::new();
     // Related inputs qualify the selected owner's relationships. They cannot
     // replace another owner's publication with this selected, partial closure.
@@ -818,6 +966,10 @@ pub fn repair_session_overview_with_control(
     // current/history membership; the publication below does not touch either.
     let _schema = EventCache::open_scoped(&options.cache).map_err(failure)?;
     crate::selected_read::check()?;
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let mut writable = Connection::open(EventCache::path(&options.cache)).map_err(failure)?;
     crate::selected_read::install(&writable)?;
     writable.busy_timeout(Duration::ZERO).map_err(failure)?;
@@ -832,14 +984,14 @@ pub fn repair_session_overview_with_control(
         )
         .map_err(failure)?;
     if current != generation {
-        return Ok(false);
+        return Err(publication_changed());
     }
     for row in &repaired {
         let Some(current) = catalog(&tx, &row.key)? else {
-            return Ok(false);
+            return Err(publication_changed());
         };
         if current.sources != row.sources {
-            return Ok(false);
+            return Err(publication_changed());
         }
     }
     for row in &repaired {
@@ -862,15 +1014,79 @@ pub fn repair_session_overview_with_control(
             };
             tx.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
         }
+        if upgrade {
+            let projection = transcripts
+                .iter()
+                .find(|projection| projection.key == row.key)
+                .ok_or_else(|| failure("Selected transcript recipes unavailable"))?;
+            if selection.incomplete {
+                return Err(failure("Selected transcript closure incomplete"));
+            }
+            publish_projection(&tx, row, projection)?;
+        }
         tx.execute(
             "DELETE FROM meta WHERE key=?1",
             [format!("overview_needed:{}", row.key)],
         )
         .map_err(failure)?;
     }
+    if upgrade && !ready(&tx, &repaired[0])? {
+        return Err(failure("Selected transcript is not ready"));
+    }
     crate::selected_read::checkpoint("selected_publication")?;
     tx.commit().map_err(failure)?;
     Ok(true)
+}
+
+fn publish_projection(
+    tx: &rusqlite::Transaction<'_>,
+    row: &CatalogRow,
+    projection: &crate::slot_projection::Projection,
+) -> io::Result<()> {
+    let texts = projection
+        .slots
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
+    let generation = crate::slot_projection::generation(&texts, &row.sources).map_err(failure)?;
+    let history = crate::history_projection::catalog(tx, &row.key)
+        .map_err(failure)?
+        .is_some();
+    let slots = if history {
+        "session_history_slots"
+    } else {
+        "session_slots"
+    };
+    if history {
+        tx.execute("INSERT OR REPLACE INTO session_history_projections(session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,0)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+    } else {
+        tx.execute("INSERT OR REPLACE INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES(?1,?2,?3,?4,?5)",rusqlite::params![row.key,generation,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failure)?;
+    }
+    tx.execute(
+        &format!("DELETE FROM {slots} WHERE session_key=?1"),
+        [&row.key],
+    )
+    .map_err(failure)?;
+    let mut put = tx
+        .prepare(&format!(
+            "INSERT INTO {slots}(session_key,slot,metadata) VALUES(?1,?2,?3)"
+        ))
+        .map_err(failure)?;
+    for (slot, text) in texts.iter().enumerate() {
+        crate::selected_read::check()?;
+        put.execute(rusqlite::params![row.key, slot as i64, text])
+            .map_err(failure)?;
+    }
+    Ok(())
+}
+
+fn publication_changed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "Selected native publication changed; retry observation",
+    )
 }
 
 fn with_records<T>(
@@ -903,6 +1119,7 @@ fn with_records<T>(
             full: BTreeMap::new(),
             selected: None,
             read: None,
+            raw: None,
             evidence: None,
             error: std::cell::RefCell::new(None),
             fields: BTreeMap::new(),
@@ -939,8 +1156,9 @@ fn with_records<T>(
         let mut field_bytes = 0;
         for row in rows {
             let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
-            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=5)",rusqlite::params![row.key,source],|r|r.get::<_,bool>(0)).map_err(failure)?;
-            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=5)",rusqlite::params![row.key,source],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let projection_version = crate::slot_projection::VERSION;
+            let history = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
+            let current = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3)",rusqlite::params![row.key,source,projection_version],|r|r.get::<_,bool>(0)).map_err(failure)?;
             if !history && !current {
                 continue;
             }
@@ -975,17 +1193,14 @@ fn with_records<T>(
     tx.commit().map_err(failure)?;
     let bytes_left = std::cell::RefCell::new(BYTES_MAX as usize);
     let requests = std::cell::Cell::new(1024usize);
+    let windows = RecordWindows::default();
     let memo = std::cell::RefCell::new(BTreeMap::<(PathBuf, u64), Value>::new());
-    let read = |path: &Path, offset: u64| -> io::Result<Value> {
-        let key = (path.to_owned(), offset);
-        if let Some(value) = memo.borrow().get(&key) {
-            return Ok(value.clone());
-        }
+    let raw = |path: &Path, offset: u64| -> io::Result<Vec<u8>> {
         let row = rows
             .iter()
             .find(|row| row.sources.iter().any(|source| source.path == path))
-            .ok_or_else(|| failure("Unqualified native producer source"))?;
-        let value = crate::transcript_range::with_source_reader(
+            .ok_or_else(|| failure("Unqualified native recipe source"))?;
+        crate::transcript_range::with_source_reader(
             options,
             &row.harness,
             &row.sources,
@@ -993,19 +1208,33 @@ fn with_records<T>(
             mode,
             |reader, refs| {
                 let reader = crate::source_reader::BudgetedReader::new(reader, requests.get());
-                let value = crate::source_reader::read_record_bounded(
-                    &reader,
+                let bytes = crate::source_reader::read_record_bytes_bounded(
+                    &WindowReader {
+                        reader: &reader,
+                        windows: &windows,
+                    },
                     refs.get(path)
-                        .ok_or_else(|| failure("Unknown producer source"))?,
+                        .ok_or_else(|| failure("Unknown recipe source"))?,
                     offset,
                     32 * 1024 * 1024,
                     &mut bytes_left.borrow_mut(),
                 );
                 requests.set(reader.remaining());
-                value
+                let bytes = bytes?;
+                crate::selected_read::charge(0, bytes.len())?;
+                Ok(bytes)
             },
-        )?;
-        if value.to_string().len() <= 1048576 {
+        )
+    };
+    let read = |path: &Path, offset: u64| -> io::Result<Value> {
+        let key = (path.to_owned(), offset);
+        if let Some(value) = memo.borrow().get(&key) {
+            return Ok(value.clone());
+        }
+        let bytes = raw(path, offset)?;
+        let value = crate::tx::parse_native_record(&bytes)
+            .ok_or_else(|| failure("Native producer record is malformed"))?;
+        if bytes.len() <= 1048576 {
             let mut memo = memo.borrow_mut();
             if memo.len() >= 16 {
                 memo.clear();
@@ -1045,6 +1274,7 @@ fn with_records<T>(
         read: selected
             .as_ref()
             .map(|_| Box::new(read) as Box<dyn Fn(&Path, u64) -> io::Result<Value>>),
+        raw: selected.as_ref().map(|_| Box::new(raw) as NativeBytes),
         evidence: selected
             .as_ref()
             .map(|_| Box::new(evidence) as EvidenceRead),
@@ -1192,6 +1422,89 @@ pub(crate) fn with_query<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_record_windows_reuse_qualified_bytes_and_reject_rebinding() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Reader {
+            generation: AtomicUsize,
+            length: AtomicUsize,
+        }
+        impl SessionSourceReader for Reader {
+            fn read_range(
+                &self,
+                _source: &crate::SessionSourceRef,
+                _expected: Option<&str>,
+                offset: u64,
+                max: usize,
+            ) -> io::Result<crate::SessionSourceRange> {
+                Ok(crate::SessionSourceRange {
+                    generation: self.generation.load(Ordering::Relaxed).to_string(),
+                    length: self.length.load(Ordering::Relaxed) as u64,
+                    offset,
+                    bytes: Arc::from(vec![b'x'; max]),
+                    cached: false,
+                })
+            }
+        }
+        let reader = Reader {
+            generation: AtomicUsize::new(1),
+            length: AtomicUsize::new(24 * 1024),
+        };
+        let bounded = crate::source_reader::BudgetedReader::new(&reader, 4);
+        let windows = RecordWindows::default();
+        let windowed = WindowReader {
+            reader: &bounded,
+            windows: &windows,
+        };
+        let source = crate::SessionSourceRef {
+            root: "claude".into(),
+            path: "projects/fixture.jsonl".into(),
+            native_id: "fixture".into(),
+            offset: 24 * 1024,
+            prefix_sha256: [1; 32],
+            tail_sha256: [2; 32],
+        };
+        assert_eq!(
+            windowed
+                .read_range(&source, None, 0, 8192)
+                .unwrap()
+                .bytes
+                .len(),
+            8192
+        );
+        for offset in 0..1024 {
+            let part = windowed
+                .read_range(&source, Some("1"), offset, 8192)
+                .unwrap();
+            assert_eq!(part.offset, offset);
+            assert_eq!(part.bytes.len(), 8192 - offset as usize);
+        }
+        assert_eq!(
+            bounded.remaining(),
+            3,
+            "adjacent records reuse qualified bytes"
+        );
+        let mut changed = source.clone();
+        changed.prefix_sha256 = [3; 32];
+        assert!(windowed.read_range(&changed, None, 0, 1).is_err());
+        assert!(windowed.read_range(&source, Some("2"), 0, 1).is_err());
+        reader.generation.store(2, Ordering::Relaxed);
+        assert!(windowed.read_range(&source, None, 8192, 8192).is_err());
+        reader.generation.store(1, Ordering::Relaxed);
+        reader.length.store(24 * 1024 + 1, Ordering::Relaxed);
+        assert!(windowed.read_range(&source, None, 8192, 8192).is_err());
+        assert!(
+            windowed
+                .read_range(&source, None, source.offset, 1)
+                .is_err()
+        );
+        assert_eq!(bounded.remaining(), 1);
+    }
+
     #[test]
     fn migration_candidate_work_is_independent_of_unrelated_history() {
         let db = Connection::open_in_memory().unwrap();

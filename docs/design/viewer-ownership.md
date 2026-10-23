@@ -2,8 +2,9 @@
 
 The hosted Viewer has one bounded, source-scoped application. A document mounts
 `createCatalogViewer` through `mountViewerApplication`; replacement destroys the
-previous mount first. Analytics, Sessions, selected transcripts and Trace
-share that shell, navigation and effect lifetime. Query parameters do not choose
+previous mount first. Analytics, Sessions, selected transcripts, Trace and
+authorized Hub administration content share that shell, navigation and effect
+lifetime. Query parameters do not choose
 an application architecture. Old compatibility markers are removed while
 preserving supported destinations, source selection and reading anchors.
 
@@ -25,24 +26,32 @@ they do not select an active landing page.
 | Shared `lib` components | Shell, Topbar, Recent, screens, panels, measured charts and transcript DOM | One owner per region; synchronous commits retain stable keys and native control roots. |
 | Scoped control/runtime observers | Status streams, recovery and selected custody observations | Exact source/native identity, independent authorization and teardown govern every delivery. |
 | `app/localControl` | Source-qualified drafts, pending operations and approvals | Preserve uncertain outcomes and edited drafts; do not replay writes. |
-| Native host content | Server forms, readiness and application destinations | Shared chrome does not render into native descendants or intercept native submission. |
+| Host page port (`ViewerHost.pages`) | Server-authorized content, heading, destination and page enhancements | The canonical router owns history, request cancellation/deadlines, scroll and content insertion. Hub owns authorization and native forms; page teardown precedes replacement. |
 
 `EffectScope` owns requests, deadlines, listeners, timers and animation frames.
 Settled requests leave that scope. Route changes close contextual panels and
 abort superseded overview/causal work. Destroying the application invalidates
 callbacks before destroying stores, controls, native content and screen roots.
-Navigation's observable route is shared with scoped status observers; it has no
-native-page loader or independent destination request lifecycle.
-Native host documents never select a reader source. An authenticated workspace
-host opts into `nativePage.workspaceChrome` to consume the same compact workspace
-Recent publication and Home count as reader pages. The sidebar-only overview path
-never hydrates previews, observes pending native sessions or replaces host content;
-the existing EffectScope, refresh cadence and publication validation own these
-reads. Hosts without a workspace retain their empty Recent slot and issue no
-workspace requests. Their native links enter
-Home, Analytics and selected-session reader documents through browser navigation;
-mount, ordinary cadence, visibility and same-document history notifications keep
-the native content and its forms under the host's owner.
+Navigation's observable route is shared with scoped status observers. The narrow
+`ViewerHost.pages` port matches host destinations and supplies an initial page or
+an abortable authorized GET. It adds no router, data store or poller. Host pages
+use the same shell, account, Recent publication and overview cadence as reader
+routes. They never select a source, hydrate transcript previews or prepare native
+history for chrome. In-flight source capability responses are invalidated when a
+host page takes the content slot. Stale page deliveries are destroyed before they
+can mount. The application retains at most 24 host scroll positions.
+
+Hub's port validates the current account/workspace before accepting fetched
+server content. Redirects and changed principals require a fresh document;
+errors remain errors with a retry action. POST forms, workspace switching and
+sign-out retain native server submission and authorization. Modified clicks and
+downloads retain browser semantics. Direct loads and JavaScript-disabled pages
+retain the server fallback. Host enhancements mount only after insertion and
+release their dialogs, observers and listeners before the next route.
+
+`nativePage` remains a legacy static embedding port, not Hub's application mode.
+Its optional workspace chrome still reads only compact metadata. It is not used
+by the Hub adapter; new administration routes use `pages` and the canonical router.
 An initial causal read marks its root busy until its selected metadata and
 preview work settles. Navigation clears that state, and a superseded read cannot
 clear a new route's readiness. Browser consumers wait for the requested native
@@ -159,8 +168,7 @@ owners. Jump to Bottom belongs to the reading dock and is independent of that
 panel. The New Session native creation composer is a separate product flow.
 
 Local CLI and stdio MCP share native Session Query. Hosted focused MCP admits
-authorized native selections with bounded worker/custody lifetime; broad hosted
-queries still require archive-cohort retirement. ViewerCore owns standalone
+authorized native selections with bounded worker/custody lifetime; broad full-text retrieval remains paused. ViewerCore owns standalone
 native routing and refresh coordination, the supported CLI tree, and request
 chrome. It owns no full workspace model, model preparation, transcript body
 cache, raw file lookup cache or compatibility read fallback. `/api/model` and
@@ -338,7 +346,8 @@ without an existing shared-memory sidecar is skipped to avoid creating native
 files. Only validated name observations are carried in machine facts, with native
 harness/ID, metadata source, observation time and explicit current/stale freshness.
 Received sources use their own facts and never the viewer host's native database.
-Metadata changes invalidate the model snapshot but preserve transcript marks.
+Metadata changes invalidate native metadata observations while preserving
+unchanged transcript generations.
 
 ## Empty local native launch
 

@@ -15,7 +15,7 @@ use std::{
 /// This is request-owned evidence, never a partial producer FileIndex/cache.
 pub(crate) struct Metadata {
     pub(crate) summary: Summary,
-    pub(crate) chunks: Arc<crate::source_chunks::Chunks>,
+    pub(crate) chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker: crate::native_marker::Index,
     pub(crate) calls: Arc<crate::native_handoff::Index>,
 }
@@ -24,7 +24,7 @@ impl Metadata {
     pub(crate) fn from_index(index: &events::FileIndex) -> Option<Self> {
         Some(Self {
             summary: index.tree_summary.clone()?,
-            chunks: index.source_chunks.clone()?,
+            chunks: Some(index.source_chunks.clone()?),
             marker: index.marker_index.clone()?,
             calls: Arc::new(index.handoff_index.clone()?),
         })
@@ -109,6 +109,10 @@ pub(crate) struct Summary {
     pub(crate) codex_tokens: Tokens,
     #[serde(default)]
     pub(crate) codex_native_usage: Option<events::CodexNativeUsage>,
+    #[serde(default)]
+    pub(crate) usage_total: Option<Tokens>,
+    #[serde(skip)]
+    pub(crate) stored: Option<events::store::tree_state::Snapshot>,
     // Never persisted: a marker can carry a handoff prompt path, and the
     // on-disk cache must not retain session content (risk:secret).
     #[serde(skip)]
@@ -122,6 +126,9 @@ impl Summary {
                 || self.codex_tokens.clone(),
                 events::CodexNativeUsage::tokens,
             );
+        }
+        if let Some(total) = &self.usage_total {
+            return total.clone();
         }
         let mut total = Tokens::default();
         for usage in self.usage_by_id.values() {
@@ -144,10 +151,55 @@ impl Summary {
             })
             .collect()
     }
+
+    pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
+        if let Some(name) = self.tools.get(id) {
+            return Ok(Some(name.clone()));
+        }
+        self.stored
+            .as_ref()
+            .map_or(Ok(None), |stored| stored.tool_name(id))
+    }
+
+    pub(crate) fn load_shared_usage(&mut self) -> io::Result<()> {
+        if let Some(stored) = &self.stored {
+            let (records, tokens, models) = stored.shared_usage()?;
+            self.usage_records = records;
+            self.usage_by_id = tokens;
+            self.usage_models = models;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn compact(&self, normalized_usage: bool) -> Self {
+        Self {
+            malformed_lines: self.malformed_lines,
+            line_count: self.line_count,
+            codex_tokens: self.codex_tokens.clone(),
+            codex_native_usage: self.codex_native_usage.as_ref().map(|usage| {
+                if normalized_usage {
+                    usage.compact()
+                } else {
+                    usage.clone()
+                }
+            }),
+            usage_total: Some(self.tokens("claude")),
+            ..Default::default()
+        }
+    }
 }
 
 impl Summary {
     pub(crate) fn observe(&mut self, record: Option<&Value>, harness: &str) {
+        self.observe_counted(record, harness, true);
+    }
+
+    pub(crate) fn observe_counted(
+        &mut self,
+        record: Option<&Value>,
+        harness: &str,
+        count_usage: bool,
+    ) {
         self.line_count += 1;
         let Some(record) = record.filter(|record| record.is_object()) else {
             self.malformed_lines += 1;
@@ -156,7 +208,7 @@ impl Summary {
         if harness == "claude" {
             update_claude(self, record);
         } else {
-            update_codex(self, record);
+            update_codex(self, record, count_usage);
         }
     }
 
@@ -244,16 +296,23 @@ fn update_claude(summary: &mut Summary, record: &Value) {
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        summary.usage_by_id.insert(
-            id.into(),
-            Tokens {
-                input: input + creation + read,
-                cached_input: read,
-                output,
-                reasoning_output: 0,
-                total: input + creation + read + output,
-            },
-        );
+        let used = Tokens {
+            input: input + creation + read,
+            cached_input: read,
+            output,
+            reasoning_output: 0,
+            total: input + creation + read + output,
+        };
+        if let Some(total) = &mut summary.usage_total {
+            let old = summary.usage_by_id.get(id).cloned().unwrap_or_default();
+            total.input = total.input - old.input + used.input;
+            total.cached_input = total.cached_input - old.cached_input + used.cached_input;
+            total.output = total.output - old.output + used.output;
+            total.reasoning_output =
+                total.reasoning_output - old.reasoning_output + used.reasoning_output;
+            total.total = total.total - old.total + used.total;
+        }
+        summary.usage_by_id.insert(id.into(), used);
     }
     if let Some(blocks) = message.get("content").and_then(Value::as_array) {
         for block in blocks {
@@ -274,7 +333,7 @@ fn update_claude(summary: &mut Summary, record: &Value) {
     }
 }
 
-fn update_codex(summary: &mut Summary, record: &Value) {
+fn update_codex(summary: &mut Summary, record: &Value, count_usage: bool) {
     update_activity(summary, record);
     let payload = &record["payload"];
     match field(record, "type") {
@@ -296,7 +355,7 @@ fn update_codex(summary: &mut Summary, record: &Value) {
                 summary.models.insert(model.into());
             }
         }
-        Some("token_usage_record") => {
+        Some("token_usage_record") if count_usage => {
             // Tree summaries preserve available request counts without asserting
             // model attribution; their native model labels are tracked separately.
             events::CodexNativeUsage::observe(
@@ -352,13 +411,13 @@ pub(crate) fn read(
     let mut summary = metadata.summary;
     let sources = crate::query_source::Sources::capture_native(
         options,
-        std::iter::once((source.clone(), Some(metadata.chunks.clone()))),
+        std::iter::once((source.clone(), metadata.chunks.clone())),
     )?;
     let records = sources.reader();
     records.verify_all()?;
     summary.marker = records.marker(path, &metadata.marker)?;
     records.finish()?;
-    evidence.source(source, Some(metadata.chunks), Some(metadata.calls))?;
+    evidence.source(source, metadata.chunks, Some(metadata.calls))?;
     if let Some(record) = metadata.marker.record() {
         evidence
             .records

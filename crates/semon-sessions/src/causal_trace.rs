@@ -59,16 +59,15 @@ impl Projection {
     }
     pub(crate) fn with_staged_origin_turns(
         mut self,
-        context: Option<&crate::model::relation_stage::Context>,
+        origins: Option<&BTreeMap<String, crate::model::relation_stage::RelationOrigin>>,
         physical_sender: impl Fn(&str) -> bool,
     ) -> std::io::Result<Self> {
         use crate::model::relation_stage::OriginTurn;
-        let Some(context) = context else {
+        let Some(origins) = origins else {
             return Ok(self);
         };
         for edge in &mut self.edges {
-            let Some(relation) = edge["id"].as_str().and_then(|id| context.relations.get(id))
-            else {
+            let Some(relation) = edge["id"].as_str().and_then(|id| origins.get(id)) else {
                 continue;
             };
             if edge["from"].as_str() != Some(relation.from.as_str())
@@ -81,9 +80,7 @@ impl Projection {
                 OriginTurn::Unknown => {}
                 OriginTurn::Unavailable => {
                     if edge.get("source_turn").is_some() {
-                        return Err(std::io::Error::other(
-                            "Staged parent turn observation changed",
-                        ));
+                        return Err(staged_turn_changed("unavailable-has-local", edge, None));
                     }
                 }
                 OriginTurn::Known(turn) => {
@@ -91,8 +88,14 @@ impl Projection {
                     if local.is_some_and(|local| local != turn)
                         || (local.is_none() && physical_sender(&relation.from))
                     {
-                        return Err(std::io::Error::other(
-                            "Staged parent turn observation changed",
+                        return Err(staged_turn_changed(
+                            if local.is_some() {
+                                "known-disagrees"
+                            } else {
+                                "known-missing-for-physical-sender"
+                            },
+                            edge,
+                            Some(turn),
                         ));
                     }
                     edge["source_turn"] = json!(turn);
@@ -174,6 +177,21 @@ impl Projection {
         self.session["family_usd"] = json!(usd);
         self
     }
+}
+
+/// Correlate a refused observation without logging native identities or content.
+fn staged_turn_changed(reason: &str, edge: &Value, recorded: Option<&str>) -> std::io::Error {
+    let fingerprint = |value: Option<&str>| {
+        value
+            .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())))
+            .unwrap_or_else(|| "none".into())
+    };
+    std::io::Error::other(format!(
+        "Staged parent turn observation changed: reason={reason} edge={} recorded={} local={}",
+        fingerprint(edge["id"].as_str()),
+        fingerprint(recorded),
+        fingerprint(edge["source_turn"].as_str()),
+    ))
 }
 
 /// The producer already owns the machine's descriptions. Roll descendant costs
@@ -1166,6 +1184,72 @@ mod generation_tests {
         let wrong = populated_projection()
             .with_origin_turns(&BTreeMap::from([("edge", &wrong_owner)]), &BTreeSet::new());
         assert!(wrong.edges[0]["source_turn"].is_null());
+    }
+
+    #[test]
+    fn catalog_runtime_staged_parent_turn_diagnostics_preserve_refusals_and_privacy() {
+        use crate::model::relation_stage::{OriginTurn, RelationOrigin};
+        let edge_id = "private-native-edge";
+        let recorded = "private-recorded-turn";
+        let local = "private-local-turn";
+        let projection = |observed: Option<&str>| {
+            let mut projection = populated_projection();
+            projection.edges[0] = json!({
+                "id":edge_id,"from":"owner","to":"child","kind":"spawn"
+            });
+            if let Some(observed) = observed {
+                projection.edges[0]["source_turn"] = json!(observed);
+            }
+            projection
+        };
+        let origins = |source_turn| {
+            BTreeMap::from([(
+                edge_id.to_owned(),
+                RelationOrigin {
+                    from: "owner".into(),
+                    kind: "spawn".into(),
+                    to: Some("child".into()),
+                    source_turn,
+                },
+            )])
+        };
+        for (source_turn, observed, reason) in [
+            (
+                OriginTurn::Unavailable,
+                Some(local),
+                "unavailable-has-local",
+            ),
+            (
+                OriginTurn::Known(recorded.into()),
+                Some(local),
+                "known-disagrees",
+            ),
+            (
+                OriginTurn::Known(recorded.into()),
+                None,
+                "known-missing-for-physical-sender",
+            ),
+        ] {
+            let error = projection(observed)
+                .with_staged_origin_turns(Some(&origins(source_turn)), |_| true)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason));
+            assert!(error.contains(&format!("{:x}", Sha256::digest(edge_id.as_bytes()))));
+            for private in [edge_id, recorded, local, "owner", "child"] {
+                assert!(!error.contains(private));
+            }
+        }
+        for (source_turn, observed, physical) in [
+            (OriginTurn::Unavailable, None, true),
+            (OriginTurn::Unknown, Some(local), true),
+            (OriginTurn::Known(recorded.into()), Some(recorded), true),
+            (OriginTurn::Known(recorded.into()), None, false),
+        ] {
+            projection(observed)
+                .with_staged_origin_turns(Some(&origins(source_turn)), |_| physical)
+                .unwrap();
+        }
     }
 
     #[test]

@@ -19,6 +19,18 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("io", error.to_string())
 }
 
+fn proof_unavailable(error: &io::Error) -> QueryError {
+    if crate::source_carrier::FailureStage::of(error).is_some()
+        || error
+            .get_ref()
+            .is_some_and(|error| error.is::<crate::source_carrier::RevisionChanged>())
+    {
+        QueryError::io(error)
+    } else {
+        QueryError::new("io", "Original native transcript proofs are unavailable")
+    }
+}
+
 fn unchanged(
     db: &Connection,
     key: &str,
@@ -118,7 +130,7 @@ fn edge(
                 recipe["kind"].as_str().unwrap_or(""),
                 &mut bytes_left.borrow_mut(),
             )
-            .map_err(unavailable)?;
+            .map_err(|error| records.query_error(error))?;
             return crate::native_field::preview_record(
                 &field,
                 &text,
@@ -129,7 +141,7 @@ fn edge(
         let remaining = *bytes_left.borrow();
         let bytes = records
             .record_bytes(path, offset, remaining as u64)
-            .map_err(unavailable)?
+            .map_err(|error| records.query_error(error))?
             .ok_or_else(|| unavailable("Native handoff record unavailable"))?;
         *bytes_left.borrow_mut() = remaining
             .checked_sub(bytes.len())
@@ -289,7 +301,7 @@ fn virtual_read(
     .map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
-    let tx = db.transaction().map_err(unavailable)?;
+    let mut tx = db.transaction().map_err(unavailable)?;
     let context = match crate::overview_repair::query_context(&tx, key) {
         Ok(context) => context,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -382,13 +394,26 @@ fn virtual_read(
             return Err(unavailable("Virtual source generations disagree"));
         }
     }
-    let sources = crate::query_source::Sources::capture_focused(
+    // Transfer the selection's WAL snapshot to the lazy byte-proof readers.
+    // Later metadata reads retain their existing publication rechecks.
+    tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    drop(tx);
+    let sources = crate::query_source::Sources::capture_focused_snapshot(
         options,
         &sources.into_values().collect::<Vec<_>>(),
+        db,
     )
-    .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
-    tx.commit().map_err(unavailable)?;
-    let records = sources.reader_with(provider.map(|reader| (reader, mode)));
+    .map_err(|error| proof_unavailable(&error))?;
+    let mut db = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(unavailable)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(unavailable)?;
+    let records = sources.reader_with_mode(provider, mode);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "query_transcript_before_read");
     let prefix = format!(
         "{}{}:{key}:",
         crate::query_projection::prefix("virtual-slot", &identity),
@@ -531,9 +556,11 @@ fn virtual_read(
             limit,
             &mut tx::Lines::provider(&mut read),
         )
-        .map_err(unavailable)?
+        .map_err(|error| records.query_error(error))?
     };
-    records.finish().map_err(unavailable)?;
+    records
+        .finish()
+        .map_err(|error| records.query_error(error))?;
     let snapshot = db.transaction().map_err(unavailable)?;
     if generation(&snapshot)? != catalog_generation
         || serde_json::to_value(
@@ -636,7 +663,7 @@ fn read_inner(
     .map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
-    let tx = db.transaction().map_err(unavailable)?;
+    let mut tx = db.transaction().map_err(unavailable)?;
     let catalog_generation = generation(&tx)?;
     let projection_generation: Option<String> = tx
         .query_row(
@@ -726,9 +753,13 @@ fn read_inner(
     if !observation.valid(total) {
         return Err(unavailable("Native transcript observation is invalid"));
     }
-    if version != VERSION
-        || source_generation.as_deref()
-            != Some(&crate::retention::source_generation(&row.sources).map_err(unavailable)?)
+    if version != VERSION {
+        let mut error = unavailable("Native transcript projection upgrade required");
+        error.stage = Some("header-version");
+        return Err(error);
+    }
+    if source_generation.as_deref()
+        != Some(&crate::retention::source_generation(&row.sources).map_err(unavailable)?)
     {
         return Err(unavailable("Native transcript source generation changed"));
     }
@@ -805,8 +836,6 @@ fn read_inner(
         }
     }
     let selected_sources: Vec<_> = selected_sources.into_values().collect();
-    let sources = crate::query_source::Sources::capture_focused(options, &selected_sources)
-        .map_err(|_| unavailable("Original native transcript proofs are unavailable"))?;
     let incomplete: bool = if history.is_some() {
         tx.query_row(
             "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
@@ -820,9 +849,21 @@ fn read_inner(
     if incomplete {
         return Ok(None);
     }
-    tx.commit().map_err(unavailable)?;
-    let rendering = provider.map(|provider| (provider, mode));
-    let records = sources.reader_with(rendering);
+    tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    drop(tx);
+    let sources =
+        crate::query_source::Sources::capture_focused_snapshot(options, &selected_sources, db)
+            .map_err(|error| proof_unavailable(&error))?;
+    let mut db = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(unavailable)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(unavailable)?;
+    let records = sources.reader_with_mode(provider, mode);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::run(options, "query_transcript_before_read");
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     if session {
         let session_key =
@@ -932,7 +973,7 @@ fn read_inner(
                         .ok_or_else(|| unavailable("Turn prompt source unavailable"))?;
                     let (record, read_bytes) = records
                         .prompt(file, slot.offset)
-                        .ok_or_else(|| unavailable("Turn prompt unavailable"))?;
+                        .ok_or_else(|| records.query_error("Turn prompt unavailable"))?;
                     let remaining = *bytes_left.borrow();
                     *bytes_left.borrow_mut() =
                         remaining.checked_sub(read_bytes as usize).ok_or_else(|| {
@@ -1028,7 +1069,9 @@ fn read_inner(
             }
             *children = kept;
         }
-        records.finish().map_err(unavailable)?;
+        records
+            .finish()
+            .map_err(|error| records.query_error(error))?;
         let snapshot = db.transaction().map_err(unavailable)?;
         unchanged(
             &snapshot,
@@ -1141,7 +1184,9 @@ fn read_inner(
             }
             high = low;
         }
-        records.finish().map_err(unavailable)?;
+        records
+            .finish()
+            .map_err(|error| records.query_error(error))?;
         let snapshot = db.transaction().map_err(unavailable)?;
         unchanged(
             &snapshot,
@@ -1272,10 +1317,12 @@ fn read_inner(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && count < MAX_SLOTS => {
                 count = (count * 2).min(MAX_SLOTS)
             }
-            Err(error) => return Err(unavailable(error)),
+            Err(error) => return Err(records.query_error(error)),
         }
     };
-    records.finish().map_err(unavailable)?;
+    records
+        .finish()
+        .map_err(|error| records.query_error(error))?;
     let snapshot = db.transaction().map_err(unavailable)?;
     unchanged(
         &snapshot,
@@ -1292,4 +1339,40 @@ fn read_inner(
         ));
     }
     Ok(Some(answer))
+}
+
+#[cfg(test)]
+mod proof_error_tests {
+    use super::*;
+
+    #[test]
+    fn unstaged_proof_errors_are_generic_and_staged_errors_keep_the_stage() {
+        let untyped = proof_unavailable(&io::Error::other("private sqlite detail"));
+        assert_eq!(untyped.code, "io");
+        assert_eq!(
+            untyped.message,
+            "Original native transcript proofs are unavailable"
+        );
+        assert!(!untyped.message.contains("private sqlite detail"));
+
+        let staged_error = crate::source_carrier::FailureStage::HeaderLedger
+            .wrap(io::Error::other("private ledger detail"));
+        assert_eq!(staged_error.kind(), io::ErrorKind::Other);
+        let staged = proof_unavailable(&staged_error);
+        assert_eq!(staged.code, "io");
+        assert_eq!(staged.stage, Some("header_ledger"));
+        assert_eq!(
+            staged.message,
+            "Original native transcript proofs are unavailable"
+        );
+    }
+
+    #[test]
+    fn unstaged_revision_error_preserves_the_typed_source_fence() {
+        let error = crate::source_carrier::RevisionReason::SizeGrew.error();
+        let mapped = proof_unavailable(&error);
+        assert_eq!(mapped.code, "stale_projection");
+        assert_eq!(mapped.local_revision_reason, Some("size_grew"));
+        assert_eq!(mapped.stage, None);
+    }
 }
