@@ -38,8 +38,7 @@ fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "linux")]
-#[test]
-fn selected_codex_pages_survive_multi_segment_sealing() {
+fn sealed_codex_fixture(padding: usize) -> (Home, PathBuf) {
     let home = Home::new("sealed-pages");
     let mut records = vec![codex_line(
         ts(5, 0),
@@ -50,12 +49,12 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         records.push(codex_line(
             ts(5, 1),
             "response_item",
-            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(2000))}]}),
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(padding))}]}),
         ));
         records.push(codex_line(
             ts(5, 1),
             "response_item",
-            json!({"type":"reasoning","summary":[{"type":"summary_text","text":format!("Readable record thinking {index} {}", "synthetic ".repeat(2000))}]}),
+            json!({"type":"reasoning","summary":[{"type":"summary_text","text":format!("Readable record thinking {index} {}", "synthetic ".repeat(padding))}]}),
         ));
         records.push(codex_line(
             ts(5, 1),
@@ -65,7 +64,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         records.push(codex_line(
             ts(5, 1),
             "response_item",
-            json!({"type":"function_call_output","call_id":format!("call-{index}"),"output":format!("Readable record output {index} {}", "synthetic ".repeat(2000))}),
+            json!({"type":"function_call_output","call_id":format!("call-{index}"),"output":format!("Readable record output {index} {}", "synthetic ".repeat(padding))}),
         ));
         records.push(codex_line(
             ts(5, 2),
@@ -83,6 +82,13 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         NOW,
     )
     .unwrap();
+    (home, path)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_codex_pages_survive_multi_segment_sealing() {
+    let (home, path) = sealed_codex_fixture(2000);
     let read_pages = |sealed: bool| {
         let mut after = 0;
         let mut pages = Vec::new();
@@ -115,6 +121,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
                 );
             }
             assert_eq!(reply.status, 200, "selected page fence: {body}");
+            assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
             let entries = body["entries"].as_array().unwrap();
             assert!(!entries.is_empty());
             assert!(
@@ -145,8 +152,81 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
     for (before, after) in before.iter().zip(&after) {
         assert_eq!(before["entries"], after["entries"]);
         assert_eq!(before["projection"], after["projection"]);
+        assert_eq!(before["range"], after["range"]);
     }
     assert_eq!(before.len(), after.len());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_sealed_page_still_rejects_excess_unique_evidence() {
+    let (home, path) = sealed_codex_fixture(4000);
+    let read = || {
+        crate::session_transcript_range_with_mode(
+            &home.options,
+            "local",
+            "sid=sealed-pages&limit=60",
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+    };
+    assert_eq!(read().status, 200);
+    assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+    crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
+    let reply = read();
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "source_budget_exhausted");
+    assert_eq!(body["fence_reason"], "source_budget");
+    assert_eq!(body["stage"], "budget");
+    assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_sealed_pages_reject_replacement_truncation_and_corruption() {
+    for mutation in 0..3 {
+        let (home, path) = sealed_codex_fixture(2000);
+        let read = || {
+            crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                "sid=sealed-pages&limit=60",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            )
+        };
+        assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+        assert_eq!(read().status, 200);
+        match mutation {
+            0 => {
+                let replacement = path.with_extension("replacement");
+                fs::write(&replacement, b"{}\n").unwrap();
+                fs::rename(replacement, &path).unwrap();
+            }
+            1 => fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(1)
+                .unwrap(),
+            _ => {
+                // A short corrupt segment must fail even after decompressed
+                // bytes have previously entered the process-wide cache.
+                let directory = path.with_file_name("rollout-sealed-pages.jsonl.seal");
+                let segment = fs::read_dir(directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.extension().is_some_and(|extension| extension == "zst"))
+                    .unwrap();
+                fs::write(segment, b"corrupt segment").unwrap();
+            }
+        }
+        let reply = read();
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_ne!(reply.status, 200, "mutation {mutation} accepted");
+        assert_ne!(body["fence_reason"], "source_budget");
+    }
 }
 
 fn admitted(options: Options) -> Arc<SessionSources> {
