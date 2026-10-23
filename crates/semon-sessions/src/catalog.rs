@@ -2378,7 +2378,8 @@ mod tests {
             crate::retain_source_event_index(&fixture.options, &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
-        assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+        // A writable producer now discards obsolete derived contracts; these
+        // assertions exercise the focused custody boundary before that rebuild.
         assert_eq!(
             crate::native_timing::cleanup_tests::snapshot(&connection),
             unsupported
@@ -2514,7 +2515,8 @@ mod tests {
             crate::retain_source_event_index(&fixture.options, &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
-        assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+        // A writable producer now discards obsolete derived contracts; these
+        // assertions exercise the focused custody boundary before that rebuild.
         assert_eq!(
             crate::native_timing::cleanup_tests::snapshot(&connection),
             unsupported
@@ -4693,7 +4695,6 @@ mod tests {
     #[test]
     fn unsupported_storage_is_observable_at_product_read_entrypoints() {
         for change in [
-            "PRAGMA user_version=1",
             "PRAGMA user_version=2147483647",
             "DELETE FROM meta WHERE key='cache_version'",
             "UPDATE meta SET value='invalid' WHERE key='cache_version'",

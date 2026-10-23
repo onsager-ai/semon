@@ -95,11 +95,16 @@ an explicit incomplete observation, rather than a claim that the whole object
 was indexed. Archive locations, credentials and tenant policy do not enter the
 public read model.
 
-Semon opens only its current schema and parser contract. Unsupported stores are
-refused before journal/schema writes; opening one never clears event rows or
-changes observations to retained. Original references and recipes stay in place.
-Unsupported recipe versions remain explicitly unavailable; they are never
-interpreted as current versions.
+Semon reads only its current schema and parser contract. Normal writable
+producers discard recognized obsolete derived indexes and rebuild from supported
+native sources under the [current storage contract](session-source-reader.md#current-semon-storage-contract).
+This also discards obsolete derived references, recipes and proof metadata;
+archive objects and native bytes remain untouched. Missing original source bytes
+cannot be reconstructed from a discarded index. Future, foreign and ambiguous
+stores remain refused without reset; focused readers never invalidate storage.
+Physical-corruption recovery is unchanged. Unsupported individual recipe versions
+in a current store remain explicitly unavailable; they are never interpreted as
+current versions.
 Native source reappearance can reactivate its catalog key through normal source
 CAS publication. This retains the latest observation per canonical key, rather
 than introducing arbitrary historical revision browsing. Explicit original raw
@@ -110,7 +115,8 @@ global producer work. This change protects provenance and bounds indexed reads;
 it does not claim that the subsequent dirty-lineage producer is complete.
 
 Current verification covers cold initialization, incremental writes and restart,
-version refusal without changing original bytes or custody, native source
+obsolete-index rebuild, future/foreign version refusal without changing original
+bytes or custody, native source
 reappearance, interrupted lifecycle retirement with the dirty observation still
 pending, and provider-rendered ranges when local source ledgers are absent.
 The exact-path guard rejects missing indexes without creating them, stale
@@ -238,6 +244,7 @@ generations and existing archive markers are retained unchanged. This is
 custody preservation, never a grant of control or new eviction authority.
 
 The current schema creates the custody-part table together with the rest of the
-storage contract. Unsupported older schemas are refused without rebinding rows,
-headers, archives or facts. Custody preservation of an unsupported individual
-recipe is distinct from reading or upgrading an old database.
+storage contract. Recognized obsolete stores are discarded by writable producers,
+without rebinding old rows, headers, archives or facts. Custody preservation of an
+unsupported individual recipe in a current store is distinct from whole-index
+invalidation; neither permits deletion of original native or archive bytes.
