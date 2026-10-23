@@ -17,3 +17,38 @@ First integrated run: Viewer foundation39933503091 correctly rejected the provis
 Integrated visual proof: run39933749307 artifact12492823634 (`viewer-visual-binding-audit`) passed all114 identities and684 actual image/evidence digests, zero unregistered states/errors. Tested merge aad343270b57d4a3bef78e4f87e35013d9080afe and delivered1b3acbaa97a0d7c64bcab88f5330564d2ad013e9 share tree13b844511ea291aea0f6c96018b93aa3b4688e0e. Exact current fingerprint f56e1d0679e135754f7535c39a1b4967482b6e60e2ccce6cc85c9547577f7839. Update only candidateFingerprint for114 existing entries; original review fields, references, artifact digests, ratios and thresholds stay unchanged. Remove completed one-off advisory audit; raw comparator remains required.
 
 Worker actual-image inspection (not independent acceptance): visual artifact12492818658 from that same run; inspected all9 reference/candidate/diff images for phone-light, phone-dark and desktop-light deps menu, plus all6 preservation images for390-light Harbor and1280-dark Atlas. Menu differences show only the previously reviewed Last-turn row and downstream shift; Harbor/Atlas show the previously approved passive-control notice removal and resulting reading-dock visibility. CI proves all captures byte-identical to their existing reviewed bindings. No new appearance approval is asserted. Images downloaded/extracted locally with live sensor32.125C before/after, no browser or local build/test used.
+
+## Second integration: PR481 main movement (2026-10-23)
+
+Starting PR head af4a675c56914e521b7a862afd0e9870427cfd36; actual fetched main
+cf1ec9c4cdf8ac102d8952cd0f75b6fbee8a395e. Merge, no rebase/force. Prior CI and
+image acceptance above are historical and cannot qualify this revision.
+
+Conflict decisions:
+- events.rs: preserve main's pub(crate) CACHE_VERSION visibility and PR's29.
+  Ancestor01c8e42c/maincf1ec9c4 both28; PRaf4a675c29. Slot recipe6 on all three.
+  Schema33 from481 remains; no competing parser or slot recipe bump.
+- native_usage/migration.rs -> native_usage/repair.rs: preserve main's complete
+  removal of legacy usage conversion, model rederivation and migration storage.
+  Observe source-qualified lifecycle in current receipt-bound tree repair instead,
+  using main's boolean copied-usage identity check. Existing tree labels checkpoint
+  the reducer. New regression crosses512-record repair slices and checks no retired
+  migration table appears. Native Codex legacy carriers stay supported inputs.
+- reprice.rs: main's parser_version helper plus parser29 assertion.
+- model/tests.rs: retain main's deletion of obsolete direct-formatter cache-upgrade
+  compatibility test. Current rebuild and source replacement lifecycle tests remain;
+  conformance workflow correctly uses main's current-storage refusal entrypoint.
+- viewer.generated.js: PR bundle retained only provisionally; CI foundation must
+  regenerate from merged canonical ui/src (including main's overviewPages change).
+- visual-acceptance.json:111 main bindings and114 PR bindings have identical
+  shared evidence/review fields; differences only fingerprints/rationale. Preserve
+  all114 PR bindings, including3 Last-turn regions. No approval/threshold/reference
+  change; fresh artifacts must qualify every fingerprint change. No advisory
+  audit workflow/script reintroduced.
+
+Docs reconcile schema33 whole-index invalidation/parser29 and current source repair,
+without restoring removed Semon compatibility. No CPU-heavy local checks, builds,
+formatting, tests or generation. Live k10temp31C before merge and30.875C after bounded
+resolution; temps.log absent. Stop CPU work>=85C/no telemetry. Every local read is
+bounded to one file under10MB. CI and fresh independent acceptance remain required;
+Worker does not merge. #430/#426 remain open.

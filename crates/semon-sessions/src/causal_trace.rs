@@ -813,6 +813,7 @@ pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) ->
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
         let tx = db.transaction().map_err(|_| 503u16)?;
+        crate::events::store::require_current(&tx).map_err(|_| 503u16)?;
         let generation: String = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='catalog_generation'",

@@ -1,5 +1,4 @@
-//! The event index persisted in SQLite: `sessions-index.sqlite3`, beside the
-//! V1 metadata cache (step a1 of `docs/design/derived-store.md`).
+//! The native event index persisted in SQLite: `sessions-index.sqlite3`.
 //!
 //! It holds the metadata represented by [`FileIndex`], versioned stable session
 //! descriptions and a focused-read catalog: kinds, offsets, ids, counts, flags
@@ -56,6 +55,8 @@ use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
 std::thread_local! {
+    static BEFORE_FRESH_WAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_STORAGE_INIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -243,7 +244,8 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-pub(crate) const SCHEMA_VERSION: i64 = 31;
+// Contract fence: pre-cleanup proof/tree/usage representations are rebuilt together.
+pub(crate) const SCHEMA_VERSION: i64 = 33;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -281,7 +283,8 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     harness TEXT NOT NULL,
     repo TEXT,
     parent_key TEXT,
-    metadata TEXT NOT NULL
+    metadata TEXT NOT NULL,
+    pricing_fingerprint TEXT
 ) STRICT;
 CREATE INDEX IF NOT EXISTS session_catalog_order ON session_catalog(last_ms DESC, session_key ASC);
 CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(harness, last_ms DESC, session_key ASC);
@@ -378,6 +381,7 @@ CREATE TABLE IF NOT EXISTS files (
     codex_tokens_by_model TEXT NOT NULL,
     rate_limits TEXT,
     codex_native_usage TEXT,
+    codex_pricing_fingerprint TEXT,
     copilot TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS events (
@@ -483,64 +487,6 @@ CREATE TABLE IF NOT EXISTS reported_runs (
 ) STRICT, WITHOUT ROWID;
 ";
 
-/// The tables derived from the logs: emptied when the parser's version
-/// changes. `reported_runs` isn't among them: its source keeps only the
-/// last run, so it can't be rebuilt.
-const DERIVED: &str = "
-DELETE FROM session_catalog_invalidations;
-DELETE FROM session_source_mutations;
-DELETE FROM catalog_backfill_sources;
-DELETE FROM catalog_relocation_candidates;
-DELETE FROM catalog_native_dependencies;
-DELETE FROM catalog_semantic_stage;
-DELETE FROM catalog_semantic_frontier;
-DELETE FROM catalog_semantic_sources;
-DELETE FROM catalog_semantic_inputs;
-DELETE FROM catalog_semantic_keys;
-DELETE FROM catalog_semantic_endpoints;
-DELETE FROM catalog_semantic_native;
-DELETE FROM catalog_semantic_owner_sources;
-DELETE FROM catalog_semantic_paths;
-DELETE FROM catalog_semantic_relations;
-DELETE FROM catalog_semantic_events;
-DELETE FROM catalog_semantic_names;
-DELETE FROM meta WHERE key IN ('catalog_semantic_gc','catalog_backfill_state','catalog_recovery_reason','catalog_recovery_after');
-UPDATE session_catalog SET lifecycle='retained',metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END;
-UPDATE session_catalog_sources SET lifecycle='retained';
-DELETE FROM meta WHERE key IN ('catalog_version', 'catalog_generation', 'catalog_observed_at', 'catalog_completeness', 'catalog_publication_epoch');
-DELETE FROM session_descriptions;
-DELETE FROM events;
-DELETE FROM signals;
-DELETE FROM usage_identity;
-DELETE FROM usage;
-DELETE FROM codex_usage;
-DELETE FROM native_tree_headers;
-DELETE FROM native_tree_generations;
-DELETE FROM native_tree_usage_work;
-DELETE FROM native_tree_codex_work;
-DELETE FROM native_tree_models;
-DELETE FROM native_tree_labels;
-DELETE FROM native_tree_tools;
-DELETE FROM native_tree_usage_models;
-DELETE FROM native_tree_copied_identities;
-DELETE FROM native_usage_current;
-DELETE FROM native_usage_migrations;
-DELETE FROM meta WHERE key IN ('native_usage_discovery_done','native_usage_discovery_after','native_usage_migration_clock','native_tree_copy_clock');
-DELETE FROM files;
-INSERT INTO meta(key,value) VALUES('native_tree_legacy_max_file','0') ON CONFLICT(key) DO UPDATE SET value='0';
-INSERT INTO meta(key,value) VALUES('native_usage_discovery_done','1') ON CONFLICT(key) DO UPDATE SET value='1';
-DELETE FROM meta WHERE key GLOB 'archive_event_index:*';
-DELETE FROM meta WHERE key GLOB 'native_codex_header:*';
-DELETE FROM meta WHERE key GLOB 'native_claude_sidecar:*';
-DELETE FROM meta WHERE key GLOB 'native_source_chunks:*';
-DELETE FROM meta WHERE key GLOB 'native_proof_tree:*';
-DELETE FROM meta WHERE key GLOB 'native_proof_repair:*';
-DELETE FROM meta WHERE key GLOB 'native_parent_marker:*';
-DELETE FROM meta WHERE key GLOB 'native_tree_summary:*';
-DELETE FROM meta WHERE key GLOB 'native_tree_failure:*';
-DELETE FROM meta WHERE key GLOB 'native_launch_calls:*';
-";
-
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
      branch, pending, tool_ids, yields, busy, links, codex_tokens, codex_tokens_by_model, \
@@ -635,20 +581,22 @@ struct SqliteStore {
 
 /// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
-/// `<path>.corrupt` and a new store is made in its place. Any other failure
-/// (a read-only directory, a lock held past the timeout, a store a newer
-/// Semon wrote) is returned for the caller to run in memory.
-pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), String> {
+/// `<path>.corrupt` and a new store is made in its place. Operational failures
+/// (a read-only directory or a lock held past the timeout) permit an in-memory
+/// cache. Unsupported contracts and malformed persistent values never do.
+pub(super) fn open(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), Unopened> {
     let (store, loaded) = match SqliteStore::attempt(path) {
         Err(Unopened::Corrupt(error)) => {
-            set_aside(path).map_err(|aside| format!("{error}; it can't be set aside: {aside}"))?;
+            set_aside(path).map_err(|aside| {
+                Unopened::Other(format!("{error}; it can't be set aside: {aside}"))
+            })?;
             eprintln!(
                 "semon: the session index {} was damaged ({error}); it was set aside and is being rebuilt",
                 path.display()
             );
-            SqliteStore::attempt(path).map_err(|error| error.to_string())?
+            SqliteStore::attempt(path)?
         }
-        opened => opened.map_err(|error| error.to_string())?,
+        opened => opened?,
     };
     Ok((Box::new(store), loaded))
 }
@@ -660,6 +608,14 @@ pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), 
     let (store, loaded) =
         SqliteStore::attempt_scoped(path, true).map_err(|error| error.to_string())?;
     Ok((Box::new(store), loaded))
+}
+
+/// Qualify an exact selected or recovery path without traversing unrelated
+/// archived markers. An existing database is never initialized or reset here.
+pub(crate) fn open_selected(path: &Path) -> Result<(), String> {
+    SqliteStore::attempt_selected(path)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Restart/read interest can resume durable work without opening Event payloads.
@@ -864,7 +820,7 @@ pub(crate) fn catalog_dependents(
     options: &crate::Options,
     selectors: &[(String, String)],
 ) -> io::Result<Vec<crate::Input>> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut found = std::collections::BTreeSet::new();
     let mut statement=store.connection.prepare("SELECT d.source_path FROM catalog_native_dependencies d WHERE harness=?1 AND native_id=?2 AND EXISTS(SELECT 1 FROM session_catalog_sources s WHERE s.source_path=d.source_path AND s.lifecycle='current') LIMIT 65").map_err(io::Error::other)?;
@@ -937,7 +893,7 @@ pub(crate) fn verify_relocation_prefix(
     length: u64,
     expected: &str,
 ) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     if let Some((_, ledger)) =
         ledger_row(&store.connection, &path.to_string_lossy()).map_err(io::Error::other)?
@@ -962,11 +918,14 @@ pub(crate) fn complete_relocation(
     input: &crate::Input,
     evidence: &crate::source_change::RelocationEvidence,
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
     let path = input.full_path(options).to_string_lossy().into_owned();
+    let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
+    let _ = archived_index(&tx, &evidence.from_path).map_err(io::Error::other)?;
     tx.execute(
         "INSERT OR REPLACE INTO session_source_mutations VALUES(?1,?2)",
         params![
@@ -991,10 +950,15 @@ pub(crate) fn prioritize_projection_sources(
     options: &crate::Options,
     sources: &[crate::model::summary::CatalogSource],
 ) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        let _ = archived_index(&tx, &path).map_err(io::Error::other)?;
+    }
     tx.execute(
         "DELETE FROM meta WHERE key>='slot_upgrade_selected:' AND key<'slot_upgrade_selected;'",
         [],
@@ -1024,10 +988,11 @@ pub(crate) fn prioritize_projection_sources(
 /// Discover prior current paths in bounded durable keyset pages during repair.
 /// Filesystem discovery cannot enumerate disappeared or deselected sources.
 pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
     let after: Option<String> = tx
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_recovery_after'",
@@ -1040,6 +1005,9 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
         return Ok(true);
     };
     let paths=tx.prepare("SELECT DISTINCT source_path FROM session_catalog_sources WHERE lifecycle='current' AND source_path>?1 ORDER BY source_path LIMIT 64").map_err(io::Error::other)?.query_map([after],|row|row.get::<_,String>(0)).map_err(io::Error::other)?.collect::<Result<Vec<_>,_>>().map_err(io::Error::other)?;
+    for path in &paths {
+        let _ = archived_index(&tx, path).map_err(io::Error::other)?;
+    }
     for path in &paths {
         if tx
             .execute(
@@ -1068,10 +1036,11 @@ pub(crate) fn discover_recovery_sources(options: &crate::Options) -> io::Result<
 }
 
 pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> io::Result<()> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
     tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');").map_err(io::Error::other)?;
     tx.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_reason',?1)",
@@ -1081,27 +1050,8 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
     tx.commit().map_err(io::Error::other)
 }
 
-/// Fence an existing publication's bounded upgrade before an old subset stage
-/// can publish the current version. Published history remains available while
-/// the ordinary discovery and drain owners rebuild its derived metadata.
-pub(crate) fn recover_unsupported_catalog(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
-        .map_err(io::Error::other)?;
-    let unsupported: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation') AND COALESCE((SELECT value FROM meta WHERE key='catalog_version'),'')!=?1 AND NOT EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining'))",
-        [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get(0),
-    ).map_err(io::Error::other)?;
-    if unsupported {
-        tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after',''),('catalog_recovery_reason','unsupported-publication-version');").map_err(io::Error::other)?;
-    }
-    tx.commit().map_err(io::Error::other)?;
-    Ok(unsupported)
-}
-
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     store
         .connection
@@ -1145,10 +1095,14 @@ pub(crate) fn requeue_concurrent_sources(
     if paths.is_empty() {
         return Ok(());
     }
-    let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
+    for path in &paths {
+        let _ = archived_index(&tx, path).map_err(io::Error::other)?;
+    }
     for path in paths {
         invalidate_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
     }
@@ -1766,25 +1720,18 @@ pub(super) fn selected_roles_current(
     Ok(true)
 }
 
-/// Additive storage preparation for already-published focused recipes. This is
-/// the existing schema owner with lazy loading. A
-/// parser change is left to its producer instead of resetting evidence in a read.
+/// Focused reads never prepare or convert another Semon storage contract.
 pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(io::Error::other)?;
-    let (schema, parser) = versions(&db).map_err(io::Error::other)?;
-    if schema == SCHEMA_VERSION && parser == Some(CACHE_VERSION) {
-        return Ok(db);
+    let read = db.unchecked_transaction().map_err(io::Error::other)?;
+    match qualify_contract(&read).map_err(io::Error::other)? {
+        Init::Ready => {}
+        Init::Unsupported(reason) => return Err(io::Error::other(reason)),
+        _ => return Err(io::Error::other("session index is not initialized")),
     }
-    if schema > SCHEMA_VERSION || parser != Some(CACHE_VERSION) {
-        return Err(io::Error::other(
-            "Native focused schema requires its producer",
-        ));
-    }
-    drop(db);
-    let _owner = SqliteStore::attempt_scoped(path, true)
-        .map_err(|_| io::Error::other("Native focused schema preparation unavailable"))?;
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(io::Error::other)
+    read.commit().map_err(io::Error::other)?;
+    Ok(db)
 }
 
 #[cfg(test)]
@@ -2360,28 +2307,36 @@ impl IndexStore for SqliteStore {
     }
 
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
-        let mut selected = self.connection.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?;
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        require_current_sql(&transaction).map_err(failure)?;
+        let mut selected = transaction.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?;
         let paths = selected
             .query_map([limit as i64], |row| row.get(0))
             .map_err(failure)?
             .collect::<Result<Vec<String>, _>>()
             .map_err(failure)?;
         if !paths.is_empty() {
+            drop(selected);
+            transaction.commit().map_err(failure)?;
             return Ok(paths);
         }
-        let mut statement = self.connection.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
-        statement
+        drop(selected);
+        let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
+        let paths = statement
             .query_map([limit as i64], |row| row.get(0))
             .map_err(failure)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)
+            .map_err(failure)?;
+        drop(statement);
+        transaction.commit().map_err(failure)?;
+        Ok(paths)
     }
 
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         let repairs = {
-            let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE version<>?1 LIMIT 64) LIMIT 64").map_err(failure)?;
+            let mut statement=tx.prepare("SELECT source_path FROM session_catalog_sources WHERE lifecycle='current' AND session_key IN(SELECT session_key FROM session_slot_projections WHERE version=?1 AND source_generation IS NULL LIMIT 64) LIMIT 64").map_err(failure)?;
             statement
                 .query_map([crate::slot_projection::VERSION], |row| {
                     row.get::<_, String>(0)
@@ -2438,30 +2393,23 @@ impl IndexStore for SqliteStore {
         native_usage::seen(&self.connection, path, ledger, identity).map_err(failure)
     }
 
-    fn advance_native_usage_migration(
+    fn advance_tree_repair(
         &mut self,
         options: &crate::Options,
     ) -> io::Result<(bool, Option<String>)> {
         let (pending, changed) = native_usage::advance(self, options)?;
-        let copies = tree_state::advance_copies(&mut self.connection).map_err(io::Error::other)?;
         let cleanup = tree_state::cleanup_work(&mut self.connection).map_err(io::Error::other)?;
-        Ok((pending || copies || cleanup, changed))
+        Ok((pending || cleanup, changed))
     }
 
-    fn native_usage_migration_pending(&self) -> Result<bool, StoreError> {
-        let usage = native_usage::migration_pending(&self.connection).map_err(failure)?;
-        let copies = self
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM native_tree_headers WHERE copies_ready=0)",
-                [],
-                |r| r.get::<_, bool>(0),
-            )
-            .map_err(failure)?;
-        Ok(usage || copies || tree_state::work_pending(&self.connection).map_err(failure)?)
+    fn tree_repair_pending(&self) -> Result<bool, StoreError> {
+        Ok(
+            native_usage::repair_pending(&self.connection).map_err(failure)?
+                || tree_state::work_pending(&self.connection).map_err(failure)?,
+        )
     }
 
-    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, harness: &str) -> io::Result<()> {
+    fn queue_tree_repair(&mut self, path: &str, ledger: &Ledger, _harness: &str) -> io::Result<()> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2491,9 +2439,7 @@ impl IndexStore for SqliteStore {
                 "native tree compact metadata exceeds budget",
             ));
         }
-        let usage_needed = harness == "codex"
-            && !native_usage::normalized(&tx, path, ledger).map_err(io::Error::other)?;
-        tx.execute("INSERT INTO native_usage_migrations(source_path,receipt,usage_needed) VALUES(?1,?2,?3) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_usage_migrations.state='done' THEN 'ready' ELSE native_usage_migrations.state END",params![path,header_ledger(ledger),usage_needed]).map_err(io::Error::other)?;
+        tx.execute("INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END",params![path,header_ledger(ledger)]).map_err(io::Error::other)?;
         tx.commit().map_err(io::Error::other)
     }
 
@@ -2658,17 +2604,18 @@ fn invalidate_catalog_source(
     Ok(())
 }
 
-enum Unopened {
+pub(super) enum Unopened {
     /// Not a database, or a damaged one: set aside and rebuilt.
     Corrupt(rusqlite::Error),
     Other(String),
+    Unsupported(String),
 }
 
 impl fmt::Display for Unopened {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Corrupt(error) => write!(formatter, "{error}"),
-            Self::Other(message) => formatter.write_str(message),
+            Self::Other(message) | Self::Unsupported(message) => formatter.write_str(message),
         }
     }
 }
@@ -2676,7 +2623,9 @@ impl fmt::Display for Unopened {
 enum Init {
     Ready,
     NoWal,
-    Newer,
+    Fresh,
+    Obsolete,
+    Unsupported(&'static str),
 }
 
 /// A closed, unchanged identity component can advance without revisiting other
@@ -2876,7 +2825,7 @@ const CATALOG_CONFLICT: &str = " ON CONFLICT(session_key) DO UPDATE SET lifecycl
 enum CatalogWriter {
     Auto,
     #[cfg(test)]
-    Legacy,
+    RowWise,
     #[cfg(test)]
     Traversal {
         owners: usize,
@@ -2896,7 +2845,7 @@ fn catalog_batch_bytes(
         #[cfg(test)]
         CatalogWriter::Traversal { .. } => {}
         #[cfg(test)]
-        CatalogWriter::Legacy => return None,
+        CatalogWriter::RowWise => return None,
     }
     if !(2..=64).contains(&rows.len()) || metadata.len() != rows.len() {
         return None;
@@ -3352,7 +3301,7 @@ impl SqliteStore {
                             }
                             let changed = put
                                 .as_mut()
-                                .expect("legacy writer statement")
+                                .expect("row_wise writer statement")
                                 .execute(params![
                                     row.key,
                                     row.last.unwrap_or(0),
@@ -3765,10 +3714,31 @@ impl SqliteStore {
         let classify = |error: rusqlite::Error| {
             if is_corrupt(&error) {
                 Unopened::Corrupt(error)
-            } else {
+            } else if is_unavailable(&error) {
                 Unopened::Other(error.to_string())
+            } else {
+                Unopened::Unsupported(format!(
+                    "unsupported session index: malformed persistent state ({error})"
+                ))
             }
         };
+        if path.exists() {
+            let db = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(classify)?;
+            db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+            let read = db.unchecked_transaction().map_err(classify)?;
+            if let Init::Unsupported(reason) = qualify_producer(&read).map_err(classify)? {
+                return Err(Unopened::Unsupported(reason.into()));
+            }
+            read.commit().map_err(classify)?;
+        }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_STORAGE_INIT.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         create_private(path, &crate::state_dir())
             .map_err(|error| Unopened::Other(error.to_string()))?;
         // Never through a symlink: the path is checked above, and SQLite
@@ -3788,11 +3758,8 @@ impl SqliteStore {
                     "its filesystem doesn't support WAL".to_owned(),
                 ));
             }
-            Init::Newer => {
-                return Err(Unopened::Other(
-                    "a newer version of semon wrote it".to_owned(),
-                ));
-            }
+            Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
+            Init::Fresh | Init::Obsolete => unreachable!("init initializes fresh storage"),
         }
         let store = Self {
             connection,
@@ -3812,6 +3779,79 @@ impl SqliteStore {
             store.load().map_err(classify)?
         };
         Ok((store, loaded))
+    }
+
+    /// Opens an existing current store for bounded selected or recovery work.
+    /// Unlike producer opens, this does not initialize storage or inspect
+    /// unrelated archived markers.
+    fn attempt_selected(path: &Path) -> Result<Self, Unopened> {
+        if !path.exists() {
+            return Self::attempt_scoped(path, true).map(|(store, _)| store);
+        }
+        let classify = |error: rusqlite::Error| {
+            if is_corrupt(&error) {
+                Unopened::Corrupt(error)
+            } else if is_unavailable(&error) {
+                Unopened::Other(error.to_string())
+            } else {
+                Unopened::Unsupported(format!(
+                    "unsupported session index: malformed persistent state ({error})"
+                ))
+            }
+        };
+        {
+            let db = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(classify)?;
+            db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+            let read = db.unchecked_transaction().map_err(classify)?;
+            match qualify_contract(&read).map_err(classify)? {
+                Init::Ready => {}
+                Init::Unsupported(reason) => {
+                    return Err(Unopened::Unsupported(reason.into()));
+                }
+                _ => {
+                    return Err(Unopened::Unsupported(
+                        "unsupported session index: existing store is not initialized".into(),
+                    ));
+                }
+            }
+            read.commit().map_err(classify)?;
+            let mode: String = db
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .map_err(classify)?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(Unopened::Unsupported(
+                    "unsupported session index: journal mode".into(),
+                ));
+            }
+        }
+
+        // Keep the usual owner-only file and WAL permissions, but only after
+        // the persistent contract has been qualified and without creating it.
+        make_existing_private(path, &crate::state_dir())
+            .map_err(|error| Unopened::Other(error.to_string()))?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(classify)?;
+        connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+        let store = Self {
+            connection,
+            path: path.to_owned(),
+            selected_runs: Some(std::collections::BTreeSet::new()),
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        Ok(store)
     }
 
     fn read_stamp(&self) -> rusqlite::Result<Option<ReportedFileStamp>> {
@@ -3955,6 +3995,7 @@ impl SqliteStore {
         if !current(&transaction)? {
             return Ok(Outcome::Stale);
         }
+        require_current_sql(&transaction)?;
         let found = ledger_row(&transaction, path)?;
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
@@ -3979,6 +4020,7 @@ impl SqliteStore {
         if !current(&transaction)? {
             return Ok(Outcome::Stale);
         }
+        require_current_sql(&transaction)?;
         for (path, expected) in files {
             match (ledger_row(&transaction, path), expected) {
                 (Ok(Some((_, found))), Some(expected)) if found == *expected => {
@@ -4078,6 +4120,26 @@ fn is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error.sqlite_error_code(),
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Only operational failures may become an in-memory cache. SQL/schema and
+/// persistent value decoding errors must remain observable refusals.
+fn is_unavailable(error: &rusqlite::Error) -> bool {
+    let rusqlite::Error::SqliteFailure(code, _) = error else {
+        return false;
+    };
+    matches!(
+        code.extended_code & 0xff,
+        rusqlite::ffi::SQLITE_BUSY
+            | rusqlite::ffi::SQLITE_LOCKED
+            | rusqlite::ffi::SQLITE_PERM
+            | rusqlite::ffi::SQLITE_READONLY
+            | rusqlite::ffi::SQLITE_IOERR
+            | rusqlite::ffi::SQLITE_FULL
+            | rusqlite::ffi::SQLITE_CANTOPEN
+            | rusqlite::ffi::SQLITE_NOMEM
+            | rusqlite::ffi::SQLITE_INTERRUPT
     )
 }
 
@@ -4196,6 +4258,50 @@ fn create_private(path: &Path, semon_state: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Tightens the existing store and its SQLite siblings without creating any
+/// of them. Selected opens call this only after read-only qualification.
+fn make_existing_private(path: &Path, semon_state: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::other("its path is a symlink"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(O_NOFOLLOW);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for sibling_path in [
+            path.to_owned(),
+            sibling(path, "-wal"),
+            sibling(path, "-shm"),
+        ] {
+            if let Ok(metadata) = fs::symlink_metadata(&sibling_path)
+                && metadata.is_file()
+                && metadata.permissions().mode() & 0o077 != 0
+            {
+                fs::set_permissions(&sibling_path, fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        let owner = file.metadata()?.uid();
+        if let Some(state) = tightened(path, semon_state)
+            && let Ok(metadata) = fs::symlink_metadata(&state)
+            && metadata.is_dir()
+            && metadata.uid() == owner
+            && metadata.permissions().mode() & 0o077 != 0
+        {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = semon_state;
+        drop(file);
+    }
+    Ok(())
+}
+
 /// Renames a damaged store to `<path>.corrupt` and drops its `-wal` and
 /// `-shm`, which belong to it and must not meet the new file.
 fn set_aside(path: &Path) -> io::Result<()> {
@@ -4221,18 +4327,439 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
     }
 }
 
-/// Readies a connection. The versions are read without a lock, so a store
-/// that is current opens even while another process writes; the write lock
-/// is taken only to create or migrate it.
+/// Classify in a read snapshot, before journal, schema or recovery writes.
+/// Version zero is fresh only when there are no schema objects.
+fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
+    let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if schema == 0 {
+        let nonempty: bool =
+            connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |row| {
+                row.get(0)
+            })?;
+        return Ok(if nonempty {
+            Init::Unsupported("unsupported session index: nonempty schema zero")
+        } else {
+            Init::Fresh
+        });
+    }
+    if schema < SCHEMA_VERSION {
+        return Ok(Init::Unsupported("unsupported session index: older schema"));
+    }
+    if schema > SCHEMA_VERSION {
+        return Ok(Init::Unsupported("unsupported session index: newer schema"));
+    }
+    let meta: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !meta {
+        return Ok(Init::Unsupported(
+            "unsupported session index: missing metadata",
+        ));
+    }
+    let parser = match connection
+        .query_row(
+            "SELECT CASE WHEN octet_length(value)<=32 THEN value ELSE NULL END FROM meta WHERE key='cache_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+    {
+        Ok(Some(value)) => match value.parse::<u32>() {
+            Ok(version) if value == version.to_string() => version,
+            _ => {
+                return Ok(Init::Unsupported(
+                    "unsupported session index: malformed metadata",
+                ));
+            }
+        },
+        Ok(None) => {
+            return Ok(Init::Unsupported(
+                "unsupported session index: missing metadata",
+            ));
+        }
+        Err(_) => {
+            return Ok(Init::Unsupported(
+                "unsupported session index: malformed metadata",
+            ));
+        }
+    };
+    if parser != CACHE_VERSION {
+        return Ok(Init::Unsupported(
+            "unsupported session index: parser version mismatch",
+        ));
+    }
+    // Qualify the actual loader statements, including their child-row readers,
+    // even when files is empty. A current label cannot hide incomplete DDL.
+    if let Err(error) = qualify_load_schema(connection) {
+        return malformed_schema(error);
+    }
+    for sql in [
+        "SELECT codex_pricing_fingerprint,ctime_ns,copilot FROM files LIMIT 0",
+        "SELECT pricing_fingerprint,lifecycle,parent_key FROM session_catalog LIMIT 0",
+        "SELECT usage_ready FROM native_usage_sources LIMIT 0",
+        "SELECT tree_root FROM native_tree_repairs LIMIT 0",
+        "SELECT source_generation FROM session_slot_projections LIMIT 0",
+        "SELECT metadata FROM session_history_catalog LIMIT 0",
+        "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
+    ] {
+        if let Err(error) = connection.prepare(sql) {
+            return malformed_schema(error);
+        }
+    }
+    let publication: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_recipe' AND value<>?3)",
+        params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION, semantic_stage::RECIPE],
+        |row| row.get(0),
+    )?;
+    if publication {
+        return Ok(Init::Unsupported(
+            "unsupported session index: publication version",
+        ));
+    }
+    Ok(Init::Ready)
+}
+
+// SQLITE_ERROR describes a missing/malformed SQL object here. Busy, I/O and
+// physical-corruption errors retain their existing operational/recovery paths.
+fn malformed_schema(error: rusqlite::Error) -> rusqlite::Result<Init> {
+    if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_ERROR)
+    {
+        Ok(Init::Unsupported(
+            "unsupported session index: malformed schema",
+        ))
+    } else {
+        Err(error)
+    }
+}
+
+/// The complete open's SQL dependencies, without loading any source/history
+/// rows. Readers owns the event, signal, usage and native metadata statements;
+/// the other prepares cover the conditional normalized usage/tree restorers.
+fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
+    let _readers = Readers::new(connection)?;
+    connection.prepare(&format!(
+        "SELECT {FILE_COLUMNS} FROM files ORDER BY file_id LIMIT 0"
+    ))?;
+    connection.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start LIMIT 0"
+    ))?;
+    for sql in [
+        "SELECT source_path,source_id FROM native_usage_current LIMIT 0",
+        "SELECT source_id,receipt,parser_version,usage_ready FROM native_usage_sources LIMIT 0",
+        "SELECT source_id,kind,dimension,value FROM native_usage_dimensions LIMIT 0",
+        "SELECT source_path,file_id,projection_id,ledger FROM native_tree_headers LIMIT 0",
+        "SELECT projection_id,source_id,complete,version,receipt FROM native_tree_generations LIMIT 0",
+        "SELECT projection_id,label,value FROM native_tree_labels LIMIT 0",
+        "SELECT projection_id,model FROM native_tree_models LIMIT 0",
+        "SELECT projection_id,tool_id,name,closed FROM native_tree_tools LIMIT 0",
+    ] {
+        connection.prepare(sql)?;
+    }
+    Ok(())
+}
+
+/// Bounded selected reads qualify the storage contract in their own snapshot.
+/// Archive marker consumers additionally validate the exact selected marker;
+/// unrelated archive history is never traversed by a focused request.
+pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
+    match qualify_contract(connection).map_err(io::Error::other)? {
+        Init::Ready => Ok(()),
+        Init::Unsupported(reason) => Err(io::Error::other(reason)),
+        _ => Err(io::Error::other("session index is not initialized")),
+    }
+}
+
+/// A writer qualifies the fixed-size current contract in its own transaction
+/// before changing durable rows or proof metadata. Writers that touch archive
+/// custody validate only the selected marker at that call site.
+pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<()> {
+    match qualify_contract(connection)? {
+        Init::Ready => Ok(()),
+        Init::Unsupported(reason) => Err(rusqlite::Error::InvalidParameterName(reason.into())),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "session index is not initialized".to_owned(),
+        )),
+    }
+}
+
+/// Writers also qualify retained marker formats before any mutation.
+fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
+    let found = qualify_contract(connection)?;
+    if !matches!(found, Init::Ready) {
+        return Ok(found);
+    }
+    let unsupported_archive: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
+        [CACHE_VERSION],
+        |row| row.get(0),
+    )?;
+    if unsupported_archive {
+        return Ok(Init::Unsupported(
+            "unsupported session index: archived marker version",
+        ));
+    }
+    Ok(Init::Ready)
+}
+
+/// One authored DDL set, shared by cold initialization and whole-index rebuilds.
+fn storage_ddl() -> [&'static str; 10] {
+    [
+        SCHEMA,
+        native_usage::SCHEMA,
+        tree_state::SCHEMA,
+        semantic_stage::SCHEMA,
+        crate::overview::SCHEMA,
+        crate::causal_trace::SCHEMA,
+        crate::history_projection::SCHEMA,
+        crate::catalog_search::SCHEMA,
+        crate::catalog_changes::SCHEMA,
+        reprice::SCHEMA,
+    ]
+}
+
+/// Recognize ownership without reading old event/proof/recipe payloads. Refuse
+/// mixed databases: no unknown tables, views or triggers may be discarded.
+/// The three retired table names are ownership evidence, never old-schema DDL.
+type OwnedObjects = Vec<(String, String)>;
+
+fn owned_objects(connection: &Connection) -> rusqlite::Result<Option<OwnedObjects>> {
+    let objects = connection
+        .prepare("SELECT type,name,tbl_name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type DESC,name LIMIT 513")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if objects.len() > 512 {
+        return Ok(None);
+    }
+    let declared = |kind: &str, name: &str| {
+        let prefix = format!("CREATE {kind} IF NOT EXISTS ");
+        storage_ddl().iter().any(|ddl| {
+            ddl.split(prefix.as_str()).skip(1).any(|tail| {
+                tail.split(|ch: char| ch.is_whitespace() || ch == '(')
+                    .next()
+                    == Some(name)
+            })
+        })
+    };
+    let table = |name: &str| {
+        declared("TABLE", name)
+            || matches!(
+                name,
+                "native_usage_migrations" | "native_tree_copy_queue" | "session_search_postings"
+            )
+    };
+    if objects
+        .iter()
+        .any(|(kind, name, owner)| match kind.as_str() {
+            "table" => !table(name),
+            "index" => !table(owner),
+            "trigger" => !table(owner) || !declared("TRIGGER", name),
+            _ => true,
+        })
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        objects
+            .into_iter()
+            .filter_map(|(kind, name, _)| {
+                matches!(kind.as_str(), "table" | "trigger").then_some((kind, name))
+            })
+            .collect(),
+    ))
+}
+
+fn contract_number(value: &str) -> Option<u32> {
+    let number = value.parse::<u32>().ok()?;
+    (number > 0 && value == number.to_string()).then_some(number)
+}
+
+/// Only producers can turn an obsolete, positively recognized Semon contract
+/// into a fresh index. Every known version must be readable and <= current;
+/// a single newer/unrecognized contract wins over any older contract.
+fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
+    let found = qualify(connection)?;
+    if !matches!(found, Init::Unsupported(_)) {
+        return Ok(found);
+    }
+    let schema: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let application: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if schema <= 0 || schema > SCHEMA_VERSION || application != 0 {
+        return Ok(found);
+    }
+    // These stable columns and the canonical parser key are the evidence
+    // existing Semon databases already wrote; no new marker is required.
+    for sql in [
+        "SELECT key,value FROM meta LIMIT 0",
+        "SELECT file_id,path,dev,ino,resume_at,head_sha256,tail_sha256 FROM files LIMIT 0",
+        "SELECT file_id,extra,seq,k,o,b FROM events LIMIT 0",
+    ] {
+        if let Err(error) = connection.prepare(sql) {
+            return match malformed_schema(error)? {
+                Init::Unsupported(_) => Ok(found),
+                _ => unreachable!(),
+            };
+        }
+    }
+    let mut obsolete = schema < SCHEMA_VERSION;
+    for (key, current, required) in [
+        ("cache_version", CACHE_VERSION, true),
+        (
+            "catalog_version",
+            crate::model::summary::CATALOG_VERSION,
+            false,
+        ),
+        (
+            "search_version",
+            contract_number(crate::catalog_search::VERSION).expect("current search version"),
+            false,
+        ),
+    ] {
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1 AND octet_length(value)<=32",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(value) = value else {
+            // Oversized values are not absent metadata.
+            let present: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+                [key],
+                |row| row.get(0),
+            )?;
+            if required || present {
+                return Ok(found);
+            }
+            continue;
+        };
+        let Some(version) = contract_number(&value) else {
+            return Ok(found);
+        };
+        if version > current {
+            return Ok(found);
+        }
+        obsolete |= version < current;
+    }
+    let recipe: Option<Option<String>> = connection.query_row(
+        "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE key='catalog_semantic_recipe'", [], |row| row.get(0),
+    ).optional()?;
+    if let Some(recipe) = recipe {
+        let Some(version) = recipe
+            .as_deref()
+            .and_then(|text| text.strip_prefix("recorded-origin-turn-complete-receipts-v"))
+            .and_then(contract_number)
+        else {
+            return Ok(found);
+        };
+        let current = semantic_stage::RECIPE
+            .strip_prefix("recorded-origin-turn-complete-receipts-v")
+            .and_then(contract_number)
+            .expect("current semantic recipe");
+        if version > current {
+            return Ok(found);
+        }
+        obsolete |= version < current;
+    }
+    // Inspect only format numbers, never old archive payloads or source bytes.
+    let (invalid, older): (bool, bool) = connection.query_row(
+        "SELECT COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN CASE WHEN json_type(value,'$.version')='integer' AND json_extract(value,'$.version') BETWEEN 1 AND 6 AND ((json_extract(value,'$.version')<6 AND json_type(value,'$.parser_version') IS NULL) OR (json_type(value,'$.parser_version')='integer' AND json_extract(value,'$.parser_version') BETWEEN 1 AND ?1)) THEN 0 ELSE 1 END ELSE 1 END),0), COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN json_extract(value,'$.version')<6 OR json_extract(value,'$.parser_version')<?1 ELSE 0 END),0) FROM meta WHERE key GLOB 'archive_event_index:*'",
+        [CACHE_VERSION], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if invalid {
+        return Ok(found);
+    }
+    obsolete |= older;
+    if obsolete && owned_objects(connection)?.is_some() {
+        Ok(Init::Obsolete)
+    } else {
+        Ok(found)
+    }
+}
+
+/// Reclassify inside SQLite's writer lock. Reset and current DDL commit as one
+/// transaction: WAL readers keep their old snapshots; producers cannot reset a
+/// store that another producer has already rebuilt. No files are unlinked.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
-    // Reuse the small set of per-source ledger/index statements. Cached SQL
-    // clears bound values on return; this retains neither source bodies nor
-    // authority and never skips the transaction's generation checks.
     connection.set_prepared_statement_cache_capacity(32);
-    let mode: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    let read = connection.transaction()?;
+    let found = qualify_producer(&read)?;
+    read.commit()?;
+    if matches!(found, Init::Unsupported(_)) {
+        return Ok(found);
+    }
+    let fresh = matches!(found, Init::Fresh);
+    let rebuild = matches!(found, Init::Obsolete);
+    let mut initialized = false;
+    if fresh || rebuild {
+        if fresh {
+            // Cold initialization retains exclusion through the first WAL switch.
+            connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        }
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        match qualify_producer(&transaction)? {
+            state @ (Init::Fresh | Init::Obsolete) => {
+                if matches!(state, Init::Obsolete) {
+                    let Some(objects) = owned_objects(&transaction)? else {
+                        return Ok(Init::Unsupported(
+                            "unsupported session index: ambiguous ownership",
+                        ));
+                    };
+                    // Triggers precede tables; indexes disappear with their table.
+                    for (kind, name) in objects {
+                        let quoted = name.replace('"', "\"\"");
+                        transaction.execute_batch(&format!("DROP {kind} \"{quoted}\""))?;
+                    }
+                }
+                for ddl in storage_ddl() {
+                    transaction.execute_batch(ddl)?;
+                }
+                transaction.execute(
+                    "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
+                    [CACHE_VERSION.to_string()],
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                initialized = true;
+            }
+            Init::Ready => {}
+            unsupported => return Ok(unsupported),
+        }
+        transaction.commit()?;
+    }
+    #[cfg(test)]
+    if initialized && let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+    let mut mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if initialized && !mode.eq_ignore_ascii_case("wal") {
+        mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    }
     if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(Init::NoWal);
+        return Ok(if fresh || rebuild {
+            Init::NoWal
+        } else {
+            Init::Unsupported("unsupported session index: journal mode")
+        });
+    }
+    if fresh
+        && let Some(path) = connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    {
+        let old = std::mem::replace(connection, Connection::open_in_memory()?);
+        drop(old);
+        *connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        return init(connection);
     }
     let _: i64 = connection.query_row(
         &format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
@@ -4240,187 +4767,8 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         |row| row.get(0),
     )?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
-    // One read transaction, so the two versions are read together.
-    let read = connection.transaction()?;
-    let found = versions(&read)?;
-    read.commit()?;
-    match found {
-        (schema, _) if schema > SCHEMA_VERSION => return Ok(Init::Newer),
-        (_, Some(parser)) if parser > CACHE_VERSION => return Ok(Init::Newer),
-        (SCHEMA_VERSION, Some(CACHE_VERSION)) => return Ok(Init::Ready),
-        _ => {}
-    }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Read again under the lock: another process may have migrated it.
-    let (schema, parser) = versions(&transaction)?;
-    if schema > SCHEMA_VERSION || parser.is_some_and(|parser| parser > CACHE_VERSION) {
-        return Ok(Init::Newer);
-    }
-    if schema < SCHEMA_VERSION {
-        if schema != 0
-            && !transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='ctime_ns')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )?
-        {
-            transaction.execute_batch("ALTER TABLE files ADD COLUMN ctime_ns BLOB")?;
-        }
-        if schema == 6 {
-            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN parent_key TEXT")?;
-        }
-        if (6..11).contains(&schema) && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='lifecycle')", [], |row| row.get::<_,bool>(0))? {
-            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')); ")?;
-        }
-        if (7..11).contains(&schema) && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog_sources') WHERE name='lifecycle')", [], |row| row.get::<_,bool>(0))? {
-            transaction.execute_batch("ALTER TABLE session_catalog_sources ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')); ")?;
-        }
-        if schema==10 && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_slot_projections') WHERE name='source_generation')",[],|row|row.get::<_,bool>(0))? {
-            transaction.execute_batch("ALTER TABLE session_slot_projections ADD COLUMN source_generation TEXT")?;
-        }
-        // Earlier schemas used lifecycle-prefixed indexes containing retained rows.
-        // Replace only the Current list trees; history/source lookup indexes
-        // still support both lifecycle states and keep their existing authority.
-        if (11..17).contains(&schema) {
-            transaction.execute_batch(
-                "DROP INDEX IF EXISTS session_catalog_current_order;
-                DROP INDEX IF EXISTS session_catalog_current_harness;
-                DROP INDEX IF EXISTS session_catalog_current_repo;
-                DROP INDEX IF EXISTS session_catalog_current_harness_repo;
-                DROP INDEX IF EXISTS session_catalog_current_parent;",
-            )?;
-        }
-        transaction.execute_batch(SCHEMA)?;
-        transaction.execute_batch(native_usage::SCHEMA)?;
-        if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_usage_sources') WHERE name='usage_ready')",[],|r|r.get::<_,bool>(0))? {
-            transaction.execute_batch("ALTER TABLE native_usage_sources ADD COLUMN usage_ready INTEGER NOT NULL DEFAULT 1")?;
-        }
-        if !transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='codex_pricing_fingerprint')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )? {
-            transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_pricing_fingerprint TEXT")?;
-        }
-        if !transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog') WHERE name='pricing_fingerprint')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )? {
-            transaction.execute_batch("ALTER TABLE session_catalog ADD COLUMN pricing_fingerprint TEXT")?;
-        }
-        transaction.execute_batch(tree_state::SCHEMA)?;
-        // New usage identities are maintained by the installed copy triggers.
-        // Only files already present at the additive upgrade need bootstrap.
-        transaction.execute("INSERT INTO meta(key,value) SELECT 'native_tree_legacy_max_file',CAST(COALESCE(MAX(file_id),0) AS TEXT) FROM files WHERE true ON CONFLICT(key) DO NOTHING",[])?;
-        transaction.execute("INSERT INTO meta(key,value) SELECT 'native_usage_discovery_done','1' WHERE NOT EXISTS(SELECT 1 FROM files) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[])?;
-        transaction.execute_batch(semantic_stage::SCHEMA)?;
-        transaction.execute_batch(crate::overview::SCHEMA)?;
-        transaction.execute_batch(crate::causal_trace::SCHEMA)?;
-        transaction.execute_batch(crate::history_projection::SCHEMA)?;
-        transaction.execute_batch(crate::catalog_search::SCHEMA)?;
-        // Format 2 also reads the existing format-1 postings. Promote only its
-        // metadata in this additive transaction, before the publication path
-        // could interpret a supported upgrade as a missing search projection.
-        transaction.execute(
-            "UPDATE meta SET value=?1 WHERE key='search_version' AND value='1'",
-            [crate::catalog_search::VERSION],
-        )?;
-        transaction.execute_batch(crate::catalog_changes::SCHEMA)?;
-        if schema < 18 {
-            // One-time metadata bootstrap; requests only read this durable
-            // stream. Scope indexes permit useful history without consuming
-            // every current-list record first.
-            transaction.execute_batch("INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'current' FROM session_catalog ORDER BY last_ms DESC,session_key ASC; INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'retained_history' FROM (SELECT session_key FROM session_catalog UNION SELECT session_key FROM session_history_catalog) ORDER BY session_key;")?;
-        } else if schema == 18 {
-            // Schema 18 omitted Current fallback keys from the initial History
-            // stream. Append recovery hints without resetting any saved cursor.
-            transaction.execute_batch("INSERT INTO session_catalog_changes(session_key,read_scope) SELECT session_key,'retained_history' FROM session_catalog ORDER BY session_key;")?;
-        }
-        if schema == 1 {
-            transaction.execute_batch("ALTER TABLE files ADD COLUMN codex_native_usage TEXT")?;
-        }
-        if schema == 1 || schema == 2 {
-            transaction.execute_batch(
-                "ALTER TABLE usage ADD COLUMN record_ids TEXT NOT NULL DEFAULT '[]'",
-            )?;
-        }
-        if (1..=3).contains(&schema) {
-            transaction.execute_batch("ALTER TABLE files ADD COLUMN copilot TEXT")?;
-        }
-        if (4..=8).contains(&schema) {
-            // Existing record identities are metadata, not source bodies.
-            // Corrupt usage JSON remains unreadable and is rebuilt from source
-            // by the existing loader; it must not block additive migration.
-            transaction.execute_batch("INSERT INTO usage_identity(file_id,message_id,record_uuid)
-                SELECT usage.file_id,usage.message_id,identity.value FROM usage,
-                json_each(CASE WHEN json_valid(usage.record_ids) THEN
-                    CASE WHEN json_type(usage.record_ids)='array' THEN usage.record_ids ELSE '[]' END
-                    ELSE '[]' END) AS identity
-                WHERE identity.type='text'
-                ON CONFLICT DO NOTHING;")?;
-        }
-        if schema == 10 {
-            let coherent:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta a JOIN meta b ON a.value=b.value WHERE a.key='catalog_generation' AND b.key='slot_projection_catalog_generation')",[],|row|row.get(0))?;
-            if coherent {
-                let mut statement=transaction.prepare("SELECT session_catalog.metadata FROM session_catalog JOIN session_slot_projections USING(session_key) WHERE session_slot_projections.version=?1 AND session_slot_projections.source_generation IS NULL")?;
-                let metadata = statement
-                    .query_map([crate::slot_projection::VERSION], |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                for metadata in metadata {
-                    if let Ok(row) =
-                        serde_json::from_str::<crate::model::summary::CatalogRow>(&metadata)
-                        && let Ok(source_generation) =
-                            crate::retention::source_generation(&row.sources)
-                    {
-                        transaction.execute("UPDATE session_slot_projections SET source_generation=?1 WHERE session_key=?2",params![source_generation,row.key])?;
-                    }
-                }
-            }
-        }
-        if schema < 21 {
-            transaction.execute_batch("INSERT OR IGNORE INTO meta(key,value) SELECT 'overview_needed:'||c.session_key,'1' FROM session_catalog c LEFT JOIN session_overview o USING(session_key) LEFT JOIN session_trace_headers t USING(session_key) WHERE o.session_key IS NULL OR t.session_key IS NULL;")?;
-        }
-        // Pricing indexes reference legacy columns installed above, including
-        // codex_native_usage on schema-1 stores.
-        transaction.execute_batch(reprice::SCHEMA)?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    }
-    let wiped = parser_version(&transaction)? != Some(CACHE_VERSION);
-    if wiped {
-        transaction.execute_batch(DERIVED)?;
-        transaction.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_version', ?1)",
-            [CACHE_VERSION.to_string()],
-        )?;
-    }
-    transaction.commit()?;
     crate::pricing::runtime::notify_reprice();
-    if wiped {
-        // Not fatal: the automatic checkpoint and the size limit follow.
-        checkpoint(connection).ok();
-    }
     Ok(Init::Ready)
-}
-
-/// The schema and parser versions; no parser before the schema exists.
-fn versions(connection: &Connection) -> rusqlite::Result<(i64, Option<u32>)> {
-    let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let parser = if schema >= 1 {
-        parser_version(connection)?
-    } else {
-        None
-    };
-    Ok((schema, parser))
-}
-
-/// Moves the WAL into the database and truncates it, after a write as
-/// large as the store. Busy readers only defer it: the next automatic
-/// checkpoint and [`JOURNAL_SIZE_LIMIT`] cut it back later.
-fn checkpoint(connection: &Connection) -> rusqlite::Result<()> {
-    connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
 }
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
@@ -4432,8 +4780,8 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 }
 
 /// The store still has this binary's schema and parser: no other version
-/// rebuilt it since it was opened.
-fn current(connection: &Connection) -> rusqlite::Result<bool> {
+/// replaced it since it was opened.
+pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;
@@ -4463,48 +4811,29 @@ struct ArchivedIndex {
 
 impl ArchivedIndex {
     fn matches(&self, ledger: &Ledger) -> bool {
-        ((self.version == 1 && self.native_header_sha256.is_none())
-            || (self.version == 2
-                && self.source.root == "codex"
-                && self.native_header_sha256.as_ref().is_some_and(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                }))
-            || (self.version == 3
-                && self.source.root == "claude"
-                && crate::native_sidecar::agent_path(Path::new(&self.source.path))
-                && self.native_header_sha256.as_ref().is_some_and(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                }))
-            || (matches!(self.version, 4..=6)
-                && self.source_chunks_sha256.as_ref().is_some_and(|hash| {
+        self.version == 6
+            && self.source_chunks_sha256.as_ref().is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            && (if self.source.root == "codex"
+                || (self.source.root == "claude"
+                    && crate::native_sidecar::agent_path(Path::new(&self.source.path)))
+            {
+                self.native_header_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
-                && (if self.source.root == "codex"
-                    || (self.source.root == "claude"
-                        && crate::native_sidecar::agent_path(Path::new(&self.source.path)))
-                {
-                    self.native_header_sha256.as_ref().is_some_and(|hash| {
-                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
-                } else {
-                    self.native_header_sha256.is_none()
-                })))
-            && (matches!(self.version, 4..=6) || self.source_chunks_sha256.is_none())
-            && (if matches!(self.version, 5 | 6)
-                && matches!(self.source.root.as_str(), "claude" | "codex")
-            {
+            } else {
+                self.native_header_sha256.is_none()
+            })
+            && (if matches!(self.source.root.as_str(), "claude" | "codex") {
                 self.parent_marker_sha256.as_ref().is_some_and(|hash| {
                     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
             } else {
                 self.parent_marker_sha256.is_none()
             })
-            && (if self.version == 6 {
-                self.launch_calls_sha256.as_ref().is_some_and(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-            } else {
-                self.launch_calls_sha256.is_none()
+            && self.launch_calls_sha256.as_ref().is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
             && self.parser_version == CACHE_VERSION
             && crate::is_input_path(&self.source.root, &self.source.path)
@@ -4538,17 +4867,13 @@ fn current_file_count(
     let mut rows = statement.query(["archive_event_index:", "archive_event_index:*"])?;
     while let Some(row) = rows.next()? {
         let path: String = row.get(9)?;
+        let record = archived_index(connection, &path)?.ok_or(rusqlite::Error::InvalidQuery)?;
         if sources.contains_key(&path) {
             continue;
         }
-        let encoded: Option<String> = row.get(10)?;
-        let record =
-            encoded.and_then(|encoded| serde_json::from_str::<ArchivedIndex>(&encoded).ok());
-        if let Some(record) = record {
-            let (_, ledger) = read_ledger(row)?;
-            if record.matches(&ledger) {
-                count -= 1;
-            }
+        let (_, ledger) = read_ledger(row)?;
+        if record.matches(&ledger) {
+            count -= 1;
         }
     }
     Ok(count)
@@ -4559,9 +4884,17 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
         "SELECT CASE WHEN octet_length(value)<=16384 THEN value ELSE NULL END FROM meta WHERE key=?1",
         [archive_index_key(path)], |row| row.get(0),
     ).optional()?;
-    Ok(encoded
-        .flatten()
-        .and_then(|value| serde_json::from_str(&value).ok()))
+    encoded
+        .map(|value| {
+            let record: ArchivedIndex =
+                serde_json::from_str(&value.ok_or(rusqlite::Error::InvalidQuery)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if record.version != 6 || record.parser_version != CACHE_VERSION {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(record)
+        })
+        .transpose()
 }
 
 fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
@@ -4591,6 +4924,8 @@ pub(crate) fn retain_archive_index(
     if !current(connection)? {
         return Ok(false);
     }
+    // Refuse unsupported retained custody metadata before replacing its marker.
+    let _ = archived_index(connection, path)?;
     let expected = proof_ledger(proof);
     let native_header_sha256;
     let source_chunks_sha256;
@@ -4832,14 +5167,14 @@ fn read_tree_summary(
     let Some(record) = serde_json::from_str::<TreeSummaryRecord>(&text).ok() else {
         return Ok(None);
     };
-    if !(1..=3).contains(&record.version)
+    if record.version != 3
         || record.parser_version != CACHE_VERSION
         || record.ledger != header_ledger(ledger)
     {
         return Ok(None);
     }
     let mut summary = record.summary;
-    if record.version == 3 && !tree_state::restore(connection, path, ledger, &mut summary)? {
+    if !tree_state::restore(connection, path, ledger, &mut summary)? {
         return Ok(None);
     }
     Ok(Some(summary))
@@ -4865,17 +5200,13 @@ fn write_tree_summary(
         .transpose()?;
     if let Some(encoded) = encoded {
         if encoded.len() > NATIVE_METADATA_MAX {
-            // A pathological scalar is explicitly unavailable for this
-            // receipt. Retain old compatibility data; never delete and retry
-            // the same oversized representation on every unchanged read.
+            // Retain the source and current rows, but stop retrying a scalar
+            // that cannot fit the compact projection budget.
             transaction.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("native_tree_failure:{path}"),header_ledger(ledger)])?;
-            if normalized_usage {
-                transaction.execute("UPDATE native_usage_migrations SET state='blocked_metadata' WHERE source_path=?1",[path])?;
-            } else {
-                // An oversized compatibility accumulator is precisely the
-                // migration's input, not a reason to block that worker.
-                transaction.execute("INSERT INTO native_usage_migrations(source_path,receipt,usage_needed) VALUES(?1,?2,1) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_usage_migrations.state='done' THEN 'ready' ELSE native_usage_migrations.state END",params![path,header_ledger(ledger)])?;
-            }
+            transaction.execute(
+                "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
+                [path],
+            )?;
             return Ok(());
         }
         transaction.prepare_cached("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value")?.execute(params![tree_summary_key(path), encoded])?;
@@ -6569,6 +6900,129 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn storage_public_selected_upgrade_ignores_unrelated_archive_and_refuses_selected_marker_without_writes()
+     {
+        let root = scratch("selected-open-public-entry");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let selected = &rows[1];
+        let path = selected.sources[0].path.to_string_lossy().into_owned();
+        let cache_path = super::super::EventCache::path(&options.cache);
+        let db = Connection::open(&cache_path).unwrap();
+        db.execute(
+            "UPDATE session_slot_projections SET version=5 WHERE session_key=?1",
+            [&selected.key],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            params![
+                archive_index_key("/synthetic/unrelated.jsonl"),
+                r#"{"version":1}"#
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "DELETE FROM session_catalog_invalidations WHERE source_path=?1",
+            [&path],
+        )
+        .unwrap();
+        drop(db);
+        assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
+        let db = Connection::open(&cache_path).unwrap();
+        let selected_meta = format!("slot_upgrade_selected:{path}");
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [&selected_meta],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            path
+        );
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&path],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+        );
+
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            params![archive_index_key(&path), r#"{"version":5}"#],
+        )
+        .unwrap();
+        let snapshot = |connection: &Connection| {
+            let mut meta_statement = connection
+                .prepare("SELECT key,value FROM meta ORDER BY key")
+                .unwrap();
+            let meta = meta_statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let mut invalidation_statement = connection
+                .prepare(
+                    "SELECT source_path,revision,reason FROM session_catalog_invalidations ORDER BY source_path",
+                )
+                .unwrap();
+            let invalidations = invalidation_statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let mut claims_statement = connection
+                .prepare(
+                    "SELECT source_path,claim FROM catalog_semantic_sources WHERE claim IS NOT NULL ORDER BY source_path",
+                )
+                .unwrap();
+            let claims = claims_statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (meta, invalidations, claims)
+        };
+        let before = snapshot(&db);
+        let mut wal_path = cache_path.as_os_str().to_owned();
+        wal_path.push("-wal");
+        let wal_path = PathBuf::from(wal_path);
+        let read_wal = || match fs::read(&wal_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read SQLite WAL: {error}"),
+        };
+        let database_before = fs::read(&cache_path).unwrap();
+        let wal_before = read_wal();
+        // Keep this connection alive so closing the last writer cannot
+        // checkpoint the fixture between the baseline and the refusal.
+        assert!(crate::request_session_projection_upgrade(&options, &selected.key).is_err());
+        let wal_after = read_wal();
+        assert!(
+            wal_after == wal_before,
+            "selected refusal changed WAL bytes"
+        );
+        assert!(
+            fs::read(&cache_path).unwrap() == database_before,
+            "selected refusal changed database bytes"
+        );
+        assert_eq!(snapshot(&db), before);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn catalog_fixture_projection(
         options: &crate::Options,
     ) -> (
@@ -6610,7 +7064,7 @@ mod tests {
     fn catalog_pair(options: &crate::Options) -> (SqliteStore, SqliteStore) {
         let seed = crate::events::EventCache::path(&options.cache);
         let left = seed.with_file_name("batch.sqlite3");
-        let right = seed.with_file_name("legacy.sqlite3");
+        let right = seed.with_file_name("row_wise.sqlite3");
         // All fixture connections are closed, so the committed WAL has been
         // checkpointed. Copy the exact stream epoch and source evidence too.
         fs::copy(&seed, &left).unwrap();
@@ -6713,7 +7167,7 @@ mod tests {
 
     fn catalog_write_pair(
         batch: &mut SqliteStore,
-        legacy: &mut SqliteStore,
+        row_wise: &mut SqliteStore,
         rows: &[crate::model::summary::CatalogRow],
         projections: &[crate::slot_projection::Projection],
         scoped: bool,
@@ -6728,9 +7182,9 @@ mod tests {
         let before = crate::model::now_ms();
         let recording = crate::native_timing::catalog_commit_tests::recording(true);
         let right =
-            catalog_write(legacy, rows, projections, scoped, CatalogWriter::Legacy).unwrap();
+            catalog_write(row_wise, rows, projections, scoped, CatalogWriter::RowWise).unwrap();
         let right_state =
-            catalog_commit_success_state(&legacy.connection, before, crate::model::now_ms());
+            catalog_commit_success_state(&row_wise.connection, before, crate::model::now_ms());
         crate::native_timing::catalog_commit_tests::assert_written(true);
         drop(recording);
         assert_eq!(left, right, "exact committed collection generation");
@@ -6741,7 +7195,7 @@ mod tests {
         );
         assert_eq!(
             catalog_comparable_state(&batch.connection),
-            catalog_comparable_state(&legacy.connection)
+            catalog_comparable_state(&row_wise.connection)
         );
     }
 
@@ -7305,61 +7759,18 @@ mod tests {
     }
 
     #[test]
-    fn old_catalog_component_cannot_preserve_complete_before_bounded_upgrade() {
-        let root = scratch("catalog-component-version");
-        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
-        let (mut store, other) = catalog_pair(&options);
-        let publication = crate::slot_projection::Publication {
-            rows: &rows[..1],
-            transcripts: Some(&projections),
-        };
-        let claims = rows[0]
-            .sources
-            .iter()
-            .map(|source| (source.path.to_string_lossy().into_owned(), None))
-            .collect::<Vec<_>>();
-        let before = store.session_catalog_generation().unwrap();
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value=?1 WHERE key='catalog_version'",
-                [(crate::model::summary::CATALOG_VERSION - 1).to_string()],
-            )
-            .unwrap();
-        assert!(
-            store
-                .publish_closed_catalog_fenced(&publication, before.as_deref(), &claims)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(store.session_catalog_generation().unwrap(), before);
-        assert!(!store.qualified_catalog().unwrap());
-        assert_eq!(
-            store
-                .connection
-                .query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
-        drop(store);
-        drop(other);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn catalog_batch_complete_publisher_matches_legacy_rows_feed_sources_slots_and_repairs() {
+    fn catalog_batch_complete_publisher_matches_row_wise_rows_feed_sources_slots_and_repairs() {
         let root = scratch("catalog-publisher-parity");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 64, false);
         rows[4].repo = Some("fixture-repo".into());
-        let (mut batch, mut legacy) = catalog_pair(&options);
+        let (mut batch, mut row_wise) = catalog_pair(&options);
         let metadata = rows
             .iter()
             .map(json)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(catalog_batch_bytes(&rows, &metadata, CatalogWriter::Auto).is_some());
-        catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         assert_eq!(
             batch
                 .connection
@@ -7375,7 +7786,7 @@ mod tests {
         let new_key = rows[0].key.clone();
         let parent_only = rows[1].key.clone();
         let retained = rows[2].key.clone();
-        for store in [&batch, &legacy] {
+        for store in [&batch, &row_wise] {
             store
                 .connection
                 .execute(
@@ -7417,7 +7828,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         let feed = batch.connection.prepare("SELECT session_key,read_scope FROM session_catalog_changes WHERE revision>?1 ORDER BY revision").unwrap().query_map([feed_before], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         let expected = [0, 2, 4, 5, 6, 7]
             .into_iter()
@@ -7440,7 +7851,7 @@ mod tests {
             let transaction = batch.connection.transaction().unwrap();
             assert!(crate::catalog_search::row_present(&transaction, &rows[3].key).unwrap());
         }
-        for store in [&batch, &legacy] {
+        for store in [&batch, &row_wise] {
             store
                 .connection
                 .execute(
@@ -7456,7 +7867,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         assert_eq!(batch.connection.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE session_key=?1 AND lifecycle='current'", [&rows[8].key], |row| row.get::<_, i64>(0)).unwrap(), rows[8].sources.len() as i64, "unchanged metadata still repairs old-version sources");
         // A two-row scoped no-op keeps unrelated rows and exact source claims.
         let metadata = rows[10..12]
@@ -7465,21 +7876,21 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(catalog_batch_bytes(&rows[10..12], &metadata, CatalogWriter::Auto).is_some());
-        catalog_write_pair(&mut batch, &mut legacy, &rows[10..12], &projections, true);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows[10..12], &projections, true);
         drop(batch);
-        drop(legacy);
+        drop(row_wise);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn catalog_batch_fallbacks_preserve_legacy_acceptance_and_duplicate_rollback() {
+    fn catalog_batch_fallbacks_preserve_row_wise_acceptance_and_duplicate_rollback() {
         let root = scratch("catalog-publisher-fallback");
         let (options, rows, projections) = catalog_native_fixture(&root, 65, false);
-        let (mut batch, mut legacy) = catalog_pair(&options);
+        let (mut batch, mut row_wise) = catalog_pair(&options);
         let before = catalog_state(&batch.connection);
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
-            (&mut legacy, CatalogWriter::Legacy),
+            (&mut row_wise, CatalogWriter::RowWise),
         ] {
             assert_eq!(
                 catalog_write(store, &[], &[], false, writer).unwrap(),
@@ -7498,7 +7909,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             assert!(catalog_batch_bytes(rows, &metadata, CatalogWriter::Auto).is_none());
-            catalog_write_pair(&mut batch, &mut legacy, rows, &projections, scoped);
+            catalog_write_pair(&mut batch, &mut row_wise, rows, &projections, scoped);
         }
         let mut oversized = rows[..2].to_vec();
         oversized[1].name = "x".repeat(1_048_576);
@@ -7508,11 +7919,11 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(catalog_batch_bytes(&oversized, &metadata, CatalogWriter::Auto).is_none());
-        catalog_write_pair(&mut batch, &mut legacy, &oversized, &projections, true);
+        catalog_write_pair(&mut batch, &mut row_wise, &oversized, &projections, true);
         let duplicate = vec![rows[0].clone(), rows[0].clone()];
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
-            (&mut legacy, CatalogWriter::Legacy),
+            (&mut row_wise, CatalogWriter::RowWise),
         ] {
             let before = catalog_state(&store.connection);
             let error = catalog_write(store, &duplicate, &projections, true, writer).unwrap_err();
@@ -7527,7 +7938,7 @@ mod tests {
             );
         }
         drop(batch);
-        drop(legacy);
+        drop(row_wise);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7535,13 +7946,13 @@ mod tests {
     fn catalog_batch_parent_transaction_rolls_back_middle_dml_sources_slots_and_ack_tail() {
         let root = scratch("catalog-publisher-rollback");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 4, false);
-        let (mut batch, mut legacy) = catalog_pair(&options);
-        catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+        let (mut batch, mut row_wise) = catalog_pair(&options);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         let mut stale_sources = rows.clone();
         stale_sources[1].sources[0].prefix_sha256[0] ^= 1;
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
-            (&mut legacy, CatalogWriter::Legacy),
+            (&mut row_wise, CatalogWriter::RowWise),
         ] {
             let before = catalog_state(&store.connection);
             let raw_before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
@@ -7586,7 +7997,7 @@ mod tests {
             row.overview = Some(serde_json::from_value(overview).unwrap());
             row.trace.as_mut().unwrap().relationships_incomplete();
         }
-        for store in [&mut batch, &mut legacy] {
+        for store in [&mut batch, &mut row_wise] {
             let tx = store
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -7609,7 +8020,7 @@ mod tests {
         }
         assert_eq!(
             catalog_comparable_state(&batch.connection),
-            catalog_comparable_state(&legacy.connection)
+            catalog_comparable_state(&row_wise.connection)
         );
         let fail_key = &rows[2].key;
         let failures = [
@@ -7621,7 +8032,7 @@ mod tests {
         for failure in failures {
             for (store, writer) in [
                 (&mut batch, CatalogWriter::Auto),
-                (&mut legacy, CatalogWriter::Legacy),
+                (&mut row_wise, CatalogWriter::RowWise),
             ] {
                 let before = catalog_state(&store.connection);
                 store.connection.execute_batch(&failure).unwrap();
@@ -7648,7 +8059,7 @@ mod tests {
                     .unwrap();
             }
         }
-        catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         assert_eq!(
             batch
                 .connection
@@ -7661,7 +8072,7 @@ mod tests {
             0
         );
         drop(batch);
-        drop(legacy);
+        drop(row_wise);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7809,8 +8220,8 @@ mod tests {
                 "claude",
                 "shared native parser must establish the replacement identity"
             );
-            let (mut batch, mut legacy) = catalog_pair(&options);
-            catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+            let (mut batch, mut row_wise) = catalog_pair(&options);
+            catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
             let metadata = crate::history_projection::catalog(&batch.connection, key)
                 .unwrap()
                 .unwrap();
@@ -7866,97 +8277,9 @@ mod tests {
                 "claude"
             );
             drop(batch);
-            drop(legacy);
+            drop(row_wise);
             fs::remove_dir_all(root).unwrap();
         }
-    }
-
-    #[test]
-    fn schema_twenty_seven_preserves_original_rows_and_adds_focused_identity_index() {
-        let root = scratch("focused-proof-migration");
-        let (options, _, _) = catalog_native_fixture(&root, 2, true);
-        let path = crate::events::EventCache::path(&options.cache);
-        let (store, _) = opened(&path);
-        store
-            .connection
-            .execute_batch("DROP INDEX session_trace_edge_identity; PRAGMA user_version=27;")
-            .unwrap();
-        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
-        drop(store);
-        let (store, _) = opened(&path);
-        assert_eq!(
-            versions(&store.connection).unwrap(),
-            (SCHEMA_VERSION, Some(CACHE_VERSION))
-        );
-        let mut after = crate::native_timing::cleanup_tests::snapshot(&store.connection);
-        let schema = after.get_mut("main.sqlite_schema").unwrap();
-        let added = schema
-            .iter()
-            .filter(|row| {
-                row[1] == rusqlite::types::Value::Text("session_trace_edge_identity".into())
-            })
-            .count();
-        assert_eq!(added, 1);
-        schema.retain(|row| {
-            row[1] != rusqlite::types::Value::Text("session_trace_edge_identity".into())
-        });
-        assert_eq!(
-            after, before,
-            "migration must preserve every existing MAIN/TEMP row and schema object"
-        );
-        assert!(store.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_trace_edge_identity')",[],|r|r.get::<_,bool>(0)).unwrap());
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn schema_twenty_six_adds_custody_parts_without_rebinding_existing_rows() {
-        let root = scratch("custody-parts-migration");
-        let (options, _, _) = catalog_native_fixture(&root, 2, true);
-        let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
-        let proof = crate::session_source_proof(&options, "codex", relative)
-            .unwrap()
-            .unwrap();
-        let ready = crate::source_projection_ready(&options, "codex", relative)
-            .unwrap()
-            .unwrap();
-        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
-        let path = crate::events::EventCache::path(&options.cache);
-        let (store, _) = opened(&path);
-        // Recreate the preceding schema's absence of this additive table.
-        assert_eq!(
-            store
-                .connection
-                .query_row("SELECT count(*) FROM session_history_slot_parts", [], |r| r
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        store
-            .connection
-            .execute_batch("DROP TABLE session_history_slot_parts; PRAGMA user_version=26;")
-            .unwrap();
-        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
-        drop(store);
-        let (store, _) = opened(&path);
-        assert_eq!(
-            versions(&store.connection).unwrap(),
-            (SCHEMA_VERSION, Some(CACHE_VERSION))
-        );
-        let mut after = crate::native_timing::cleanup_tests::snapshot(&store.connection);
-        assert_eq!(
-            after.remove("main.session_history_slot_parts"),
-            Some(Vec::new())
-        );
-        after.get_mut("main.sqlite_schema").unwrap().retain(|row| {
-            row[2] != rusqlite::types::Value::Text("session_history_slot_parts".into())
-        });
-        assert_eq!(
-            after, before,
-            "migration must preserve every existing MAIN/TEMP row and schema object"
-        );
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -8013,8 +8336,8 @@ mod tests {
                 .join(format!("projects/-work-proj/{key}.jsonl"));
             fs::write(&replacement,serde_json::json!({"type":"user","uuid":"replacement","sessionId":key,"timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"Replacement Current"}}).to_string()+"\n").unwrap();
             let (rows, projections) = catalog_fixture_projection(&options);
-            let (mut store, legacy) = catalog_pair(&options);
-            drop(legacy);
+            let (mut store, row_wise) = catalog_pair(&options);
+            drop(row_wise);
             let mut steps = 0;
             loop {
                 let before = catalog_recipes(&store.connection, "session_history_slots", key).len();
@@ -8169,7 +8492,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_batch_matches_legacy_partial_native_lineage_history_and_archive_proofs() {
+    fn catalog_batch_matches_row_wise_partial_native_lineage_history_and_archive_proofs() {
         let root = scratch("catalog-batch-partial-lineage");
         let (options, _, _) = catalog_native_fixture(&root, 4, false);
         let relative = "projects/-work-proj/native-cl-02.jsonl";
@@ -8235,8 +8558,8 @@ mod tests {
                 .len(),
             1
         );
-        let (mut batch, mut legacy) = catalog_pair(&options);
-        catalog_write_pair(&mut batch, &mut legacy, &rows, &projections, false);
+        let (mut batch, mut row_wise) = catalog_pair(&options);
+        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         let text = crate::history_projection::catalog(&batch.connection, &old.key)
             .unwrap()
             .unwrap();
@@ -8263,7 +8586,7 @@ mod tests {
             archive
         );
         drop(batch);
-        drop(legacy);
+        drop(row_wise);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8489,7 +8812,7 @@ mod tests {
             } else {
                 "history_last_ms"
             };
-            let physical = connection.prepare(&format!("SELECT session_key,gram,{column} FROM session_search_memberships WHERE {column} IS NOT NULL UNION ALL SELECT session_key,gram,last_ms FROM session_search_postings WHERE read_scope=?1")).unwrap()
+            let physical = connection.prepare(&format!("SELECT session_key,gram,{column} FROM session_search_memberships WHERE {column} IS NOT NULL AND ?1 IN ('current','retained_history')")).unwrap()
                 .query_map([scope_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             let expected_positions = complete_rows
                 .iter()
@@ -8600,9 +8923,7 @@ mod tests {
             outcomes.push(catalog_write(store, &rows, &projections, true, writer).unwrap());
         }
         assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
-        // Seed the same real-schema legacy representation and history-only owner
-        // before all arms. Replacements must remove old grams and convert only
-        // reached legacy owners without changing the retained owner.
+        // Keep a history-only owner in every arm while replacing Current grams.
         let retained = rows[63].key.clone();
         for store in &mut stores {
             let tx = store
@@ -8612,17 +8933,6 @@ mod tests {
             tx.execute("INSERT INTO session_history_catalog SELECT session_key,json_set(metadata,'$.lifecycle','retained') FROM session_catalog WHERE session_key=?1", [&retained]).unwrap();
             tx.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1", [&retained]).unwrap();
             crate::catalog_search::retire_key(&tx, &retained).unwrap();
-            for (scope, column) in [
-                ("current", "current_last_ms"),
-                ("retained_history", "history_last_ms"),
-            ] {
-                tx.execute(&format!("INSERT INTO session_search_postings SELECT ?1,session_key,gram,{column} FROM session_search_memberships WHERE session_key=?2 AND {column} IS NOT NULL"), params![scope,rows[0].key]).unwrap();
-            }
-            tx.execute(
-                "DELETE FROM session_search_memberships WHERE session_key=?1",
-                [&rows[0].key],
-            )
-            .unwrap();
             tx.commit().unwrap();
         }
         for row in &mut rows[..63] {
@@ -8659,18 +8969,6 @@ mod tests {
             );
         }
         for store in &stores {
-            assert_eq!(
-                store
-                    .connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM session_search_postings WHERE session_key=?1",
-                        [&rows[62].key],
-                        |row| row.get::<_, i64>(0)
-                    )
-                    .unwrap(),
-                0,
-                "selected legacy owner converted"
-            );
             assert!(store.connection.query_row("SELECT COUNT(*) FROM session_search_memberships WHERE session_key=?1 AND current_last_ms IS NULL AND history_last_ms IS NOT NULL", [&retained], |row| row.get::<_, i64>(0)).unwrap() > 0, "retained-history-only positions survive Current replacement");
         }
         drop(stores);
@@ -9298,6 +9596,105 @@ mod tests {
     }
 
     #[test]
+    fn storage_selected_repair_ignores_unrelated_archive_markers_and_refuses_selected_damage() {
+        let root = scratch("selected-archive-marker");
+        let (mut store, _) = opened(&root.join("index.sqlite3"));
+        let unrelated_key = archive_index_key("unrelated.jsonl");
+        let selected_key = archive_index_key("selected.jsonl");
+        store
+            .write_one("selected.jsonl", None, None, &ledger(1), &full())
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![unrelated_key, r#"{"version":1}"#],
+            )
+            .unwrap();
+
+        // Focused qualification and a selected removal do not traverse an
+        // unrelated archive marker. The selected operation remains usable.
+        require_current(&store.connection).unwrap();
+        assert_eq!(
+            store
+                .remove(&[("selected.jsonl".into(), Some(ledger(1)))])
+                .unwrap(),
+            Outcome::Written
+        );
+        assert!(store.read_one("selected.jsonl").unwrap().is_none());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?1",
+                    [&unrelated_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            r#"{"version":1}"#
+        );
+
+        // An invalid marker for the selected key still refuses the repair
+        // before it changes the indexed source, its events or its claim.
+        store
+            .write_one("selected.jsonl", None, None, &ledger(2), &full())
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![selected_key, r#"{"version":1}"#],
+            )
+            .unwrap();
+        let before = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM files), (SELECT COUNT(*) FROM events), \
+                 (SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path='selected.jsonl'), \
+                 (SELECT value FROM meta WHERE key=?1)",
+                [&selected_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert!(
+            store
+                .remove(&[("selected.jsonl".into(), Some(ledger(2)))])
+                .is_err()
+        );
+        let after = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM files), (SELECT COUNT(*) FROM events), \
+                 (SELECT COUNT(*) FROM session_catalog_invalidations WHERE source_path='selected.jsonl'), \
+                 (SELECT value FROM meta WHERE key=?1)",
+                [&selected_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            store.read_one("selected.jsonl").unwrap().unwrap().0,
+            ledger(2)
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn usage_identity_peers_require_message_and_record_and_update_atomically() {
         let root = scratch("usage-identities");
         let path = root.join("index.sqlite3");
@@ -9412,47 +9809,551 @@ mod tests {
     }
 
     #[test]
-    fn schema_eight_backfills_exact_usage_identity_without_reading_source_bodies() {
-        let root = scratch("usage-identity-migration");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        store.write_runs(&[run()], &stamp()).unwrap();
-        store
-            .write_one("a", None, None, &ledger(1), &full())
-            .unwrap();
-        store
-            .write_one("damaged", None, None, &ledger(1), &full())
-            .unwrap();
-        store.connection.execute("UPDATE usage SET record_ids='not json' WHERE file_id=(SELECT file_id FROM files WHERE path='damaged')", []).unwrap();
-        store
-            .connection
-            .execute_batch("DROP TABLE usage_identity; PRAGMA user_version=8;")
-            .unwrap();
-        drop(store);
-        let (store, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        let expected: i64 = store
-            .connection
-            .query_row("SELECT COUNT(*) FROM usage_identity", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(expected, 1);
-        let identity: (String, String) = store
-            .connection
-            .query_row(
-                "SELECT message_id,record_uuid FROM usage_identity",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(identity.1, "record-uuid");
-        assert_eq!(
+    fn unsupported_contracts_refuse_every_open_without_mutating_originals() {
+        let snapshot = |db: &Connection| {
+            let version: i64 = db
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            let schema = db
+                .prepare("SELECT name,sql FROM sqlite_schema ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (version, schema, catalog_state(db))
+        };
+        for (name, change, reason) in [
+            (
+                "nonempty-zero",
+                "PRAGMA user_version=0",
+                "nonempty schema zero",
+            ),
+            ("newer", "PRAGMA user_version=2147483647", "newer schema"),
+            (
+                "foreign",
+                "DROP TABLE events; DROP TABLE files",
+                "malformed schema",
+            ),
+            (
+                "mixed",
+                "CREATE TABLE unrelated(secret TEXT); PRAGMA user_version=32",
+                "older schema",
+            ),
+            (
+                "older-with-future-parser",
+                "PRAGMA user_version=32; UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "older schema",
+            ),
+            (
+                "older-with-future-recipe",
+                "PRAGMA user_version=32; INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v99')",
+                "older schema",
+            ),
+            (
+                "missing",
+                "DELETE FROM meta WHERE key='cache_version'",
+                "missing metadata",
+            ),
+            (
+                "missing-table",
+                "ALTER TABLE meta RENAME TO original_meta",
+                "missing metadata",
+            ),
+            (
+                "missing-reported-runs",
+                "DROP TABLE reported_runs",
+                "malformed schema",
+            ),
+            (
+                "missing-reported-column",
+                "ALTER TABLE reported_runs DROP COLUMN capture_at",
+                "malformed persistent state",
+            ),
+            (
+                "missing-file-column",
+                "ALTER TABLE files DROP COLUMN pending",
+                "malformed persistent state",
+            ),
+            (
+                "missing-event-column",
+                "DROP INDEX semantic_index_send; ALTER TABLE events DROP COLUMN reply_m",
+                "malformed persistent state",
+            ),
+            (
+                "missing-child-table",
+                "DROP TABLE signals",
+                "malformed schema",
+            ),
+            (
+                "malformed",
+                "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+                "malformed metadata",
+            ),
+            (
+                "newer-parser",
+                "UPDATE meta SET value='4294967295' WHERE key='cache_version'",
+                "parser version mismatch",
+            ),
+            (
+                "publication",
+                "INSERT INTO meta VALUES('catalog_version','4294967295')",
+                "publication version",
+            ),
+            (
+                "search",
+                "INSERT INTO meta VALUES('search_version','4294967295')",
+                "publication version",
+            ),
+            (
+                "archive",
+                "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":7}')",
+                "archived marker version",
+            ),
+        ] {
+            let root = scratch(name);
+            let v1 = root.join("index.json");
+            let path = v1.with_extension("sqlite3");
+            let (mut store, _) = opened(&path);
+            store.write_runs(&[run()], &stamp()).unwrap();
+            store
+                .write_one("original", None, None, &ledger(1), &full())
+                .unwrap();
+            // Custody is deliberately opaque to version classification.
+            store.connection.execute("INSERT INTO session_history_catalog VALUES('original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
                 .connection
-                .query_row("SELECT COUNT(*) FROM reported_runs", [], |row| row
-                    .get::<_, i64>(0))
+                .execute(
+                    "INSERT INTO meta VALUES('archive-custody','original proof')",
+                    [],
+                )
+                .unwrap();
+            store.connection.execute_batch(change).unwrap();
+            let original_state = snapshot(&store.connection);
+            // Finish fixture writes before snapshotting the original file.
+            let checkpoint: (i64, i64, i64) = store
+                .connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(checkpoint, (0, 0, 0), "{name} fixture checkpoint");
+            drop(store);
+            let original = fs::read(&path).unwrap();
+            let unchanged = || {
+                assert_eq!(fs::read(&path).unwrap(), original, "{name} database bytes");
+                // A read-only WAL connection can create coordination sidecars.
+                // No WAL bytes means no frames or commits were written.
+                match fs::read(sibling(&path, "-wal")) {
+                    Ok(bytes) => assert!(bytes.is_empty(), "{name} wrote WAL bytes"),
+                    Err(error) => assert_eq!(error.kind(), io::ErrorKind::NotFound),
+                }
+                assert!(!sibling(&path, ".corrupt").exists());
+            };
+            unchanged();
+            let fail = |result: Result<(SqliteStore, Loaded), Unopened>| match result {
+                Err(Unopened::Unsupported(error)) => {
+                    assert!(error.contains(reason), "{name}: {error}")
+                }
+                _ => panic!("{name} must be explicitly unsupported"),
+            };
+            fail(SqliteStore::attempt(&path));
+            unchanged();
+            fail(SqliteStore::attempt_scoped(&path, true));
+            unchanged();
+            if name != "archive" {
+                assert!(focused_connection(&path).is_err(), "focused {name}");
+            } else {
+                let db = focused_connection(&path).unwrap();
+                assert!(archived_index(&db, "original").is_err());
+            }
+            unchanged();
+            match super::super::EventCache::open(&v1) {
+                Err(error) => assert!(error.contains(reason), "{error}"),
+                Ok(_) => panic!("unsupported {name} became valid in-memory history"),
+            }
+            unchanged();
+            let options = crate::Options {
+                cache: v1.clone(),
+                claude_home: root.join("claude"),
+                claude_json: root.join(".claude.json"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                proc_root: root.join("proc"),
+                ..crate::Options::default()
+            };
+            let error = crate::local_facts(&options).unwrap_err();
+            assert!(error.to_string().contains(reason), "{name}: {error}");
+            unchanged();
+            let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(snapshot(&db), original_state, "{name} schema and rows");
+            if name != "missing-reported-runs" {
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM reported_runs", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+            }
+            assert_eq!(
+                db.query_row("SELECT metadata FROM session_history_catalog", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "{\"custody\":\"retain exact bytes\"}"
+            );
+            drop(db);
+            unchanged();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn obsolete_producer_contracts_rebuild_once_and_keep_focused_reads_read_only() {
+        for change in [
+            "PRAGMA user_version=32",
+            "PRAGMA user_version=1",
+            "UPDATE meta SET value='1' WHERE key='cache_version'",
+            "INSERT INTO meta VALUES('catalog_version','1')",
+            "INSERT INTO meta VALUES('search_version','1')",
+            "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
+            "INSERT INTO meta VALUES('archive_event_index:old','{\"version\":1}')",
+            "CREATE TABLE native_usage_migrations(source_path TEXT); PRAGMA user_version=31",
+        ] {
+            for scoped in [false, true] {
+                let root = scratch("obsolete-contract");
+                let cache = root.join("index.json");
+                let path = cache.with_extension("sqlite3");
+                let (mut old, _) = opened(&path);
+                old.write_one("obsolete", None, None, &ledger(1), &full())
+                    .unwrap();
+                old.write_runs(&[run()], &stamp()).unwrap();
+                old.connection.execute_batch(change).unwrap();
+                old.connection
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .unwrap();
+                drop(old);
+                let original = fs::read(&path).unwrap();
+                if change.contains("archive_event_index") {
+                    let reader = focused_connection(&path).unwrap();
+                    assert!(archived_index(&reader, "old").is_err());
+                } else {
+                    assert!(focused_connection(&path).is_err(), "{change}");
+                    assert!(SqliteStore::attempt_selected(&path).is_err(), "{change}");
+                }
+                assert_eq!(fs::read(&path).unwrap(), original);
+                let producer = if scoped {
+                    super::super::EventCache::open_scoped(&cache)
+                } else {
+                    super::super::EventCache::open(&cache)
+                }
+                .unwrap();
+                drop(producer);
+                let (mut current, loaded) = opened(&path);
+                assert!(
+                    loaded.files.is_empty() && loaded.reported_runs.is_empty(),
+                    "{change}"
+                );
+                assert!(matches!(qualify(&current.connection).unwrap(), Init::Ready));
+                current
+                    .write_one("fresh", None, None, &ledger(2), &full())
+                    .unwrap();
+                drop(current);
+                let (_, loaded) = opened(&path);
+                assert_eq!(loaded.files.len(), 1, "restart must not reset: {change}");
+                assert_eq!(loaded.files[0].0, "fresh");
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn obsolete_reset_refuses_foreign_databases_and_waits_for_the_sqlite_writer() {
+        let root = scratch("obsolete-ownership-and-lock");
+        let foreign = root.join("foreign.sqlite3");
+        let db = Connection::open(&foreign).unwrap();
+        db.execute_batch("CREATE TABLE private(secret TEXT); INSERT INTO private VALUES('preserve'); PRAGMA user_version=1").unwrap();
+        drop(db);
+        let original = fs::read(&foreign).unwrap();
+        assert!(matches!(
+            SqliteStore::attempt(&foreign),
+            Err(Unopened::Unsupported(_))
+        ));
+        assert!(matches!(
+            SqliteStore::attempt_scoped(&foreign, true),
+            Err(Unopened::Unsupported(_))
+        ));
+        assert_eq!(fs::read(&foreign).unwrap(), original);
+        let path = root.join("owned.sqlite3");
+        let (mut old, _) = opened(&path);
+        old.write_one("obsolete", None, None, &ledger(1), &full())
+            .unwrap();
+        old.connection
+            .pragma_update(None, "user_version", 32)
+            .unwrap();
+        old.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let original = catalog_state(&old.connection);
+        assert!(matches!(
+            SqliteStore::attempt_scoped(&path, true),
+            Err(Unopened::Other(_))
+        ));
+        assert_eq!(catalog_state(&old.connection), original);
+        old.connection.execute_batch("ROLLBACK").unwrap();
+        let (_, loaded) = opened(&path);
+        assert!(loaded.files.is_empty());
+        drop(old);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn obsolete_reset_preserves_wal_snapshots_and_serializes_concurrent_producers() {
+        let root = scratch("obsolete-wal");
+        let path = root.join("index.sqlite3");
+        let (mut old, _) = opened(&path);
+        old.write_one("obsolete", None, None, &ledger(1), &full())
+            .unwrap();
+        old.connection
+            .pragma_update(None, "user_version", 32)
+            .unwrap();
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             1
         );
+        assert!(!fs::read(sibling(&path, "-wal")).unwrap().is_empty());
+        // A second producer finishes while the first is between its read-only
+        // qualification and locked initialization. Reclassification must spare
+        // the second producer's newly committed rows.
+        let other_path = path.clone();
+        BEFORE_STORAGE_INIT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    let (mut other, _) = opened(&other_path);
+                    other
+                        .write_one("fresh", None, None, &ledger(2), &full())
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
+            }));
+        });
+        let (mut current, loaded) = opened(&path);
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].0, "fresh");
+        assert_eq!(
+            reader
+                .query_row("SELECT path FROM files", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "obsolete"
+        );
+        assert_eq!(
+            old.write_one("obsolete", Some(&ledger(1)), None, &ledger(2), &full())
+                .unwrap(),
+            Outcome::Conflict
+        );
+        assert_eq!(
+            current
+                .write_one("fresh", Some(&ledger(2)), None, &ledger(3), &full())
+                .unwrap(),
+            Outcome::Written
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        drop(old);
+        drop(current);
+        let (_, loaded) = opened(&path);
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].1, ledger(3));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn obsolete_index_rebuilds_native_catalog_history_and_selected_transcripts() {
+        for scoped in [false, true] {
+            let root = scratch("obsolete-native");
+            let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+            let originals = rows
+                .iter()
+                .flat_map(|row| &row.sources)
+                .map(|source| (source.path.clone(), fs::read(&source.path).unwrap()))
+                .collect::<Vec<_>>();
+            let untouched = [
+                root.join("archive-object"),
+                root.join("credentials"),
+                root.join("seed.tree.json"),
+                root.join("unrelated.sqlite3"),
+            ];
+            for file in &untouched {
+                fs::write(file, b"retain exact original bytes").unwrap();
+            }
+            let path = super::super::EventCache::path(&options.cache);
+            let db = Connection::open(&path).unwrap();
+            db.pragma_update(None, "user_version", 32).unwrap();
+            drop(db);
+            let producer = if scoped {
+                super::super::EventCache::open_scoped(&options.cache)
+            } else {
+                super::super::EventCache::open(&options.cache)
+            }
+            .unwrap();
+            drop(producer);
+            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+            let complete = (0..128).any(|_| {
+                evidence
+                    .refresh_catalog(
+                        &mut crate::viewer::lock(&evidence.work),
+                        CATALOG_FIXTURE_NOW,
+                    )
+                    .unwrap()
+            });
+            evidence.retire();
+            assert!(complete);
+            for row in &rows {
+                assert!(
+                    crate::session_catalog_identity(&options, "source", &row.key)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    crate::session_catalog_history_identity(&options, "source", &row.key)
+                        .unwrap()
+                        .is_some()
+                );
+            }
+            let reply = crate::session_transcript_range_with_mode(
+                &options,
+                "source",
+                "sid=native-cx-01&after=0&limit=2",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            for (file, bytes) in originals {
+                assert_eq!(fs::read(file).unwrap(), bytes);
+            }
+            for file in untouched {
+                assert_eq!(fs::read(file).unwrap(), b"retain exact original bytes");
+            }
+            let (store, loaded) = opened(&path);
+            assert_eq!(loaded.files.len(), 2);
+            assert!(matches!(qualify(&store.connection).unwrap(), Init::Ready));
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn storage_initialization_holds_its_lock_through_the_first_wal_switch() {
+        let root = scratch("first-wal-lock");
+        let path = root.join("index.sqlite3");
+        let other_path = path.clone();
+        BEFORE_FRESH_WAL.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let other = Connection::open(&other_path).unwrap();
+                other.busy_timeout(Duration::ZERO).unwrap();
+                let error = other
+                    .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                    .unwrap_err();
+                assert_eq!(error.sqlite_error_code(), Some(ErrorCode::DatabaseBusy));
+            }));
+        });
+        let (store, _) = opened(&path);
+        let mode: String = store
+            .connection
+            .query_row("PRAGMA locking_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "normal");
+        assert!(current(&store.connection).unwrap());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_open_rechecks_a_concurrent_version_change_before_writes() {
+        let root = scratch("concurrent-open-version");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store.write_runs(&[run()], &stamp()).unwrap();
+        drop(store);
+        let original = fs::read(&path).unwrap();
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let saved = captured.clone();
+        let wal = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let saved_wal = wal.clone();
+        let writer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let live_writer = writer.clone();
+        let changed = path.clone();
+        BEFORE_STORAGE_INIT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let db = Connection::open(&changed).unwrap();
+                db.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                    .unwrap();
+                *saved.borrow_mut() = fs::read(&changed).unwrap();
+                *saved_wal.borrow_mut() = fs::read(sibling(&changed, "-wal")).unwrap();
+                // Keep the unsupported version committed only in the live WAL.
+                *live_writer.borrow_mut() = Some(db);
+            }));
+        });
+        match SqliteStore::attempt(&path) {
+            Err(Unopened::Unsupported(error)) => assert!(error.contains("newer schema")),
+            _ => panic!("the concurrently committed WAL version must be refused"),
+        }
+        assert_eq!(*captured.borrow(), original);
+        assert_eq!(fs::read(&path).unwrap(), *captured.borrow());
+        assert!(!wal.borrow().is_empty());
+        assert_eq!(fs::read(sibling(&path, "-wal")).unwrap(), *wal.borrow());
+        assert!(!sibling(&path, ".corrupt").exists());
+        drop(writer.borrow_mut().take());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_current_storage_initializes_all_columns_and_restarts_without_reseeding() {
+        let root = scratch("current-cold-start");
+        let path = root.join("index.sqlite3");
+        fs::write(&path, []).unwrap();
+        let (mut store, loaded) = opened(&path);
+        assert!(loaded.files.is_empty() && loaded.reported_runs.is_empty());
+        for (table, column) in [
+            ("files", "codex_pricing_fingerprint"),
+            ("session_catalog", "pricing_fingerprint"),
+        ] {
+            assert!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                        params![table, column],
+                        |r| r.get::<_, bool>(0)
+                    )
+                    .unwrap()
+            );
+        }
+        let default: String = store.connection.query_row("SELECT dflt_value FROM pragma_table_info('native_usage_sources') WHERE name='usage_ready'", [], |r| r.get(0)).unwrap();
+        assert_eq!(default, "0");
+        let retired: i64 = store.connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('native_usage_migrations','native_tree_copy_queue','session_search_postings')", [], |r| r.get(0)).unwrap();
+        assert_eq!(retired, 0);
+        store
+            .write_one("current", None, None, &ledger(1), &full())
+            .unwrap();
+        store.write_runs(&[run()], &stamp()).unwrap();
+        drop(store);
+        let (store, loaded) = opened(&path);
+        assert!(matches!(qualify(&store.connection).unwrap(), Init::Ready));
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.reported_runs, [run()]);
+        assert_eq!(loaded.stamp, Some(stamp()));
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9572,304 +10473,6 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table}");
         }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn catalog_outbox_migration_includes_current_history_fallback_without_reseeding() {
-        for schema in [17, 18] {
-            let root = scratch(&format!("outbox-migration-{schema}"));
-            let path = root.join("index.sqlite3");
-            let (store, _) = opened(&path);
-            store.connection.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('current-only',0,'claude','{}')", []).unwrap();
-            let epoch: String = store
-                .connection
-                .query_row(
-                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            if schema == 17 {
-                store.connection.execute_batch("DROP TRIGGER catalog_changes_insert; DROP TRIGGER catalog_changes_update; DROP TRIGGER catalog_changes_delete; DROP TRIGGER catalog_history_changes_insert; DROP TRIGGER catalog_history_changes_update; DROP TRIGGER catalog_history_changes_delete; DROP TABLE session_catalog_changes; DELETE FROM meta WHERE key='catalog_changes_epoch';").unwrap();
-            } else {
-                // The old bootstrap stream did not seed Current fallback rows
-                // for History, but its Current consumer may have a saved head.
-                store
-                    .connection
-                    .execute(
-                        "DELETE FROM session_catalog_changes WHERE read_scope='retained_history'",
-                        [],
-                    )
-                    .unwrap();
-            }
-            store
-                .connection
-                .execute(
-                    "DELETE FROM meta WHERE key LIKE 'catalog_changes_floor_%'",
-                    [],
-                )
-                .unwrap();
-            store
-                .connection
-                .pragma_update(None, "user_version", schema)
-                .unwrap();
-            drop(store);
-            let (store, _) = opened(&path);
-            let hints: Vec<(String, String)> = store
-                .connection
-                .prepare(
-                    "SELECT session_key,read_scope FROM session_catalog_changes ORDER BY revision",
-                )
-                .unwrap()
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap();
-            assert_eq!(
-                hints,
-                [
-                    ("current-only".into(), "current".into()),
-                    ("current-only".into(), "retained_history".into())
-                ]
-            );
-            if schema == 18 {
-                let migrated: String = store
-                    .connection
-                    .query_row(
-                        "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(
-                    migrated, epoch,
-                    "saved consumer epoch must survive migration"
-                );
-            }
-            drop(store);
-            let (store, _) = opened(&path);
-            let count: i64 = store
-                .connection
-                .query_row("SELECT count(*) FROM session_catalog_changes", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            assert_eq!(count, 2, "restart cannot repeat migration hints");
-            drop(store);
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn schema_thirteen_preserves_sources_without_inventing_change_time() {
-        let root = scratch("change-time-migration");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        // This historical schema did not persist portable native metadata.
-        let mut index = full();
-        index.codex_header = None;
-        index.marker_index = None;
-        index.handoff_index = None;
-        store
-            .write_one("original.jsonl", None, None, &ledger(1), &index)
-            .unwrap();
-        store
-            .connection
-            .execute_batch("ALTER TABLE files DROP COLUMN ctime_ns; PRAGMA user_version = 13;")
-            .unwrap();
-        drop(store);
-        let (store, _) = opened(&path);
-        let (migrated, original) = store.read_one("original.jsonl").unwrap().unwrap();
-        let mut expected = ledger(1);
-        expected.stat.changed_ns = None;
-        assert_eq!(migrated, expected);
-        assert_eq!(format!("{original:?}"), format!("{index:?}"));
-        assert_eq!(
-            versions(&store.connection).unwrap(),
-            (SCHEMA_VERSION, Some(CACHE_VERSION))
-        );
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn schema_one_migrates_native_usage_without_losing_reported_runs() {
-        let root = scratch("native-usage-migration");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        store.write_runs(&[run()], &stamp()).unwrap();
-        store
-            .connection
-            .execute_batch(
-                "DROP TRIGGER pricing_pending_file_insert;
-             DROP TRIGGER pricing_pending_file_update;
-             DROP TRIGGER pricing_pending_native_usage_ready;
-             DROP TRIGGER pricing_pending_catalog_insert;
-             DROP TRIGGER pricing_pending_catalog_update;
-             DROP INDEX files_codex_pricing_fingerprint;
-             DROP INDEX session_catalog_pricing_fingerprint;
-             DROP TABLE pricing_recompute_pending;
-             ALTER TABLE files DROP COLUMN codex_pricing_fingerprint;
-             ALTER TABLE session_catalog DROP COLUMN pricing_fingerprint;
-             ALTER TABLE usage DROP COLUMN record_ids;
-             ALTER TABLE files DROP COLUMN copilot;
-             ALTER TABLE files DROP COLUMN codex_native_usage;
-             PRAGMA user_version = 1;
-             UPDATE meta SET value = '19' WHERE key = 'cache_version';",
-            )
-            .unwrap();
-        drop(store);
-        let (store, loaded) = opened(&path);
-        assert_eq!(
-            format!("{:?}", loaded.reported_runs),
-            format!("{:?}", [run()])
-        );
-        assert_eq!(loaded.stamp, Some(stamp()));
-        assert!(loaded.files.is_empty());
-        assert_eq!(
-            versions(&store.connection).unwrap(),
-            (SCHEMA_VERSION, Some(CACHE_VERSION))
-        );
-        store
-            .connection
-            .prepare("SELECT codex_native_usage FROM files")
-            .unwrap();
-    }
-
-    #[test]
-    fn schema_two_rebuilds_assistant_uuids_and_preserves_reported_runs() {
-        let root = scratch("copied-usage-migration");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        store.write_runs(&[run()], &stamp()).unwrap();
-        store
-            .write_one("a.jsonl", None, None, &ledger(1), &full())
-            .unwrap();
-        store.connection.execute_batch("ALTER TABLE files DROP COLUMN copilot; ALTER TABLE usage DROP COLUMN record_ids; PRAGMA user_version = 2; UPDATE meta SET value = '20' WHERE key = 'cache_version';").unwrap();
-        drop(store);
-        let (store, loaded) = opened(&path);
-        assert!(loaded.files.is_empty());
-        assert_eq!(
-            format!("{:?}", loaded.reported_runs),
-            format!("{:?}", [run()])
-        );
-        assert_eq!(loaded.stamp, Some(stamp()));
-        assert_eq!(
-            versions(&store.connection).unwrap(),
-            (SCHEMA_VERSION, Some(CACHE_VERSION))
-        );
-        store
-            .connection
-            .prepare("SELECT record_ids FROM usage")
-            .unwrap();
-    }
-
-    #[test]
-    fn schema_three_adds_copilot_and_preserves_reported_runs() {
-        let root = scratch("copilot-migration");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        store.write_runs(&[run()], &stamp()).unwrap();
-        store
-            .write_one("a.jsonl", None, None, &ledger(1), &full())
-            .unwrap();
-        store.connection.execute_batch("ALTER TABLE files DROP COLUMN copilot; PRAGMA user_version = 3; UPDATE meta SET value = '21' WHERE key = 'cache_version';").unwrap();
-        drop(store);
-        let (store, loaded) = opened(&path);
-        assert!(loaded.files.is_empty());
-        assert_eq!(
-            format!("{:?}", loaded.reported_runs),
-            format!("{:?}", [run()])
-        );
-        assert_eq!(loaded.stamp, Some(stamp()));
-        assert_eq!(
-            versions(&store.connection).unwrap(),
-            (SCHEMA_VERSION, Some(CACHE_VERSION))
-        );
-        store
-            .connection
-            .prepare("SELECT copilot FROM files")
-            .unwrap();
-        store
-            .connection
-            .prepare("SELECT record_ids FROM usage")
-            .unwrap();
-    }
-
-    #[test]
-    fn a_parser_change_rereads_every_file_but_keeps_reported_runs() {
-        let root = scratch("versions");
-        let path = root.join("index.sqlite3");
-        let (mut store, _) = opened(&path);
-        store
-            .write_one("a.jsonl", None, None, &ledger(1), &full())
-            .unwrap();
-        let all = store.write_runs(&[run()], &stamp()).unwrap().unwrap();
-        assert_eq!(format!("{all:?}"), format!("{:?}", [run()]));
-
-        // Another version rebuilt it for an older parser: this connection
-        // notices and writes nothing.
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value = '13' WHERE key = 'cache_version'",
-                [],
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .write_one("a.jsonl", Some(&ledger(1)), None, &ledger(2), &full())
-                .unwrap(),
-            Outcome::Stale
-        );
-        assert_eq!(store.remove(&[]).unwrap(), Outcome::Stale);
-        assert!(store.write_runs(&[run()], &stamp()).unwrap().is_none());
-        drop(store);
-
-        // Opened by this parser: every file is read again, and the reported
-        // runs, which the logs can't give back, stay.
-        let (store, loaded) = opened(&path);
-        assert!(loaded.files.is_empty());
-        assert_eq!(
-            format!("{:?}", loaded.reported_runs),
-            format!("{:?}", [run()])
-        );
-        assert_eq!(loaded.stamp, Some(stamp()));
-
-        // A newer parser's store isn't touched.
-        let newer = (CACHE_VERSION + 1).to_string();
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value = ?1 WHERE key = 'cache_version'",
-                [&newer],
-            )
-            .unwrap();
-        drop(store);
-        assert!(matches!(
-            SqliteStore::attempt(&path),
-            Err(Unopened::Other(_))
-        ));
-        let connection = Connection::open(&path).unwrap();
-        let kept: String = connection
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'cache_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(kept, newer);
-
-        // So is a newer schema's.
-        connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-            .unwrap();
-        drop(connection);
-        assert!(matches!(
-            SqliteStore::attempt(&path),
-            Err(Unopened::Other(_))
-        ));
         fs::remove_dir_all(root).unwrap();
     }
 

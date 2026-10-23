@@ -551,6 +551,46 @@ mod tests {
     }
 
     #[test]
+    fn current_source_repair_resumes_owned_lifecycle_across_receipt_bound_slices() {
+        let home = Home::new();
+        home.append(event("task_started", Some("repair-turn")));
+        for _ in 0..600 {
+            home.append(json!({"type":"event_msg","payload":{"type":"agent_message","message":"sanitized"}}));
+        }
+        home.append(event("task_complete", Some("repair-turn")));
+        let expected = home.query()["turn_lifecycle"].clone();
+        let db = home.db();
+        db.execute(
+            "DELETE FROM meta WHERE key=?1",
+            [format!("native_tree_summary:{}", home.path.display())],
+        )
+        .unwrap();
+        let parsed = crate::events::PARSED.with(std::cell::Cell::get);
+        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let error = crate::events::scan_file(&home.path, "codex", &mut cache, &mut false)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        let mut steps = 0;
+        while cache.advance_tree_repair(&home.options).unwrap() {
+            steps += 1;
+            assert!(steps < 8);
+        }
+        assert!(steps > 0, "start and terminal must cross a repair checkpoint");
+        assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
+        drop(cache);
+        assert_eq!(home.query()["turn_lifecycle"], expected);
+        assert_eq!(home.query()["state"], "idle");
+        let retired: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='native_usage_migrations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retired, 0, "repair cannot restore retired migration storage");
+    }
+
+    #[test]
     fn parser28_rebuild_and_source_replacement_cannot_retain_completed_turn() {
         let home = Home::new();
         home.append(event("task_started", Some("a")));

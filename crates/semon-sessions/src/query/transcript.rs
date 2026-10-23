@@ -302,6 +302,7 @@ fn virtual_read(
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
+    crate::events::store::require_current(&tx).map_err(unavailable)?;
     let context = match crate::overview_repair::query_context(&tx, key) {
         Ok(context) => context,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -664,6 +665,7 @@ fn read_inner(
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
+    crate::events::store::require_current(&tx).map_err(unavailable)?;
     let catalog_generation = generation(&tx)?;
     let projection_generation: Option<String> = tx
         .query_row(

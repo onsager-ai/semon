@@ -30,8 +30,7 @@ ownership, approvals and lineage remain unknown; a usage snapshot grants no
 runtime or control authority.
 
 Current list indexes are partial B-trees (`WHERE lifecycle='current'`) ordered
-by their filter and keyset keys. Retained rows do not enter those trees; schema
-17 replaces earlier schemas' lifecycle-prefixed list indexes without rebinding rows.
+by their filter and keyset keys. Retained rows do not enter those trees.
 Separate unprefixed indexes support history across both observation
 states. Current exact-key lookup remains a primary-key operation. Source maps
 carry the same lifecycle and have indexed current native/path lookups. Default
@@ -96,10 +95,21 @@ an explicit incomplete observation, rather than a claim that the whole object
 was indexed. Archive locations, credentials and tenant policy do not enter the
 public read model.
 
-On parser-cache reset, observations become retained while rebuildable event
-rows are cleared. Original references and recipes survive. Unsupported recipe
-versions remain unavailable until an authorized producer rebuilds them from the
-original source; they are never silently interpreted as current versions.
+Exactly owned Codex turn outcomes remain recorded observations in current and
+retained metadata. They never inherit writer liveness or archive read authority.
+Parser 29 qualifies those lifecycle facts; current-source tree repair restores
+them from verified source slices without importing retired Semon storage.
+
+Semon reads only its current schema and parser contract. Normal writable
+producers discard recognized obsolete derived indexes and rebuild from supported
+native sources under the [current storage contract](session-source-reader.md#current-semon-storage-contract).
+This also discards obsolete derived references, recipes and proof metadata;
+archive objects and native bytes remain untouched. Missing original source bytes
+cannot be reconstructed from a discarded index. Future, foreign and ambiguous
+stores remain refused without reset; focused readers never invalidate storage.
+Physical-corruption recovery is unchanged. Unsupported individual recipe versions
+in a current store remain explicitly unavailable; they are never interpreted as
+current versions.
 Native source reappearance can reactivate its catalog key through normal source
 CAS publication. This retains the latest observation per canonical key, rather
 than introducing arbitrary historical revision browsing. Explicit original raw
@@ -109,13 +119,13 @@ The existing complete background builder and collection hash still perform
 global producer work. This change protects provenance and bounds indexed reads;
 it does not claim that the subsequent dirty-lineage producer is complete.
 
-Verification at the schema-11 checkpoint includes schema-10 coherent/stale
-header migration, parser reset with absent source, native source reappearance,
-interrupted lifecycle retirement with the dirty observation still pending, and
-a provider-rendered native range after a complete rebuild removed the local
-source ledger. The exact-path guard rejects missing indexes without creating
-them, stale collection markers, missing source digests and unsupported recipe
-versions.
+Current verification covers cold initialization, incremental writes and restart,
+obsolete-index rebuild, future/foreign version refusal without changing original
+bytes or custody, native source
+reappearance, interrupted lifecycle retirement with the dirty observation still
+pending, and provider-rendered ranges when local source ledgers are absent.
+The exact-path guard rejects missing indexes without creating them, stale
+collection markers, missing source digests and unsupported recipe versions.
 
 An isolated indexed SQL check holds one selected current row and a three-row
 request constant while unrelated retained rows grow from 1 to 20,001. The
@@ -238,8 +248,8 @@ history remains unavailable to ordinary recipe readers. Source references,
 generations and existing archive markers are retained unchanged. This is
 custody preservation, never a grant of control or new eviction authority.
 
-Schema 27 adds the custody-part table through the storage owner's additive
-migration. It leaves the parser version, original rows, headers and archive
-markers unchanged; older schema-26 writers refuse the newer store. The migration
-regression compares every existing MAIN/TEMP row and schema object before and
-after opening the previous schema.
+The current schema creates the custody-part table together with the rest of the
+storage contract. Recognized obsolete stores are discarded by writable producers,
+without rebinding old rows, headers, archives or facts. Custody preservation of an
+unsupported individual recipe in a current store is distinct from whole-index
+invalidation; neither permits deletion of original native or archive bytes.
