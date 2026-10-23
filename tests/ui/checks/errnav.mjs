@@ -475,7 +475,9 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
       }
     };
     await nav({ v: 'sessions' });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Sessions');
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+    );
     await nav({ v: 'session', id: 'faults' });
     await page.waitForFunction(
       () =>

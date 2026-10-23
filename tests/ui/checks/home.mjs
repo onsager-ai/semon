@@ -460,7 +460,13 @@ export default async function homeCheck(browser) {
   r.results = out;
   r.expect(errs.length === 0, 'page errors: ' + errs.join(' | '));
   r.expect(out.homeOver === 0, 'root Sessions overflow=' + out.homeOver);
-  r.expect(out.root.title === 'Sessions' && out.root.path === '/sessions' && out.root.rows > 0 && out.root.removedInbox === 0, 'root retains the existing Sessions list without Home');
+  r.expect(
+    out.root.title === 'Sessions' &&
+      out.root.path === '/sessions' &&
+      out.root.rows > 0 &&
+      out.root.removedInbox === 0,
+    'root retains the existing Sessions list without Home',
+  );
   r.expect(out.sessionsOver === 0, 'sessions overflow=' + out.sessionsOver);
   r.expect(out.machinesOver === 0, 'machines overflow=' + out.machinesOver);
   for (const mp of out.machinePages)

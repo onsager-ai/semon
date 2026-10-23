@@ -459,7 +459,9 @@ export default async function turnsCheck(browser) {
       D1.hadPick = !!pick;
       // Home's inbox click/Trace/Enter/Space affordances were removed with
       // Home. Retain the anchored native URL and Back contract from Sessions.
-      const started = [...D.holds.values()].find((turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1));
+      const started = [...D.holds.values()].find(
+        (turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1),
+      );
       D1.hadAnchor = !!started;
       if (started) {
         await goto(page, { v: 'sessions' }, D0);
@@ -470,8 +472,12 @@ export default async function turnsCheck(browser) {
         );
         D1.fromSessions = { expectTurn: started.id, ...(await landed()) };
         await page.goBack();
-        await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Sessions');
-        D1.fromSessions.backTo = await page.evaluate(() => document.querySelector('#topbar .t')?.textContent);
+        await page.waitForFunction(
+          () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+        );
+        D1.fromSessions.backTo = await page.evaluate(
+          () => document.querySelector('#topbar .t')?.textContent,
+        );
       }
       D1.nestedButtonsInItems = await page.evaluate(
         () => document.querySelectorAll('button .ib, .ib button button, button button').length,
@@ -588,7 +594,9 @@ export default async function turnsCheck(browser) {
   const anchorPin = { passed: false };
   let releaseRange = () => {};
   try {
-    const started = [...D.holds.values()].find((turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1));
+    const started = [...D.holds.values()].find(
+      (turn) => D.SESS[turn.sid] && turn !== D.turns[turn.sid].at(-1),
+    );
     if (!started) throw Error('fixture has no recorded turn for anchored navigation');
     const sid = D.KEYS?.[started.sid] ?? started.sid;
     let fetchedResolve;
@@ -662,13 +670,25 @@ export default async function turnsCheck(browser) {
       ]).finally(() => clearTimeout(timer));
     };
     // Start navigation without awaiting the intentionally held transcript.
-    await anchorPage.evaluate(({ sid, turn, harness, machine }) => {
-      const url = new URL('/s/' + harness + '/' + encodeURIComponent(sid), location.href);
-      url.searchParams.set('machine', machine);
-      url.hash = 'turn=' + encodeURIComponent(turn);
-      history.pushState({ v: 'session', id: sid, turn }, '', url.pathname + url.search + url.hash);
-      dispatchEvent(new PopStateEvent('popstate'));
-    }, { sid, turn: started.id, harness: D.SESS[started.sid].harness, machine: D.SOURCES?.[D.SESS[started.sid].machine] ?? D.SESS[started.sid].machine });
+    await anchorPage.evaluate(
+      ({ sid, turn, harness, machine }) => {
+        const url = new URL('/s/' + harness + '/' + encodeURIComponent(sid), location.href);
+        url.searchParams.set('machine', machine);
+        url.hash = 'turn=' + encodeURIComponent(turn);
+        history.pushState(
+          { v: 'session', id: sid, turn },
+          '',
+          url.pathname + url.search + url.hash,
+        );
+        dispatchEvent(new PopStateEvent('popstate'));
+      },
+      {
+        sid,
+        turn: started.id,
+        harness: D.SESS[started.sid].harness,
+        machine: D.SOURCES?.[D.SESS[started.sid].machine] ?? D.SESS[started.sid].machine,
+      },
+    );
     const fetchedRange = await bounded(fetched, 'anchored transcript range');
     if (fetchedRange.status !== 200)
       throw Error('anchored transcript range failed: ' + JSON.stringify(fetchedRange));
@@ -858,10 +878,16 @@ export default async function turnsCheck(browser) {
       'crumb back did not return to Trace: ' + light.deepLinks.crumb.backTo,
     );
   }
-  r.expect(light.deepLinks.hadAnchor === true, 'fixture has no recorded turn for native deep-link coverage');
+  r.expect(
+    light.deepLinks.hadAnchor === true,
+    'fixture has no recorded turn for native deep-link coverage',
+  );
   const anchored = light.deepLinks.fromSessions;
   r.expect(
-    anchored?.inView && anchored.flash && anchored.turn === anchored.expectTurn && anchored.backTo === 'Sessions',
+    anchored?.inView &&
+      anchored.flash &&
+      anchored.turn === anchored.expectTurn &&
+      anchored.backTo === 'Sessions',
     'native turn link or Back to Sessions failed: ' + JSON.stringify(anchored),
   );
   r.expect(

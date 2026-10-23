@@ -1354,7 +1354,7 @@ export default async function (browser) {
     // the removed Home page. Keep selected-result persistence and storage
     // failure coverage, and assert that Sessions never adopts the inbox.
     r.expect(
-      await page.locator('#page .ib, #nav [data-go="home"]').count() === 0,
+      (await page.locator('#page .ib, #nav [data-go="home"]').count()) === 0,
       'Sessions must not render Home inbox cards or navigation',
     );
 
@@ -1372,12 +1372,18 @@ export default async function (browser) {
     await page.goto(ENV.extraBase + '/?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Sessions');
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+    );
     await page.reload({ waitUntil: 'load' });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Sessions');
-    const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('semon.seen') ?? '[]'));
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+    );
+    const persisted = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('semon.seen') ?? '[]'),
+    );
     r.expect(persisted.includes(resultKey), 'selected result read state survives reload');
-    r.expect(await page.locator('#page .ib').count() === 0, 'Sessions retains no Home inbox');
+    r.expect((await page.locator('#page .ib').count()) === 0, 'Sessions retains no Home inbox');
     await page.context().close();
 
     const blocked = await served(browser, { extras: true, path: '/' });
@@ -1399,7 +1405,8 @@ export default async function (browser) {
     await blocked.waitForFunction(() => !!document.querySelector('.turns .event'));
     r.expect(
       blocked.errors.length === 0,
-      'Sessions and the session page render when localStorage throws: ' + blocked.errors.join(' | '),
+      'Sessions and the session page render when localStorage throws: ' +
+        blocked.errors.join(' | '),
     );
     await blocked.context().close();
   }
