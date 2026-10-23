@@ -68,6 +68,21 @@ See the [inventory, reference provenance and acceptance reconciliation](model-or
 Final integration, consumer/release qualification and the separate transcript
 proof repair remain under their existing owners. No merge or deployment is implied.
 
+## Derived-index cleanup
+
+The user's October 23 correction authorizes automatic discard and reindex of
+recognized obsolete Semon-owned derived SQLite indexes during normal writable
+producer open. The [storage contract](session-source-reader.md#current-semon-storage-contract)
+defines recognition, current schema initialization and refusal of future,
+foreign or ambiguous stores. Reset is transactional and safe for concurrent
+producers and WAL readers; it does not migrate old rows. Focused reads never
+reset storage, and physical-corruption recovery remains unchanged.
+
+This narrow cache invalidation does not authorize live operational cleanup.
+Native logs, archive objects, credentials, unrelated files and retired JSON
+caches are preserved. History without accessible supported native source bytes
+cannot be rebuilt, and old archive markers do not become new custody authority.
+
 ## Remaining acceptance
 
 - Catalog discovery and deterministic relationship closure are bounded. Publish

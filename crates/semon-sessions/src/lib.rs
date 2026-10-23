@@ -764,7 +764,7 @@ pub(crate) fn collect_with_index(
 }
 
 fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io::Result<Vec<Node>> {
-    index.begin_scan();
+    index.begin_scan()?;
     let mut dirty = false;
     let mut evidence = native_tree::Evidence::default();
     let now = unix_now();

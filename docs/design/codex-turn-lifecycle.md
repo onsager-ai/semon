@@ -69,9 +69,13 @@ generation; rebuilding the same over-limit source remains unknown. It never
 evicts old IDs and then accepts an old start as new. This is an explicit metadata
 availability limit, not truncated successful lifecycle analysis.
 
-Parser cache 29 rebuilds the current SQLite parsed facts from native source;
-it does not import retired JSON caches. Storage
-schema and retained slot recipe version 6 are unchanged. Retained projections
+Parser cache 29 makes recognized obsolete derived SQLite indexes rebuild from
+supported original native sources under the current schema-33 storage contract;
+read-only selected paths never reset storage. It does not import retired JSON
+caches, migrate old usage or restore obsolete archive authority. Current missing
+tree projections repair lifecycle observations in receipt-bound native-source
+slices, persisting reducer state between slices. Storage schema 33 and retained
+slot recipe version 6 are unchanged by this lifecycle addition. Retained projections
 remain historical observations under their existing original/source custody
 contract. Tests use sanitized source-shaped JSON records, with no personal logs.
 CI owns builds, tests, formatting and all visual gates; no local test acceptance

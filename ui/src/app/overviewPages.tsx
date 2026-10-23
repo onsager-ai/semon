@@ -764,8 +764,7 @@ export function createOverviewPages(host: OverviewHost) {
     const inbox = home.inbox.filter(
       (row) =>
         row.event?.ask !== 'result' ||
-        (!(home!.machines.length === 1 && seen.SEEN_RESULTS.has(row.event.id)) &&
-          !seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id]))),
+        !seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id])),
     );
     const byId = new Map<string, HomeRow>();
     const rowId = (row: HomeRow) =>
@@ -1583,8 +1582,7 @@ export function createOverviewPages(host: OverviewHost) {
               workspaceHome.inbox.filter(
                 (row) =>
                   row.event?.ask === 'result' &&
-                  ((workspaceHome!.machines.length === 1 && seen.SEEN_RESULTS.has(row.event.id)) ||
-                    seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id]))),
+                  seen.SEEN_RESULTS.has(JSON.stringify([row.source_key, row.event.id])),
               ).length,
           )
         : undefined,

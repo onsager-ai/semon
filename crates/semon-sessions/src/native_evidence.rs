@@ -329,7 +329,7 @@ impl NativeEvidence {
                 Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
                     return Err(io::Error::other(error));
                 }
-                Err(_) => EventCache::open(&self.options.cache),
+                Err(_) => EventCache::open(&self.options.cache).map_err(io::Error::other)?,
             });
         }
         let cache = work.events.as_mut().expect("event cache initialized");
@@ -901,7 +901,7 @@ impl NativeEvidence {
         before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
         let complete = self.refresh_catalog_step(work, now, before_build)?;
-        Ok(complete && !work.usage_migration_pending)
+        Ok(complete && !work.tree_repair_pending)
     }
 
     fn refresh_catalog_step(
@@ -923,18 +923,11 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
-        work.usage_migration_pending = work
+        work.tree_repair_pending = work
             .events
             .as_mut()
             .expect("event cache initialized")
-            .advance_native_usage_migration(&self.options)?;
-        if work.events.as_ref().is_some_and(EventCache::is_scoped)
-            && crate::events::store::recover_unsupported_catalog(&self.options)?
-        {
-            work.cold_catalog = None;
-            work.catalog_snapshot = None;
-            work.pending_sources = true;
-        }
+            .advance_tree_repair(&self.options)?;
         if self.advance_semantic_stage(work, now, &mut before_build)? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
@@ -1324,7 +1317,7 @@ impl NativeEvidence {
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
-        work.usage_migration_pending
+        work.tree_repair_pending
             || work.cold_catalog.is_some()
             || work.audit.is_some()
             || (work.pending_sources
@@ -1332,11 +1325,11 @@ impl NativeEvidence {
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
-        work.usage_migration_pending
+        work.tree_repair_pending
             || work
                 .events
                 .as_ref()
-                .is_some_and(EventCache::native_usage_migration_pending)
+                .is_some_and(EventCache::tree_repair_pending)
             || work.cold_catalog.is_some()
             || work.pending_sources
             || work.audit.is_some()
@@ -1417,7 +1410,7 @@ pub(crate) struct Work {
     observed_catalog_generation: Option<String>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
-    usage_migration_pending: bool,
+    tree_repair_pending: bool,
     audit: Option<CatalogAudit>,
     audit_revision: u64,
     /// When the last native preparation started.
@@ -2129,7 +2122,7 @@ mod catalog_owner_tests {
     }
 
     #[test]
-    fn old_publication_with_active_subset_rebuilds_unrelated_metadata_before_qualification() {
+    fn unsupported_semantic_recipe_with_active_subset_refuses_without_rebinding_history() {
         let (root, options, input) = audit_fixture();
         let unrelated = crate::Input {
             root: crate::InputRoot::Codex,
@@ -2154,55 +2147,39 @@ mod catalog_owner_tests {
         }
         let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
         let unrelated_key: String = db.query_row("SELECT session_key FROM session_catalog_sources WHERE native_id='unrelated' LIMIT 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
         db.execute(
-            "UPDATE meta SET value=?1 WHERE key='catalog_version'",
-            [(model::summary::CATALOG_VERSION - 1).to_string()],
+            "UPDATE meta SET value=?1 WHERE key='catalog_semantic_recipe'",
+            ["unsupported-semantic-recipe"],
         )
         .unwrap();
-        assert_eq!(db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.name','old derived metadata') WHERE session_key=?1", [&unrelated_key]).unwrap(), 1);
-        db.execute("DELETE FROM meta WHERE key='catalog_semantic_recipe'", [])
-            .unwrap();
-        let published: i64 = db
-            .query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row.get(0))
-            .unwrap();
-        {
+        let before = crate::native_timing::cleanup_tests::snapshot(&db);
+        let path = EventCache::path(&options.cache);
+        let wal = path.with_extension("sqlite3-wal");
+        let original = fs::read(&path).unwrap();
+        let original_wal = fs::read(&wal).unwrap();
+        for _ in 0..2 {
             let mut work = lock(&evidence.work);
-            assert!(
-                !evidence
-                    .refresh_catalog(&mut work, model::now_ms())
-                    .unwrap()
-            );
-            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
-        }
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM session_catalog", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            published,
-            "upgrade must retain published history"
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT value FROM meta WHERE key='catalog_backfill_state'",
-                [],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-            "discovering"
-        );
-        let mut complete = false;
-        for _ in 0..128 {
-            let mut work = lock(&evidence.work);
-            if evidence
+            let error = evidence
                 .refresh_catalog(&mut work, model::now_ms())
-                .unwrap()
-            {
-                assert!(work.events.as_ref().unwrap().qualified_catalog().unwrap());
-                complete = true;
-                break;
-            }
+                .unwrap_err();
+            assert!(error.to_string().contains("unsupported semantic recipe"));
+            assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
+            assert!(EventCache::open_scoped(&options.cache).is_err());
+            assert!(EventCache::open(&options.cache).is_err());
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&db),
+                before,
+                "refusal preserves the active subset and unrelated published history"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert_eq!(fs::read(&wal).unwrap(), original_wal);
         }
-        assert!(complete, "bounded upgrade did not finish");
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            crate::events::store::SCHEMA_VERSION
+        );
         let name: String = db
             .query_row(
                 "SELECT json_extract(metadata,'$.name') FROM session_catalog WHERE session_key=?1",
@@ -2210,9 +2187,9 @@ mod catalog_owner_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             name, "old derived metadata",
-            "subset publication qualified untouched old metadata"
+            "unsupported publication must not rewrite unrelated metadata"
         );
         drop(db);
         drop(evidence);
