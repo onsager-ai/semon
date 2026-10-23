@@ -338,7 +338,7 @@ pub(super) fn reuse(
     )
     .map_err(failure)?;
     tx.execute(
-        "UPDATE native_usage_migrations SET source_path=?2 WHERE source_path=?1",
+        "UPDATE native_tree_repairs SET source_path=?2 WHERE source_path=?1",
         params![old, path],
     )
     .map_err(failure)?;

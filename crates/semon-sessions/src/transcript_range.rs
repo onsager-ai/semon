@@ -551,6 +551,7 @@ fn read(
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let mut transaction = connection.transaction()?;
+    crate::events::store::require_current(&transaction)?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "transcript_before_snapshot");
     let selected = catalog::catalog_selection_in_snapshot(
