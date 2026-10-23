@@ -112,6 +112,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- --no-deps -D warnings
 
+      - name: Sealed selected transcript regression
+        run: cargo test -p semon-sessions --locked selected_codex_pages_survive_multi_segment_sealing -- --nocapture
+
       - name: Runtime pricing regressions
         run: |
           cargo test -p semon-sessions --lib --locked pricing::runtime::tests::
