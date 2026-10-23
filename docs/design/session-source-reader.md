@@ -61,13 +61,25 @@ generations retain their independent fences.
 On a changed physical witness (append, copy/remount, touch or a missing legacy
 change token), a local carrier may instead supply only ranges whose covering
 64 KiB blocks verify against persisted native proofs for the exact original
-ledger, consumed boundary and prefix generation. One request-local verified
-block is retained, and physical block reads charge the existing page/field or
-attachment byte budget. The named file and descriptor
+ledger, consumed boundary and prefix generation. Verified blocks are retained
+only for that request, keyed by source path and block ordinal. Every first
+physical block read charges the existing page/field (1 MiB), attachment (12 MiB)
+or selected-reader (64 MiB) byte budget; retained bytes cannot exceed that
+budget. Repeated field, signal and tool reads reuse those verified bytes, so
+switching blocks cannot charge the same evidence repeatedly. Without a physical
+change token, reuse remains disabled. The named file and descriptor
 must agree before/after I/O. The request pins the first physical observation;
 later physical changes fail closed. A small read never rehashes the full prefix
 or reparses history. Missing or incompatible proofs remain unavailable; readers
 do not manufacture proof for legacy/provisional rows.
+
+Exhausting that physical evidence bound still fails closed. Page and field
+replies distinguish it with HTTP 503, `source_budget_exhausted`,
+`fence_reason: source_budget` and `stage: budget`; it is not evidence that the
+source generation changed. A sparse page can require more unique evidence than
+its logical preview bytes and remains unavailable if the physical bound is
+exceeded. No budget is increased and no warming or retry is required for reuse
+within one request.
 
 If local qualification fails before that source's first accepted bytes, a host
 with independently verified originals may use the exact selected callback.
