@@ -1380,31 +1380,50 @@ for (const width of [390, 1280])
         if (width === 390 && colorScheme === 'light') {
           const group = page.locator('#page .tgroup');
           await group.locator('.tsum').click();
+          if (process.env.SEMON_CATALOG_OUT) {
+            await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
+            await page.screenshot({
+              path: `${process.env.SEMON_CATALOG_OUT}/preview-notices-clipped-tool-group-390-light.png`,
+            });
+          }
           const tool = page.locator('#page [data-entry-key="one:7"]');
           await tool.locator('button').click();
           await tool.getByRole('button', { name: 'View all', exact: true }).click();
-          const loadMoreToolText = page.getByRole('button', {
+          const toolDialog = page.locator('dialog.panel.full[open]');
+          const toolDialogBody = toolDialog.locator('.panel-b.viewer-b');
+          const loadMoreToolText = toolDialog.getByRole('button', {
             name: 'Load more text',
             exact: true,
           });
           await loadMoreToolText.waitFor();
-          assert.match(await page.locator('body').innerText(), /First native tool text chunk/);
+          assert.match(await toolDialogBody.innerText(), /First native tool text chunk/);
           await loadMoreToolText.click();
-          await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
-          assert.match(await page.locator('body').innerText(), /and final native tool text chunk/);
+          await toolDialog.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+          await toolDialogBody.getByText(/and final native tool text chunk/).waitFor();
+          assert.match(await toolDialogBody.innerText(), /and final native tool text chunk/);
+          if (process.env.SEMON_CATALOG_OUT) {
+            await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
+            await page.screenshot({
+              path: `${process.env.SEMON_CATALOG_OUT}/preview-notices-tool-details-loaded-390-light.png`,
+            });
+          }
           await page.keyboard.press('Escape');
           await page.waitForFunction(() => !history.state?.sheet);
 
           const unsupported = page.locator('#page [data-entry-key="one:9"]');
           await unsupported.locator('button').click();
           await unsupported.getByRole('button', { name: 'View all', exact: true }).click();
-          await page
+          const unsupportedDialog = page.locator('dialog.panel.full[open]');
+          const unsupportedDialogBody = unsupportedDialog.locator('.panel-b.viewer-b');
+          await unsupportedDialogBody
             .getByText('Recorded text preview. The complete source text is not loaded.', {
               exact: true,
             })
             .waitFor();
           assert.equal(
-            await page.getByRole('button', { name: 'Load recorded text', exact: true }).count(),
+            await unsupportedDialog
+              .getByRole('button', { name: 'Load recorded text', exact: true })
+              .count(),
             0,
           );
           await page.keyboard.press('Escape');
