@@ -4278,6 +4278,12 @@ export function createCatalogViewer(
         return;
       }
       if (sessionRoute.legacyHarness) {
+        leaveScreen();
+        navigation.route = { v: 'sessions' };
+        sourcesOpen = true;
+        bookmarkMatches = [];
+        sourcesNote = 'Resolving recorded session…';
+        drawSources();
         void locateBookmark(sessionRoute.key, sessionRoute.source ?? undefined);
         return;
       }

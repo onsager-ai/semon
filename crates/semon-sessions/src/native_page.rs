@@ -329,27 +329,25 @@ fn selected_reply(
     let get = |name: &str| route.controls.get(name).map(String::as_str);
     let mut after = get("after").map(str::to_owned);
     let mut generation = get("generation").map(str::to_owned);
-    if let Some(turn) = &route.turn {
-        if after.is_none() {
-            let anchor = read(
-                "/api/session-anchor",
-                &query(&[
-                    ("machine", machine),
-                    ("sid", key),
-                    ("turn", turn),
-                    ("scope", "retained_history"),
-                ]),
-            );
-            if anchor.status != 200 {
-                return anchor;
-            }
-            let value: Value = serde_json::from_slice(&anchor.body).unwrap_or(Value::Null);
-            if !value["slot"].is_number() || !value["generation"].is_string() {
-                return response(404, "<p>Turn not found.</p>");
-            }
-            after = Some(value["slot"].to_string());
-            generation = value["generation"].as_str().map(str::to_owned);
+    if let Some(turn) = route.turn.as_ref().filter(|_| after.is_none()) {
+        let anchor = read(
+            "/api/session-anchor",
+            &query(&[
+                ("machine", machine),
+                ("sid", key),
+                ("turn", turn),
+                ("scope", "retained_history"),
+            ]),
+        );
+        if anchor.status != 200 {
+            return anchor;
         }
+        let value: Value = serde_json::from_slice(&anchor.body).unwrap_or(Value::Null);
+        if !value["slot"].is_number() || !value["generation"].is_string() {
+            return response(404, "<p>Turn not found.</p>");
+        }
+        after = Some(value["slot"].to_string());
+        generation = value["generation"].as_str().map(str::to_owned);
     }
     let mut pairs = vec![
         ("machine", machine),
@@ -379,6 +377,13 @@ fn selected_reply(
     let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
     response(
         200,
-        &crate::native_html::transcript(&value, path, machine, &selected.harness, key),
+        &crate::native_html::transcript_with_controls(
+            &value,
+            path,
+            machine,
+            &selected.harness,
+            key,
+            &route.controls,
+        ),
     )
 }

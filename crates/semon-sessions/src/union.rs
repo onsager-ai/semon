@@ -1099,8 +1099,9 @@ impl ViewerCore {
         let inventory = self.source_inventory(&views);
         let mut candidates = Vec::<Candidate>::new();
         let mut unavailable = false;
+        let mut work_guards = Vec::new();
         for (index, (internal, view)) in views.iter().enumerate() {
-            let source = if internal.is_empty() && views.len() == 1 {
+            let source = if internal.is_empty() {
                 "local"
             } else {
                 internal
@@ -1116,7 +1117,14 @@ impl ViewerCore {
             if !inventory.valid() || inventory.index(source) != Some(index) {
                 continue;
             }
-            let _ = view.note_catalog_read();
+            let work_guard = match view.evidence.work.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    unavailable = true;
+                    continue;
+                }
+            };
+            work_guards.push(work_guard);
             let reply = crate::session_bookmark(
                 view.options(),
                 source,
@@ -1134,7 +1142,9 @@ impl ViewerCore {
         if unavailable {
             return text(503, "Session index is updating");
         }
-        match resolve(&route, &candidates) {
+        let resolution = resolve(&route, &candidates);
+        drop(work_guards);
+        match resolution {
             Resolution::Valid(index) => {
                 let candidate = &candidates[index];
                 if let Some(turn) = &route.turn {
@@ -1192,6 +1202,7 @@ impl ViewerCore {
             let mut matches = Vec::<Value>::new();
             let mut unavailable = 0_u64;
             for (source, view) in views.iter() {
+                let source = if source.is_empty() { "local" } else { source };
                 let _ = view.note_catalog_read();
                 let reply = crate::session_bookmark(view.options(), source, query);
                 if reply.status != 200 {
@@ -1532,118 +1543,22 @@ impl ViewerCore {
         let Some(parts) = page_parts(path) else {
             return Some(text(400, "Invalid request"));
         };
-        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let shell = || views[0].1.respond("GET", "/", "", None);
-        let labels = native_machine_ids(views);
-        let (harness, id, turn) = match parts.as_slice() {
-            ["machines", id] => {
-                return Some(
-                    if labels.iter().any(|label| label == id)
-                        || views
-                            .iter()
-                            .any(|(key, _)| key == id || (key.is_empty() && *id == "local"))
-                    {
-                        shell()
-                    } else {
-                        text(404, "Not found")
-                    },
-                );
-            }
-            ["s", harness, id] => (*harness, *id, None),
-            ["trace", harness, id, turn] => (*harness, *id, Some(*turn)),
-            _ => return Some(text(404, "Not found")),
-        };
-        if !matches!(harness, "claude" | "codex" | "copilot")
-            || id.is_empty()
-            || id.len() > 4096
-            || id.chars().any(char::is_control)
-            || turn.is_some_and(|turn| {
-                turn.is_empty() || turn.len() > 4096 || turn.chars().any(char::is_control)
-            })
-        {
+        let parts: Vec<_> = parts.iter().map(String::as_str).collect();
+        let ["machines", id] = parts.as_slice() else {
             return Some(text(404, "Not found"));
-        }
-        // A literal native id wins before interpreting a multi-machine alias.
-        let aliases = id.rsplit_once('@').filter(|(_, label)| {
-            views.len() > 1 && labels.iter().any(|candidate| candidate == label)
-        });
-        for (own, selected_label) in
-            std::iter::once((id, None)).chain(aliases.map(|(own, label)| (own, Some(label))))
-        {
-            let mut found = Vec::new();
-            let mut unavailable = false;
-            for (index, (key, view)) in views.iter().enumerate() {
-                let source_key = if key.is_empty() && views.len() == 1 {
-                    "local"
-                } else {
-                    key
-                };
-                let query = format!("sid={}", percent_encode(own));
-                // A publication in progress can contain a newly discovered id.
-                // Serve the shell while its focused APIs wait for that index.
-                unavailable |= view.evidence.work.try_lock().is_err();
-                let reply = crate::session_bookmark(view.options(), source_key, &query);
-                let body = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
-                unavailable |= reply.status >= 500
-                    || body["unavailable"].as_u64().is_some_and(|count| count > 0);
-                let matches = body["matches"].as_array().into_iter().flatten();
-                let mut matched = false;
-                for item in matches {
-                    if item["harness"] != harness {
-                        continue;
-                    }
-                    if let Some(turn) = turn {
-                        let Some(catalog_key) = item["catalog_key"].as_str() else {
-                            continue;
-                        };
-                        let anchor = crate::session_turn_anchor(
-                            view.options(),
-                            source_key,
-                            &format!(
-                                "sid={}&turn={}&scope=retained_history",
-                                percent_encode(catalog_key),
-                                percent_encode(turn)
-                            ),
-                        );
-                        let value =
-                            serde_json::from_slice::<Value>(&anchor.body).unwrap_or(Value::Null);
-                        unavailable |= anchor.status >= 500 || anchor.status == 409;
-                        matched |= anchor.status == 200 && value["slot"].is_number();
-                    } else {
-                        matched = true;
-                    }
-                }
-                // Far-end handoff stubs have indexed owners but no native file.
-                if !matched
-                    && turn.is_none()
-                    && harness == "claude"
-                    && body["matches"].as_array().is_some_and(Vec::is_empty)
-                {
-                    matched = crate::session_query_sources(view.options(), own).is_ok();
-                }
-                if matched && (index < self.droppable() || found.is_empty()) {
-                    found.push(index);
-                }
-            }
-            let candidates: Vec<_> = found
-                .into_iter()
-                .filter(|index| selected_label.is_none_or(|label| labels[*index] == label))
-                .collect();
-            if candidates.len() == 1 {
-                return Some(shell());
-            }
-            if candidates.len() > 1 {
-                return Some(text(404, "Not found"));
-            }
-            if selected_label.is_some() || aliases.is_none() {
-                return Some(if unavailable {
-                    shell()
-                } else {
-                    text(404, "Not found")
-                });
-            }
-        }
-        Some(text(404, "Not found"))
+        };
+        let labels = native_machine_ids(views);
+        Some(
+            if labels.iter().any(|label| label == id)
+                || views
+                    .iter()
+                    .any(|(key, _)| key == id || (key.is_empty() && *id == "local"))
+            {
+                views[0].1.respond("GET", "/", "", None)
+            } else {
+                text(404, "Not found")
+            },
+        )
     }
 }
 
