@@ -3437,6 +3437,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
       dispatchEvent(new PopStateEvent('popstate', { state }));
     });
     await withDeadline(firstAnchorStarted, 'first turn anchor request');
+    assert.equal(new URL(page.url()).hash, '#anchor-turn');
     await page.clock.runFor(34);
     assert.equal(
       await page.evaluate(
@@ -4153,8 +4154,8 @@ for (const width of [390, 1280])
       await navigate('sessions');
       await page.locator('#page [data-session-row="list"]').waitFor();
       await page.locator('#page [data-session-row="list"]').click();
-      await page.locator('#page [data-entry-key]').first().waitFor();
-      assert.equal(new URL(page.url()).pathname, '/session/source/list');
+      await page.locator('#page [data-entry-key^="one:"]').first().waitFor();
+      assert.equal(new URL(page.url()).pathname, '/session/source/one');
       await navigate('machines');
       await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
       await page.waitForTimeout(50);
@@ -4288,11 +4289,14 @@ for (const width of [390, 1280])
     }
   });
 
-for (const mode of ['unique', 'missing', 'ambiguous', 'incomplete'])
-  test(`legacy indexed unsent bookmark keeps canonical identity: ${mode}`, async () => {
+for (const hostMode of ['standalone', 'catalog-sources', 'single-source-host'])
+  for (const mode of ['unique', 'missing', 'ambiguous', 'incomplete'])
+    test(`legacy indexed unsent bookmark keeps canonical identity: ${mode} (${hostMode})`, async () => {
     const browser = await chromium.launch();
     try {
       const page = await browser.newPage();
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
       const selected = [],
         lookups = [];
       await page.route('http://catalog.test/**', async (route) => {
@@ -4349,27 +4353,35 @@ for (const mode of ['unique', 'missing', 'ambiguous', 'incomplete'])
       });
       await page.goto('http://catalog.test/s/native/unsent%3Atarget?machine=source&t=bootstrap');
       await page.addScriptTag({ content: outputFiles[0].text });
-      await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+      const host =
+        hostMode === 'standalone'
+          ? null
+          : {
+              machinesPath: '/machines',
+              ...(hostMode === 'catalog-sources' ? { catalogSources: true } : {}),
+            };
+      await page.evaluate((value) => (window.app = CatalogViewer.mountViewerApplication(value)), host);
       if (mode === 'unique') {
         await page.locator('#page [data-entry-key="real:0"]').waitFor();
         assert.equal(new URL(page.url()).pathname, '/session/source/real');
         assert.equal(selected.length > 0, true);
       } else {
-        await page
-          .getByText(
-            mode === 'incomplete'
-              ? 'The recorded session index is updating. Retrying…'
-              : mode === 'ambiguous'
-                ? 'This bookmark has several recorded origins. Choose a session.'
-                : 'Recorded session not found.',
-            { exact: true },
-          )
-          .waitFor();
+        const message =
+          mode === 'incomplete'
+            ? 'The recorded session index is updating. Retrying…'
+            : mode === 'ambiguous'
+              ? 'This bookmark has several recorded origins. Choose a session.'
+              : 'Recorded session not found.';
+        const note = page.locator('#page [role="status"]').filter({ hasText: message });
+        await note.waitFor();
+        assert.ok((await note.innerText()).includes(message));
+        await note.getByRole('button', { name: 'Retry', exact: true }).waitFor();
         assert.equal(new URL(page.url()).pathname, '/s/native/unsent%3Atarget');
         assert.deepEqual(selected, [], 'unresolved indexed bookmark selected content');
       }
       assert.equal(lookups.length > 0, true);
       assert.equal(new URL(page.url()).searchParams.has('t'), false);
+      assert.deepEqual(errors, []);
       await page.evaluate(() => window.app.destroy());
     } finally {
       await browser.close();

@@ -21,7 +21,8 @@ Hub's authenticated fallback router:
 
 * Transcript: `/session/<source_key>/<catalog_key>`.
 * Transcript anchor: `/session/<source_key>/<catalog_key>#<encoded turn>`.
-  The historical `#turn=<encoded turn>` spelling remains readable.
+  The historical `#turn=<encoded turn>` spelling is read once and normalized
+  with `replaceState`; new links use only the canonical fragment.
 * Trace: `/session/<source_key>/<catalog_key>/trace/<turn>`.
   The turn is mandatory. There is no turnless trace destination.
 
@@ -65,7 +66,13 @@ It cannot grant a read, make native IDs authoritative or silently choose another
 source. Outcomes are valid, malformed (400), not_found (404), unauthorized under
 the host's existing denial policy, and legacy-only ambiguous or mismatch.
 An unavailable publication remains unavailable; it is not evidence of absence
-or uniqueness. Selected reads retain their generation and custody fences.
+or uniqueness. For syntactically valid direct routes, the enhanced reader shell
+remains available while a source observation is pending; selected APIs own its
+retry state and content waits for exact resolution. The no-JavaScript route
+requests the normal source-scoped observation and returns an HTML reload action
+while that observation remains unavailable. Hub validates workspace and source
+authority before returning either response. Selected reads retain their
+generation and custody fences.
 
 Legacy `/s/<native|codex|claude|copilot>/<key>` and
 `/trace/<native|codex|claude|copilot>/<key>/<turn>` are compatibility inputs only.

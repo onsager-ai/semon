@@ -54,7 +54,7 @@ pub(crate) fn reply(
         )
     };
     if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
-        return selected_reply(path, arguments, &mut read);
+        return selected_reply(path, arguments, &args, &mut read);
     }
     let mut body = String::new();
     let mut status = 200;
@@ -251,6 +251,7 @@ pub(crate) fn reply(
 fn selected_reply(
     path: &str,
     arguments: &str,
+    retry_arguments: &BTreeMap<String, String>,
     read: &mut impl FnMut(&str, &str) -> ViewerReply,
 ) -> ViewerReply {
     use crate::session_route::{Candidate, Resolution, SessionRoute, resolve_bookmark};
@@ -264,6 +265,9 @@ fn selected_reply(
     } else {
         let reply = read("/api/session-sources", "limit=100");
         if reply.status != 200 {
+            if reply.status >= 500 {
+                return retry_unavailable(path, retry_arguments);
+            }
             return reply;
         }
         let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
@@ -283,11 +287,14 @@ fn selected_reply(
             &query(&[("machine", &source), ("sid", &route.key)]),
         );
         if reply.status != 200 {
+            if reply.status >= 500 {
+                return retry_unavailable(path, retry_arguments);
+            }
             return reply;
         }
         let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
         if value["unavailable"].as_u64().is_none_or(|n| n > 0) {
-            return response(503, "<p>Session index is updating.</p>");
+            return retry_unavailable(path, retry_arguments);
         }
         candidates.extend(
             value["matches"]
@@ -340,6 +347,9 @@ fn selected_reply(
             ]),
         );
         if anchor.status != 200 {
+            if anchor.status >= 500 {
+                return retry_unavailable(path, retry_arguments);
+            }
             return anchor;
         }
         let value: Value = serde_json::from_slice(&anchor.body).unwrap_or(Value::Null);
@@ -372,6 +382,9 @@ fn selected_reply(
     };
     let reply = read(endpoint, &query(&pairs));
     if reply.status != 200 {
+        if reply.status >= 500 {
+            return retry_unavailable(path, retry_arguments);
+        }
         return reply;
     }
     let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
@@ -384,6 +397,20 @@ fn selected_reply(
             &selected.harness,
             key,
             &route.controls,
+        ),
+    )
+}
+
+fn retry_unavailable(path: &str, arguments: &BTreeMap<String, String>) -> ViewerReply {
+    let pairs: Vec<_> = arguments
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let retry = link(path, &pairs, "Reload to retry");
+    response(
+        503,
+        &format!(
+            "<p>The recorded session index is updating. Reload this page to retry.</p>{retry}"
         ),
     )
 }

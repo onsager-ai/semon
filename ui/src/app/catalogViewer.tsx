@@ -2,6 +2,8 @@ import {
   sessionPath,
   tracePath,
   parseSessionRoute,
+  canonicalSessionHash,
+  sessionHashTurn,
   canonicalSessionRoute,
   resolveSessionBookmark,
   type SessionRoute,
@@ -718,16 +720,7 @@ export function createCatalogViewer(
     return p;
   };
   const sessionAnchor = () => {
-    const hash = location.hash.slice(1);
-    try {
-      return hash.startsWith('turn=')
-        ? (new URLSearchParams(hash).get('turn') ?? undefined)
-        : hash
-          ? decodeURIComponent(hash)
-          : undefined;
-    } catch {
-      return undefined;
-    }
+    return sessionHashTurn(location.hash);
   };
   const saveFilters = () =>
     history.replaceState(history.state, '', '/sessions?' + browsingParams());
@@ -3671,6 +3664,10 @@ export function createCatalogViewer(
     };
     focusHeading();
     view.anchorNote = undefined;
+    if (turn && view.store.selectedPage()) {
+      if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, view.scroll);
+      else document.querySelector<HTMLElement>('#main')!.scrollTop = view.scroll;
+    }
     if (turn) {
       const sourceKey = view.sourceKey;
       const p = params();
@@ -4093,6 +4090,18 @@ export function createCatalogViewer(
     drawSources();
     if (!sourceItems.length) await loadSources(false);
   }
+  function showBookmarkOutcome(
+    message: string,
+    matches: { source_key: string; catalog_key: string; harness: string }[],
+  ) {
+    leaveScreen();
+    navigation.route = { v: 'sessions' };
+    sourcesOpen = true;
+    sourcesUpdating = false;
+    bookmarkMatches = matches;
+    sourcesNote = message;
+    drawSources();
+  }
   async function switchSource(key: string, push = true) {
     if (disposed) return;
     const epoch = ++sourcesEpoch;
@@ -4180,6 +4189,11 @@ export function createCatalogViewer(
     const path = location.pathname,
       search = location.search;
     const route = parseSessionRoute(path, search);
+    const legacyMachine = route.legacyHarness
+      ? new URLSearchParams(search).get('machine')
+      : null;
+    const selectedSource = route.source ?? sourceKey ?? legacyMachine ?? undefined;
+    const lookupRoute = selectedSource ? { ...route, source: selectedSource } : route;
     const current = () => !disposed && location.pathname === path && location.search === search;
     const retry = () =>
       scope.timeout(() => {
@@ -4189,7 +4203,7 @@ export function createCatalogViewer(
       const reply = object(
         await api(
           '/api/session-locate?' +
-            new URLSearchParams({ sid: key, ...(sourceKey ? { machine: sourceKey } : {}) }),
+            new URLSearchParams({ sid: key, ...(selectedSource ? { machine: selectedSource } : {}) }),
         ),
       );
       if (!current()) return;
@@ -4208,18 +4222,18 @@ export function createCatalogViewer(
           harness: text(match.harness),
         };
       });
-      const resolved = resolveSessionBookmark(route, candidates);
+      const resolved = resolveSessionBookmark(lookupRoute, candidates);
       if (resolved.outcome === 'valid' && reply.unavailable === 0) {
         const match = resolved.candidate;
         history.replaceState(
           history.state,
           '',
-          canonicalSessionRoute(route, match.source_key, match.catalog_key) +
+          canonicalSessionRoute(lookupRoute, match.source_key, match.catalog_key) +
             (route.anchor ? '' : location.hash),
         );
         fromLocation();
       } else {
-        bookmarkMatches = (resolved.outcome === 'ambiguous' ? reply.matches : [])
+        const matches = (resolved.outcome === 'ambiguous' ? reply.matches : [])
           .slice(0, 100)
           .map((value) => {
             const match = object(value);
@@ -4229,10 +4243,7 @@ export function createCatalogViewer(
               harness: typeof match.harness === 'string' ? match.harness : 'native',
             };
           });
-        leaveScreen();
-        navigation.route = { v: 'sessions' };
-        sourcesOpen = true;
-        sourcesNote =
+        const message =
           Number(reply.unavailable) > 0
             ? 'The recorded session index is updating. Retrying…'
             : reply.matches.length > 1
@@ -4240,13 +4251,12 @@ export function createCatalogViewer(
               : resolved.outcome === 'mismatch'
                 ? 'This bookmark does not match the recorded harness.'
                 : 'Recorded session not found.';
-        drawSources();
+        showBookmarkOutcome(message, matches);
         if (Number(reply.unavailable) > 0) retry();
       }
     } catch (error) {
       if (current()) {
-        sourcesNote = readError(error);
-        drawSources();
+        showBookmarkOutcome(readError(error), []);
         if (retryable(error)) retry();
       }
     } finally {
@@ -4254,6 +4264,11 @@ export function createCatalogViewer(
     }
   }
   function fromLocation() {
+    if (/^\/(session|s|trace)(?:\/|$)/.test(location.pathname)) {
+      const hash = canonicalSessionHash(location.hash);
+      if (hash !== location.hash)
+        history.replaceState(history.state, '', location.pathname + location.search + hash);
+    }
     const url = new URL(location.href);
     if (viewerHost?.pages?.match(url)) {
       void showHostPage(url);
@@ -4278,12 +4293,7 @@ export function createCatalogViewer(
         return;
       }
       if (sessionRoute.legacyHarness) {
-        leaveScreen();
-        navigation.route = { v: 'sessions' };
-        sourcesOpen = true;
-        bookmarkMatches = [];
-        sourcesNote = 'Resolving recorded session…';
-        drawSources();
+        showBookmarkOutcome('Resolving recorded session…', []);
         void locateBookmark(sessionRoute.key, sessionRoute.source ?? undefined);
         return;
       }

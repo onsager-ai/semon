@@ -23,6 +23,25 @@ export const routeSegment = (value: string) =>
     /[!'()*]/g,
     (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
   );
+/** Read canonical anchors and the former query-shaped spelling strictly. */
+export function sessionHashTurn(hash: string) {
+  if (!hash.startsWith('#')) return undefined;
+  try {
+    const legacy = hash.startsWith('#turn=');
+    const raw = hash.slice(legacy ? 6 : 1);
+    if (legacy && raw.includes('&')) return undefined;
+    const turn = decodeURIComponent(legacy ? raw.replace(/\+/g, ' ') : raw);
+    return identifier(turn) ? turn : undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** Canonicalize the former query-shaped turn fragment without changing its ID. */
+export function canonicalSessionHash(hash: string) {
+  if (!hash.startsWith('#turn=')) return hash;
+  const turn = sessionHashTurn(hash);
+  return turn ? '#' + routeSegment(turn) : hash;
+}
 export const sessionPath = (source: string, key: string) =>
   '/session/' + routeSegment(source) + '/' + routeSegment(key);
 export const tracePath = (source: string, key: string, turn: string) =>
