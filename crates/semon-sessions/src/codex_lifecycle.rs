@@ -558,7 +558,9 @@ mod tests {
         // to exercise the receipt-bound worker rather than that fallback.
         let filler = "sanitized".repeat(256);
         for _ in 0..600 {
-            home.append(json!({"type":"event_msg","payload":{"type":"agent_message","message":filler}}));
+            home.append(
+                json!({"type":"event_msg","payload":{"type":"agent_message","message":filler}}),
+            );
         }
         home.append(event("task_complete", Some("repair-turn")));
         assert!(fs::metadata(&home.path).unwrap().len() > 1024 * 1024);
