@@ -7,7 +7,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "import {installSelect} from './src/lib/select'; installSelect(); export {mountViewerApplication} from './src/app/viewer';",
+      "import {installSelect} from './src/lib/select'; import {installTooltip} from './src/lib/tooltip'; installSelect(); installTooltip(); export {mountViewerApplication} from './src/app/viewer';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -1520,6 +1520,137 @@ function transcript(key, p, total = 65, generation = 'b') {
     relationship_context: { state: 'incomplete', turn_ids: [], handoffs: [] },
   };
 }
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`Codex last-turn menu and tooltip observations at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        for (const [phase, state, outcome] of [
+          ['completed', 'idle', 'Completed'],
+          ['aborted', 'idle', 'Aborted'],
+          ['errored', 'err', 'Errored'],
+          ['active', 'work', 'Terminal not recorded'],
+          [null, 'off', 'Unknown'],
+        ]) {
+          const page = await browser.newPage({
+            viewport: { width, height: 900 },
+            colorScheme,
+            isMobile: width === 390,
+            hasTouch: width === 390,
+          });
+          const nativeSource = {
+            ...source('turn'),
+            root: 'codex',
+            path: 'sessions/2026/10/22/rollout-native-turn.jsonl',
+          };
+          const references = [{ source: nativeSource, state: 'cached' }];
+          const details = {
+            state,
+            turns: 1,
+            calls: 0,
+            errors: 0,
+            tool_calls: {},
+            signals: {},
+            cost: { usd: null },
+            copied_usage: false,
+            copilot: null,
+            reported_runs: [],
+            cost_check: [],
+            live_observation: true,
+            turn_lifecycle: phase && {
+              phase,
+              thread_id: 'PRIVATE-THREAD',
+              turn_id: 'PRIVATE-TURN',
+              offset: 987654321,
+              source_generation: 'PRIVATE-GENERATION',
+            },
+          };
+          const selected = {
+            ...meta('turn'),
+            name: 'Codex lifecycle fixture',
+            harness: 'codex',
+            kind: 'codex-run',
+            source_refs: references,
+            details,
+          };
+          const nativeIdentity = {
+            ...identity('turn'),
+            harness: 'codex',
+            source_refs: references,
+            read_scope: 'current',
+          };
+          await page.route('http://catalog.test/**', async (route) => {
+            const url = new URL(route.request().url());
+            const machine = url.searchParams.get('machine') ?? 'source';
+            if (url.pathname === '/api/session-capabilities')
+              return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
+            if (url.pathname === '/api/sessions')
+              return route.fulfill({
+                json: {
+                  ...list([selected]),
+                  machine,
+                  machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
+                },
+              });
+            if (url.pathname === '/api/session-identity')
+              return route.fulfill({
+                json: { api: 1, identity: { ...nativeIdentity, source_key: machine } },
+              });
+            if (url.pathname === '/api/session-transcript') {
+              const value = transcript('turn', url.searchParams, 1);
+              value.session = selected;
+              value.identity = {
+                ...nativeIdentity,
+                source_key: machine,
+                read_scope: 'retained_history',
+              };
+              value.entries[0].provenance.source = nativeSource;
+              return route.fulfill({ json: value });
+            }
+            if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+            return fulfillCatalogStatic(route, url);
+          });
+          await page.goto('http://catalog.test/sessions');
+          await page.addScriptTag({ content: outputFiles[0].text });
+          await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+          await page.locator('#page [data-id="turn"]').waitFor({ state: 'visible' });
+          await assertCodexIconsLoaded(page);
+          await page.locator('#page [data-id="turn"]').click();
+          await page.locator('#page [data-entry-key="turn:0"]').waitFor();
+          assert.doesNotMatch(await page.locator('body').innerText(), /invalid history view/i);
+          const tooltip = page.locator('#topbar [data-tip*="Last turn:"]:visible').first();
+          assert.match(await tooltip.getAttribute('data-tip'), new RegExp(outcome));
+          if (width === 390) await tooltip.tap();
+          else await tooltip.hover();
+          await page.getByRole('tooltip').waitFor({ state: 'visible' });
+          assert.match(await page.getByRole('tooltip').innerText(), new RegExp(outcome));
+          if (process.env.SEMON_CATALOG_OUT) {
+            await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
+            await page.screenshot({
+              path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-tooltip.png`,
+            });
+          }
+          await page
+            .getByRole('button', { name: 'Session menu: details, cost and actions' })
+            .click();
+          const last = page
+            .locator('dt')
+            .filter({ hasText: /^Last turn$/ })
+            .locator('xpath=following-sibling::dd[1]');
+          await last.waitFor();
+          assert.equal(await last.innerText(), outcome);
+          assert.doesNotMatch(await page.locator('body').innerText(), /PRIVATE-|987654321/);
+          await assertCodexIconsLoaded(page);
+          if (process.env.SEMON_CATALOG_OUT)
+            await page.screenshot({
+              path: `${process.env.SEMON_CATALOG_OUT}/codex-${phase ?? 'unknown'}-${width}-${colorScheme}-menu.png`,
+            });
+          await page.close();
+        }
+      } finally {
+        await browser.close();
+      }
+    });
 for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
     test(`catalog boot, selection and retained native ranges use no global model at ${width}px ${colorScheme}`, async () => {
@@ -3080,7 +3211,53 @@ for (const width of [390, 1280])
       }
     });
 
+async function assertCodexIconsLoaded(page) {
+  await page.waitForFunction(() => {
+    const theme = document.documentElement.dataset.theme;
+    const dark =
+      theme === 'dark' ||
+      (theme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    // HARNESS_ICONS maps light to codex-black and dark to codex. Production
+    // CSS hides the inactive image, which Harness intentionally leaves lazy.
+    const expected = dark ? '/harness/codex.svg' : '/harness/codex-black.svg';
+    const icons = [
+      ...document.querySelectorAll(
+        'img[src="/harness/codex.svg"], img[src="/harness/codex-black.svg"]',
+      ),
+    ].filter((icon) => {
+      const style = window.getComputedStyle(icon);
+      return (
+        icon.getClientRects().length > 0 &&
+        style.display !== 'none' &&
+        style.visibility === 'visible'
+      );
+    });
+    return (
+      icons.length > 0 &&
+      icons.every(
+        (icon) => icon.getAttribute('src') === expected && icon.complete && icon.naturalWidth > 0,
+      )
+    );
+  });
+}
+
 async function fulfillCatalogStatic(route, url) {
+  // Exact production HARNESS_ICONS allowlist; never resolve arbitrary URL paths.
+  const icons = [
+    'claude-code.svg',
+    'codex.svg',
+    'codex-black.svg',
+    'copilot.svg',
+    'opencode-light.svg',
+    'opencode-dark.svg',
+  ];
+  const icon = icons.find((name) => url.pathname === '/harness/' + name);
+  if (icon)
+    return route.fulfill({
+      contentType: 'image/svg+xml',
+      body: await readFile(new URL('../../assets/harnesses/' + icon, import.meta.url)),
+    });
+  if (url.pathname.startsWith('/harness/')) return route.fulfill({ status: 404, body: '' });
   const font = url.pathname.match(
     /^\/fonts\/(instrument-sans|jetbrains-mono)-(latin(?:-ext)?)\.woff2$/,
   );

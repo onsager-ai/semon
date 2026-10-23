@@ -1,5 +1,11 @@
 # Codex session display and event classification
 
+Durable turn activity, terminal outcomes and their source/version limitations
+are specified in [Codex turn lifecycle](codex-turn-lifecycle.md). Writer liveness
+alone does not establish that a Codex turn is running. Parser cache 29 rebuilds
+these lifecycle facts while preserving the cache-28 tool/pricing semantics and
+retained slot recipe version 6.
+
 Session display names are separate from native session identity. An ordinary
 Codex subagent uses a recorded title, then the task segment of `agent_path`,
 then its first non-harness user prompt (one line, at most 80 characters).

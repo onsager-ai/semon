@@ -70,7 +70,7 @@ impl Summary {
             activity: activity.cloned(),
             source_generation: String::new(),
             home: json!({"name":session.name,"kind":session.kind,"harness":session.harness,
-            "model":session.model,"repo":session.repo,"state":session.state,"last":session.last,
+            "model":session.model,"repo":session.repo,"state":session.state,"last":session.last,"turn_lifecycle":session.turn_lifecycle,
             "start":session.start,"parent":parent,"branch":session.branch,"waiting_for":null,"waiting_since":session.waiting_since,
             "activity":session.activity.as_ref().map(|(name,_,age,at)|(name,"",age,at)),"detail":null,"detail_from":content["detail_from"],"detail_from_name":content["detail_from_name"],"content":content,"cost":session.cost.usd,"events":events}),
         }
