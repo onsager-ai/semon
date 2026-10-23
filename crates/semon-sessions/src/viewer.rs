@@ -1916,6 +1916,60 @@ mod tests {
     }
 
     #[test]
+    fn direct_session_shell_is_available_during_busy_index() {
+        let fixture = Fixture::new();
+        fixture.claude(
+            "readiness",
+            &[json!({
+                "type":"user",
+                "sessionId":"readiness",
+                "uuid":"u",
+                "timestamp":"2026-10-01T00:00:00Z",
+                "message":{"role":"user","content":"Cold native observation"}
+            })],
+        );
+        let core = ViewerCore::new(fixture.options.clone());
+        let view = core.machine_views().into_iter().next().unwrap();
+        let work = view.evidence.work.lock().unwrap();
+        let shell = core.respond("GET", "/session/local/readiness", "", None);
+        assert_eq!(shell.status, 200);
+        assert!(shell.content_type.starts_with("text/html"));
+        drop(work);
+        core.close();
+    }
+
+    #[test]
+    fn cold_native_session_retry_observes_source_without_javascript() {
+        let fixture = Fixture::new();
+        fixture.claude(
+            "readiness",
+            &[json!({
+                "type":"user",
+                "sessionId":"readiness",
+                "uuid":"u",
+                "timestamp":"2026-10-01T00:00:00Z",
+                "message":{"role":"user","content":"Cold native observation"}
+            })],
+        );
+        let core = ViewerCore::new(fixture.options.clone());
+        let view = core.machine_views().into_iter().next().unwrap();
+        let work = view.evidence.work.lock().unwrap();
+        let unavailable = core.respond("GET", "/session/local/readiness", "native=1", None);
+        assert_eq!(unavailable.status, 503);
+        assert!(unavailable.content_type.starts_with("text/html"));
+        let unavailable = String::from_utf8(unavailable.body).unwrap();
+        assert!(unavailable.contains("The recorded session index is updating."));
+        assert!(unavailable.contains("href=\"/session/local/readiness?native=1\""));
+        drop(work);
+        eventually("direct native session retry", || {
+            let reply = core.respond("GET", "/session/local/readiness", "native=1", None);
+            let body = String::from_utf8_lossy(&reply.body);
+            (reply.status == 200 && body.contains("Cold native observation")).then_some(())
+        });
+        core.close();
+    }
+
+    #[test]
     fn http_guards_and_headers() {
         let fixture = Fixture::new();
         let token = "0123456789abcdef0123456789abcdef";

@@ -1094,9 +1094,24 @@ impl ViewerCore {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
         };
+        let native_requested = route
+            .controls
+            .get("native")
+            .is_some_and(|value| value == "1");
         self.follow();
         let views = self.views();
         let inventory = self.source_inventory(&views);
+        let shell = || {
+            let selected = route
+                .source
+                .as_deref()
+                .and_then(|source| inventory.index(source))
+                .and_then(|index| views.get(index))
+                .or_else(|| views.first());
+            selected
+                .map(|(_, view)| view.respond("GET", "/", "", None))
+                .unwrap_or_else(|| text(404, "Not found"))
+        };
         let mut candidates = Vec::<Candidate>::new();
         let mut unavailable = false;
         let mut work_guards = Vec::new();
@@ -1140,7 +1155,16 @@ impl ViewerCore {
             }
         }
         if unavailable {
-            return text(503, "Session index is updating");
+            drop(work_guards);
+            if native_requested {
+                return crate::native_page::reply(path, query, |endpoint, args| {
+                    self.respond_with(extras, "GET", endpoint, args, None)
+                });
+            }
+            // A valid address can load before its bounded source observation
+            // finishes. Keep the shell available so the selected APIs own the
+            // retry state and content still waits for exact resolution.
+            return shell();
         }
         let resolution = resolve_bookmark(&route, &candidates);
         drop(work_guards);
@@ -1159,6 +1183,14 @@ impl ViewerCore {
                         ]),
                     );
                     if anchor.status != 200 {
+                        if anchor.status >= 500 {
+                            if native_requested {
+                                return crate::native_page::reply(path, query, |endpoint, args| {
+                                    self.respond_with(extras, "GET", endpoint, args, None)
+                                });
+                            }
+                            return shell();
+                        }
                         return anchor;
                     }
                 }
@@ -1167,11 +1199,7 @@ impl ViewerCore {
                         route.canonical(&candidate.source_key, &candidate.catalog_key),
                     );
                 }
-                if route
-                    .controls
-                    .get("native")
-                    .is_some_and(|value| value == "1")
-                {
+                if native_requested {
                     crate::native_page::reply(path, query, |endpoint, args| {
                         self.respond_with(extras, "GET", endpoint, args, None)
                     })
