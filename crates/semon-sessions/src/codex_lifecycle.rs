@@ -554,10 +554,14 @@ mod tests {
     fn current_source_repair_resumes_owned_lifecycle_across_receipt_bound_slices() {
         let home = Home::new();
         home.append(event("task_started", Some("repair-turn")));
+        // Current small-source repair is synchronous; exceed its 1 MiB ceiling
+        // to exercise the receipt-bound worker rather than that fallback.
+        let filler = "sanitized".repeat(256);
         for _ in 0..600 {
-            home.append(json!({"type":"event_msg","payload":{"type":"agent_message","message":"sanitized"}}));
+            home.append(json!({"type":"event_msg","payload":{"type":"agent_message","message":filler}}));
         }
         home.append(event("task_complete", Some("repair-turn")));
+        assert!(fs::metadata(&home.path).unwrap().len() > 1024 * 1024);
         let expected = home.query()["turn_lifecycle"].clone();
         let db = home.db();
         db.execute(
@@ -567,15 +571,18 @@ mod tests {
         .unwrap();
         let parsed = crate::events::PARSED.with(std::cell::Cell::get);
         let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
-        let error = crate::events::scan_file(&home.path, "codex", &mut cache, &mut false)
-            .unwrap_err();
+        let error =
+            crate::events::scan_file(&home.path, "codex", &mut cache, &mut false).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         let mut steps = 0;
         while cache.advance_tree_repair(&home.options).unwrap() {
             steps += 1;
             assert!(steps < 8);
         }
-        assert!(steps > 0, "start and terminal must cross a repair checkpoint");
+        assert!(
+            steps > 0,
+            "start and terminal must cross a repair checkpoint"
+        );
         assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
         drop(cache);
         assert_eq!(home.query()["turn_lifecycle"], expected);
@@ -587,7 +594,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(retired, 0, "repair cannot restore retired migration storage");
+        assert_eq!(
+            retired, 0,
+            "repair cannot restore retired migration storage"
+        );
     }
 
     #[test]
