@@ -118,6 +118,9 @@ export default async function homeCheck(browser) {
       await page.waitForTimeout(150);
     };
 
+    await page.waitForFunction(() =>
+      document.querySelector('[data-session-row="list"] .nm')?.textContent?.trim(),
+    );
     out.root = await page.evaluate(() => ({
       title: document.querySelector('#topbar .t')?.textContent,
       path: location.pathname,
@@ -168,6 +171,12 @@ export default async function homeCheck(browser) {
       }, out.tree.pair);
       await page.reload({ waitUntil: 'load' });
       await settled(page);
+      await page.waitForFunction(
+        (parent) => [...document.querySelectorAll('#lanes > .treeitem')].some(
+          (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
+        ),
+        out.tree.pair.parent,
+      );
       out.tree.collapseReload = await page.evaluate(({ parent, child }) => {
         const item = [...document.querySelectorAll('#lanes > .treeitem')].find(
           (x) => x.dataset.id === parent,
@@ -200,6 +209,12 @@ export default async function homeCheck(browser) {
       }, out.tree.pair);
       await page.reload({ waitUntil: 'load' });
       await settled(page);
+      await page.waitForFunction(
+        (parent) => [...document.querySelectorAll('#lanes > .treeitem')].some(
+          (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
+        ),
+        out.tree.pair.parent,
+      );
       out.tree.expandReload = await page.evaluate(({ parent, child }) => {
         const item = [...document.querySelectorAll('#lanes > .treeitem')].find(
           (x) => x.dataset.id === parent,

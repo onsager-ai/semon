@@ -237,7 +237,16 @@ export default async function viewerBacklog(browser) {
       }
       await route.fulfill({ response, json: catalog });
     });
-    await goto(page, { v: 'sessions' }, D);
+    // Re-enter through a fresh document so this interceptor observes a real
+    // Catalog read instead of the current Sessions page's retained cache.
+    const modeled = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/sessions' && !url.searchParams.has('sid') && response.ok();
+    });
+    await page.reload();
+    await modeled;
+    await ready(page, 'sessions');
+    assert.equal(versions.length, 2, 'model-label fixture read did not complete');
     assert.equal(
       await page.locator('.nrow[data-id="' + versions[0] + '"] .row-model').textContent(),
       'sol',

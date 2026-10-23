@@ -4044,6 +4044,19 @@ export function createCatalogViewer(
       sourceItems = append ? [...sourceItems, ...next.items] : next.items;
       sourceCursor = next.next_cursor;
       sourcesRetryDelay = 1000;
+      // Standalone readers discover source authority before scoped reads.
+      // A sole source preserves the single-machine landing behavior; several
+      // sources retain the existing picker until the user chooses one.
+      if (
+        !viewerHost?.catalogSources &&
+        !capabilities.source_key &&
+        sourcesOpen &&
+        navigation.route.v === 'sessions' &&
+        sourceCursor === null &&
+        sourceItems.length === 1 &&
+        new URLSearchParams(location.search).get('choose_source') !== '1'
+      )
+        await switchSource(sourceItems[0].source_key, false);
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
@@ -4097,7 +4110,8 @@ export function createCatalogViewer(
   }
   async function switchSource(key: string, push = true) {
     if (disposed) return;
-    const epoch = ++sourcesEpoch;
+    const epoch = ++sourcesEpoch,
+      requestedURL = location.href;
     sourcesUpdating = true;
     sourcesNote = '';
     drawSources();
@@ -4105,7 +4119,7 @@ export function createCatalogViewer(
       const next = parseCatalogCapabilities(
         await api('/api/session-capabilities?' + new URLSearchParams(key ? { machine: key } : {})),
       );
-      if (disposed || epoch !== sourcesEpoch) return;
+      if (disposed || epoch !== sourcesEpoch || location.href !== requestedURL) return;
       if (next.source_key !== key)
         throw new Error('Source capability identity does not match this selection');
       if (!sourcesOpen) saveSource();
@@ -4170,7 +4184,15 @@ export function createCatalogViewer(
           if (
             !disposed &&
             epoch === sourcesEpoch &&
-            (new URLSearchParams(location.search).get('machine') ?? '') === key
+            location.href === requestedURL &&
+            ((new URLSearchParams(location.search).get('machine') ?? '') === key ||
+              (!viewerHost?.catalogSources &&
+                !capabilities.source_key &&
+                sourcesOpen &&
+                navigation.route.v === 'sessions' &&
+                sourceCursor === null &&
+                sourceItems.length === 1 &&
+                sourceItems[0].source_key === key))
           )
             void switchSource(key, false);
         }, 1000);
@@ -4336,28 +4358,10 @@ export function createCatalogViewer(
         drawSources();
       }
       if (machine || viewerHost?.catalogSources) void switchSource(machine ?? '', false);
-      else
-        void api('/api/session-capabilities')
-          .then((value) => {
-            if (disposed) return;
-            Object.assign(capabilities, parseCatalogCapabilities(value));
-            fromLocation();
-          })
-          .catch((error) => {
-            if (disposed) return;
-            sourcesNote = readError(error);
-            drawSources();
-            if (retryable(error))
-              scope.timeout(() => {
-                if (
-                  !disposed &&
-                  !capabilities.source_key &&
-                  location.pathname !== '/' &&
-                  location.pathname !== '/analytics'
-                )
-                  fromLocation();
-              }, 1000);
-          });
+      else {
+        void showSources();
+        void overview.refresh();
+      }
       return;
     }
     const beforeFilters = countFilters();

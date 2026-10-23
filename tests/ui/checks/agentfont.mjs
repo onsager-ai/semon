@@ -168,6 +168,9 @@ export default async function agentFontCheck(browser) {
     // The removed Home inbox has no question text to audit. Keep the same
     // non-vacuous font/serif audit on retained Sessions row names.
     await goto(page, { v: 'sessions' }, X);
+    await page.waitForFunction(() =>
+      document.querySelector('.session-list .nrow .nm')?.textContent?.trim(),
+    );
     const sessions = await styles(page, { name: '.session-list .nrow .nm' });
     res.sessions = sessions;
     same('a Sessions row name', sessions.name);
