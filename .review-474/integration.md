@@ -63,3 +63,12 @@ fixture incorrectly stayed under the1MiB synchronous repair ceiling, so its
 expectation of deferred repair failed. Increased sanitized filler above1MiB;
 kept all checkpoint/phase/no-migration assertions. Upstream pinned reducer passed.
 No weakening of product or raw gates. New CI required after this correction.
+
+Follow-up0acad350 CI: Viewer39939638981 foundation passed (including types,
+all164 UI tests, bundle freshness and infrastructure checks). Rust39939639163
+both exact-head Semon and upstream conformance jobs passed: corrected current-source
+repair regression and all remaining lifecycle/native/selected-output contracts pass.
+Only fmt requested a wrap of the enlarged filler macro; applied exact artifact
+12495252871. No local formatter/test/generator used. Final new runtime still needs
+actual visual artifact qualification; retained fingerprints are explicitly stale
+until that evidence exists, never an inferred pass.
