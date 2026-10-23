@@ -37,6 +37,74 @@ fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_codex_pages_survive_multi_segment_sealing() {
+    let home = Home::new("sealed-pages");
+    let mut records = vec![codex_line(
+        ts(5, 0),
+        "session_meta",
+        json!({"id":"sealed-pages","cwd":"/work/proj","originator":"codex_exec","thread_source":"user"}),
+    )];
+    for index in 0..240 {
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(20))}]}),
+        ));
+        records.push(codex_line(
+            ts(5, 2),
+            "event_msg",
+            json!({"type":"token_count","info":null,"rate_limits":null}),
+        ));
+    }
+    let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
+    let mut query = home.query();
+    query.call_at("list_sessions", &json!({}), NOW).unwrap();
+    let read_pages = || {
+        let mut after = 0;
+        let mut pages = Vec::new();
+        loop {
+            let reply = crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                &format!("sid=sealed-pages&after={after}&limit=60"),
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(reply.status, 200, "selected page fence: {body}");
+            let entries = body["entries"].as_array().unwrap();
+            assert!(!entries.is_empty());
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.to_string().contains("Readable record"))
+            );
+            pages.push(body.clone());
+            let Some(next) = body["range"]["next"].as_u64() else {
+                break;
+            };
+            assert!(next > after);
+            after = next;
+        }
+        assert!(pages.len() >= 2);
+        pages
+    };
+    let before = read_pages();
+    assert!(crate::sealed::punch_supported(&home.root).unwrap());
+    let first = crate::sealed::seal(&path, 1, 32 * 1024).unwrap();
+    assert!(first.punched);
+    let second = crate::sealed::seal(&path, 1, u64::MAX).unwrap();
+    assert!(second.added.is_some());
+    let after = read_pages();
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(before["entries"], after["entries"]);
+        assert_eq!(before["projection"], after["projection"]);
+    }
+    assert_eq!(before.len(), after.len());
+}
+
 fn admitted(options: Options) -> Arc<SessionSources> {
     Arc::new(SessionSources::with_machines(vec![(
         String::new(),
