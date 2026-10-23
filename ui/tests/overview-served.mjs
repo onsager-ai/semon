@@ -620,7 +620,11 @@ test(
               const warmInitialIds = await warmListedChildren.evaluateAll((nodes) =>
                 nodes.map((node) => node.getAttribute('data-id') ?? ''),
               );
-              assert.equal(warmInitialIds.length, 3, 'Sessions starts with three Recent preview rows');
+              assert.equal(
+                warmInitialIds.length,
+                3,
+                'Sessions starts with three Recent preview rows',
+              );
               assert.equal(
                 warmInitialIds.some((id) => id.includes('a-docs')),
                 false,
@@ -700,13 +704,19 @@ test(
               await page.locator('#page h1').filter({ hasText: 'Analytics' }).waitFor();
               releaseHeldPreviews();
               await page.locator('.analytics-metrics').waitFor();
-              assert.equal(await page.locator('#page.machine-page, #page .ib').count(), 0,
-                'late machine preview cannot replace Analytics');
+              assert.equal(
+                await page.locator('#page.machine-page, #page .ib').count(),
+                0,
+                'late machine preview cannot replace Analytics',
+              );
               await navigate('sessions');
               await page.locator('#page h1').filter({ hasText: 'Sessions' }).waitFor();
             }
-            assert.equal(await page.locator('#page .ib, #nav [data-go="home"]').count(), 0,
-              'Home inbox and navigation must not move into Sessions');
+            assert.equal(
+              await page.locator('#page .ib, #nav [data-go="home"]').count(),
+              0,
+              'Home inbox and navigation must not move into Sessions',
+            );
             await page.locator('#page [data-session-row="list"]').first().waitFor();
             assert.ok((await page.locator('#lanes > .treeitem').count()) <= 8);
             assert.ok(
@@ -719,11 +729,22 @@ test(
             // Trace bookmark for the same exact source/session/recorded turn.
             const traceTurn = question.turn ?? waiting.event.turn;
             assert.ok(traceTurn, 'the qualified question identifies its recorded turn');
-            const tracePath = '/trace/' + encodeURIComponent(waiting.session.harness) + '/' +
-              encodeURIComponent(waiting.catalog_key) + '/' + encodeURIComponent(traceTurn);
-            await page.goto(address[1] + tracePath + '?' + new URLSearchParams({
-              t: address[2], machine: waiting.source_key,
-            }));
+            const tracePath =
+              '/trace/' +
+              encodeURIComponent(waiting.session.harness) +
+              '/' +
+              encodeURIComponent(waiting.catalog_key) +
+              '/' +
+              encodeURIComponent(traceTurn);
+            await page.goto(
+              address[1] +
+                tracePath +
+                '?' +
+                new URLSearchParams({
+                  t: address[2],
+                  machine: waiting.source_key,
+                }),
+            );
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
             assert.match(new URL(page.url()).pathname, /^\/trace\//);

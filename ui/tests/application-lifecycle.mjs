@@ -427,7 +427,11 @@ for (const width of [390, 1280])
               await settle();
               assert(requests === before, 'disposed refresh listener polled');
             }
-            history.replaceState(null, '', '/machines/' + encodeURIComponent(model.machines[0].key));
+            history.replaceState(
+              null,
+              '',
+              '/machines/' + encodeURIComponent(model.machines[0].key),
+            );
             pendingObservation = true;
             const retrying = Application.mountViewerApplication(host());
             await ready();
