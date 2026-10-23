@@ -10,11 +10,10 @@ pub(super) fn prefix(path: &str, ledger: &str) -> String {
     )
 }
 
-fn namespaces(prefix: &str) -> [String; 3] {
+fn namespaces(prefix: &str) -> [String; 2] {
     [
         prefix.to_owned(),
         format!("native_proof_tree:{prefix}:"),
-        repair_key(prefix),
     ]
 }
 

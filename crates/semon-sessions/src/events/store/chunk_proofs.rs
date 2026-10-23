@@ -44,8 +44,7 @@ struct Header {
     #[serde(default, skip_serializing)]
     consumed_offset: Option<u64>,
     fingerprint: [u8; 32],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pages_root: Option<[u8; 32]>,
+    pages_root: [u8; 32],
     #[serde(default)]
     resume: Option<crate::source_chunks::PrefixState>,
 }
@@ -56,8 +55,24 @@ struct Page {
     version: u32,
     index: usize,
     hashes: Vec<[u8; 32]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    sha256: Option<String>,
+    sha256: String,
+}
+
+impl Page {
+    fn canonical(&self) -> rusqlite::Result<String> {
+        // The witness covers only the page payload, never its own digest.
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            version: u32,
+            index: usize,
+            hashes: &'a [[u8; 32]],
+        }
+        json(&Payload {
+            version: self.version,
+            index: self.index,
+            hashes: &self.hashes,
+        })
+    }
 }
 
 fn prefix(path: &str) -> String {
@@ -298,6 +313,7 @@ pub(super) fn read(
             || part.index != page
             || part.hashes.len() != remaining.min(PAGE)
             || remaining == 0
+            || part.sha256 != page_witness(&part.canonical()?)
         {
             return Ok(None);
         }
@@ -341,166 +357,6 @@ pub(super) fn header_ready(c: &Connection, path: &str, ledger: &Ledger) -> rusql
             == Ok(header.count))
 }
 
-#[derive(Serialize, Deserialize)]
-struct Repair {
-    header: String,
-    page: usize,
-    state: crate::source_chunks::PrefixState,
-    tail: Vec<u8>,
-    complete: bool,
-}
-fn repair_key(prefix: &str) -> String {
-    format!("native_proof_repair:{prefix}")
-}
-
-fn repair_sql_error(error: rusqlite::Error) -> io::Error {
-    if super::is_unavailable(&error) || matches!(error, rusqlite::Error::QueryReturnedNoRows) {
-        io::Error::other(error)
-    } else {
-        io::Error::new(io::ErrorKind::InvalidData, error)
-    }
-}
-
-fn selected_open_error(error: super::Unopened) -> io::Error {
-    match error {
-        super::Unopened::Corrupt(error) => io::Error::new(io::ErrorKind::InvalidData, error),
-        super::Unopened::Other(message) => io::Error::other(message),
-        super::Unopened::Unsupported(message) => {
-            io::Error::new(io::ErrorKind::InvalidData, io::Error::other(message))
-        }
-    }
-}
-
-fn repair_value_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
-}
-
-/// One bounded metadata-only producer step qualifies old hash pages against
-/// their original complete fingerprint. A restart resumes the committed hash
-/// continuation; replacement discards its private cursor. Original proof pages,
-/// ledgers and archive markers are never rewritten by this preparation.
-fn repair_step(
-    cache: &Path,
-    source_path: &str,
-    prefix: &str,
-    expected: &str,
-    offset: u64,
-) -> io::Result<bool> {
-    let store = super::SqliteStore::attempt_selected(cache).map_err(selected_open_error)?;
-    let mut db = store.connection;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(repair_sql_error)?;
-    let tx = db
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(repair_sql_error)?;
-    if !super::current(&tx).map_err(repair_sql_error)? {
-        return Err(repair_value_error(io::Error::other(
-            "Native proof producer changed",
-        )));
-    }
-    super::require_current_sql(&tx).map_err(repair_sql_error)?;
-    let _ = super::archived_index(&tx, source_path).map_err(repair_sql_error)?;
-    let encoded: String = tx
-        .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |r| {
-            r.get(0)
-        })
-        .map_err(repair_sql_error)?;
-    if encoded != expected {
-        // A producer can replace this publication while an existing reader
-        // still owns its original WAL snapshot. Preparation is unavailable;
-        // that reader must qualify the original snapshot's fingerprint.
-        return Err(io::Error::other("Native proof header changed"));
-    }
-    let header: Header = serde_json::from_str(&encoded).map_err(repair_value_error)?;
-    let key = repair_key(prefix);
-    let prior: Option<String> = tx
-        .query_row(NATIVE_METADATA_VALUE, [&key], |r| r.get(0))
-        .optional()
-        .map_err(repair_sql_error)?
-        .flatten();
-    let initial_repair = || Repair {
-        header: expected.to_owned(),
-        page: 0,
-        state: Default::default(),
-        tail: offset.to_be_bytes().to_vec(),
-        complete: false,
-    };
-    let mut repair = match prior {
-        Some(text) => {
-            let repair: Repair = serde_json::from_str(&text).map_err(repair_value_error)?;
-            if repair.header == expected {
-                repair
-            } else {
-                initial_repair()
-            }
-        }
-        None => initial_repair(),
-    };
-    if repair.page > header.count.div_ceil(PAGE) || repair.tail.len() >= 64 {
-        return Err(repair_value_error(io::Error::other(
-            "Native proof repair cursor is invalid",
-        )));
-    }
-    if repair.complete {
-        return Ok(true);
-    }
-    if repair.page < header.count.div_ceil(PAGE) {
-        let page: String = tx
-            .query_row(
-                NATIVE_METADATA_VALUE,
-                [format!("{prefix}{:010}", repair.page)],
-                |r| r.get(0),
-            )
-            .map_err(repair_sql_error)?;
-        let page: Page = serde_json::from_str(&page).map_err(repair_value_error)?;
-        if page.version != 1
-            || page.index != repair.page
-            || page.hashes.len() != (header.count - repair.page * PAGE).min(PAGE)
-        {
-            return Err(repair_value_error(io::Error::other(
-                "Native proof page is incomplete",
-            )));
-        }
-        let mut bytes = std::mem::take(&mut repair.tail);
-        for hash in &page.hashes {
-            bytes.extend_from_slice(hash);
-        }
-        let full = bytes.len() / 64 * 64;
-        repair.state.advance_blocks(&bytes[..full]);
-        repair.tail = bytes[full..].to_vec();
-        repair.page += 1;
-        // The checksum is private staged preparation until the complete
-        // fingerprint qualifies this exact header.
-        let canonical = json(&Page {
-            sha256: None,
-            ..page
-        })
-        .map_err(repair_value_error)?;
-        tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
-            params![
-                format!("{key}:{:010}", repair.page - 1),
-                page_witness(&canonical)
-            ],
-        )
-        .map_err(repair_sql_error)?;
-    }
-    if repair.page == header.count.div_ceil(PAGE) {
-        if repair.state.finish(&repair.tail) != header.fingerprint {
-            return Err(repair_value_error(io::Error::other(
-                "Native proof fingerprint changed",
-            )));
-        }
-        repair.complete = true;
-    }
-    tx.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
-        params![key, json(&repair).map_err(repair_value_error)?],
-    )
-    .map_err(repair_sql_error)?;
-    tx.commit().map_err(repair_sql_error)?;
-    Ok(repair.complete)
-}
 /// Request-owned proof pager. The producer binds each page to the exact header
 /// and page digest in its ledger transaction. No source bytes or reader survive
 /// the request, and completion reads the same witnesses again.
@@ -512,10 +368,8 @@ pub(crate) struct Focused {
     ledger: Ledger,
     path: String,
     count: usize,
-    fingerprint: [u8; 32],
-    pages_root: Option<[u8; 32]>,
+    pages_root: [u8; 32],
     cached: std::sync::Mutex<Option<(usize, Page)>>,
-    legacy_qualified: std::sync::Mutex<bool>,
 }
 
 #[cfg(test)]
@@ -651,8 +505,10 @@ impl Focused {
                     .wrap(io::Error::other("Native proof header unavailable"))
             })?
         };
-        let header: Header = serde_json::from_str(&encoded)
-            .map_err(|error| FailureStage::HeaderVersion.wrap(io::Error::other(error)))?;
+        let header: Header = serde_json::from_str(&encoded).map_err(|error| {
+            FailureStage::HeaderVersion
+                .wrap_preserving_kind(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
         diagnostic.proof_ledger_digest =
             Some(crate::source_carrier::ledger_digest_value(&header.ledger));
         diagnostic.proof_offset = header.consumed_offset;
@@ -671,7 +527,10 @@ impl Focused {
             None
         };
         if let Some(stage) = stage {
-            return Err(stage.wrap(io::Error::other("Native proof header changed")));
+            return Err(stage.wrap_preserving_kind(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Native proof header changed",
+            )));
         }
         #[cfg(test)]
         FOCUSED_METADATA_BYTES.with(|n| n.set(n.get() + encoded.len()));
@@ -684,10 +543,8 @@ impl Focused {
             ledger: ledger.clone(),
             path: path.to_owned(),
             count: header.count,
-            fingerprint: header.fingerprint,
             pages_root: header.pages_root,
             cached: std::sync::Mutex::new(None),
-            legacy_qualified: std::sync::Mutex::new(false),
         })
     }
 
@@ -741,7 +598,7 @@ impl Focused {
                     |r| r.get(0),
                 )
                 .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
-            if part.sha256 != witness {
+            if witness.as_deref() != Some(part.sha256.as_str()) {
                 return Err(
                     FailureStage::PageHash.wrap(io::Error::other("Native proof page changed"))
                 );
@@ -758,22 +615,26 @@ impl Focused {
                 |row| row.get(0),
             )
             .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
-        let part: Page = serde_json::from_str(&encoded)
+        let part: Page = serde_json::from_str(&encoded).map_err(|error| {
+            FailureStage::PageHash
+                .wrap_preserving_kind(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
+        if part.version != 1
+            || part.index != page
+            || part.hashes.len() != (self.count - page * PAGE).min(PAGE)
+        {
+            return Err(FailureStage::PageMissing.wrap_preserving_kind(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Native proof page is incomplete",
+            )));
+        }
+        let canonical = part
+            .canonical()
             .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?;
-        let original = Page {
-            version: part.version,
-            index: part.index,
-            hashes: part.hashes.clone(),
-            sha256: None,
-        };
-        let canonical = json(&original)
-            .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?;
-        if part.sha256.is_none() {
-            self.qualify_legacy(tx, page, &canonical)?;
-        } else if part.sha256.as_deref() != Some(&page_witness(&canonical)) {
+        if part.sha256 != page_witness(&canonical) {
             return Err(FailureStage::PageHash.wrap(io::Error::other("Native proof page changed")));
         }
-        if let Some(root) = self.pages_root {
+        {
             let mut node: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
             let mut at = page;
             let mut width = self.count.div_ceil(PAGE);
@@ -807,19 +668,11 @@ impl Focused {
                 width = width.div_ceil(2);
                 level += 1;
             }
-            if node != root {
+            if node != self.pages_root {
                 return Err(
                     FailureStage::PageHash.wrap(io::Error::other("Native proof root changed"))
                 );
             }
-        }
-        if part.version != 1
-            || part.index != page
-            || part.hashes.len() != (self.count - page * PAGE).min(PAGE)
-        {
-            return Err(
-                FailureStage::PageMissing.wrap(io::Error::other("Native proof page is incomplete"))
-            );
         }
         #[cfg(test)]
         {
@@ -829,108 +682,6 @@ impl Focused {
         let hash = part.hashes[index % PAGE];
         *cache = Some((page, part));
         Ok(hash)
-    }
-
-    fn qualify_legacy(
-        &self,
-        snapshot: &Connection,
-        page: usize,
-        canonical: &str,
-    ) -> io::Result<()> {
-        let mut qualified = self.legacy_qualified.lock().map_err(|_| {
-            FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof cache unavailable"))
-        })?;
-        if *qualified {
-            return Ok(());
-        }
-        // Preparation commits independently. Qualify its completion marker,
-        // exact header and page witness together in a fresh read transaction.
-        // GC or replacement may make preparation unavailable to this old read;
-        // that does not invalidate the original pinned proof snapshot.
-        let repaired = (|| -> io::Result<bool> {
-            while !repair_step(
-                &self.cache_path,
-                &self.path,
-                &self.prefix,
-                &self.header,
-                self.ledger.offset,
-            )? {}
-            let store = super::SqliteStore::attempt_selected(&self.cache_path)
-                .map_err(selected_open_error)?;
-            let mut db = store.connection;
-            let tx = db.transaction().map_err(repair_sql_error)?;
-            super::require_current_sql(&tx).map_err(repair_sql_error)?;
-            let marker: String = tx
-                .query_row(NATIVE_METADATA_VALUE, [repair_key(&self.prefix)], |r| {
-                    r.get(0)
-                })
-                .map_err(repair_sql_error)?;
-            let marker: Repair = serde_json::from_str(&marker).map_err(repair_value_error)?;
-            let header: String = tx
-                .query_row(
-                    NATIVE_METADATA_VALUE,
-                    [format!("{}header", self.prefix)],
-                    |r| r.get(0),
-                )
-                .map_err(repair_sql_error)?;
-            let witness: String = tx
-                .query_row(
-                    NATIVE_METADATA_VALUE,
-                    [format!("{}:{page:010}", repair_key(&self.prefix))],
-                    |r| r.get(0),
-                )
-                .map_err(repair_sql_error)?;
-            tx.commit().map_err(repair_sql_error)?;
-            Ok(marker.complete
-                && marker.header == self.header
-                && header == self.header
-                && witness == page_witness(canonical))
-        })();
-        match repaired {
-            Ok(true) => {
-                // Only this page was checked; another uncached page still needs
-                // its own qualified witness.
-                return Ok(());
-            }
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
-            _ => {}
-        }
-        // Legacy headers have only a whole-vector fingerprint. Stream bounded
-        // hash pages from the pinned snapshot once, with no native body read.
-        let mut state = crate::source_chunks::PrefixState::default();
-        let mut tail = self.ledger.offset.to_be_bytes().to_vec();
-        for at in 0..self.count.div_ceil(PAGE) {
-            let encoded: String = snapshot
-                .query_row(
-                    NATIVE_METADATA_VALUE,
-                    [format!("{}{:010}", self.prefix, at)],
-                    |r| r.get(0),
-                )
-                .map_err(|error| proof_db_error(FailureStage::PageMissing, error))?;
-            let part: Page = serde_json::from_str(&encoded)
-                .map_err(|error| FailureStage::PageHash.wrap(io::Error::other(error)))?;
-            if part.version != 1
-                || part.index != at
-                || part.hashes.len() != (self.count - at * PAGE).min(PAGE)
-            {
-                return Err(
-                    FailureStage::PageHash.wrap(io::Error::other("Native proof page changed"))
-                );
-            }
-            for hash in part.hashes {
-                tail.extend_from_slice(&hash);
-            }
-            let full = tail.len() / 64 * 64;
-            state.advance_blocks(&tail[..full]);
-            tail = tail[full..].to_vec();
-        }
-        if state.finish(&tail) != self.fingerprint {
-            return Err(
-                FailureStage::PageHash.wrap(io::Error::other("Native proof fingerprint changed"))
-            );
-        }
-        *qualified = true;
-        Ok(())
     }
 
     pub(crate) fn clear_cache(&self) -> io::Result<()> {
@@ -1006,12 +757,11 @@ pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Resu
         "DELETE FROM meta WHERE key>=?1 AND key<?2",
         params![&prefix, format!("{prefix}~")],
     )?;
-    for namespace in [format!("native_proof_tree:{prefix}:"), repair_key(&prefix)] {
-        transaction.execute(
-            "DELETE FROM meta WHERE key>=?1 AND key<?2",
-            params![&namespace, format!("{namespace}~")],
-        )?;
-    }
+    let namespace = format!("native_proof_tree:{prefix}:");
+    transaction.execute(
+        "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        params![&namespace, format!("{namespace}~")],
+    )?;
     Ok(())
 }
 
@@ -1057,20 +807,19 @@ pub(super) fn write_measured(
     for (index, hashes) in chunks.hashes.chunks(PAGE).enumerate() {
         let started = measurements.start();
         let key = format!("{prefix}{index:010}");
-        let encoded = json(&Page {
+        let mut value = Page {
             version: 1,
             index,
             hashes: hashes.to_vec(),
-            sha256: None,
-        })?;
+            sha256: String::new(),
+        };
+        let encoded = value.canonical()?;
         measurements.record("chunks_page_serialization", started, 1);
         measurements.count("chunks_page_bytes", encoded.len());
         measurements.count("chunks_hashes", hashes.len());
         let started = measurements.start();
         leaves.push(<[u8; 32]>::from(Sha256::digest(encoded.as_bytes())));
-        let mut value: Page = serde_json::from_str(&encoded)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        value.sha256 = Some(page_witness(&encoded));
+        value.sha256 = page_witness(&encoded);
         let encoded = json(&value)?;
         put.execute(params![key, encoded])?;
         measurements.record("chunks_page_sql", started, 1);
@@ -1137,7 +886,7 @@ pub(super) fn write_measured(
             measurements.record("chunks_header_fingerprint", started, 1);
             value
         },
-        pages_root: Some(pages_root),
+        pages_root,
         resume: chunks.resume.clone(),
     };
     let started = measurements.start();
@@ -1155,43 +904,126 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diagnostic_header_writes_remain_readable_by_legacy_readers() {
-        #[derive(Serialize, Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct LegacyHeader {
-            version: u32,
-            parser_version: u32,
-            ledger: String,
-            count: usize,
-            fingerprint: [u8; 32],
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            pages_root: Option<[u8; 32]>,
-            #[serde(default)]
-            resume: Option<crate::source_chunks::PrefixState>,
+    fn unsupported_proof_metadata_is_refused_without_mutation() {
+        for (is_header, field, replacement, stage) in [
+            (true, "pages_root", None, FailureStage::HeaderVersion),
+            (
+                true,
+                "pages_root",
+                Some(serde_json::Value::Null),
+                FailureStage::HeaderVersion,
+            ),
+            (
+                true,
+                "version",
+                Some(serde_json::json!(0)),
+                FailureStage::HeaderVersion,
+            ),
+            (
+                true,
+                "version",
+                Some(serde_json::json!(2)),
+                FailureStage::HeaderVersion,
+            ),
+            (false, "sha256", None, FailureStage::PageHash),
+            (
+                false,
+                "sha256",
+                Some(serde_json::Value::Null),
+                FailureStage::PageHash,
+            ),
+            (
+                false,
+                "version",
+                Some(serde_json::json!(0)),
+                FailureStage::PageMissing,
+            ),
+            (
+                false,
+                "version",
+                Some(serde_json::json!(2)),
+                FailureStage::PageMissing,
+            ),
+        ] {
+            // Every case owns a fresh empty state root, never user data.
+            let root = cleanup_root();
+            let path = root.join("index.sqlite3");
+            let mut store = cleanup_store(&root, "index.sqlite3");
+            let bytes = vec![b'x'; crate::source_chunks::SIZE];
+            let (ledger, mut index) = cleanup_proof(1, 0);
+            index.source_chunks = Some(Arc::new(Chunks {
+                offset: ledger.offset,
+                hashes: vec![Sha256::digest(&bytes).into()],
+                resume: None,
+            }));
+            let tx = store.connection.transaction().unwrap();
+            write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
+            tx.commit().unwrap();
+            let key = format!(
+                "{}{}",
+                prefix("original"),
+                if is_header { "header" } else { "0000000000" }
+            );
+            let encoded: String = store
+                .connection
+                .query_row(NATIVE_METADATA_VALUE, [&key], |row| row.get(0))
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            if let Some(replacement) = replacement {
+                value[field] = replacement;
+            } else {
+                value.as_object_mut().unwrap().remove(field);
+            }
+            store
+                .connection
+                .execute(
+                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    params![key, value.to_string()],
+                )
+                .unwrap();
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            let before = proof_metadata(&store.connection);
+            let before_db = fs::read(&path).unwrap();
+            let wal = root.join("index.sqlite3-wal");
+            let before_wal = fs::read(&wal).unwrap();
+            assert_eq!(
+                header_ready(&store.connection, "original", &ledger).unwrap(),
+                !is_header
+            );
+            assert!(read(&store.connection, "original", &ledger).unwrap().is_none());
+            let error = Focused::open(&path, "original", &ledger)
+                .and_then(|reader| reader.verify(0, &bytes))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(FailureStage::of(&error), Some(stage));
+            assert_eq!(proof_metadata(&store.connection), before);
+            assert_eq!(fs::read(&path).unwrap(), before_db);
+            assert_eq!(fs::read(&wal).unwrap(), before_wal);
+            let unexpected_proof_metadata: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM meta WHERE key GLOB 'native_proof_*' AND key NOT GLOB 'native_proof_tree:*'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(unexpected_proof_metadata, 0);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
         }
+    }
 
-        let header = Header {
-            version: 1,
-            parser_version: CACHE_VERSION,
-            ledger: "synthetic-ledger".into(),
-            count: 1,
-            consumed_offset: Some(128),
-            fingerprint: [7; 32],
-            pages_root: Some([8; 32]),
-            resume: None,
-        };
-        let encoded = json(&header).unwrap();
-        let legacy: LegacyHeader = serde_json::from_str(&encoded).unwrap();
-        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        assert!(value.get("consumed_offset").is_none());
-        assert_eq!(serde_json::to_value(legacy).unwrap(), value);
-        let current: Header = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(current.consumed_offset, None);
-
-        value["consumed_offset"] = serde_json::json!(128);
-        assert!(serde_json::from_value::<LegacyHeader>(value.clone()).is_err());
-        let current: Header = serde_json::from_value(value).unwrap();
-        assert_eq!(current.consumed_offset, Some(128));
+    fn proof_metadata(connection: &Connection) -> Vec<(String, Option<String>)> {
+        connection
+            .prepare("SELECT key,value FROM meta ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
     }
 
     #[test]
@@ -1324,9 +1156,8 @@ mod tests {
                 .query_row(NATIVE_METADATA_VALUE, [&key], |r| r.get(0))
                 .unwrap();
             let mut part: Page = serde_json::from_str(&encoded).unwrap();
-            part.sha256 = None;
-            let canonical = json(&part).unwrap();
-            part.sha256 = Some(page_witness(&canonical));
+            let canonical = part.canonical().unwrap();
+            part.sha256 = page_witness(&canonical);
             store
                 .connection
                 .execute(
@@ -1351,83 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_proof_preparation_resumes_bounded_metadata_steps_without_rebinding_originals() {
-        let root = cleanup_root();
-        let path = root.join("index.sqlite3");
-        let mut store = cleanup_store(&root, "index.sqlite3");
-        let bytes = vec![b'x'; crate::source_chunks::SIZE];
-        let hash: [u8; 32] = Sha256::digest(&bytes).into();
-        let (ledger, mut index) = cleanup_proof(PAGE + 1, 0);
-        index.source_chunks = Some(Arc::new(Chunks {
-            offset: ledger.offset,
-            hashes: vec![hash; PAGE + 1],
-            resume: None,
-        }));
-        let tx = store.connection.transaction().unwrap();
-        write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
-        tx.commit().unwrap();
-        let prefix = prefix("original");
-        store.connection.execute("UPDATE meta SET value=json_remove(value,'$.sha256') WHERE key>=?1 AND key<?2 AND key!=?3",params![&prefix,format!("{prefix}~"),format!("{prefix}header")]).unwrap();
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value=json_remove(value,'$.pages_root') WHERE key=?1",
-                [format!("{prefix}header")],
-            )
-            .unwrap();
-        let header: String = store
-            .connection
-            .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let before = read(&store.connection, "original", &ledger)
-            .unwrap()
-            .unwrap();
-        assert!(!repair_step(&path, "original", &prefix, &header, ledger.offset).unwrap());
-        let state: String = store
-            .connection
-            .query_row(NATIVE_METADATA_VALUE, [repair_key(&prefix)], |r| r.get(0))
-            .unwrap();
-        let state: Repair = serde_json::from_str(&state).unwrap();
-        assert_eq!(state.page, 1);
-        assert!(!state.complete);
-        assert!(state.tail.len() < 64);
-        drop(store);
-        assert!(repair_step(&path, "original", &prefix, &header, ledger.offset).unwrap());
-        let focused = Focused::open(&path, "original", &ledger).unwrap();
-        focused.verify(PAGE, &bytes).unwrap();
-        focused.clear_cache().unwrap();
-        focused.verify(PAGE, &bytes).unwrap();
-        let store = cleanup_store(&root, "index.sqlite3");
-        assert_eq!(
-            read(&store.connection, "original", &ledger)
-                .unwrap()
-                .unwrap(),
-            before
-        );
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value=json_set(value,'$.hashes[0][0]',0) WHERE key=?1",
-                [format!("{prefix}{:010}", 1)],
-            )
-            .unwrap();
-        focused.clear_cache().unwrap();
-        focused.verify(PAGE, &bytes).unwrap();
-        assert!(
-            Focused::open(&path, "original", &ledger)
-                .unwrap()
-                .verify(PAGE, &bytes)
-                .is_err()
-        );
-        drop(focused);
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn proof_repair_refuses_malformed_contract_before_metadata_writes() {
+    fn proof_reader_refuses_malformed_contract_without_metadata_writes() {
         let root = cleanup_root();
         let path = root.join("index.sqlite3");
         let mut store = cleanup_store(&root, "index.sqlite3");
@@ -1435,13 +1190,6 @@ mod tests {
         let tx = store.connection.transaction().unwrap();
         write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
         tx.commit().unwrap();
-        let prefix = prefix("original");
-        let header: String = store
-            .connection
-            .query_row(NATIVE_METADATA_VALUE, [format!("{prefix}header")], |row| {
-                row.get(0)
-            })
-            .unwrap();
         store
             .connection
             .execute("DROP TABLE reported_runs", [])
@@ -1458,7 +1206,7 @@ mod tests {
                 .unwrap()
         };
         let before = metadata(&store.connection);
-        assert!(repair_step(&path, "original", &prefix, &header, ledger.offset).is_err());
+        assert!(Focused::open(&path, "original", &ledger).is_err());
         assert_eq!(metadata(&store.connection), before);
         drop(store);
         fs::remove_dir_all(root).unwrap();
@@ -1558,117 +1306,103 @@ mod tests {
 
     #[test]
     fn published_proofs_follow_catalog_references_and_survive_gc_until_last_reader_drop() {
-        for legacy in [false, true] {
-            let root = cleanup_root();
-            let path = root.join("index.sqlite3");
-            let mut store = cleanup_store(&root, "index.sqlite3");
-            let bytes = vec![b'x'; crate::source_chunks::SIZE];
-            let hash: [u8; 32] = Sha256::digest(&bytes).into();
-            let (old, mut index) = cleanup_proof(PAGE + 1, 0);
-            index.source_chunks = Some(Arc::new(Chunks {
-                offset: old.offset,
-                hashes: vec![hash; PAGE + 1],
-                resume: None,
-            }));
-            let tx = store.connection.transaction().unwrap();
-            write(&tx, "original", &old, index.source_chunks.as_deref()).unwrap();
-            tx.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('owner',0,'codex',?1)", [published_metadata(&old)]).unwrap();
-            tx.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('owner','codex','owner','original')", []).unwrap();
-            tx.execute(
-                "INSERT INTO session_history_catalog(session_key,metadata) VALUES('owner',?1)",
-                [published_metadata(&old)],
-            )
-            .unwrap();
-            tx.commit().unwrap();
-            if legacy {
-                let live = prefix("original");
-                store.connection.execute("UPDATE meta SET value=json_remove(value,'$.sha256','$.pages_root') WHERE key>=?1 AND key<?2", params![&live,format!("{live}~")]).unwrap();
-            }
-            let live_reader = Focused::open(&path, "original", &old).unwrap();
-            let owned_snapshot = Arc::downgrade(&live_reader.db);
-            let mut latest = old.clone();
-            // Index leads an unchanged Catalog through several observations.
-            for at in 1..=4 {
-                latest.stat.modified_ns += 1;
-                let tx = store.connection.transaction().unwrap();
-                write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
-                tx.commit().unwrap();
-                let count: i64 = store.connection.query_row("SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'", [], |r|r.get(0)).unwrap();
-                assert_eq!(count, 1, "unbounded retained versions at mutation {at}");
-                Focused::open(&path, "original", &old)
-                    .unwrap()
-                    .verify(PAGE, &bytes)
-                    .unwrap();
-            }
-            let retained_reader = Focused::open(&path, "original", &old).unwrap();
-            assert!(
-                retained_reader
-                    .prefix
-                    .starts_with("native_published_chunks:")
-            );
-            // Both current and history references count. Publishing a different
-            // Current alone must not collect the original retained observation.
-            store
-                .connection
-                .execute(
-                    "UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'",
-                    [published_metadata(&latest)],
-                )
-                .unwrap();
-            let tx = store.connection.transaction().unwrap();
-            write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
-            tx.commit().unwrap();
-            Focused::open(&path, "original", &old)
-                .unwrap()
-                .verify(PAGE, &bytes)
-                .unwrap();
-            store
-                .connection
-                .execute(
-                    "DELETE FROM session_history_catalog WHERE session_key='owner'",
-                    [],
-                )
-                .unwrap();
+        let root = cleanup_root();
+        let path = root.join("index.sqlite3");
+        let mut store = cleanup_store(&root, "index.sqlite3");
+        let bytes = vec![b'x'; crate::source_chunks::SIZE];
+        let hash: [u8; 32] = Sha256::digest(&bytes).into();
+        let (old, mut index) = cleanup_proof(PAGE + 1, 0);
+        index.source_chunks = Some(Arc::new(Chunks {
+            offset: old.offset,
+            hashes: vec![hash; PAGE + 1],
+            resume: None,
+        }));
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &old, index.source_chunks.as_deref()).unwrap();
+        tx.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('owner',0,'codex',?1)", [published_metadata(&old)]).unwrap();
+        tx.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('owner','codex','owner','original')", []).unwrap();
+        tx.execute(
+            "INSERT INTO session_history_catalog(session_key,metadata) VALUES('owner',?1)",
+            [published_metadata(&old)],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let live_reader = Focused::open(&path, "original", &old).unwrap();
+        let owned_snapshot = Arc::downgrade(&live_reader.db);
+        let mut latest = old.clone();
+        // Index leads an unchanged Catalog through several observations.
+        for at in 1..=4 {
             latest.stat.modified_ns += 1;
             let tx = store.connection.transaction().unwrap();
             write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
             tx.commit().unwrap();
-            assert!(Focused::open(&path, "original", &old).is_err());
-            // Includes an uncached legacy page whose repair namespace has now
-            // been collected: its original fingerprint still qualifies it.
-            live_reader.verify(PAGE, &bytes).unwrap();
-            retained_reader.verify(PAGE, &bytes).unwrap();
-            let count: i64 = store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 1);
-            store
-                .connection
-                .busy_timeout(Duration::from_millis(10))
-                .unwrap();
-            let checkpoint = |db: &Connection| {
-                db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-                    r.get::<_, i64>(0)
-                })
+            let count: i64 = store.connection.query_row("SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'", [], |r|r.get(0)).unwrap();
+            assert_eq!(count, 1, "unbounded retained versions at mutation {at}");
+            Focused::open(&path, "original", &old)
                 .unwrap()
-            };
-            assert_eq!(checkpoint(&store.connection), 1, "request must pin WAL");
-            drop(live_reader);
-            assert!(owned_snapshot.upgrade().is_none());
-            drop(retained_reader);
-            assert_eq!(
-                checkpoint(&store.connection),
-                0,
-                "last drop must release WAL"
-            );
-            drop(store);
-            fs::remove_dir_all(root).unwrap();
+                .verify(PAGE, &bytes)
+                .unwrap();
         }
+        let retained_reader = Focused::open(&path, "original", &old).unwrap();
+        assert!(retained_reader.prefix.starts_with("native_published_chunks:"));
+        // Both current and history references count. Publishing a different
+        // Current alone must not collect the original retained observation.
+        store
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'",
+                [published_metadata(&latest)],
+            )
+            .unwrap();
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        Focused::open(&path, "original", &old)
+            .unwrap()
+            .verify(PAGE, &bytes)
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM session_history_catalog WHERE session_key='owner'",
+                [],
+            )
+            .unwrap();
+        latest.stat.modified_ns += 1;
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        assert!(Focused::open(&path, "original", &old).is_err());
+        // Uncached current pages remain verifiable in each pinned snapshot
+        // after the original publication has been collected.
+        live_reader.verify(PAGE, &bytes).unwrap();
+        retained_reader.verify(PAGE, &bytes).unwrap();
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        store
+            .connection
+            .busy_timeout(Duration::from_millis(10))
+            .unwrap();
+        let checkpoint = |db: &Connection| {
+            db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(checkpoint(&store.connection), 1, "request must pin WAL");
+        drop(live_reader);
+        assert!(owned_snapshot.upgrade().is_none());
+        drop(retained_reader);
+        assert_eq!(checkpoint(&store.connection), 0, "last drop must release WAL");
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
