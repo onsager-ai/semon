@@ -310,6 +310,9 @@ pub(super) fn reuse(
     {
         return Ok(None);
     }
+    let Some(chunks) = chunk_proofs::read(&tx, old, &prior).map_err(failure)? else {
+        return Ok(None);
+    };
     tx.execute(
         "UPDATE files SET path=?1,dev=?2,ino=?3,size=?4,mtime_ns=?5,ctime_ns=?6 WHERE path=?7",
         params![
@@ -327,9 +330,28 @@ pub(super) fn reuse(
     )
     .map_err(failure)?;
     write_codex_header(&tx, path, &relocated, header.as_ref()).map_err(failure)?;
-    write_tree_summary(&tx, path, &relocated, Some(&metadata.summary)).map_err(failure)?;
+    let normalized_usage =
+        native_usage::relocate(&tx, old, path, &prior, &relocated).map_err(failure)?;
+    tx.execute(
+        "UPDATE native_tree_headers SET source_path=?2 WHERE source_path=?1",
+        params![old, path],
+    )
+    .map_err(failure)?;
+    tx.execute(
+        "UPDATE native_usage_migrations SET source_path=?2 WHERE source_path=?1",
+        params![old, path],
+    )
+    .map_err(failure)?;
+    write_tree_summary(
+        &tx,
+        path,
+        &relocated,
+        Some(&metadata.summary),
+        normalized_usage,
+    )
+    .map_err(failure)?;
     write_parent_marker(&tx, path, &relocated, Some(&metadata.marker)).map_err(failure)?;
-    chunk_proofs::write(&tx, path, &relocated, Some(&metadata.chunks)).map_err(failure)?;
+    chunk_proofs::write(&tx, path, &relocated, Some(&chunks)).map_err(failure)?;
     launch_calls::write(&tx, path, &relocated, Some(&metadata.calls)).map_err(failure)?;
     if relocated.stat != *stat {
         let evidence = crate::source_change::AppendEvidence {

@@ -253,7 +253,7 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        match SqliteStore::attempt(&root.join(name), None) {
+        match SqliteStore::attempt(&root.join(name)) {
             Ok((store, _)) => store,
             Err(error) => panic!("real Index schema: {error}"),
         }

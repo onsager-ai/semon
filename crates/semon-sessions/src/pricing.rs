@@ -7,11 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
+pub(crate) mod runtime;
+pub(crate) use runtime::{EffectiveTable, snapshot};
+pub use runtime::{initialize, initialize_default, start_default_refresh, start_refresh};
+
 use serde::{Deserialize, Serialize};
 
 use crate::events::{BillingUsage, CodexUsageEvent, MessageUsage};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Price {
     pub input: Option<f64>,
     pub output: Option<f64>,
@@ -23,7 +27,7 @@ pub struct Price {
     pub web_search_per_1k: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub struct LongContextPrice {
     pub threshold_tokens: u64,
     pub input: Option<f64>,
@@ -33,9 +37,21 @@ pub struct LongContextPrice {
     pub cache_write_1h: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-pub struct FastPrice {
-    pub multiplier: f64,
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FastPrice {
+    Multiplier { multiplier: f64 },
+    Rates { rates: FastRates },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct FastRates {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write_5m: Option<f64>,
+    pub cache_write_1h: Option<f64>,
+    pub long_context: Option<LongContextPrice>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -107,13 +123,16 @@ pub(crate) fn normalize_model_id(model: &str) -> &str {
     }
 }
 
+#[cfg(test)]
 fn price_for(model: &str) -> Option<Price> {
-    let model = normalize_model_id(model);
-    price_data()
-        .models
-        .iter()
-        .find(|(id, _)| normalize_model_id(id.as_str()) == model)
-        .map(|(_, row)| row.price)
+    // Compatibility for bundled-table tests only. Production always supplies
+    // the native harness's provider, never infers it from a model name.
+    let provider = if model.starts_with("claude-") {
+        "anthropic"
+    } else {
+        "openai"
+    };
+    snapshot().price_for(provider, model)
 }
 
 #[cfg(test)]
@@ -155,6 +174,8 @@ pub(crate) struct ModelCost {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Cost {
+    #[serde(default)]
+    pub(crate) pricing_fingerprint: String,
     pub(crate) usd: Option<f64>,
     pub(crate) unpriced_models: Vec<String>,
     pub(crate) split_unknown_messages: u64,
@@ -188,6 +209,7 @@ fn cost_kinds<'de, D: serde::Deserializer<'de>>(
 impl Default for Cost {
     fn default() -> Self {
         Self {
+            pricing_fingerprint: snapshot().fingerprint.clone(),
             usd: Some(0.0),
             unpriced_models: Vec::new(),
             split_unknown_messages: 0,
@@ -206,25 +228,109 @@ const KINDS: [&str; 6] = [
     "web_search",
 ];
 
-#[derive(Default)]
-struct ModelCostBuild {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ModelCostBuild {
     tokens: CostTokens,
+    #[serde(deserialize_with = "cost_kinds")]
     usd_by_kind: BTreeMap<&'static str, f64>,
     usd: f64,
-    unpriced: bool,
+    pub(crate) unpriced: bool,
 }
 
-#[derive(Default)]
-struct CostBuild {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct CostBuild {
+    #[serde(default)]
+    pub(crate) pricing_fingerprint: String,
+    #[serde(skip)]
+    table: Option<std::sync::Arc<EffectiveTable>>,
     usd: f64,
     has_unpriced: bool,
     split_unknown_messages: u64,
-    models: BTreeMap<String, ModelCostBuild>,
-    unpriced_models: BTreeSet<String>,
-    by_day: BTreeMap<String, f64>,
+    pub(crate) models: BTreeMap<String, ModelCostBuild>,
+    pub(crate) unpriced_models: BTreeSet<String>,
+    pub(crate) by_day: BTreeMap<String, f64>,
 }
 
 impl CostBuild {
+    pub(crate) fn with_table(table: std::sync::Arc<EffectiveTable>) -> Self {
+        Self {
+            pricing_fingerprint: table.fingerprint.clone(),
+            table: Some(table),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn bind_table(&mut self, table: std::sync::Arc<EffectiveTable>) {
+        self.table = Some(table);
+    }
+
+    fn lookup(&mut self, provider: &str, model: &str) -> Option<Price> {
+        let table = self.table.get_or_insert_with(snapshot);
+        if self.pricing_fingerprint.is_empty() && self.models.is_empty() {
+            self.pricing_fingerprint = table.fingerprint.clone();
+        }
+        // A restored accumulator can precede the current reference table.
+        // Appended facts remain unknown until the bounded producer recomputes
+        // the entire source; never claim a mixed accumulator is current.
+        if self.pricing_fingerprint != table.fingerprint {
+            return None;
+        }
+        table.price_for(provider, model)
+    }
+
+    pub(crate) fn message(&mut self, message: &MessageUsage) {
+        let model = message.model.as_deref().unwrap_or("unknown");
+        let price = self.lookup("anthropic", model);
+        self.add(
+            model,
+            &message.billing,
+            message.billing.timestamp,
+            message.billing.split_unknown,
+            price,
+        );
+    }
+    pub(crate) fn codex(&mut self, event: &CodexUsageEvent) {
+        let billing = BillingUsage {
+            input: event.tokens.input,
+            output: event.tokens.output,
+            cache_read: event.tokens.cache_read,
+            prompt_size: event.tokens.input + event.tokens.cache_read,
+            timestamp: event.timestamp,
+            ..Default::default()
+        };
+        let price = self.lookup("openai", &event.model);
+        self.add(&event.model, &billing, event.timestamp, false, price);
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) {
+        if self.models.is_empty() {
+            self.pricing_fingerprint = other.pricing_fingerprint.clone();
+        } else if self.pricing_fingerprint != other.pricing_fingerprint {
+            self.pricing_fingerprint.clear();
+        }
+        self.usd += other.usd;
+        self.has_unpriced |= other.has_unpriced;
+        self.split_unknown_messages += other.split_unknown_messages;
+        self.unpriced_models
+            .extend(other.unpriced_models.iter().cloned());
+        for (model, cost) in &other.models {
+            let entry = self.models.entry(model.clone()).or_default();
+            entry.usd += cost.usd;
+            entry.unpriced |= cost.unpriced;
+            entry.tokens.input += cost.tokens.input;
+            entry.tokens.output += cost.tokens.output;
+            entry.tokens.cache_read += cost.tokens.cache_read;
+            entry.tokens.cache_write_5m += cost.tokens.cache_write_5m;
+            entry.tokens.cache_write_1h += cost.tokens.cache_write_1h;
+            for (kind, amount) in &cost.usd_by_kind {
+                *entry.usd_by_kind.entry(kind).or_default() += amount;
+            }
+        }
+        for (day, amount) in &other.by_day {
+            *self.by_day.entry(day.clone()).or_default() += amount;
+        }
+    }
+
     fn add(
         &mut self,
         model: &str,
@@ -234,15 +340,56 @@ impl CostBuild {
         price: Option<Price>,
     ) {
         let prompt_long = price
-            .and_then(|price| price.long_context)
+            .and_then(|price| {
+                if usage.speed.as_deref() == Some("fast")
+                    && let Some(FastPrice::Rates { rates }) = price.fast
+                {
+                    rates.long_context.or(price.long_context)
+                } else {
+                    price.long_context
+                }
+            })
             .is_some_and(|tier| usage.prompt_size > tier.threshold_tokens);
-        let fast_multiplier = match price {
-            Some(price) if usage.speed.as_deref() == Some("fast") => {
-                price.fast.map(|fast| fast.multiplier)
+        let price = price.map(|mut price| {
+            if usage.speed.as_deref() == Some("fast") {
+                match price.fast {
+                    Some(FastPrice::Rates { rates }) => {
+                        price.input = rates.input;
+                        price.output = rates.output;
+                        price.cache_read = rates.cache_read;
+                        price.cache_write_5m = rates.cache_write_5m;
+                        price.cache_write_1h = rates.cache_write_1h;
+                        price.long_context = rates.long_context;
+                    }
+                    Some(FastPrice::Multiplier { multiplier }) => {
+                        price.input = price.input.map(|v| v * multiplier);
+                        price.output = price.output.map(|v| v * multiplier);
+                        price.cache_read = price.cache_read.map(|v| v * multiplier);
+                        price.cache_write_5m = price.cache_write_5m.map(|v| v * multiplier);
+                        price.cache_write_1h = price.cache_write_1h.map(|v| v * multiplier);
+                        price.long_context = price.long_context.map(|mut tier| {
+                            tier.input = tier.input.map(|v| v * multiplier);
+                            tier.output = tier.output.map(|v| v * multiplier);
+                            tier.cache_read = tier.cache_read.map(|v| v * multiplier);
+                            tier.cache_write_5m = tier.cache_write_5m.map(|v| v * multiplier);
+                            tier.cache_write_1h = tier.cache_write_1h.map(|v| v * multiplier);
+                            tier
+                        });
+                    }
+                    None => {
+                        price.input = None;
+                        price.output = None;
+                        price.cache_read = None;
+                        price.cache_write_5m = None;
+                        price.cache_write_1h = None;
+                        price.long_context = None;
+                    }
+                }
             }
-            Some(_) => Some(1.0),
-            None => None,
-        };
+            price
+        });
+        // An explicit fast table without a matching long-context tier cannot
+        // silently use its short-context rates for a long prompt.
         let categories = [
             (
                 "input",
@@ -301,8 +448,8 @@ impl CostBuild {
                 continue;
             }
             let amount = rate
-                .zip(fast_multiplier)
-                .map(|(rate, multiplier)| tokens as f64 * rate * multiplier / 1_000_000.0);
+                .map(|rate| tokens as f64 * rate / 1_000_000.0)
+                .filter(|v| v.is_finite());
             if let Some(amount) = amount {
                 *model_cost.usd_by_kind.entry(kind).or_default() += amount;
                 model_cost.usd += amount;
@@ -337,7 +484,7 @@ impl CostBuild {
         }
     }
 
-    fn finish(self) -> Cost {
+    pub(crate) fn finish(self) -> Cost {
         let by_model = self
             .models
             .into_iter()
@@ -356,6 +503,7 @@ impl CostBuild {
             })
             .collect();
         Cost {
+            pricing_fingerprint: self.pricing_fingerprint,
             usd: (!self.has_unpriced).then_some(self.usd),
             unpriced_models: self.unpriced_models.into_iter().collect(),
             split_unknown_messages: self.split_unknown_messages,
@@ -380,7 +528,7 @@ fn add_tokens(tokens: &mut CostTokens, kind: &str, amount: u64) {
     }
 }
 
-fn utc_day(timestamp_ms: i64) -> String {
+pub(crate) fn utc_day(timestamp_ms: i64) -> String {
     let days = timestamp_ms.div_euclid(86_400_000);
     // Howard Hinnant's civil_from_days, with Unix epoch day zero.
     let z = days + 719_468;
@@ -397,9 +545,17 @@ fn utc_day(timestamp_ms: i64) -> String {
 }
 
 pub(crate) fn calculate_cost(messages: &[MessageUsage], codex_events: &[CodexUsageEvent]) -> Cost {
-    calculate_cost_with(messages, codex_events, price_for)
+    let mut cost = CostBuild::with_table(snapshot());
+    for message in messages {
+        cost.message(message);
+    }
+    for event in codex_events {
+        cost.codex(event);
+    }
+    cost.finish()
 }
 
+#[cfg(test)]
 fn calculate_cost_with(
     messages: &[MessageUsage],
     codex_events: &[CodexUsageEvent],
@@ -518,10 +674,60 @@ mod tests {
     }
 
     #[test]
-    fn dotted_gpt_version_does_not_borrow_another_models_price() {
+    fn dotted_gpt_version_uses_its_own_price_and_unknown_versions_stay_unpriced() {
         assert_eq!(normalize_model_id("gpt-6.1-sol"), "gpt-6.1-sol");
-        assert!(super::price_for("gpt-6.1-sol").is_none());
+        assert_eq!(
+            super::price_for("gpt-6.1-sol").unwrap().cache_read,
+            Some(0.1)
+        );
         assert!(super::price_for("gpt-6-sol").is_some());
+        assert!(super::price_for("gpt-6.999-sol").is_none());
+    }
+
+    #[test]
+    fn haiku_five_five_uses_the_standard_rate_at_100k_and_long_rate_above_it() {
+        // The prompt threshold includes cached input tokens.
+        let at_threshold = usage("claude-haiku-5-5", 90_000, 1_000, 10_000, 0, 0);
+        let above_threshold = usage("claude-haiku-5-5", 90_000, 1_000, 10_001, 0, 0);
+        assert_eq!(at_threshold.billing.prompt_size, 100_000);
+        assert_eq!(above_threshold.billing.prompt_size, 100_001);
+
+        let standard = calculate_cost(&[at_threshold], &[]);
+        let long = calculate_cost(&[above_threshold], &[]);
+        assert!((standard.usd.unwrap() - 0.0096).abs() < 1e-12);
+        assert!((long.usd.unwrap() - 0.04800005).abs() < 1e-12);
+    }
+
+    #[test]
+    fn haiku_five_five_cache_write_durations_use_their_own_rates() {
+        let writes = usage("claude-haiku-5-5", 0, 0, 0, 1_000, 1_000);
+        let cost = calculate_cost(&[writes], &[]);
+        assert!((cost.usd.unwrap() - 0.000325).abs() < 1e-12);
+        assert!(
+            (cost.by_model["claude-haiku-5-5"].usd_by_kind["cache_write_5m"] - 0.000125).abs()
+                < 1e-12
+        );
+        assert!(
+            (cost.by_model["claude-haiku-5-5"].usd_by_kind["cache_write_1h"] - 0.0002).abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn gpt_six_one_sol_prices_codex_cached_tokens_at_its_catalog_rate() {
+        let event = CodexUsageEvent {
+            model: "gpt-6.1-sol".into(),
+            tokens: ModelTokens {
+                input: 100_000,
+                output: 100_000,
+                cache_write: 0,
+                cache_read: 100_000,
+            },
+            timestamp: Some(0),
+        };
+        let cost = calculate_cost(&[], &[event]);
+        assert!((cost.usd.unwrap() - 1.21).abs() < 1e-12);
+        assert_eq!(cost.unpriced_models, Vec::<String>::new());
     }
 
     #[test]
@@ -556,7 +762,7 @@ mod tests {
                 cache_write_5m: Some(3.75),
                 cache_write_1h: Some(6.0),
             }),
-            fast: Some(FastPrice { multiplier: 2.0 }),
+            fast: Some(FastPrice::Multiplier { multiplier: 2.0 }),
             web_search_per_1k: None,
         };
         let below_cost = calculate_cost_with(&[below], &[], |_| Some(tier_price));

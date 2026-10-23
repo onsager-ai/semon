@@ -17,7 +17,217 @@ use serde_json::{Value, json};
 use super::*;
 use crate::ViewerCore;
 
+#[test]
+fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
+    let error = crate::source_carrier::FailureStage::HeaderLedger
+        .wrap(std::io::Error::other("private original cause"));
+    let staged = QueryError::io(&error).to_json();
+    let mut expected =
+        QueryError::new("io", "Original native transcript proofs are unavailable").to_json();
+    expected["stage"] = json!("header_ledger");
+    assert_eq!(staged, expected);
+    assert_eq!(
+        staged,
+        json!({
+            "error":{"code":"io","message":"Original native transcript proofs are unavailable"},
+            "stage":"header_ledger",
+        })
+    );
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "linux")]
+fn sealed_codex_fixture(padding: usize) -> (Home, PathBuf) {
+    let home = Home::new("sealed-pages");
+    let mut records = vec![codex_line(
+        ts(5, 0),
+        "session_meta",
+        json!({"id":"sealed-pages","cwd":"/work/proj","originator":"codex_exec","thread_source":"user"}),
+    )];
+    for index in 0..240 {
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(padding))}]}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"reasoning","summary":[{"type":"summary_text","text":format!("Readable record thinking {index} {}", "synthetic ".repeat(padding))}]}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"function_call","call_id":format!("call-{index}"),"name":"exec_command","arguments":"{\"cmd\":\"echo synthetic\"}"}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"function_call_output","call_id":format!("call-{index}"),"output":format!("Readable record output {index} {}", "synthetic ".repeat(padding))}),
+        ));
+        records.push(codex_line(
+            ts(5, 2),
+            "event_msg",
+            json!({"type":"context_compacted"}),
+        ));
+    }
+    let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    (home, path)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_codex_pages_survive_multi_segment_sealing() {
+    let (home, path) = sealed_codex_fixture(2000);
+    let read_pages = |sealed: bool| {
+        let mut after = 0;
+        let mut pages = Vec::new();
+        loop {
+            crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
+            crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow_mut().clear());
+            crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.set(None));
+            let reply = crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                &format!("sid=sealed-pages&after={after}&limit=60"),
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            let bytes = crate::source_chunks::READ_BYTES.with(|bytes| bytes.get());
+            let blocks = crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow().len());
+            let stage = crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get());
+            println!(
+                "sealed={sealed} after={after} status={} blocks={blocks} bytes={bytes} stage={stage:?}",
+                reply.status
+            );
+            if reply.status != 200 {
+                assert!(sealed, "pre-seal read failed: {body}");
+                assert!(bytes > blocks as u64 * crate::source_chunks::SIZE as u64);
+                assert_eq!(
+                    crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
+                    Some(crate::source_carrier::FailureStage::Budget),
+                    "unexpected underlying source failure: {body}"
+                );
+            }
+            assert_eq!(reply.status, 200, "selected page fence: {body}");
+            assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
+            let entries = body["entries"].as_array().unwrap();
+            assert!(!entries.is_empty());
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.to_string().contains("Readable record"))
+            );
+            pages.push(body.clone());
+            let Some(next) = body["range"]["next"].as_u64() else {
+                break;
+            };
+            assert!(next > after);
+            after = next;
+        }
+        assert!(pages.len() >= 2);
+        pages
+    };
+    let before = read_pages(false);
+    assert!(crate::sealed::punch_supported(&home.root).unwrap());
+    let first = crate::sealed::seal(&path, 1, 32 * 1024).unwrap();
+    assert!(first.added.is_some());
+    let second = crate::sealed::seal(&path, 1, u64::MAX).unwrap();
+    assert!(second.added.is_some());
+    assert!(second.punched);
+    assert_eq!(second.added.unwrap().start, first.added.unwrap().end);
+    crate::sealed::clear_frame_cache_for_test();
+    let after = read_pages(true);
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(before["entries"], after["entries"]);
+        assert_eq!(before["projection"], after["projection"]);
+        assert_eq!(before["range"], after["range"]);
+    }
+    assert_eq!(before.len(), after.len());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_sealed_page_still_rejects_excess_unique_evidence() {
+    let (home, path) = sealed_codex_fixture(4000);
+    let read = || {
+        crate::session_transcript_range_with_mode(
+            &home.options,
+            "local",
+            "sid=sealed-pages&limit=60",
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+    };
+    assert_eq!(read().status, 200);
+    assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+    crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
+    let reply = read();
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "source_budget_exhausted");
+    assert_eq!(body["fence_reason"], "source_budget");
+    assert_eq!(body["stage"], "budget");
+    assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_sealed_pages_reject_replacement_truncation_and_corruption() {
+    for mutation in 0..3 {
+        let (home, path) = sealed_codex_fixture(2000);
+        let read = || {
+            crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                "sid=sealed-pages&limit=60",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            )
+        };
+        assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+        assert_eq!(read().status, 200);
+        match mutation {
+            0 => {
+                let replacement = path.with_extension("replacement");
+                fs::write(&replacement, b"{}\n").unwrap();
+                fs::rename(replacement, &path).unwrap();
+            }
+            1 => fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(1)
+                .unwrap(),
+            _ => {
+                // A short corrupt segment must fail even after decompressed
+                // bytes have previously entered the process-wide cache.
+                let directory = path.with_file_name("rollout-sealed-pages.jsonl.seal");
+                let segment = fs::read_dir(directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.extension().is_some_and(|extension| extension == "zst"))
+                    .unwrap();
+                fs::write(segment, b"corrupt segment").unwrap();
+            }
+        }
+        let reply = read();
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_ne!(reply.status, 200, "mutation {mutation} accepted");
+        assert_ne!(body["fence_reason"], "source_budget");
+    }
+}
 
 fn admitted(options: Options) -> Arc<SessionSources> {
     Arc::new(SessionSources::with_machines(vec![(
@@ -404,20 +614,18 @@ fn source_backed_prompt_briefs_preserve_native_caps_and_completion_fences() {
     let home = Home::new("prompt-brief-integrity");
     home.top("lead", &[human("lead", ts(1, 0), &"é".repeat(50_000))]);
     let sources = admitted(home.options.clone());
-    let model = crate::model::reference_json(&home.options, crate::model::now_ms());
+    // Explicit native cap, independently asserted before the oracle was removed.
+    let expected_brief = format!("{}\n…(truncated)", "é".repeat(2048));
     let mut query = Query::from_sources(sources.clone());
     let selected = query
         .call_at("get_session", &json!({"id":"lead"}), NOW)
         .unwrap();
-    assert_eq!(
-        selected["session"]["handoffs"][0]["brief"],
-        model["handoffs"][0]["brief"]
-    );
+    assert_eq!(selected["session"]["handoffs"][0]["brief"], expected_brief);
     sources.close();
     let data = &query.evidence().parts[0].data;
     let records = data.sources.reader();
     let brief = data.ask_briefs.values().next().unwrap();
-    assert_eq!(brief.read(&records).unwrap(), model["handoffs"][0]["brief"]);
+    assert_eq!(brief.read(&records).unwrap(), expected_brief);
     let path = home
         .options
         .claude_home
@@ -746,15 +954,10 @@ fn query_source_paging_preserves_large_prompts_and_cached_image_ranges() {
         ],"turn":"images:images:0"}],"window_start":null});
     assert_eq!(expected["entries"][0]["img"].as_array().unwrap().len(), 2);
     let mut query = Query::from_sources(sources);
-    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
     let actual = query
         .call_at("read_transcript", &json!({"id":"images"}), NOW)
         .unwrap();
     assert_eq!(actual, expected);
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(|count| count.get()),
-        before
-    );
     let data = &query.evidence().parts[0].data;
     let slot = data.tx["images"]
         .slots
@@ -2406,13 +2609,8 @@ fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
         "unknown_tool"
     );
     assert!(!home.options.cache.with_extension("sqlite3").exists());
-    let builds = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
     let answer = first.call_at("list_sessions", &json!({}), NOW).unwrap();
     assert_eq!(answer["window_start"], NOW - 86_400_000);
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-        builds
-    );
     let snapshot = first.native.as_ref().unwrap().parts[0].data.clone();
     let parsed = crate::events::PARSED.with(std::cell::Cell::get);
     let core = ViewerCore::from_sources(sources.clone());
@@ -2532,15 +2730,10 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                 ("stalls", json!({"idle_minutes":1})),
             ];
             let mut native = Query::from_sources(sources.clone());
-            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
             let actual: Vec<_> = calls
                 .iter()
                 .map(|(tool, args)| native.call_optional_at(tool, args, NOW))
                 .collect();
-            assert_eq!(
-                crate::model::COMPAT_BUILDS.with(|count| count.get()),
-                before
-            );
             let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
             assert_eq!(snapshot.window_start, Some(NOW - seconds as i64 * 1000));
             let mut second = Query::from_sources(sources.clone());
@@ -2569,10 +2762,6 @@ fn embedded_native_queries_preserve_output_windows_and_legacy_tool_answers() {
                     admitted.call_optional_at(tool, args, NOW),
                 );
             }
-            assert_eq!(
-                crate::model::COMPAT_BUILDS.with(|count| count.get()),
-                before
-            );
             sources.close();
             independent_sources.close();
         }
@@ -2659,15 +2848,10 @@ fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
                 ("find", json!({"text":"cargo", "max_bytes":1})),
                 ("stalls", json!({"idle_minutes":1})),
             ];
-            let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
             let actual: Vec<_> = calls
                 .iter()
                 .map(|(tool, args)| native.call_optional_at(tool, args, NOW))
                 .collect();
-            assert_eq!(
-                crate::model::COMPAT_BUILDS.with(|count| count.get()),
-                before
-            );
             let snapshot = native.native.as_ref().unwrap().parts[0].data.clone();
             native.call_at("list_sessions", &json!({}), NOW).unwrap();
             assert!(Arc::ptr_eq(
@@ -2699,7 +2883,6 @@ fn local_query_conflicts_and_source_removal_use_native_snapshots() {
         ("a".into(), first.options.clone()),
         ("b".into(), second.options.clone()),
     ]);
-    let before = crate::model::COMPAT_BUILDS.with(|count| count.get());
     for tool in ["list_sessions", "get_session", "read_transcript"] {
         let args = if tool == "list_sessions" {
             json!({})
@@ -2725,10 +2908,6 @@ fn local_query_conflicts_and_source_removal_use_native_snapshots() {
         native
             .call_at("read_transcript", &json!({"id":"duplicate"}), NOW)
             .is_ok()
-    );
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(|count| count.get()),
-        before
     );
 }
 
@@ -3341,22 +3520,37 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
                     > 0
             );
         }
+        if damaged == "proofs" {
+            crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+                .with(|lines| lines.borrow_mut().clear());
+        }
         let mut query = Query::from_sources(admitted(home.options.clone()));
-        assert_eq!(
-            query
-                .call_selected_at(
-                    "local",
-                    "lead",
-                    "read_transcript",
-                    &json!({"id":"lead"}),
-                    Some(&archive),
-                    crate::SessionSourceReadMode::ProviderOnly,
-                    NOW
-                )
-                .unwrap_err()
-                .code,
-            "io"
-        );
+        let error = query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &json!({"id":"lead"}),
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            )
+            .unwrap_err();
+        if damaged == "proofs" {
+            assert_eq!(error.code, "io");
+            assert_eq!(error.stage, Some("header_missing"));
+            assert_eq!(
+                error.message,
+                "Original native transcript proofs are unavailable"
+            );
+            let logs = crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
+                .with(|lines| lines.borrow().clone());
+            assert_eq!(logs.len(), 1);
+            assert!(logs[0].contains("stage=header_missing"));
+            assert!(logs[0].contains("raw=not_collected"));
+        } else {
+            assert_eq!(error.code, "io");
+        }
         assert_eq!(archive.calls.load(Ordering::Relaxed), 0);
         assert!(query.native.is_none());
         assert_eq!(
@@ -3369,7 +3563,7 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
 
 #[test]
 fn selected_query_refuses_changed_bytes_generations_and_revocation() {
-    for fault in [1, 2, 3] {
+    for (fault, expected_stage) in [(1, Some("page_hash")), (2, None), (3, None)] {
         let home = Home::new("selected-query-fences");
         home.top("lead", &[human("lead", ts(1, 0), "selected needle")]);
         let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
@@ -3385,21 +3579,36 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
         fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
         let generation = catalog_generation(&home);
         let mut query = Query::from_sources(admitted(home.options.clone()));
-        assert_eq!(
-            query
-                .call_selected_at(
-                    "local",
-                    "lead",
-                    "read_transcript",
-                    &json!({"id":"lead"}),
-                    Some(&archive),
-                    crate::SessionSourceReadMode::ProviderOnly,
-                    NOW
-                )
-                .unwrap_err()
-                .code,
-            "io"
-        );
+        let error = query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &json!({"id":"lead"}),
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "io");
+        assert_eq!(error.stage, expected_stage, "fault={fault}");
+        if expected_stage.is_some() {
+            assert_eq!(
+                error.message, "Original native transcript proofs are unavailable",
+                "fault={fault}"
+            );
+            assert!(!error.message.contains("revoked"));
+            assert!(!error.message.contains("Permission denied"));
+        } else {
+            // Prompt parsing tolerates the provider read error, but its sticky
+            // failure makes finish() retain the pre-R5 generic refusal.
+            assert_eq!(
+                error.message, "native query source generation unavailable",
+                "fault={fault}"
+            );
+            assert!(!error.message.contains("revoked"));
+            assert!(!error.message.contains("Permission denied"));
+        }
         assert_eq!(
             catalog_generation(&home),
             generation,
@@ -3563,7 +3772,13 @@ fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publi
             "actual native publication must run during the read"
         );
         if selected_changes {
-            assert_eq!(result.unwrap_err().code, "io");
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "io");
+            assert_eq!(
+                error.message,
+                "Selected native transcript publication changed"
+            );
+            assert_eq!(error.stage, None);
         } else {
             assert_eq!(result.unwrap(), before);
         }
@@ -3863,7 +4078,7 @@ fn handoff_endpoint_indexes_upgrade_without_losing_native_evidence() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        28
+        crate::events::store::SCHEMA_VERSION
     );
     assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('session_trace_from','session_trace_to')", [], |row|row.get::<_,i64>(0)).unwrap(), 2);
     assert!(
@@ -5949,7 +6164,6 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
     let mut query = Query::from_sources(admitted(home.options.clone()));
     let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
     let cache_reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
-    let models = crate::model::COMPAT_BUILDS.with(std::cell::Cell::get);
     let factory = |_: &str, _: &str| -> io::Result<Box<dyn crate::SessionSourceReader>> {
         panic!("paused find admitted a provider")
     };
@@ -6038,10 +6252,6 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
     assert_eq!(
         crate::events::CACHE_READS.with(std::cell::Cell::get),
         cache_reads
-    );
-    assert_eq!(
-        crate::model::COMPAT_BUILDS.with(std::cell::Cell::get),
-        models
     );
     assert!(!home.options.cache.exists());
     assert!(!crate::events::EventCache::path(&home.options.cache).exists());

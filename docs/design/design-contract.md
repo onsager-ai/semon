@@ -120,3 +120,19 @@ collapsed Thinking, one-line summaries, a lower reading dock and an availability
 disclosure for retained drafts. `ui/tests/staging-viewer-browser.mjs` covers
 390/820/1280px in both themes, keyboard disclosures, text contrast, viewport
 occlusion and composer expansion; the existing galleries remain required.
+
+## Unified hosted application
+
+Hub Sessions, Analytics and Machines use the same mounted Preact application,
+shared frame, navigation/history owner, account controls and Recent metadata
+publication. Administrative content uses the typed authorized host-page port;
+server authorization and native forms stay with Hub. There is no administrative
+shell variant or separate Recent owner. Direct loads and no-JavaScript fallbacks
+retain the same shared frame. Page-specific content and controls keep their domain
+semantics; this requirement changes no tokens, spacing or pixel thresholds.
+
+Ordinary links from the account menu use the same application router on phone
+and desktop, including links from the phone account sheet into administrative
+pages and the reader. Navigation closes the sheet and drawer without replacing
+the application document. Modified clicks, downloads, new-window links and
+native account/workspace POST actions retain their browser behavior.

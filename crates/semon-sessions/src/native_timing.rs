@@ -1131,7 +1131,7 @@ mod tests {
         let schema: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(schema, 28);
+        assert_eq!(schema, crate::events::store::SCHEMA_VERSION);
         let mode: String = connection
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
@@ -1146,7 +1146,8 @@ mod tests {
         ] {
             assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name=?1)",[trigger],|row|row.get::<_,bool>(0)).unwrap());
         }
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND tbl_name='session_catalog' AND name NOT LIKE 'sqlite_autoindex_%'",[],|row|row.get::<_,i64>(0)).unwrap(),21);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND tbl_name='session_catalog' AND name NOT LIKE 'sqlite_autoindex_%' AND name<>'session_catalog_pricing_fingerprint'",[],|row|row.get::<_,i64>(0)).unwrap(),21);
+        assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name='session_catalog' AND name='session_catalog_pricing_fingerprint')",[],|row|row.get::<_,bool>(0)).unwrap());
         connection
     }
 
@@ -1175,6 +1176,7 @@ mod tests {
                     last: Some(version),
                     tokens: [0.0; 3],
                     cost: crate::pricing::Cost {
+                        pricing_fingerprint: String::new(),
                         usd: Some(0.0),
                         unpriced_models: Vec::new(),
                         split_unknown_messages: 0,

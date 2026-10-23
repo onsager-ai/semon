@@ -208,6 +208,235 @@ for (const width of [390, 820, 1280])
     });
 
 for (const width of [390, 1280])
+  for (const retained of [false, true])
+    test(`repeated stale projection stops automatically and manual retry recovers at ${width}px retained=${retained}`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ viewport: { width, height: 900 } });
+        page.setDefaultTimeout(10000);
+        let failing = !retained,
+          reads = 0;
+        const readAt = [];
+        const errors = [];
+        page.on('pageerror', (error) => errors.push(String(error)));
+        await page.route('http://catalog.test/**', async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(true) });
+          if (url.pathname === '/api/session-identity')
+            return route.fulfill({ json: { api: 1, identity: identity('one') } });
+          if (url.pathname === '/api/sessions')
+            return route.fulfill({
+              json: list([
+                {
+                  ...meta('one'),
+                  transcript: {
+                    generation: (failing ? 'c' : 'b').repeat(64),
+                    errors_generation: (failing ? 'c' : 'b').repeat(64),
+                    total: 65,
+                  },
+                },
+              ]),
+            });
+          if (url.pathname === '/api/session-transcript') {
+            ++reads;
+            readAt.push(await page.evaluate(() => Date.now()));
+            return failing
+              ? route.fulfill({ status: 409, json: { error: 'stale_projection' } })
+              : route.fulfill({ json: transcript('one', url.searchParams) });
+          }
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/sessions?machine=source');
+        await page.clock.install({ time: new Date('2026-10-22T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-22T00:00:00.001Z'));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
+        });
+        await page.locator('#page [data-id="one"]').click();
+        if (retained) {
+          await page.locator('#page [data-entry-key="one:5"]').waitFor();
+          failing = true;
+        }
+        // Let metadata observation and the three backoffs run, allowing each
+        // routed asynchronous response to settle before advancing again.
+        for (let at = 0; at < 20; ++at) {
+          await page.clock.runFor(1000);
+          await page.waitForTimeout(20);
+        }
+        await page
+          .getByText('Recorded history could not be loaded. Retry to try again.')
+          .first()
+          .waitFor();
+        const stopped = reads;
+        assert.equal(
+          stopped,
+          retained ? 9 : 8,
+          'each of four attempts has one bounded resynchronization',
+        );
+        const attempts = readAt.filter(
+          (_, index) => index >= (retained ? 1 : 0) && (index - (retained ? 1 : 0)) % 2 === 0,
+        );
+        for (let index = 1; index < attempts.length; ++index)
+          assert.ok(
+            attempts[index] - attempts[index - 1] >= 1000 * 2 ** (index - 1),
+            'metadata cadence bypassed the pending recovery backoff',
+          );
+        await page.clock.runFor(60000);
+        await page.waitForTimeout(30);
+        assert.equal(reads, stopped, 'background observations bypassed the exhausted retry budget');
+        if (retained) await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        if (process.env.SEMON_CATALOG_OUT) {
+          await mkdir(process.env.SEMON_CATALOG_OUT, { recursive: true });
+          await page.screenshot({
+            path: `${process.env.SEMON_CATALOG_OUT}/stale-terminal-${width}-${retained}.png`,
+          });
+        }
+        failing = false;
+        await page.getByRole('button', { name: 'Retry selected transcript', exact: true }).click();
+        await page.locator('#page [data-entry-key="one:5"]').waitFor();
+        await page
+          .getByText('Recorded history could not be loaded. Retry to try again.')
+          .first()
+          .waitFor({ state: 'detached' });
+        await page.evaluate(() => app.destroy());
+        const destroyed = reads;
+        await page.clock.runFor(60000);
+        assert.equal(reads, destroyed, 'retry survived document teardown');
+        assert.deepEqual(errors, []);
+      } finally {
+        await browser.close();
+      }
+    });
+
+for (const width of [390, 1280])
+  test(`published progress reopens bounded cold recovery and preserves terminal state at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      page.setDefaultTimeout(10000);
+      let failing = true,
+        provisional = false,
+        publishedGeneration = 'a'.repeat(64),
+        identityGeneration = 'a'.repeat(64),
+        publishedOffset = 100,
+        reads = 0;
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      await page.route('http://catalog.test/**', async (route) => {
+        const url = new URL(route.request().url()),
+          currentMeta = {
+            ...meta('one'),
+            transcript: {
+              generation: publishedGeneration,
+              errors_generation: publishedGeneration,
+              total: 65,
+            },
+            source_refs: [
+              {
+                state: 'cached',
+                source: { ...source('one'), offset: publishedOffset },
+              },
+            ],
+          },
+          currentIdentity = {
+            api: 1,
+            identity: {
+              ...identity('one'),
+              generation: identityGeneration,
+              owner_qualification: provisional ? 'provisional' : 'qualified',
+              source_refs: [
+                {
+                  state: 'cached',
+                  source: { ...source('one'), offset: publishedOffset + 1 },
+                },
+              ],
+            },
+          };
+        if (url.pathname === '/api/session-capabilities')
+          return route.fulfill({ json: capabilities(true) });
+        if (url.pathname === '/api/session-identity')
+          return route.fulfill({ json: currentIdentity });
+        if (url.pathname === '/api/sessions') return route.fulfill({ json: list([currentMeta]) });
+        if (url.pathname === '/api/session-transcript') {
+          ++reads;
+          return failing
+            ? route.fulfill({ status: 409, json: { error: 'stale_projection' } })
+            : route.fulfill({ json: transcript('one', url.searchParams) });
+        }
+        return fulfillCatalogStatic(route, url);
+      });
+      await page.goto('http://catalog.test/sessions?machine=source');
+      await page.clock.install({ time: new Date('2026-10-22T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2026-10-22T00:00:00.001Z'));
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.app = CatalogViewer.mountViewerApplication({ machinesPath: '/machines' });
+      });
+      await page.locator('#page [data-id="one"]').click();
+      const terminalText = 'Recorded history could not be loaded. Retry to try again.';
+      const terminal = page.locator('#page .empty').filter({ hasText: terminalText });
+      for (let attempt = 0; attempt < 16; ++attempt) {
+        await page.clock.runFor(1000);
+        await page.waitForTimeout(20);
+        if (await terminal.count()) break;
+      }
+      await terminal.waitFor();
+      const stoppedReads = reads;
+      assert.equal(
+        stoppedReads,
+        8,
+        'four failed reads and their bounded resynchronizations exhaust',
+      );
+
+      provisional = true;
+      identityGeneration = 'c'.repeat(64);
+      for (let attempt = 0; attempt < 4; ++attempt) {
+        await page.clock.runFor(1000);
+        await page.waitForTimeout(20);
+      }
+      await terminal.waitFor();
+      assert.equal(
+        await page.getByText('Loading recorded session…', { exact: true }).count(),
+        0,
+        'identity publication cannot replace terminal recovery with a loading state',
+      );
+      assert.equal(
+        await page
+          .getByText('Session identity is provisional while history is being discovered.', {
+            exact: true,
+          })
+          .count(),
+        0,
+        'identity notes cannot overwrite the recovery-owned terminal explanation',
+      );
+      assert.equal(
+        await page.getByRole('button', { name: 'Retry selected transcript', exact: true }).count(),
+        1,
+      );
+      assert.equal(reads, stoppedReads, 'unchanged metadata keeps the hard stop in effect');
+
+      provisional = false;
+      failing = false;
+      publishedGeneration = 'b'.repeat(64);
+      publishedOffset = 200;
+      for (let attempt = 0; attempt < 12; ++attempt) {
+        await page.clock.runFor(1000);
+        await page.waitForTimeout(20);
+        if (await page.locator('#page [data-entry-key="one:5"]').count()) break;
+      }
+      await page.locator('#page [data-entry-key="one:5"]').waitFor();
+      assert.ok(reads > stoppedReads, 'published source/catalog progress reopens bounded recovery');
+      assert.equal(await terminal.count(), 0);
+      await page.evaluate(() => app.destroy());
+      assert.deepEqual(errors, []);
+    } finally {
+      await browser.close();
+    }
+  });
+
+for (const width of [390, 1280])
   for (const colorScheme of ['light', 'dark'])
     for (const workspaceChrome of [false, true])
       test(`native host chrome preserves forms with workspace chrome=${workspaceChrome} at ${width}px ${colorScheme}`, async () => {
@@ -365,7 +594,18 @@ for (const width of [390, 1280])
           await page.clock.runFor(8100);
           await assertNative();
           if (workspaceChrome) {
-            await page.locator('#lanes').getByText('Workspace Recent 2', { exact: true }).waitFor();
+            await page
+              .locator('#lanes')
+              .getByText('Workspace Recent 2', { exact: true })
+              .waitFor({
+                state: width === 390 ? 'attached' : 'visible',
+              });
+            if (width === 390)
+              assert.equal(
+                await page.evaluate(() => document.body.classList.contains('drawer-open')),
+                false,
+                'the drawer stays closed while Recent refreshes',
+              );
             assert.equal(publication, 2, 'native workspace chrome follows the existing cadence');
           }
           assert.equal(await page.locator('#page input').inputValue(), 'Edited native task');
@@ -563,8 +803,13 @@ for (const width of [390, 1280])
                 next_cursor: null,
               },
             });
-          if (url.pathname === '/api/session-capabilities')
+          if (url.pathname === '/api/session-capabilities') {
+            // Capability work may finish after the compact Home response. Keep
+            // this independently delayed so the paused clock cannot assume that
+            // receiving Home has already scheduled the next refresh timer.
+            if (workspaceMode !== 'ready') await new Promise((resolve) => setTimeout(resolve, 150));
             return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
+          }
           if (url.pathname === '/api/viewer/home') {
             const focused = url.searchParams.get('source');
             if (focused) return route.fulfill({ json: publication(focused) });
@@ -787,11 +1032,22 @@ for (const width of [390, 1280])
 
         for (const mode of ['unavailable', 'partial', 'pending', 'ready']) {
           workspaceMode = mode;
-          const response = page.waitForResponse(
-            (value) => value.headers()['x-fixture-workspace-mode'] === mode,
-          );
-          await page.clock.runFor(8100);
+          let delivered = false;
+          const response = page
+            .waitForResponse((value) => value.headers()['x-fixture-workspace-mode'] === mode)
+            .then((receipt) => {
+              delivered = true;
+              return receipt;
+            });
           stage = 'workspace response after ' + mode;
+          // The refresh cadence is armed after asynchronous capability/name
+          // reads finish. Advance the paused clock while allowing those real
+          // network callbacks to settle; one 8.1s jump can strand its next timer.
+          // Keep the existing response deadline and every scope/content check.
+          for (let tick = 0; tick < 24 && !delivered; tick++) {
+            await page.clock.runFor(1000);
+            await Promise.race([response, new Promise((resolve) => setTimeout(resolve, 100))]);
+          }
           const receipt = await withDeadline(response, stage);
           assert.equal(receipt.status(), mode === 'unavailable' ? 503 : 200);
           // Error reads intentionally release their unread body; the exact HTTP
@@ -952,7 +1208,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     identity: { ...identity(key), read_scope: 'retained_history' },
     session: meta(key),
     projection: {
-      version: 5,
+      version: 6,
       generation: generation.repeat(64),
       errors_generation: generation.repeat(64),
       total,
@@ -1035,7 +1291,7 @@ for (const width of [390, 1280])
               json: {
                 api: 1,
                 identity: { ...identity(key), read_scope: 'retained_history' },
-                projection: { version: 5, generation: nativeGeneration.repeat(64) },
+                projection: { version: 6, generation: nativeGeneration.repeat(64) },
                 slot: 6,
                 field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
                 text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
@@ -3229,7 +3485,7 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
           json: {
             api: 1,
             identity: { ...identity('one'), read_scope: 'retained_history' },
-            projection: { version: 5, generation: 'b'.repeat(64) },
+            projection: { version: 6, generation: 'b'.repeat(64) },
             slot: 400,
             field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
             text,
@@ -3817,3 +4073,300 @@ for (const width of [390, 1280])
           await browser.close();
         }
       });
+
+for (const width of [390, 1280])
+  test(`host pages share the reader router and reject stale content at ${width}px`, async () => {
+    const browser = await chromium.launch();
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    try {
+      await page.route('http://catalog.test/**', async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === '/api/session-capabilities')
+          return route.fulfill({ json: capabilities(true) });
+        if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
+        if (url.pathname === '/api/session-transcript')
+          return route.fulfill({ json: transcript('one', url.searchParams) });
+        if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 503, json: {} });
+        return fulfillCatalogStatic(route, url);
+      });
+      await page.goto('http://catalog.test/machines');
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => {
+        window.hostMounted = 0;
+        window.hostDestroyed = 0;
+        window.hostAborted = false;
+        const content = (name) => {
+          const element = document.createElement('section');
+          const heading = document.createElement('h1');
+          heading.textContent = name;
+          const form = document.createElement('form');
+          form.method = 'post';
+          form.action = '/machines/rename';
+          const input = document.createElement('input');
+          input.name = 'name';
+          input.value = 'Retained machine';
+          form.append(input);
+          element.append(heading, form);
+          return {
+            element,
+            title: name,
+            nav: 'machines',
+            mount() {
+              window.hostMounted++;
+            },
+            destroy() {
+              window.hostDestroyed++;
+              element.remove();
+            },
+          };
+        };
+        window.app = CatalogViewer.mountViewerApplication({
+          machinesPath: '/machines',
+          pages: {
+            match: (url) =>
+              ['/machines', '/account'].includes(url.pathname)
+                ? { title: url.pathname === '/machines' ? 'Machines' : 'Account', nav: 'machines' }
+                : null,
+            initial: content('Machines'),
+            load(url, signal) {
+              if (window.failHost) return Promise.reject({ status: 503 });
+              if (window.holdHost)
+                return new Promise((resolve) => {
+                  window.releaseHost = () => resolve(content('Stale account'));
+                  signal.addEventListener('abort', () => {
+                    window.hostAborted = true;
+                  });
+                });
+              return Promise.resolve(
+                content(url.pathname === '/machines' ? 'Machines' : 'Account'),
+              );
+            },
+          },
+          account: {
+            name: 'Hosted account',
+            login: 'hosted',
+            initials: 'HA',
+            workspaces: [],
+            links: [
+              { label: 'Account', href: '/account', method: 'get', danger: false },
+              { label: 'Sessions', href: '/sessions', method: 'get', danger: false },
+            ],
+          },
+        });
+        window.sharedApp = document.querySelector('.app');
+        window.sharedSidebar = document.querySelector('#sidebar');
+      });
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      assert.equal(await page.locator('form').getAttribute('method'), 'post');
+      const openAccount = async () => {
+        if (
+          width === 390 &&
+          !(await page.locator('body').evaluate((node) => node.classList.contains('drawer-open')))
+        )
+          await page.locator('#lead-btn').click();
+        await page
+          .locator(width === 390 ? '#account-drawer .account-trigger' : '#topbar .account-trigger')
+          .click();
+      };
+      await openAccount();
+      // Modified clicks must reach the browser without changing the application
+      // route or consuming the phone sheet's history entry.
+      for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey']) {
+        assert.equal(
+          await page.evaluate((modifier) => {
+            let intercepted;
+            document.addEventListener(
+              'click',
+              (event) => {
+                intercepted = event.defaultPrevented;
+                event.preventDefault();
+              },
+              { once: true },
+            );
+            document.querySelector('.account-popover a[href="/account"]').dispatchEvent(
+              new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                button: 0,
+                [modifier]: true,
+              }),
+            );
+            return intercepted;
+          }, modifier),
+          false,
+          modifier + ': account menu consumed a modified click',
+        );
+      }
+      await page.locator('.account-popover a[href="/account"]').click();
+      await page.getByRole('heading', { name: 'Account', exact: true }).waitFor();
+      assert.deepEqual(
+        await page.evaluate(() => ({
+          app: sharedApp === document.querySelector('.app'),
+          sidebar: sharedSidebar === document.querySelector('#sidebar'),
+          sheet: !!history.state?.sheet,
+          drawer: document.body.classList.contains('drawer-open'),
+          menu: !!document.querySelector('.account-popover'),
+        })),
+        { app: true, sidebar: true, sheet: false, drawer: false, menu: false },
+        'account menu navigation replaced the document or retained an overlay',
+      );
+      await page.goBack();
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => !!history.state?.sheet), false);
+      await openAccount();
+      await page.locator('.account-popover a[href="/sessions"]').click();
+      await page.locator('#page [data-session-row="list"]').waitFor();
+      assert.equal(
+        await page.evaluate(() => sharedApp === document.querySelector('.app')),
+        true,
+        'account menu reader link replaced the application document',
+      );
+      await page.goBack();
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      const navigate = async (key) => {
+        if (
+          width === 390 &&
+          !(await page.locator('body').evaluate((node) => node.classList.contains('drawer-open')))
+        )
+          await page.locator('#lead-btn').click();
+        await page.locator(`#nav [data-go="${key}"]`).click();
+      };
+      await navigate('sessions');
+      await page.locator('#page [data-session-row="list"]').waitFor();
+      await page.locator('#page [data-session-row="list"]').click();
+      await page.locator('#page [data-entry-key]').first().waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('machine'), 'source');
+      await navigate('machines');
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      await page.waitForTimeout(50);
+      assert.equal(
+        new URL(page.url()).pathname,
+        '/machines',
+        'closing the drawer rolled back the route',
+      );
+      await page.goBack();
+      await page.locator('#page [data-entry-key]').first().waitFor();
+      await page.goForward();
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      await page.evaluate(() => {
+        window.holdHost = true;
+        const link = document.createElement('a');
+        link.href = '/account';
+        document.querySelector('#page').append(link);
+        link.click();
+      });
+      await page.waitForFunction(() => typeof window.releaseHost === 'function');
+      await navigate('sessions');
+      await page.locator('#page [data-session-row="list"]').waitFor();
+      await page.evaluate(() => window.releaseHost());
+      await page.waitForTimeout(50);
+      assert.equal(await page.getByText('Stale account', { exact: true }).count(), 0);
+      assert.deepEqual(
+        await page.evaluate(() => ({
+          sameApp: sharedApp === document.querySelector('.app'),
+          sameSidebar: sharedSidebar === document.querySelector('#sidebar'),
+          aborted: hostAborted,
+        })),
+        { sameApp: true, sameSidebar: true, aborted: true },
+      );
+      await page.evaluate(() => {
+        window.holdHost = false;
+        const fetch0 = window.fetch;
+        window.fetch = (url, options) =>
+          String(url).startsWith('/api/session-capabilities')
+            ? new Promise((resolve) => {
+                window.releaseCapability = () =>
+                  resolve(
+                    new Response(
+                      JSON.stringify({
+                        api: 1,
+                        read_contract: 'catalog-v1',
+                        source_key: 'other',
+                        selected_transcript: true,
+                        pagination: true,
+                        filters: [],
+                        order: 'last_desc_key_asc',
+                        full_text_search: false,
+                      }),
+                      { headers: { 'Content-Type': 'application/json' } },
+                    ),
+                  );
+              })
+            : fetch0(url, options);
+        const link = document.createElement('a');
+        link.href = '/sessions?machine=other';
+        document.querySelector('#page').append(link);
+        link.click();
+      });
+      await page.waitForFunction(() => typeof window.releaseCapability === 'function');
+      await navigate('machines');
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      const mountedBefore = await page.evaluate(() => hostMounted);
+      await page.evaluate(() => window.releaseCapability());
+      await page.waitForTimeout(50);
+      assert.equal(
+        await page.evaluate(() => hostMounted),
+        mountedBefore,
+        'stale capability reopened the host page',
+      );
+      await page.getByRole('heading', { name: 'Machines', exact: true }).waitFor();
+      await page.evaluate(() => {
+        window.failHost = true;
+        const link = document.createElement('a');
+        link.href = '/account';
+        document.querySelector('#page').append(link);
+        link.click();
+      });
+      await page.getByText('This page is temporarily unavailable.', { exact: false }).waitFor();
+      assert.equal(await page.locator('#topbar .t').textContent(), 'Account');
+      await page.evaluate(() => {
+        window.failHost = false;
+      });
+      await page.getByRole('button', { name: 'Retry', exact: true }).click();
+      await page.getByRole('heading', { name: 'Account', exact: true }).waitFor();
+      await page.evaluate(() => app.destroy());
+      assert.equal(
+        await page.evaluate(() => hostDestroyed),
+        (await page.evaluate(() => hostMounted)) + 1,
+        'unmounted stale delivery is disposed too',
+      );
+      await page.evaluate(() => {
+        window.workspaceReads = [];
+        window.fetch = async (url) => {
+          window.workspaceReads.push(String(url));
+          throw Error('workspaceless read');
+        };
+        const element = document.createElement('section');
+        element.textContent = 'No workspace';
+        window.app = CatalogViewer.mountViewerApplication({
+          machinesPath: '/machines',
+          workspaceMetadata: false,
+          pages: {
+            match: () => ({ title: 'Account', nav: 'account' }),
+            initial: {
+              element,
+              title: 'Account',
+              nav: 'account',
+              destroy() {
+                element.remove();
+              },
+            },
+            load: async () => null,
+          },
+        });
+      });
+      await page.getByText('No workspace', { exact: true }).waitFor();
+      await page.waitForTimeout(25);
+      assert.deepEqual(
+        await page.evaluate(() => workspaceReads),
+        [],
+        'workspaceless host read workspace metadata',
+      );
+      await page.evaluate(() => app.destroy());
+      assert.deepEqual(errors, []);
+    } finally {
+      await browser.close();
+    }
+  });

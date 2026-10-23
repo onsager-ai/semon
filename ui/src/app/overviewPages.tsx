@@ -203,6 +203,7 @@ interface OverviewHost {
   reviews(): boolean;
   homeIntro?: HTMLElement;
   nativeContent?: boolean;
+  enabled?: boolean;
   api(path: string, body?: unknown): Promise<unknown>;
   route(): string;
   navigationRoute(): Readonly<ViewerRoute>;
@@ -1348,7 +1349,7 @@ export function createOverviewPages(host: OverviewHost) {
     }
   }
   async function refresh(force = false) {
-    if (disposed) return;
+    if (disposed || host.enabled === false) return;
     if (!force && host.route() === 'analytics' && Date.now() < analyticsRetryAt) return;
     if (loading) {
       queued = true;

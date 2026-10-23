@@ -45,6 +45,37 @@ consumed prefix `[0,offset)` plus its final up-to-4-KiB window. Neither marker
 binds bytes after the consumed offset. A host must independently authorize and
 verify an archived generation before supplying a requested source range.
 
+Selected transcript windows, turn anchors and annotation pages resolve their
+Catalog identity and load their recipe headers/rows in one read-only SQLite
+transaction. The global Catalog/slot publication marker must still agree inside
+that snapshot; a missing or mismatched marker is never repaired by a reader.
+Concurrent atomic publication therefore cannot pair an old selected identity
+with new recipes or spuriously reject a fresh first page merely because an
+unrelated owner changed. Current and retained-history still choose their own
+source cohorts and recipe tables. Explicit slot/error generations still reject
+stale continuation requests. Web reads now retain this metadata snapshot through
+lazy byte-proof rendering, including continuation and native field expansion;
+native/provider generation checks keep their before/after I/O fences. Focused
+MCP transfers its selection snapshot to the request-owned proof readers and
+retains its later metadata publication checks. The last proof reader drop
+rolls back and closes the connection, releasing its WAL pin on every exit path.
+
+Index mutation preserves the outgoing path proof only while Current or
+retained-history source vectors reference its exact ledger. The reference
+decision, copy and replacement are one transaction. The next path mutation
+collects unreferenced proof metadata; existing request snapshots can still read
+collected pages. The version manifest is bounded by published ledger references,
+rather than the number of appends. This stores no native content, grants no
+archive authority and does not change the schema. Rebuilt live proofs take
+precedence over obsolete retained headers from parser reset. A previously
+orphaned publication cannot be repaired by inventing proofs in a reader.
+
+Selected Home/Trace repair acknowledges an unchanged ready observation or a
+committed publication only. Losing its Catalog/source compare-and-swap returns
+a retryable observation error, rather than reporting `ready` after discarding
+the prepared metadata. This does not turn selected repair into a global Catalog
+rebuild or grant authority to read different source bytes.
+
 `source_projection_ready(options, root, path)` provides a bounded read-only
 pre-eviction guard. It never creates an index, reads bodies, opens the global
 EventCache or builds a model. It checks exact allowlisted path mappings, the
@@ -135,6 +166,34 @@ admitted machine set. The same native evidence, index and refresh coordinator
 survive that transfer; admission does not close a healthy writer or reopen its
 index. The host must transfer lifecycle ownership and retain custody/admission
 fences. Closing the admitted set closes those original observers too.
+
+For hosted sources whose Raw and Facts changes are journaled, an unrelated
+runtime observation can advance an active semantic stage's runtime fence without
+resetting its native identity/relationship progress. Facts invalidation includes
+indexed staged owners before their first Catalog publication and their native
+parent/PID dependencies. Each batch still checks the exact source claims,
+consumed ledgers, native roles, Catalog generation and prepared runtime; changed
+dependencies reset through the existing witness checks. Unjournaled/local
+observations and staged negative source-custody proofs retain the conservative
+epoch reset. This lets a large historical component finish while unrelated
+sessions start and stop, so the pending new-source journal remains reachable.
+
+Selected relationship pages derive sender-turn witnesses from the physical
+sender's complete native receipt boundaries. Indexed canonical receipt lookups
+preserve the existing first-receipt and copied-prefix rules without admitting
+additional physical sources or publishing unselected relationships. The
+temporary boundaries are discarded before staged relationship capture; the
+existing parent-turn conflict checks remain. Earlier staged recipes rebuild
+once so partial-page turn witnesses cannot survive into publication.
+
+Final owner publication replays incident relationships through indexed read-only
+pages of at most 64 relations and 1 MiB of metadata. A single owner's complete
+incident set may span pages; it is not required to fit one page. Each page
+qualifies the stage epoch, and the final publication retains all source, runtime
+and generation fences. Replay preserves producer relationship/placement order
+and compact sender-turn witnesses while discarding each metadata page. Only the
+selected owners' native derived model is assembled, outside the SQLite writer
+transaction; unrelated component sources are not admitted.
 
 The native Event Index connection reuses at most 32 compiled SQL statements for
 per-source ledger checks and row writes. Bound values clear when a statement

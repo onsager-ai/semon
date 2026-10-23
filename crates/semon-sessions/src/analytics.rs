@@ -104,8 +104,7 @@ fn day_start(day: &str) -> Option<i64> {
     Some(crate::days_from_civil(year, month, date) * DAY_MS)
 }
 
-/// What Analytics reads of the model's sessions before the model is trimmed
-/// to its window: every session active since `now - KEEP_MS`, its busy
+/// Native Analytics publication before Query output-window trimming: every session active since `now - KEEP_MS`, its busy
 /// intervals, turns and cost days since then, and its waits on you.
 pub(crate) fn activity(
     sessions: &BTreeMap<String, Session>,
@@ -115,6 +114,8 @@ pub(crate) fn activity(
     now: i64,
 ) -> BTreeMap<String, Activity> {
     let since = now.saturating_sub(KEEP_MS);
+    let oldest_day = since.saturating_sub(since.rem_euclid(DAY_MS));
+    let oldest_cost_day = crate::pricing::utc_day(oldest_day);
     let comparison = crate::comparison::ModelComparisonConfig::load();
     let launched: BTreeSet<&str> = handoffs
         .iter()
@@ -147,11 +148,15 @@ pub(crate) fn activity(
                 cost_by_day: session
                     .cost
                     .by_day
-                    .iter()
+                    .range(oldest_cost_day.clone()..)
                     .filter_map(|(day, usd)| Some((day_start(day)?, *usd)))
                     .filter(|(day, _)| day + DAY_MS > since)
                     .collect(),
-                incomplete_usage_days: session.incomplete_usage_days.clone(),
+                incomplete_usage_days: session
+                    .incomplete_usage_days
+                    .range(oldest_day..)
+                    .copied()
+                    .collect(),
                 incomplete_usage_time: session.incomplete_usage_time,
                 unpriced_models: session.cost.unpriced_models.clone(),
                 rate_limits: session.rate_limits.clone(),
@@ -222,7 +227,7 @@ pub(crate) fn activity(
         }
     }
     // Collected and pushed without knowing their lengths: give back what
-    // the growth left over, since these rows live as long as the model.
+    // the growth left over, before these rows enter compact native publication.
     for row in rows.values_mut() {
         row.busy.shrink_to_fit();
         row.turns.shrink_to_fit();

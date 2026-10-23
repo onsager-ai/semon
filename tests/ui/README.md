@@ -47,7 +47,7 @@ its completion witness is the native-publication success message in the CI log.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
-  pixel findings remain in the reports. `visual-acceptance.json` starts empty;
+  pixel findings remain in the reports. `visual-acceptance.json` records only exact reviewed states;
   a reviewed entry can accept only one exact comparator, scope, state, candidate
   runtime-binary fingerprint, reference pins, screenshot/diff hashes and bounded
   text/geometry evidence hashes. The reviewed candidate commit is recorded as
@@ -55,6 +55,83 @@ its completion witness is the native-publication success message in the CI log.
   registry does not create a self-referential commit hash or imply ancestry.
   Stale, unreviewed or incomplete records fail closed. No broad waiver, mask,
   auto-approval or threshold change can turn a mismatch green.
+- The 2026-10-19 unified Hub application review classifies the historical passive
+  reader notice/disclosure as an obsolete reference under design brief section 11.
+  The task owner explicitly accepted its removal after reviewing the 820px light
+  Thinking comparison. Actual-image inspection also covers phone collapsed/tools,
+  desktop expanded output, failed children and long-transcript clipping. The
+  smaller dock exposes existing transcript text and moves Jump to Bottom. In the
+  eight long mobile full-page frames it also shortens the document and therefore
+  moves the fixed header captured at the latest scroll position; shared
+  chrome, visible recorded text and controls retain their existing presentation.
+  The original CI evidence remains at [run 39213975213](https://github.com/onsager-ai/semon/actions/runs/39213975213/artifacts/12168508595):
+  42 preservation and 69 main-frame raw differences, no failed strict regions and
+  no coverage errors. The three closed Atlas tool-group frames also contain a
+  hidden `textContent` wording change (`no result` → `Result not recorded`); their
+  visible screenshot difference is only the removed notice. Their exact bindings
+  do not approve different expanded output. The registry retains separate records
+  for every reviewed size/theme/state and its original pinned references; raw
+  findings and the strict 0.0001 maximum ratio remain unchanged. Exact bindings
+  use the reviewed [CI captures from run 39219258365](https://github.com/onsager-ai/semon/actions/runs/39219258365/artifacts/12171068756);
+  local captures support review but are not treated as portable byte-identical
+  approvals across font/rasterization environments. The latest captured runtime
+  passed Rust and all nonvisual browser CI. Its raw visual result retains 18
+  preservation and five main-frame stale byte bindings from the preceding run;
+  reinspection and the final registry assess those exact current artifacts with
+  zero pending/unreviewed findings. A fresh rerun can require fresh exact review;
+  this record does not claim an automatically green visual CI aggregate.
+- The account-menu SPA follow-up (PR #449) re-inspects the previously approved
+  notice-removal differences for the changed runtime. Initial [CI images from
+  run 39223065023](https://github.com/onsager-ai/semon/actions/runs/39223065023/artifacts/12172548963)
+  cover phone tools, tablet Thinking, desktop expanded output, failed/returned
+  children, closed Atlas, long mobile full-page clipping, and changed desktop
+  parser/Principal/quill captures. The Atlas hidden-text distinction above stays
+  limited to closed output. No new visible behavior is approved by these records.
+- Exact PNG bindings require repeatable rasterization as well as stable DOM.
+  Earlier reruns retained identical bounded text/geometry and strict mismatch
+  ratios but changed rounded-edge/text pixels by only a few channel levels.
+  Preservation/main comparators now use Chromium's baseline Skia CPU path,
+  [deterministic rendering stages](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#rendering--gpu)
+  and full rasterization on both independent applications. Playwright keeps normal
+  frame scheduling. Functional/performance and two-machine/pushed-parity browsers
+  retain their existing launch settings. The capture regression checks independent
+  browser processes, clipped sticky geometry, repeated scroll/repaint equality,
+  and changed visible text.
+- Main desktop captures hold a real pointer in inert sidebar padding before
+  navigation/capture and require matching visible row names and selection. This
+  prevents the independent readers crossing their existing Recent idle-reorder
+  boundary at different times. The separately observed survey sidebar-order
+  mismatch is not accepted; its required state is restored and checked. Product
+  timers/order, DOM rows and pixel comparisons remain intact; other suites still
+  exercise actual idle, hover and focus behavior.
+- The [reviewed deterministic captures from run 39246032745](https://github.com/onsager-ai/semon/actions/runs/39246032745/artifacts/12182933579)
+  match [independent run 39244684719](https://github.com/onsager-ai/semon/actions/runs/39244684719/artifacts/12183397568)
+  byte-for-byte for all 68 preservation and 113 main full-frame candidate,
+  reference and diff PNGs, plus their bounded DOM evidence. All 162 strict-region
+  PNGs also match between runs. Actual tablet Thinking and closed desktop Atlas
+  images/diffs were re-inspected on this path. The registry refreshes 31 remaining
+  byte bindings with exactly unchanged bounded text/geometry evidence, retaining
+  all original reference pins, screenshot/evidence hash requirements, thresholds,
+  coverage and raw findings. Final required CI must validate the delivered tree.
+- After Source #450 merged, runtime `b8a0453a` in
+  [run 39253904406](https://github.com/onsager-ai/semon/actions/runs/39253904406/artifacts/12187521876)
+  retained all six candidate/reference/diff PNG and bounded-evidence digests for
+  each of the 111 already reviewed states (42 preservation, 69 main). The only
+  stale binding was the runtime fingerprint. Its registry update preserves every
+  state, reference, artifact digest and original image-review provenance; the 68
+  preservation cases, 113 main frames and 162 strict regions remain required.
+- Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
+  transaction. As with the existing screenshot suppression, finite effects finish;
+  infinite effects pause at time zero through both reads, then resume. The former
+  screenshot-only suppression resumed effects before diagnostics and made exact
+  hashes depend on wall-clock timing. Both independent applications use the same
+  transaction; no content, selectors, regions, styles or pixel tolerances are
+  removed. A bounded consecutive-PNG equality check also rejects unstable mobile
+  full-page compositor tiles after scrolling fixed/clipped content. It does not
+  select a favorable comparison: unchanged consecutive paints are required before
+  any reference comparison. Two-machine and pushed parity retain their existing
+  capture path. `capture-paint.test.mjs` checks the timing-dependent negative control,
+  repeated PNG/evidence equality, visible-content changes and failure cleanup.
 - Captures require bounded API/DOM quiescence and the requested rendered title,
   session heading or exact Trace root turn. Reference menu cleanup uses its real
   Close button and waits for the overlay history entry to finish. The original

@@ -1,7 +1,7 @@
 //! Shared native session semantic derivation over the generation-bound Event Index.
 //! Catalog publications and focused Query reads share identity, relationships,
-//! transcript slots and runtime facts. The complete serialization oracle is
-//! compiled only for semantic equivalence tests, never the product Viewer.
+//! transcript slots and runtime facts. Full-workspace Model transport is retired;
+//! tests exercise these same native producers and source-backed readers.
 //!
 //! Semon never guesses a link. Every join below is on a logged id: a
 //! `toolUseId`, a `msg_id`, a `session_id`, a `continued-in` or
@@ -34,27 +34,20 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use crate::{
     Marker, Options, attachments, events,
     events::{
-        ACK, ANSWERED, ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
+        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASYNC, DENIED, Event,
+        EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, handoff,
 };
 
-/// Version of the `/api/model` JSON shape. Embedders and clients compare it;
-/// bump it only for a breaking change to that shape.
-#[cfg(test)]
-pub const MODEL_API: u32 = 1;
-
 /// Briefs and results are capped as in the mockup data.
 pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
-/// A tool call without a result counts as running for this long.
-#[cfg(test)]
-const LIVE_MS: i64 = 30 * 60 * 1000;
 /// A single source line read back for text is bounded by this.
 pub(crate) const MAX_LINE: u64 = 64 * 1024 * 1024;
 
-// ---- Output shapes: the mockup's field names ---------------------------------------------
+// ---- Shared native semantic records ---------------------------------------------
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Session {
@@ -103,8 +96,8 @@ pub(crate) struct Session {
     pub(crate) last: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// A running tool: `[name, argument, age in seconds when served, start
-    /// in epoch ms]`. A client that keeps a model across 304s computes the
-    /// age from `activity[3]`.
+    /// in epoch ms]`. Native metadata retains the recorded start; current reads
+    /// qualify liveness independently.
     pub(crate) activity: Option<(String, String, i64, i64)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) waiting_for: Option<String>,
@@ -112,7 +105,7 @@ pub(crate) struct Session {
     pub(crate) waiting_since: Option<i64>,
     pub(crate) busy: Vec<(i64, i64)>,
     /// The transcript's tool calls, and those that failed or never
-    /// finished: the same numbers `/api/tx` reports, so a page needn't fetch
+    /// finished, counted from the native transcript slots so a page needn't fetch
     /// a transcript to count. Absent for a session with no transcript.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) calls: Option<usize>,
@@ -295,17 +288,6 @@ pub(crate) struct Turn {
     pub(crate) last: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[cfg(test)]
-pub(crate) struct Machine {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) up: bool,
-    /// When an offline machine was last seen (epoch ms).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last: Option<i64>,
-}
-
 /// Native Query facts beyond the Viewer session metadata, derived from
 /// qualified native evidence and current process observations.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -339,61 +321,8 @@ pub(crate) struct SessionFacts {
     pub(crate) turns_truncated: bool,
 }
 
-#[derive(Serialize)]
-#[cfg(test)]
-struct Rest<'a> {
-    pricing: &'a crate::pricing::Pricing,
-    handoffs: &'a [Handoff],
-    turns: &'a [Turn],
-    busy: &'a BTreeMap<String, Vec<(i64, i64)>>,
-    /// Each transcript's growth mark, `<entries>.<bytes>.<running>`: its slot
-    /// count, the length of the files its slots come from, and how many of
-    /// its calls are running. The page tails a loaded transcript only when
-    /// its mark moved.
-    tx: &'a BTreeMap<&'a str, String>,
-}
-
-/// A built model. Everything but the sessions' running-tool age is
-/// serialized once; `version` hashes the build and every source file's
-/// length, so it changes when, and only when, the logs do.
-#[cfg(test)]
-pub(crate) struct Built {
-    pub(crate) version: String,
-    /// Milliseconds spent in each model build phase, in order.
-    pub(crate) timings: Vec<(&'static str, u32)>,
-    machine: String,
-    /// `activity[2]` holds the running tool's start (epoch ms) until served.
-    pub(crate) sessions: BTreeMap<String, Session>,
-    /// `"handoffs":…,"turns":…,"busy":…,"tx":…}`
-    rest: String,
-    /// `$HOME` of the machine the logs come from, for shortening paths.
-    pub(crate) home: Option<String>,
-    /// This machine's id, as sessions name it.
-    pub(crate) machine_id: String,
-    /// Each session's transcript index, for `/api/tx`: metadata and offsets
-    /// only, the text is read back per page.
-    pub(crate) tx: BTreeMap<String, Arc<Transcript>>,
-    /// Native facts observed by incremental-index equivalence tests.
-    /// Production query readers retain these in QueryData, not Built.
-    #[cfg(test)]
-    pub(crate) facts: BTreeMap<String, SessionFacts>,
-    /// What `/api/analytics` reads of each session active in the last
-    /// [`crate::analytics::KEEP_MS`], taken before the model is trimmed to
-    /// its window. Never served by `/api/model`: its JSON and version don't
-    /// change with it.
-    pub(crate) activity: BTreeMap<String, crate::analytics::Activity>,
-    #[cfg(test)]
-    pub(crate) handoffs: Vec<Handoff>,
-    #[cfg(test)]
-    pub(crate) turns: Vec<Turn>,
-    /// Each session's assistant texts by turn: (turn number, offset, block).
-    #[cfg(test)]
-    pub(crate) texts: BTreeMap<String, Vec<(usize, u64, u32)>>,
-}
-
-/// Native query evidence and source offsets, without compatibility transport,
-/// growth marks or workspace analytics. The producer applies the same native
-/// relationships and window rules as the legacy model.
+/// Native Query evidence and source offsets. Catalog and selected producers
+/// share these relationships and window rules; bodies remain source-backed.
 pub(crate) struct QueryData {
     pub(crate) sessions: BTreeMap<String, Session>,
     pub(crate) handoffs: Vec<Handoff>,
@@ -428,7 +357,7 @@ impl QueryData {
             window_start: (!options.all).then(|| {
                 now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
             }),
-            sources: crate::query_source::Sources::default(),
+            sources: crate::query_source::Sources::new(options),
         }
     }
 }
@@ -446,28 +375,6 @@ impl PromptBrief {
             .and_then(prompt_text)
             .map(|text| cap(&cap(&text, TEXT_MAX), MSG_MAX))
             .unwrap_or_default())
-    }
-}
-
-#[cfg(test)]
-impl Built {
-    /// The model as served at `now`: a running tool's `activity[2]` is its
-    /// age in seconds, and a tool without a result for [`LIVE_MS`] is no
-    /// longer shown as running.
-    pub(crate) fn json(&self, now: i64) -> String {
-        let mut sessions = self.sessions.clone();
-        for session in sessions.values_mut() {
-            session.activity = session
-                .activity
-                .take()
-                .filter(|(_, _, _, start)| now - start < LIVE_MS)
-                .map(|(name, arg, _, start)| (name, arg, (now - start).max(0) / 1000, start));
-        }
-        let sessions = serde_json::to_string(&sessions).expect("serializable sessions");
-        format!(
-            "{{\"api\":{},\"version\":\"{}\",\"now\":{now},\"machine\":{},\"sessions\":{sessions},{}",
-            MODEL_API, self.version, self.machine, self.rest
-        )
     }
 }
 
@@ -505,7 +412,7 @@ impl Handoff {
     }
 }
 
-/// The compatibility model and focused catalog use the same logged-parent rule.
+/// Native Query and Catalog share this logged-parent rule.
 fn session_parent(sid: &str, session: &Session, handoffs: &[Handoff]) -> Option<String> {
     handoffs
         .iter()
@@ -610,8 +517,6 @@ impl Texts {
 thread_local! {
     /// Builds on this thread.
     pub(crate) static BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Full compatibility model preparation, excluding native catalog observation.
-    pub(crate) static COMPAT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Direct source body reads, excluding native discovery/index parsing.
     pub(crate) static DIRECT_SOURCE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SESSION_DESCRIPTIONS: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
@@ -621,8 +526,6 @@ thread_local! {
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Races after native query derivation, before projection publication.
     pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    /// Races after model derivation, before its projection is published.
-    static AFTER_MODEL_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -966,6 +869,47 @@ fn received_body(record: &Value, tag: &str, from: Option<&str>, skip: usize) -> 
     Some(body.trim().to_owned())
 }
 
+/// The first line Claude Code puts before a parent's message to a running
+/// subagent.
+const COORDINATOR_PREAMBLE: &str = "The coordinator sent a message while you were working:";
+
+/// The body of a parent's message as its subagent received it
+/// (`origin.kind == "coordinator"`): the prompt without that preamble.
+fn coordinator_body(record: &Value) -> Option<String> {
+    let text = prompt_text(record)?;
+    let text = text.trim_start();
+    let body = text
+        .strip_prefix(COORDINATOR_PREAMBLE)
+        .unwrap_or(text)
+        .trim();
+    Some(body.to_owned())
+}
+
+/// Whether a `SendMessage` result delivered the message to a subagent, and
+/// to which: the pinned agent or the resumed one by id, or an empty string
+/// for a send queued for an agent's next tool round that names no id (its
+/// `to` names the agent). `None` for any other result.
+fn down_target(record: &Value, block: usize) -> Option<String> {
+    let result = record
+        .get("toolUseResult")
+        .filter(|result| result.is_object());
+    if let Some(id) = result.and_then(|result| {
+        result
+            .get("pin")
+            .and_then(|pin| field(pin, "id"))
+            .or_else(|| field(result, "resumedAgentId"))
+    }) {
+        return Some(id.to_owned());
+    }
+    let pinned = result.is_some_and(|result| result.get("pin").is_some());
+    let text = result
+        .and_then(|result| field(result, "message"))
+        .map(str::to_owned)
+        .or_else(|| tool_result_text(record, block))
+        .unwrap_or_default();
+    (pinned || text.contains("queued for delivery to")).then(String::new)
+}
+
 fn notification_result(record: &Value, id: &str) -> Option<String> {
     let text = record
         .get("attachment")
@@ -1028,6 +972,12 @@ pub(crate) fn plain_name(name: &str) -> String {
         .map_or(name, |(head, _)| head)
         .trim()
         .to_owned()
+}
+
+/// A received relay's `msg_id`: an agent message's id names its sender, not
+/// the message.
+fn relay_msg_id(event: &Event) -> Option<&String> {
+    event.id.as_ref().filter(|_| event.k == Kind::Xsm)
 }
 
 /// Shared copy-resume identity; bridge peers deliberately do not deduplicate.
@@ -1395,8 +1345,12 @@ fn scan(
         // Stamped before it is read, so a line that lands during the read
         // counts toward the next version, not this one.
         let stamp = stamp_of(&path);
-        let Ok(summary) = events::scan_file(&path, "claude", cache, dirty) else {
-            continue;
+        let summary = match events::scan_file(&path, "claude", cache, dirty) {
+            Ok(summary) => summary,
+            Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(error);
+            }
+            Err(_) => continue,
         };
         let stamp = indexed_stamp(cache, &path, stamp);
         if let Role::Agent(agent) = &mut role {
@@ -1450,8 +1404,12 @@ fn scan(
             continue;
         }
         let stamp = stamp_of(&path);
-        let Ok(summary) = events::scan_file(&path, "codex", cache, dirty) else {
-            continue;
+        let summary = match events::scan_file(&path, "codex", cache, dirty) {
+            Ok(summary) => summary,
+            Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(error);
+            }
+            Err(_) => continue,
         };
         let stamp = indexed_stamp(cache, &path, stamp);
         let Some(header) = summary.codex_header.as_ref() else {
@@ -1696,6 +1654,48 @@ struct H {
     to: Option<usize>,
     previews: Option<BTreeMap<&'static str, PreviewRef>>,
     preview_owners: BTreeMap<String, String>,
+    /// A parent's message that reached its subagent mid-run: an entry of
+    /// the child's current turn, not the start of one.
+    inline: bool,
+}
+
+/// A parent's message to its subagent, paired in [`Builder::down_messages`]
+/// and drawn in [`Builder::relays`].
+struct DownMessage {
+    spawner: usize,
+    child: usize,
+    /// The message as the child received it (`AGM_DOWN`).
+    down: Ref,
+    /// The spawner's `SendMessage` it pairs with.
+    send: Option<Ref>,
+    brief: String,
+    /// It reached an open run: it doesn't start the child's turn.
+    inline: bool,
+}
+
+/// Each spawner's sends that can be to one of its agents: the call, the
+/// agent id its result pins or resumes, and its `to` (plain name).
+type Deliveries = HashMap<usize, Vec<(Ref, Option<String>, String)>>;
+
+/// One run of a Claude subagent ([`Builder::claude_runs`]): how it ended.
+#[derive(Default)]
+struct Run {
+    /// Its hand-back as the parent received it (the latest, if several).
+    fin: Option<Ref>,
+    /// Its agent-end task notification in the parent.
+    tn: Option<Ref>,
+    /// Its `SubagentHandback` call in the child.
+    handback: Option<Ref>,
+}
+
+impl Run {
+    fn handed_back(&self) -> bool {
+        self.fin.is_some() || self.handback.is_some()
+    }
+
+    fn ended(&self) -> bool {
+        self.handed_back() || self.tn.is_some()
+    }
 }
 
 struct PreviewRef {
@@ -1740,6 +1740,7 @@ struct SessionInputs {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DescriptionInputs {
+    pricing_fingerprint: String,
     files: Vec<(PathBuf, FileRevision)>,
     metadata: Vec<String>,
     baseline: String,
@@ -1803,7 +1804,14 @@ struct Builder<'a> {
     shared_usage: BTreeMap<String, crate::claude_usage::Shared>,
     /// A subagent's send to `main`, and its receipt in the parent.
     progress: HashMap<Ref, Ref>,
+    /// A parent's sends to its own subagents ([`Self::down_messages`]):
+    /// never relays to a name.
+    down_sends: BTreeSet<Ref>,
+    /// Parents' messages to their subagents, paired and waiting to be drawn
+    /// among the relays.
+    pending_downs: Vec<DownMessage>,
     staged_endpoints: BTreeMap<String, relation_stage::Endpoint>,
+    staged_origins: BTreeMap<String, relation_stage::RelationOrigin>,
     staged_epoch: Option<i64>,
     matching_refs: Option<BTreeSet<Ref>>,
 }
@@ -1884,7 +1892,10 @@ impl<'a> Builder<'a> {
             copied: BTreeSet::new(),
             shared_usage: BTreeMap::new(),
             progress: HashMap::new(),
+            down_sends: BTreeSet::new(),
+            pending_downs: Vec::new(),
             staged_endpoints: BTreeMap::new(),
+            staged_origins: BTreeMap::new(),
             staged_epoch: None,
             matching_refs: None,
         }
@@ -2140,6 +2151,7 @@ impl<'a> Builder<'a> {
             to,
             previews: None,
             preview_owners: BTreeMap::new(),
+            inline: false,
         });
         self.handoffs.len() - 1
     }
@@ -2426,6 +2438,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         let inputs = DescriptionInputs {
+            pricing_fingerprint: crate::pricing::snapshot().fingerprint.clone(),
             files,
             metadata,
             repos,
@@ -2670,15 +2683,15 @@ impl<'a> Builder<'a> {
                 .unwrap_or_else(|| self.texts.repo(cwd))
         });
         let billing_messages: Vec<events::MessageUsage> = usage.values().cloned().collect();
-        let codex_events: Vec<events::CodexUsageEvent> = if harness == "codex" {
-            files
-                .iter()
-                .flat_map(|file| file.summary.codex_usage_events().iter().cloned())
-                .collect()
+        let mut cost = if harness == "codex" {
+            let mut cost = crate::pricing::CostBuild::default();
+            for file in &files {
+                cost.merge(&file.summary.codex_cost());
+            }
+            cost.finish()
         } else {
-            Vec::new()
+            crate::pricing::calculate_cost(&billing_messages, &[])
         };
-        let mut cost = crate::pricing::calculate_cost(&billing_messages, &codex_events);
         if usage_evidence.is_some() || harness == "copilot" {
             cost.usd = None;
         }
@@ -2905,9 +2918,12 @@ impl<'a> Builder<'a> {
     // -- spawns --
 
     fn claude_spawns(&mut self) -> io::Result<()> {
-        let mut notifications = HashMap::<String, Ref>::new();
-        // Every `<agent-message>` a subagent's parent received from it: its
-        // sends to `main`, and its hand-backs.
+        // Terminal task notifications by tool-use id, in log order: a
+        // subagent's run ends (its spawning call's id) among them.
+        let mut notifications = HashMap::<String, Vec<Ref>>::new();
+        // Every up agent message a session received: a subagent's sends to
+        // `main` and its hand-backs, received in its parent, and its sends to
+        // other agents. Only the parent's count for a spawn.
         let mut receipts = HashMap::<String, Vec<Ref>>::new();
         let mut aliases = HashMap::<String, Vec<Ref>>::new();
         for (position, file) in self.files.iter().enumerate() {
@@ -2925,12 +2941,17 @@ impl<'a> Builder<'a> {
                     (Kind::Tn, Some(id))
                         if !matches!(event.n.as_deref(), None | Some("running" | "started")) =>
                     {
-                        notifications.insert(id.clone(), (position, at));
+                        notifications
+                            .entry(id.clone())
+                            .or_default()
+                            .push((position, at));
                     }
                     // A receipt names its sender by `senderTaskId` (the
                     // agent id or the spawning call's id), or by the tag's
                     // `from` (the agent id), and by `from`.
-                    (Kind::Agm, Some(id)) if file.harness() == "claude" => {
+                    (Kind::Agm, Some(id))
+                        if file.harness() == "claude" && event.script & AGM_UP != 0 =>
+                    {
                         receipts.entry(id.clone()).or_default().push((position, at));
                         if let Some(from) = &event.n {
                             aliases
@@ -3000,6 +3021,23 @@ impl<'a> Builder<'a> {
                 self.sessions[*child].out.lane = true;
             }
         }
+        // In staged relation order (`relation_stage::Relation::order`): by
+        // the child's first event, then its first source, then id. A nested
+        // agent's log can sort before its spawner's.
+        spawns.sort_by_cached_key(|(child, ..)| {
+            let session = &self.sessions[*child];
+            (
+                session.first.unwrap_or(i64::MAX),
+                session
+                    .files
+                    .first()
+                    .map(|file| self.files[*file].path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                stable_id("s", &format!("spawn:claude:{}", session.key)),
+            )
+        });
+        // Each spawner's sends delivered to one of its agents, read once.
+        let mut deliveries = HashMap::new();
         for (child, spawner, call, tool_use_id) in spawns {
             let Some(spawner) = spawner else {
                 continue;
@@ -3030,42 +3068,88 @@ impl<'a> Builder<'a> {
                 .and_then(|at| event(self.files, at).t)
                 .unwrap_or(self.sessions[child].out.start);
             let key = self.sessions[child].key.clone();
-            let mut result = None;
-            if let Some(found) = tool_use_id
-                .as_deref()
-                .and_then(|id| notifications.get(id))
-                .copied()
-            {
-                let id = tool_use_id.clone().unwrap_or_default();
-                let status = event(self.files, found).n.clone().unwrap_or_default();
-                let text = self.text(found, &format!("tn:{id}"), |record, _| {
-                    notification_result(record, &id)
-                });
-                let failed = !matches!(status.as_str(), "completed" | "success" | "done");
-                result = Some((text, event(self.files, found).t, failed));
-                let mut preview = PreviewRef::new(found, "notification");
-                preview.arg = Some(id);
-                previews.insert("result", preview);
-            }
             // Both forms of receipt, by either id, in time order (a receipt
-            // with no time last).
+            // with no time last). Only what the spawner received is the
+            // child's: its message to any other session is a relay between
+            // agents, drawn in `relays`.
             let mut received: Vec<Ref> = [key.as_str()]
                 .into_iter()
                 .chain(tool_use_id.as_deref())
                 .flat_map(|id| receipts.get(id).into_iter().chain(aliases.get(id)))
                 .flatten()
                 .copied()
+                .filter(|at| self.of_file[at.0] == spawner)
                 .collect();
             received.sort_by_key(|at| {
                 let t = event(self.files, *at).t;
                 (t.is_none(), t, *at)
             });
             received.dedup();
+            // Hand-backs never answer a send.
+            let (finals, received): (Vec<Ref>, Vec<Ref>) = received
+                .into_iter()
+                .partition(|at| event(self.files, *at).script & AGM_FINAL != 0);
             let paired = self.pair_sends(child, &key, &received);
-            // A receipt no send claims is a hand-back: the last one is the
-            // result.
+            let ends: Vec<Ref> = tool_use_id
+                .as_deref()
+                .and_then(|id| notifications.get(id))
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|at| self.of_file[at.0] == spawner)
+                .collect();
+            let (runs, inline) = self.claude_runs(&child_events, first_prompt, &finals, &ends);
+            let mut result = None;
+            // The latest run that ended: its hand-back receipt's text, else
+            // its notification's, else the child's `SubagentHandback`. The
+            // notification gives the status; the run ended at whichever came
+            // first.
+            if let Some(run) = runs.iter().rev().find(|run| run.ended()) {
+                let failed = run.tn.is_some_and(|found| {
+                    !matches!(
+                        event(self.files, found).n.as_deref(),
+                        Some("completed" | "success" | "done")
+                    )
+                });
+                let done = [run.fin, run.tn, run.handback]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|at| event(self.files, at).t)
+                    .min();
+                if let Some(index) = run
+                    .fin
+                    .and_then(|found| finals.iter().position(|at| *at == found))
+                {
+                    let text = self.receipt_body(&key, &finals, index);
+                    result = Some((text, done, failed));
+                    previews.insert("result", self.receipt_preview(&key, &finals, index));
+                } else if let Some(found) = run.tn {
+                    let id = tool_use_id.clone().unwrap_or_default();
+                    let text = self.text(found, &format!("tn:{id}"), |record, _| {
+                        notification_result(record, &id)
+                    });
+                    result = Some((text, done, failed));
+                    let mut preview = PreviewRef::new(found, "notification");
+                    preview.arg = Some(id);
+                    previews.insert("result", preview);
+                } else if let Some(found) = run.handback {
+                    // Ended only in the child's log.
+                    let text = self.text(found, "handback", |record, block| {
+                        input_string(record, block, &["message"])
+                    });
+                    result = Some((text, done, false));
+                    previews.insert("result", PreviewRef::new(found, "handback"));
+                }
+            }
+            // A legacy receipt (an `<agent-message>` tag, which doesn't say
+            // whether it is a send or the hand-back) no send claims is a
+            // hand-back: the last one is the result. A progress receipt
+            // never is.
             if result.is_none()
-                && let Some(index) = (0..received.len()).rev().find(|index| !paired[*index])
+                && let Some(index) = (0..received.len()).rev().find(|index| {
+                    !paired[*index]
+                        && event(self.files, received[*index]).script & AGM_PROGRESS == 0
+                })
             {
                 let found = received[index];
                 let text = self.receipt_body(&key, &received, index);
@@ -3096,7 +3180,12 @@ impl<'a> Builder<'a> {
                 previews.insert("result", PreviewRef::new(at, "handback"));
             }
             let running = self.graph_root_alive(spawner);
+            // A resumed run not ended yet works while its tree runs; the
+            // spawn's result stays the previous run's.
+            let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
             let (status, state) = match &result {
+                _ if resumed && running => ("work", "work"),
+                _ if resumed => ("done", "done"),
                 Some((_, _, true)) => ("err", "err"),
                 Some(_) => ("done", "done"),
                 None if running => ("work", "work"),
@@ -3128,8 +3217,341 @@ impl<'a> Builder<'a> {
                     self.head.insert(child, handoff);
                 }
             }
+            self.down_messages(
+                (spawner, child, call),
+                &child_events,
+                &inline,
+                &mut deliveries,
+            );
         }
         Ok(())
+    }
+
+    /// A Claude subagent's runs, in order: the brief's, then one per message
+    /// that reached it after the run before had ended (a resume). A run ends
+    /// at its hand-back (the parent's final receipt, or the child's
+    /// `SubagentHandback`) or at its agent-end notification, whichever comes
+    /// first; the other then belongs to the same run. Also returns the
+    /// parent's messages (`AGM_DOWN`) that reached an open run: inline in
+    /// its turn, not a resume.
+    ///
+    /// The parent writes a run's notification seconds after its hand-back,
+    /// and its hand-back receipt at its next turn, so a resume sent in
+    /// between already opened the next run. Such a completed notification
+    /// belongs to the run before when that one handed back without one, and
+    /// such a receipt when the child handed that run back
+    /// (`SubagentHandback`) and it has no receipt. A failed or killed
+    /// notification ends the open run. One misattribution remains: if run k
+    /// hands back, the child resumes, then a late failed or killed notification
+    /// arrives, it ends run k+1 as `err`; run k+1's own completed notification
+    /// is then ignored.
+    fn claude_runs(
+        &self,
+        child_events: &[Ref],
+        first_prompt: Option<Ref>,
+        finals: &[Ref],
+        ends: &[Ref],
+    ) -> (Vec<Run>, BTreeSet<Ref>) {
+        /// At one time, ends sort before starts: a message written with a
+        /// hand-back follows it.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        enum Step {
+            Final,
+            Handback,
+            End,
+            Start,
+        }
+        let mut steps: Vec<(Ref, Step)> = finals
+            .iter()
+            .map(|at| (*at, Step::Final))
+            .chain(ends.iter().map(|at| (*at, Step::End)))
+            .collect();
+        for at in child_events {
+            let found = event(self.files, *at);
+            let step = match found.k {
+                Kind::Tool if found.n.as_deref() == Some("SubagentHandback") => Step::Handback,
+                Kind::Agm if found.script & AGM_DOWN != 0 => Step::Start,
+                Kind::U if Some(*at) != first_prompt => Step::Start,
+                _ => continue,
+            };
+            steps.push((*at, step));
+        }
+        steps.sort_by_key(|(at, step)| {
+            let t = event(self.files, *at).t;
+            (t.is_none(), t, *step, *at)
+        });
+        let mut runs = vec![Run::default()];
+        let mut inline = BTreeSet::new();
+        for (at, step) in steps {
+            let last = runs.len() - 1;
+            match step {
+                Step::Start if runs[last].ended() => runs.push(Run::default()),
+                Step::Start => {
+                    if event(self.files, at).k == Kind::Agm {
+                        inline.insert(at);
+                    }
+                }
+                // The parent records a hand-back at its next turn, so it can
+                // land after the message that resumed the child: it belongs
+                // to the run the child handed back, when that one has none.
+                Step::Final => {
+                    let target = if last > 0
+                        && !runs[last].ended()
+                        && runs[last - 1].handback.is_some()
+                        && runs[last - 1].fin.is_none()
+                    {
+                        last - 1
+                    } else {
+                        last
+                    };
+                    runs[target].fin = Some(at);
+                }
+                Step::Handback => runs[last].handback = Some(at),
+                // A completed notification after a resume ends the run that
+                // handed back before it, when that one has none. A failed or
+                // killed one is about the run still open: the one before had
+                // handed back, so it didn't fail.
+                Step::End => {
+                    let completed = matches!(
+                        event(self.files, at).n.as_deref(),
+                        Some("completed" | "success" | "done")
+                    );
+                    let target = if last > 0
+                        && completed
+                        && !runs[last].ended()
+                        && runs[last - 1].handed_back()
+                        && runs[last - 1].tn.is_none()
+                    {
+                        last - 1
+                    } else {
+                        last
+                    };
+                    if runs[target].tn.is_none() {
+                        runs[target].tn = Some(at);
+                    }
+                }
+            }
+        }
+        (runs, inline)
+    }
+
+    /// Pairs each message `child`'s parent sent it while it ran or to resume
+    /// it (`AGM_DOWN` in the child), to be drawn as a relay from the spawner
+    /// among the other relays ([`Self::relays`]). Each pairs
+    /// with one of the spawner's `SendMessage` calls to this agent, first by
+    /// body, then by order, as [`Self::pair_sends`] does: the send is the
+    /// relay's outgoing side. A send is to this agent when its result pins or
+    /// resumes it by id, or its `to` is the agent's id, its label, or the
+    /// `name` its spawning call gave it. Every such send, paired or not, is
+    /// this agent's and never a relay to a name ([`Self::relays`]). An
+    /// unpaired message is still drawn, from its own text. One that reached
+    /// an open run is inline: it doesn't start a turn.
+    fn down_messages(
+        &mut self,
+        (spawner, child, call): (usize, usize, Option<Ref>),
+        child_events: &[Ref],
+        inline: &BTreeSet<Ref>,
+        deliveries: &mut Deliveries,
+    ) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = deliveries.entry(spawner) {
+            let mut found = Vec::new();
+            for at in self.events_of(spawner) {
+                let send = event(self.files, at);
+                if send.k != Kind::Tool || send.n.as_deref() != Some("SendMessage") {
+                    continue;
+                }
+                let Some(reply) = &send.r else {
+                    continue;
+                };
+                if reply.e || reply.f & (DENIED | SEND_FAILED) != 0 || reply.m.is_some() {
+                    continue;
+                }
+                let id = self
+                    .result_text(at, "down-target", down_target)
+                    .filter(|id| !id.is_empty());
+                let to = plain_name(&self.send_target(at));
+                found.push((at, id, to));
+            }
+            slot.insert(found);
+        }
+        let key = self.sessions[child].key.clone();
+        let mut names = vec![key.clone()];
+        names.extend(Some(self.sessions[child].out.name.clone()).filter(|name| !name.is_empty()));
+        names.extend(
+            call.and_then(|at| {
+                self.text(at, "name", |record, block| {
+                    input_string(record, block, &["name"])
+                })
+            })
+            .map(|name| plain_name(&name))
+            .filter(|name| !name.is_empty()),
+        );
+        let sends: Vec<Ref> = deliveries[&spawner]
+            .iter()
+            .filter(|(at, id, to)| {
+                !self.down_sends.contains(at)
+                    && match id {
+                        Some(id) => *id == key,
+                        None => names.contains(to),
+                    }
+            })
+            .map(|(at, _, _)| *at)
+            .collect();
+        self.down_sends.extend(sends.iter().copied());
+        let downs: Vec<Ref> = child_events
+            .iter()
+            .copied()
+            .filter(|at| {
+                let found = event(self.files, *at);
+                found.k == Kind::Agm && found.script & AGM_DOWN != 0
+            })
+            .collect();
+        if downs.is_empty() {
+            return;
+        }
+        let bodies: Vec<Option<String>> = downs
+            .iter()
+            .map(|at| self.text(*at, "down", |record, _| coordinator_body(record)))
+            .collect();
+        let messages: Vec<Option<String>> = sends
+            .iter()
+            .map(|at| {
+                self.text(*at, "message", |record, block| {
+                    input_string(record, block, &["message", "content"])
+                })
+            })
+            .collect();
+        let files = self.files;
+        // Sent no later than it arrived, when both times are known.
+        let before = |send: Ref, down: Ref| {
+            event(files, send)
+                .t
+                .zip(event(files, down).t)
+                .is_none_or(|(sent, arrived)| sent <= arrived)
+        };
+        let mut claims: Vec<Option<usize>> = vec![None; downs.len()];
+        let mut used = vec![false; sends.len()];
+        let mut next = 0;
+        for (index, down) in downs.iter().enumerate() {
+            let Some(body) = bodies[index].as_deref().map(str::trim) else {
+                continue;
+            };
+            let found = (next..sends.len()).find(|send| {
+                !used[*send]
+                    && before(sends[*send], *down)
+                    && messages[*send].as_deref().map(str::trim) == Some(body)
+            });
+            if let Some(send) = found {
+                used[send] = true;
+                claims[index] = Some(send);
+                next = send + 1;
+            }
+        }
+        for (index, down) in downs.iter().enumerate() {
+            if claims[index].is_some() {
+                continue;
+            }
+            let low = claims[..index]
+                .iter()
+                .rev()
+                .find_map(|claim| *claim)
+                .map_or(0, |send| send + 1);
+            let high = claims[index + 1..]
+                .iter()
+                .find_map(|claim| *claim)
+                .unwrap_or(sends.len());
+            let found = (low..high).find(|send| !used[*send] && before(sends[*send], *down));
+            if let Some(send) = found {
+                used[send] = true;
+                claims[index] = Some(send);
+            }
+        }
+        for (index, down) in downs.iter().enumerate() {
+            let send = claims[index].map(|claim| sends[claim]);
+            let brief = match claims[index] {
+                Some(claim) => messages[claim].clone(),
+                None => bodies[index].clone(),
+            };
+            self.pending_downs.push(DownMessage {
+                spawner,
+                child,
+                down: *down,
+                send,
+                brief: brief.unwrap_or_default(),
+                inline: inline.contains(down),
+            });
+        }
+    }
+
+    /// Where a relay sorts among the staged relations
+    /// (`relation_stage::Relation::order`, phase aside): its sender's first
+    /// source, then its outgoing placement. The shared builder draws relays
+    /// in this order so a staged replay keeps it.
+    fn relay_order(&self, from: usize, out: Option<Ref>) -> (String, u64, u32) {
+        let path = self.sessions[from]
+            .files
+            .first()
+            .map(|file| self.files[*file].path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (offset, block) = out.map_or((0, 0), |at| {
+            let found = event(self.files, at);
+            (found.o, found.b)
+        });
+        (path, offset, block)
+    }
+
+    /// A parent's message's handoff id, from where its child received it.
+    fn down_id(&self, message: &DownMessage) -> String {
+        let down = message.down;
+        stable_id(
+            "r",
+            &format!(
+                "relay:down:{}:{}",
+                self.files[down.0].id,
+                event(self.files, down).o
+            ),
+        )
+    }
+
+    /// Draws one parent's message to its subagent ([`Self::down_messages`]).
+    fn draw_down(&mut self, message: DownMessage) {
+        let id = self.down_id(&message);
+        let DownMessage {
+            spawner,
+            child,
+            down,
+            send,
+            brief,
+            inline,
+        } = message;
+        let at = send
+            .and_then(|send| event(self.files, send).t)
+            .or(event(self.files, down).t)
+            .unwrap_or(self.sessions[child].out.start);
+        let handoff = Handoff::new(
+            id,
+            "relay",
+            (
+                self.sessions[spawner].key.clone(),
+                self.sessions[child].key.clone(),
+            ),
+            at,
+            "done",
+            &brief,
+        );
+        let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+        self.handoffs[handoff].inline = inline;
+        self.handoffs[handoff].previews = Some(BTreeMap::from([(
+            "brief",
+            match send {
+                Some(send) => PreviewRef::new(send, "relay"),
+                None => PreviewRef::new(down, "received_down"),
+            },
+        )]));
+        if let Some(send) = send {
+            self.place(send, handoff, Place::Out);
+        }
+        self.place(down, handoff, Place::In);
     }
 
     /// A Codex run's spawner, the call that launched it when that is
@@ -3328,7 +3750,14 @@ impl<'a> Builder<'a> {
                     .events_of(spawner)
                     .into_iter()
                     .chain(child_events.iter().copied())
-                    .filter(|at| event(self.files, *at).k == Kind::Agm)
+                    .filter(|at| {
+                        // Only what the child sent up is its result: not its
+                        // message to its own child or to a sibling. One with
+                        // no recipient has no direction and counts, as
+                        // before.
+                        let found = event(self.files, *at);
+                        found.k == Kind::Agm && found.script & (AGM_DOWN | AGM_SIDE) == 0
+                    })
                     .collect();
                 for at in candidates {
                     let author = self.text(at, "author", |record, _| {
@@ -3389,6 +3818,7 @@ impl<'a> Builder<'a> {
     fn relays(&mut self) -> io::Result<()> {
         let mut received = HashMap::<String, Vec<Ref>>::new();
         let mut unkeyed = Vec::new();
+        let claimed: BTreeSet<Ref> = self.progress.values().copied().collect();
         for (position, file) in self.files.iter().enumerate() {
             if file.harness() != "claude" {
                 continue;
@@ -3403,7 +3833,18 @@ impl<'a> Builder<'a> {
                 if self.copied.contains(&(position, at)) {
                     continue;
                 }
-                if event.k != Kind::Xsm || !self.match_selected((position, at)) {
+                // An agent's send that isn't its hand-back and that no send
+                // to `main` claimed: to an agent that isn't its parent (a
+                // relay between agents), or to its parent unpaired. Its id
+                // names the sender, not the message.
+                let agent = event.k == Kind::Agm
+                    && event.script & AGM_PROGRESS != 0
+                    && !claimed.contains(&(position, at));
+                if !(event.k == Kind::Xsm || agent) || !self.match_selected((position, at)) {
+                    continue;
+                }
+                if agent {
+                    unkeyed.push((position, at));
                     continue;
                 }
                 match &event.id {
@@ -3430,6 +3871,7 @@ impl<'a> Builder<'a> {
                 if event.k == Kind::Tool
                     && event.n.as_deref() == Some("SendMessage")
                     && self.match_selected((position, at))
+                    && !self.down_sends.contains(&(position, at))
                     && let Some(reply) = &event.r
                     && reply.f & PIN == 0
                 {
@@ -3437,6 +3879,28 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Use the relation key before merging down messages with sends. A
+        // session may span files, so use each source path and local event index
+        // to break ties without inheriting `self.files` position order.
+        sends.sort_by_cached_key(|((position, at), _)| {
+            (
+                self.relay_order(self.of_file[*position], Some((*position, *at))),
+                self.files[*position].path.to_string_lossy().into_owned(),
+                *at,
+            )
+        });
+        // A send its result proves went to an agent in this process (pinned,
+        // resuming it, or queued for its next tool round) is that agent's
+        // message, drawn with its receipt by `down_messages`, never a relay
+        // to a name.
+        let mut peer_sends = Vec::with_capacity(sends.len());
+        for (at, reply) in sends {
+            if reply.m.is_none() && self.result_text(at, "down-target", down_target).is_some() {
+                continue;
+            }
+            peer_sends.push((at, reply));
+        }
+        let sends = peer_sends;
         // D3's fallback: names learned only from exact joins and records.
         let mut names = HashMap::<String, BTreeSet<usize>>::new();
         for (index, session) in self.sessions.iter().enumerate() {
@@ -3458,7 +3922,26 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Parents' messages to their subagents are relays too, drawn in
+        // relation order among the sends.
+        // Ties sort by handoff id, as staged relations do.
+        let mut downs: Vec<_> = std::mem::take(&mut self.pending_downs)
+            .into_iter()
+            .map(|message| {
+                (
+                    self.relay_order(message.spawner, message.send),
+                    self.down_id(&message),
+                    message,
+                )
+            })
+            .collect();
+        downs.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        let mut downs = downs.into_iter().peekable();
         for (at, reply) in sends {
+            let order = self.relay_order(self.of_file[at.0], Some(at));
+            while let Some((_, _, message)) = downs.next_if(|(key, _, _)| *key < order) {
+                self.draw_down(message);
+            }
             let from = self.of_file[at.0];
             let tool_id = event(self.files, at).id.clone().unwrap_or_default();
             let message = self.text(at, "message", |record, block| {
@@ -3466,7 +3949,7 @@ impl<'a> Builder<'a> {
             });
             let mut unmatched = false;
             let failed = reply.e || reply.f & (DENIED | SEND_FAILED) != 0;
-            let source = match &reply.m {
+            let mut source = match &reply.m {
                 Some(id) => format!("relay:{id}"),
                 None => format!("relay:tool:{tool_id}"),
             };
@@ -3486,8 +3969,21 @@ impl<'a> Builder<'a> {
                 (None, None)
             } else if let Some(parent) = self.parent_addressed(from, at) {
                 // Received as the parent's `<agent-message>` that answers
-                // this send (paired when the spawn was read).
-                (Some(parent), self.progress.get(&at).copied())
+                // this send (paired when the spawn was read). A progress
+                // receipt names the relay, as it does when no send claims
+                // it: the parent's turn it starts is then known from the
+                // parent's log alone.
+                let receipt = self.progress.get(&at).copied();
+                if let Some(receipt) = receipt
+                    && event(self.files, receipt).script & AGM_PROGRESS != 0
+                {
+                    source = format!(
+                        "relay:recv:{}:{}",
+                        self.files[receipt.0].id,
+                        event(self.files, receipt).o
+                    );
+                }
+                (Some(parent), receipt)
             } else if reply.m.is_some() {
                 let name = plain_name(&self.send_target(at));
                 unmatched = true;
@@ -3540,6 +4036,9 @@ impl<'a> Builder<'a> {
                 self.place(receiver, handoff, Place::In);
             }
         }
+        for (_, _, message) in downs {
+            self.draw_down(message);
+        }
         // Received with no send in these logs: the sender is a stub keyed by
         // its process, or the sending subagent that `origin.from` names.
         let mut orphans: Vec<(String, Ref)> = received
@@ -3558,23 +4057,36 @@ impl<'a> Builder<'a> {
         for (source, at) in orphans {
             let to = self.of_file[at.0];
             let found = event(self.files, at).clone();
+            let agent = found.k == Kind::Agm;
             let peer = found.peer.clone().unwrap_or_default();
-            let name = found.n.as_deref().map(plain_name).unwrap_or_default();
+            let name = found
+                .n
+                .as_deref()
+                .or(found.id.as_deref().filter(|_| agent))
+                .map(plain_name)
+                .unwrap_or_default();
             // A subagent's message to another subagent carries no msg_id;
-            // its `origin.from` is the sending agent's id. Anything else is a
-            // stub: a socket belongs to a process, not to whichever session
-            // that process writes now, so a live pid file proves nothing.
+            // its `origin.from` (or `senderTaskId`) is the sending agent's id.
+            // Anything else is a stub: a socket belongs to a process, not to
+            // whichever session that process writes now, so a live pid file
+            // proves nothing.
+            let agent_id = |id: &str| {
+                self.by_native
+                    .get(&("claude", id.to_owned()))
+                    .copied()
+                    .filter(|from| {
+                        self.sessions[*from].kind == SessKind::Agent
+                            || self
+                                .staged_endpoints
+                                .get(&self.sessions[*from].key)
+                                .is_some_and(|endpoint| endpoint.facts_kind == "subagent")
+                    })
+            };
             let from = peer
                 .sock
                 .as_deref()
-                .and_then(|from| self.by_native.get(&("claude", from.to_owned())).copied())
-                .filter(|from| {
-                    self.sessions[*from].kind == SessKind::Agent
-                        || self
-                            .staged_endpoints
-                            .get(&self.sessions[*from].key)
-                            .is_some_and(|endpoint| endpoint.facts_kind == "subagent")
-                });
+                .and_then(agent_id)
+                .or_else(|| found.id.as_deref().filter(|_| agent).and_then(agent_id));
             let from = from.unwrap_or_else(|| {
                 let identity = match (peer.pid, &peer.start, &peer.sock) {
                     (Some(pid), start, _) => {
@@ -3585,9 +4097,12 @@ impl<'a> Builder<'a> {
                 };
                 self.stub(&identity, &name)
             });
-            let body = self.text(at, "body", |record, _| {
-                received_body(record, "cross-session-message", None, 0)
-            });
+            let tag = if agent {
+                "agent-message"
+            } else {
+                "cross-session-message"
+            };
+            let body = self.text(at, "body", |record, _| received_body(record, tag, None, 0));
             let handoff = Handoff {
                 unmatched: self.sessions[from].kind == SessKind::Stub
                     && !self.staged_endpoints.contains_key(&self.sessions[from].key),
@@ -3607,7 +4122,14 @@ impl<'a> Builder<'a> {
             self.place(at, handoff, Place::In);
             self.handoffs[handoff].previews = Some(BTreeMap::from([(
                 "brief",
-                PreviewRef::new(at, "received_cross"),
+                PreviewRef::new(
+                    at,
+                    if agent {
+                        "received_agent"
+                    } else {
+                        "received_cross"
+                    },
+                ),
             )]));
         }
         Ok(())
@@ -3643,9 +4165,10 @@ impl<'a> Builder<'a> {
     /// unpaired (its receipt's body differs, say escaped), by time: the
     /// first unclaimed receipt between its neighbours' receipts, written
     /// from the send up to the child's last event before its next send or
-    /// prompt. A hand-back is written after that last event, so it is never
-    /// claimed; a send whose receipt isn't in these logs claims none.
-    /// Returns which receipts were claimed.
+    /// prompt. `received` holds the parent's progress and legacy receipts,
+    /// never a final one (`AGM_FINAL`); a legacy hand-back is written after
+    /// that last event, so it is never claimed. A send whose receipt isn't in
+    /// these logs claims none. Returns which receipts were claimed.
     fn pair_sends(&mut self, child: usize, key: &str, received: &[Ref]) -> Vec<bool> {
         let mut paired = vec![false; received.len()];
         let refs = self.events_of(child);
@@ -4008,9 +4531,6 @@ impl<'a> Builder<'a> {
                 // The Catalog and slot recipes contain only the relationship.
                 // Query reads its brief from the same captured generation when
                 // a selected session or searched slot actually requests it.
-                let text = (target.reference_model())
-                    .then(|| self.text(at, "user", |record, _| prompt_text(record)))
-                    .flatten();
                 let file = &self.files[at.0];
                 let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
                 let id = stable_id(ASK_PREFIX, &source);
@@ -4031,7 +4551,7 @@ impl<'a> Builder<'a> {
                         .t
                         .unwrap_or(self.sessions[index].out.start),
                     "done",
-                    text.as_deref().unwrap_or(""),
+                    "",
                 );
                 let handoff = self.add_handoff(handoff, None, Some(index));
                 self.handoffs[handoff].previews = Some(BTreeMap::from([(
@@ -4333,9 +4853,54 @@ impl<'a> Builder<'a> {
         }
         !refs[start_position..=reply_position].iter().any(|at| {
             let event = event(self.files, *at);
-            matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn)
+            matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn) && !self.continues_turn(*at)
                 || event.k == Kind::Tool && event.n.as_deref() == Some("SubagentHandback")
         }) && start.is_none_or(|start| self.handoffs[start].out.from == "you")
+    }
+
+    /// An incoming event that doesn't interrupt the turn it falls in: a
+    /// parent's message that reached its subagent's open run (inline), or
+    /// the end of a subagent run this session spawned, as its agent-end
+    /// notification or its hand-back (a result and a status, not a message).
+    /// A progress send from that subagent is a message and still interrupts.
+    fn continues_turn(&self, at: Ref) -> bool {
+        let found = event(self.files, at);
+        match found.k {
+            Kind::Agm if found.script & AGM_DOWN != 0 => {
+                self.placed.get(&at).is_some_and(|placed| {
+                    placed
+                        .iter()
+                        .all(|(handoff, _)| self.handoffs[*handoff].inline)
+                })
+            }
+            Kind::Tn => {
+                !self.bg_ends.contains_key(&at)
+                    && found
+                        .id
+                        .as_deref()
+                        .is_some_and(|id| self.spawned_here(at, id))
+            }
+            // A hand-back from this session's own subagent is that spawn's
+            // result, as its agent-end notification is: neither is a message
+            // that starts other work.
+            Kind::Agm if found.script & AGM_FINAL != 0 => [found.id.as_deref(), found.n.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|id| self.spawned_here(at, id)),
+            _ => false,
+        }
+    }
+
+    /// Whether `id` names a subagent that the session holding `at` spawned:
+    /// its own `Agent`/`Task` call's id, or the agent's id.
+    fn spawned_here(&self, at: Ref, id: &str) -> bool {
+        let session = self.of_file[at.0];
+        self.find_in(session, id).is_some_and(|call| {
+            matches!(event(self.files, call).n.as_deref(), Some("Agent" | "Task"))
+        }) || self
+            .by_native
+            .get(&("claude", id.to_owned()))
+            .is_some_and(|child| *child != session && self.sessions[*child].parent == Some(session))
     }
 
     fn activity(&mut self, index: usize) {
@@ -4355,8 +4920,8 @@ impl<'a> Builder<'a> {
             return;
         };
         let found = event(self.files, at).clone();
-        // The start time: the age and the 30-minute expiry are applied
-        // when the model is served, so they never freeze between builds.
+        // Preserve the recorded start; native readers determine current activity
+        // from their independently qualified runtime observation.
         let Some(time) = found.t else {
             return;
         };
@@ -4383,8 +4948,7 @@ impl<'a> Builder<'a> {
                 })
             })
             .unwrap_or_default();
-        // The age is filled when served, so `version` depends on the
-        // logs alone.
+        // Keep runtime age out of the persisted native observation.
         self.sessions[index].out.activity = Some((name, arg, 0, time));
     }
 
@@ -4704,33 +5268,6 @@ impl<'a> Builder<'a> {
         serde_json::json!({"events":events,"detail":current.and_then(origin),"detail_from":detail_from,"detail_from_name":detail_from_name,"activity":activity})
     }
 
-    #[cfg(test)]
-    fn texts_by_turn(&self) -> BTreeMap<String, Vec<(usize, u64, u32)>> {
-        let mut result = BTreeMap::new();
-        for (index, session) in self.sessions.iter().enumerate() {
-            if session.kind == SessKind::Stub {
-                continue;
-            }
-            let entries = self.entries(index);
-            let texts: Vec<(usize, u64, u32)> = self
-                .groups(index, &entries)
-                .iter()
-                .enumerate()
-                .flat_map(|(number, turn)| {
-                    turn.entries
-                        .iter()
-                        .map(|position| &entries[*position])
-                        .filter(|entry| matches!(entry.kind, EntryKind::A))
-                        .filter_map(|entry| entry.at)
-                        .map(move |at| (number, event(self.files, at).o, event(self.files, at).b))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            result.insert(session.key.clone(), texts);
-        }
-        result
-    }
-
     /// Every session's turns, and its transcript index: the entries the
     /// turns were split from, with the transcript-only extras merged in.
     fn link_digests(&self) -> Vec<Vec<String>> {
@@ -4866,6 +5403,103 @@ impl<'a> Builder<'a> {
             .descriptions
             .retain(|key, _| self.by_key.contains_key(key));
         (turns, transcripts)
+    }
+
+    /// Matching selects incident relationships, not the sender's turn boundaries.
+    /// Complete native receipts are needed even when their edges belong to a
+    /// different message page. These temporary boundaries carry no sender claim
+    /// and never enter the staged relationships or published projection.
+    fn complete_sender_turns(&mut self) -> io::Result<Option<Vec<Turn>>> {
+        let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
+            return Ok(None);
+        };
+        let senders: BTreeSet<_> = self
+            .handoffs
+            .iter()
+            .filter(|h| matches!(h.out.kind, "spawn" | "relay"))
+            .filter_map(|h| h.from)
+            .filter(|sender| !self.sessions[*sender].files.is_empty())
+            .collect();
+        let mut candidates = Vec::new();
+        for sender in &senders {
+            for file in &self.sessions[*sender].files {
+                if self.files[*file].harness() != "claude" {
+                    continue;
+                }
+                for (at, found) in self.files[*file].summary.events.iter().enumerate() {
+                    let at = (*file, at);
+                    // An agent's send that isn't its hand-back is drawn as a
+                    // relay too, unless its send placed it.
+                    if (found.k == Kind::Xsm
+                        || found.k == Kind::Agm && found.script & AGM_PROGRESS != 0)
+                        && !self.copied.contains(&at)
+                        && !self.placed.contains_key(&at)
+                    {
+                        candidates.push(at);
+                    }
+                }
+            }
+        }
+        let mut receipts = BTreeMap::<String, Option<Ref>>::new();
+        let mut boundaries = Vec::new();
+        for at in candidates {
+            let eligible = if let Some(id) = relay_msg_id(event(self.files, at)).cloned() {
+                let canonical = if let Some(canonical) = receipts.get(&id) {
+                    *canonical
+                } else {
+                    let selected = self.cache.semantic_select(
+                        epoch,
+                        &relation_stage::Selector::ClaudeReceipt { id: id.clone() },
+                    )?;
+                    let canonical = match selected.location {
+                        Some(location) => location.local(self)?,
+                        None => None,
+                    };
+                    receipts.insert(id, canonical);
+                    canonical
+                };
+                canonical == Some(at)
+            } else {
+                true
+            };
+            if eligible {
+                boundaries.push(at);
+            }
+        }
+        let original = self.handoffs.len();
+        for at in &boundaries {
+            let found = event(self.files, *at);
+            let receiver = self.of_file[at.0];
+            let source = relay_msg_id(found)
+                .map(|id| format!("relay:{id}"))
+                .unwrap_or_else(|| format!("relay:recv:{}:{}", self.files[at.0].id, found.o));
+            let index = self.handoffs.len();
+            self.handoffs.push(H {
+                out: Handoff::new(
+                    stable_id("r", &source),
+                    "relay",
+                    (String::new(), self.sessions[receiver].key.clone()),
+                    found.t.unwrap_or(self.sessions[receiver].out.start),
+                    "done",
+                    "",
+                ),
+                from: None,
+                to: Some(receiver),
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                inline: false,
+            });
+            self.placed.insert(*at, vec![(index, Place::In)]);
+        }
+        let mut turns = Vec::new();
+        for sender in senders {
+            turns.extend(self.split(sender, &self.entries(sender)).0);
+        }
+        for at in boundaries {
+            self.placed.remove(&at);
+        }
+        self.handoffs.truncate(original);
+        Ok(Some(turns))
     }
 
     /// A stub has no transcript of its own: it shows the handoffs that name
@@ -5112,6 +5746,7 @@ impl<'a> Builder<'a> {
                         {
                             SlotKind::Sent {
                                 shown,
+                                result_source: found.result_source,
                                 reply: found.r.clone(),
                                 start: started.o,
                                 done: started
@@ -5123,6 +5758,7 @@ impl<'a> Builder<'a> {
                         }
                         _ => SlotKind::Tool {
                             shown,
+                            result_source: found.is_some_and(|found| found.result_source),
                             name: found
                                 .and_then(|found| found.n.clone())
                                 .unwrap_or_else(|| "tool".into()),
@@ -5434,6 +6070,7 @@ impl<'a> Builder<'a> {
                     let found = &self.handoffs[handoff];
                     found.to == Some(index)
                         && matches!(found.out.kind, "ask" | "relay" | "spawn")
+                        && !found.inline
                         && !started.contains(&handoff)
                 }
                 EntryKind::U => true,
@@ -5763,7 +6400,7 @@ enum EntryKind {
 }
 
 /// How a tool call is drawn: a pending call is live only in the last turn
-/// of a working session, as the model's turn ends and activity read it.
+/// of a working session, shared by native turn ends and activity derivation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Shown {
     Ok,
@@ -5817,6 +6454,8 @@ pub(crate) enum SlotKind {
     Tool {
         shown: Shown,
         name: String,
+        /// This code-mode call prints its exact single awaited result.
+        result_source: bool,
         reply: Option<events::Reply>,
         /// A plain Codex call's `CommandExecution` item line, when the logs
         /// have one: its output is the whole copy.
@@ -5855,6 +6494,8 @@ pub(crate) enum SlotKind {
     /// A poll that sent input to a yielded command: a step of its own.
     Sent {
         shown: Shown,
+        /// This poll prints its exact single awaited result.
+        result_source: bool,
         reply: Option<events::Reply>,
         /// The line of the script that started the command, and of the item
         /// that completed it.
@@ -5875,7 +6516,7 @@ pub(crate) enum SlotKind {
     NoActivity,
 }
 
-/// Content-free signal metadata. Source event indices never leave the model.
+/// Content-free signal metadata. Physical event indices remain private.
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct SignalData {
     pub(crate) kind: events::SignalKind,
@@ -5917,7 +6558,7 @@ pub(crate) struct Slot {
     pub(crate) offset: u64,
     pub(crate) block: u32,
     pub(crate) t: Option<i64>,
-    /// The turn it belongs to, when that turn is in the model.
+    /// The native turn it belongs to, when one is observed.
     pub(crate) turn: Option<String>,
     /// The first entry of its turn.
     pub(crate) first: bool,
@@ -5944,7 +6585,7 @@ impl Slot {
 
     /// Whether this slot is a tool call and, if it is, whether it failed or
     /// never finished: exactly what a transcript's `calls` and `errors`
-    /// count, so the errors badge and `/api/tx?errors=1` agree.
+    /// count, so native call/error totals share this classification.
     pub(crate) fn failed_call(&self) -> Option<bool> {
         match &self.kind {
             SlotKind::Tool { shown, bg, .. } => Some(
@@ -6205,6 +6846,9 @@ pub(crate) fn overview_text(recipe: &Value, record: &Value, question: Option<&Va
         Some("received_cross") => serde_json::json!(
             received_body(record, "cross-session-message", None, 0).map(|text| cap(&text, MSG_MAX))
         ),
+        Some("received_down") => {
+            serde_json::json!(coordinator_body(record).map(|text| cap(&text, MSG_MAX)))
+        }
         Some("handback") => serde_json::json!(
             input_string(record, block, &["message"]).map(|text| cap(&text, MSG_MAX))
         ),
@@ -6524,81 +7168,14 @@ pub(crate) fn arg_summary(
 
 // ---- Build -------------------------------------------------------------------------------
 
-/// Builds the model from the whole of `~/.claude` and `~/.codex`: links need
-/// both ends, so every file is indexed whatever the window, and the window
-/// only trims what is returned. With [`Options::scan_window`], files last
-/// modified before the window aren't read at all.
-/// Semantic fixture oracle only; never a Viewer owner, cache or read fallback.
-#[cfg(test)]
-pub(crate) fn reference_json(options: &Options, now: i64) -> serde_json::Value {
-    let mut cache = EventCache::open_scoped(&options.cache).unwrap();
-    let built = build(options, &mut cache, &mut false, &mut Texts::default(), now).unwrap();
-    serde_json::from_str(&built.json(now)).unwrap()
-}
-
-#[cfg(test)]
-pub(crate) fn build(
-    options: &Options,
-    cache: &mut EventCache,
-    dirty: &mut bool,
-    texts: &mut Texts,
-    now: i64,
-) -> io::Result<Built> {
-    build_sources(options, cache, dirty, texts, now, None)
-}
-
-/// Native projection over an explicit, authorized source closure. Request-local
-/// caches have no writable store. Discovery and publication remain separate;
-/// callers must not claim missing relationship context as a complete graph.
-#[cfg(test)]
-pub(crate) fn build_sources(
-    options: &Options,
-    cache: &mut EventCache,
-    dirty: &mut bool,
-    texts: &mut Texts,
-    now: i64,
-    selected: Option<&[crate::inputs::Input]>,
-) -> io::Result<Built> {
-    match build_sources_inner(
-        options,
-        cache,
-        dirty,
-        texts,
-        now,
-        BuildSelection::Current(selected),
-        BuildTarget::Model,
-    )? {
-        BuildOutput::Model(built) => Ok(*built),
-        _ => Err(io::Error::other("native producer did not build model")),
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildTarget {
-    #[cfg(test)]
-    Model,
     Query,
     Catalog,
     Sources,
 }
 
-impl BuildTarget {
-    fn reference_model(self) -> bool {
-        #[cfg(test)]
-        {
-            matches!(self, Self::Model)
-        }
-        #[cfg(not(test))]
-        {
-            let _ = self;
-            false
-        }
-    }
-}
-
 enum BuildOutput {
-    #[cfg(test)]
-    Model(Box<Built>),
     Query(Box<QueryData>),
     Catalog(BTreeSet<u32>, Option<String>),
     Sources(Box<PreparedSources>),
@@ -6630,8 +7207,8 @@ pub(crate) fn build_query(
     }
 }
 
-/// Reconcile native metadata and transcript slots without preparing legacy
-/// model analytics or transport. Complete observation still discovers all sources.
+/// Reconcile native metadata and transcript slots. Complete observation still
+/// discovers all sources.
 #[cfg(test)]
 pub(crate) fn observe_catalog(
     options: &Options,
@@ -6672,7 +7249,7 @@ pub(crate) fn observe_catalog_fenced(
     }
 }
 
-/// Native producer output captured before compatibility-window trimming.
+/// Native producer output captured before output-window trimming.
 /// Scoped preparation does not publish or prune unrelated source membership.
 pub(crate) struct PreparedSources {
     pub(crate) base_generation: Option<String>,
@@ -7373,7 +7950,7 @@ fn build_sources_inner(
             hook();
         }
     }
-    if !target.reference_model() && history_records.is_none() {
+    if history_records.is_none() {
         measured!("sidecars_before", files.len(), verify_sidecars(&files)?);
     }
     let started = measurements.start();
@@ -7402,8 +7979,6 @@ fn build_sources_inner(
     let held;
     let machine;
     let home;
-    #[cfg(test)]
-    let offline_since;
     let groups;
     timed!("facts", {
         pids = pid_files(options, &facts);
@@ -7414,10 +7989,6 @@ fn build_sources_inner(
             .collect::<BTreeSet<String>>();
         machine = facts.hostname(options);
         home = facts.home();
-        #[cfg(test)]
-        {
-            offline_since = facts.offline_since();
-        }
         groups = lineages(&files);
     });
     if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
@@ -7446,11 +8017,7 @@ fn build_sources_inner(
     let source_proofs = measured!(
         "source_capture",
         files.len(),
-        if target.reference_model() {
-            crate::query_source::Sources::capture_native(options, sources)?
-        } else {
-            crate::query_source::Sources::capture(options, sources)?
-        }
+        crate::query_source::Sources::capture(options, sources)?
     );
     let source_records = source_proofs.reader();
     if history_records.is_none() {
@@ -7535,7 +8102,7 @@ fn build_sources_inner(
         }
     }
     if let Some(relationships) = staged_relationships {
-        timed!("staged_relationships", relationships.install(&mut builder)?);
+        timed!("staged_relationships", relationships.replay(&mut builder)?);
     } else {
         timed!("claude_spawns", builder.claude_spawns()?);
         timed!("codex_spawns", builder.codex_spawns()?);
@@ -7641,8 +8208,7 @@ fn build_sources_inner(
             rows,
             Some(&source_records),
             history_records,
-            (!target.reference_model() && history_records.is_none())
-                .then_some((&*builder.cache, catalog_base.as_deref())),
+            (history_records.is_none()).then_some((&*builder.cache, catalog_base.as_deref())),
         )
     });
     measurements.record(
@@ -7721,8 +8287,8 @@ fn build_sources_inner(
                 .get(row.key.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            // The local model remains usable for native paths that cannot be
-            // represented by the portable catalog. Never publish a lossy alias.
+            // Portable Catalog records require exact native paths. Never publish
+            // a lossy alias; local native tree discovery has its own path support.
             if row
                 .sources
                 .iter()
@@ -7751,12 +8317,15 @@ fn build_sources_inner(
                         tx.get(&row.key).map(Arc::as_ref),
                     )
                     .with_origin_turns(&holding_turns, &ambiguous_holding_turns)
-                    .with_staged_origin_turns(staged_relationships, |sender| {
-                        builder
-                            .by_key
-                            .get(sender)
-                            .is_some_and(|at| !builder.sessions[*at].files.is_empty())
-                    })?
+                    .with_staged_origin_turns(
+                        staged_relationships.map(|_| &builder.staged_origins),
+                        |sender| {
+                            builder
+                                .by_key
+                                .get(sender)
+                                .is_some_and(|at| !builder.sessions[*at].files.is_empty())
+                        },
+                    )?
                     .with_family_cost(family_costs[&row.key.as_str()]),
                 );
                 measurements.record("projection_trace", started, 1);
@@ -7833,7 +8402,7 @@ fn build_sources_inner(
     }
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "runtime_checked");
-    if !target.reference_model() && history_records.is_none() {
+    if history_records.is_none() {
         measured!("sidecars_after", files.len(), verify_sidecars(&files)?);
     }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
@@ -7860,8 +8429,12 @@ fn build_sources_inner(
     }
     match target {
         BuildTarget::Sources => {
-            let relationships =
-                relation_stage::Context::capture(&builder, published_facts.as_ref(), &turns);
+            let sender_turns = builder.complete_sender_turns()?;
+            let relationships = relation_stage::Context::capture(
+                &builder,
+                published_facts.as_ref(),
+                sender_turns.as_deref().unwrap_or(&turns),
+            );
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
             let mut message_dependencies = Some(Vec::new());
@@ -7957,23 +8530,11 @@ fn build_sources_inner(
             ));
         }
         BuildTarget::Query => {}
-        #[cfg(test)]
-        BuildTarget::Model => {}
     }
-    #[cfg(test)]
-    if target.reference_model() {
-        COMPAT_BUILDS.with(|builds| builds.set(builds.get() + 1));
-    }
-    #[cfg(test)]
-    let texts = builder.texts_by_turn();
-    let session_facts = if target == BuildTarget::Query || cfg!(test) {
-        timed!(
-            "session_facts",
-            published_facts.take().unwrap_or_else(derive_query_facts)
-        )
-    } else {
-        BTreeMap::new()
-    };
+    let session_facts = timed!(
+        "session_facts",
+        published_facts.take().unwrap_or_else(derive_query_facts)
+    );
     let handoff_by_id: HashMap<&str, &Handoff> = builder
         .handoffs
         .iter()
@@ -7984,11 +8545,6 @@ fn build_sources_inner(
         .iter()
         .map(|session| (session.key.clone(), session.out.clone()))
         .collect();
-    // Analytics reads a month and the month before it, whatever the model's
-    // window: taken from every session before the window trims them.
-    #[cfg(test)]
-    let activity = (target.reference_model())
-        .then(|| crate::analytics::activity(&sessions, &tx, &turns, &handoffs, now));
     // A scan window already chose the files; what it read is returned
     // whole, so an answer is never trimmed inside a session.
     if !options.all && !options.scan_window {
@@ -8045,9 +8601,9 @@ fn build_sources_inner(
         }
         tx.retain(|key, _| sessions.contains_key(key));
         // A stub's transcript is the handoffs that name it, so it lists only
-        // the ones served: the page draws a handoff from the model's list.
+        // the ones retained in this native output window.
         // A real session's transcript stays whole, and its pages before the
-        // window can name handoffs the window left out.
+        // output window can name earlier handoffs.
         for (key, transcript) in &mut tx {
             if sessions.get(key).is_some_and(|session| session.stub) {
                 Arc::make_mut(transcript)
@@ -8110,7 +8666,7 @@ fn build_sources_inner(
         tx.insert(key, Arc::new(Transcript::from_slots(slots)));
     }
     // Each session's totals come from its transcript index, built above from
-    // the same slots `/api/tx` counts.
+    // the same native transcript slots.
     for (key, session) in &mut sessions {
         if let Some(transcript) = tx.get(key) {
             session.calls = Some(transcript.calls);
@@ -8119,185 +8675,46 @@ fn build_sources_inner(
             session.tool_calls = transcript.tools.clone();
         }
     }
-    if target == BuildTarget::Query {
-        crate::selected_read::check()?;
-        let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
-        let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
-        ask_briefs.retain(|id, _| kept.contains(id));
-        #[cfg(test)]
-        if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        if history_records.is_none() {
-            verify_sidecars(&files)?;
-            source_records.finish()?;
-        }
-        drop(source_records);
-        if let Some(catalog) = catalog {
-            cache.publish_session_projection(
-                &crate::slot_projection::Publication {
-                    rows: &catalog,
-                    transcripts: slot_projections.as_deref(),
-                },
-                catalog_base.as_deref(),
-            );
-        }
-        cache.publish_session_descriptions();
-        return Ok(BuildOutput::Query(Box::new(QueryData {
-            sources: source_proofs,
-            sessions,
-            handoffs,
-            ask_briefs,
-            turns,
-            facts: session_facts,
-            tx,
-            home,
-            machine_id: machine,
-            pids: pids.iter().map(|pid| pid.pid).collect(),
-            window_start: window_start.or_else(|| {
-                (!options.all).then(|| {
-                    now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
-                })
-            }),
-        })));
-    }
-    #[cfg(not(test))]
-    unreachable!("native build targets return their evidence above");
+    crate::selected_read::check()?;
+    let mut ask_briefs = std::mem::take(&mut builder.ask_briefs);
+    let kept: BTreeSet<_> = handoffs.iter().map(|handoff| &handoff.id).collect();
+    ask_briefs.retain(|id, _| kept.contains(id));
     #[cfg(test)]
-    {
-        let all_busy = events::busy_merge(
-            sessions
-                .values()
-                .flat_map(|session| session.busy.iter().copied())
-                .collect(),
-        );
-        let busy = BTreeMap::from([(machine.clone(), all_busy)]);
-        let file_sizes: HashMap<&Path, u64> = files
-            .iter()
-            .map(|file| (file.path.as_path(), file.stamp.size))
-            .collect();
-        let marks: BTreeMap<&str, String> = tx
-            .iter()
-            .map(|(sid, transcript)| {
-                let sources: BTreeSet<&Path> = transcript
-                    .slots
-                    .iter()
-                    .filter_map(|slot| slot.file.as_ref().map(|file| file.path.as_path()))
-                    .collect();
-                let bytes: u64 = sources
-                    .iter()
-                    .filter_map(|path| file_sizes.get(path).copied())
-                    .sum();
-                // A call stops running when its process dies, which writes no
-                // line: the running count moves the mark all the same.
-                let running = transcript
-                    .slots
-                    .iter()
-                    .filter(|slot| {
-                        matches!(
-                            &slot.kind,
-                            SlotKind::Tool {
-                                bg: Some(Background {
-                                    live: true,
-                                    end: None,
-                                    ..
-                                }),
-                                ..
-                            } | SlotKind::Tool {
-                                shown: Shown::Live,
-                                ..
-                            } | SlotKind::Yielded {
-                                shown: Shown::Live,
-                                ..
-                            } | SlotKind::Sent {
-                                shown: Shown::Live,
-                                ..
-                            }
-                        )
-                    })
-                    .count();
-                (
-                    sid.as_str(),
-                    format!("{}.{bytes}.{running}", transcript.slots.len()),
-                )
-            })
-            .collect();
-        let machine_id = machine.clone();
-        let machine = Machine {
-            id: machine.clone(),
-            name: machine,
-            up: offline_since.is_none(),
-            last: offline_since,
-        };
-        let machine = serde_json::to_string(&machine)?;
-        let pricing = crate::pricing::table();
-        let rest = serde_json::to_string(&Rest {
-            pricing: &pricing,
-            handoffs: &handoffs,
-            turns: &turns,
-            busy: &busy,
-            tx: &marks,
-        })?;
-        // The version also covers every source file's length, so any appended
-        // line gives a new version, even one whose entry changes nothing else in
-        // the model (the same timestamp as the line before it). Lengths, not
-        // paths or times, keep it the same for the same content.
-        let lengths: Vec<String> = files
-            .iter()
-            .map(|file| file.stamp.size.to_string())
-            .collect();
-        let version = format!(
-            "{:016x}",
-            fnv(&format!(
-                "{machine}{}{rest}|{}",
-                serde_json::to_string(&sessions)?,
-                lengths.join(",")
-            ))
-        );
-        let mut built = Built {
-            version,
-            machine,
-            sessions,
-            rest: rest[1..].to_owned(),
-            home,
-            machine_id,
-            tx,
-            #[cfg(test)]
-            facts: session_facts,
-            activity: activity.expect("model analytics prepared"),
-            #[cfg(test)]
-            handoffs,
-            #[cfg(test)]
-            turns,
-            #[cfg(test)]
-            texts,
-            timings,
-        };
-        built.timings.push((
-            "post",
-            u32::try_from(post_started.elapsed().as_millis()).unwrap_or(u32::MAX),
-        ));
-        #[cfg(test)]
-        if let Some(hook) = AFTER_MODEL_DERIVATION.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        if history_records.is_none() {
-            source_records.finish()?;
-        }
-        if let Some(catalog) = catalog {
-            cache.publish_session_projection(
-                &crate::slot_projection::Publication {
-                    rows: &catalog,
-                    transcripts: slot_projections.as_deref(),
-                },
-                catalog_base.as_deref(),
-            );
-        }
-        if selected.is_none() {
-            cache.publish_session_descriptions();
-        }
-        Ok(BuildOutput::Model(Box::new(built)))
+    if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
+        hook();
     }
+    if history_records.is_none() {
+        verify_sidecars(&files)?;
+        source_records.finish()?;
+    }
+    drop(source_records);
+    if let Some(catalog) = catalog {
+        cache.publish_session_projection(
+            &crate::slot_projection::Publication {
+                rows: &catalog,
+                transcripts: slot_projections.as_deref(),
+            },
+            catalog_base.as_deref(),
+        );
+    }
+    cache.publish_session_descriptions();
+    Ok(BuildOutput::Query(Box::new(QueryData {
+        sources: source_proofs,
+        sessions,
+        handoffs,
+        ask_briefs,
+        turns,
+        facts: session_facts,
+        tx,
+        home,
+        machine_id: machine,
+        pids: pids.iter().map(|pid| pid.pid).collect(),
+        window_start: window_start.or_else(|| {
+            (!options.all).then(|| {
+                now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+            })
+        }),
+    })))
 }
 
 #[cfg(test)]

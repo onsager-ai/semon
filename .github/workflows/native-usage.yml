@@ -1,0 +1,53 @@
+name: Native usage projections
+
+on:
+  pull_request:
+    paths:
+      - 'crates/semon-sessions/**'
+      - '.github/workflows/native-usage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SEMON_PRICING_REFRESH: "off"
+
+concurrency:
+  group: native-usage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-usage-${{ hashFiles('Cargo.lock') }}
+      - name: Prepare formatting review
+        run: |
+          cargo fmt --all
+          git diff --binary > "$RUNNER_TEMP/native-usage-format.patch"
+      - name: Retain formatter patch
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-usage-format
+          path: ${{ runner.temp }}/native-usage-format.patch
+          retention-days: 7
+      - name: Verify native history recovery and report bounded work
+        run: |
+          cargo test --locked -p semon-sessions native_usage_ -- --nocapture
+          cargo test --locked -p semon-sessions native_tree:: -- --nocapture
+      - name: Verify catalog progress during unrelated runtime changes
+        run: cargo test --locked -p semon-sessions catalog_runtime_ -- --nocapture
+      - name: Verify bounded cross-batch native lineage recovery
+        run: cargo test --locked -p semon-sessions cold_codex_family_crossing_batches_preserves_every_native_parent -- --nocapture

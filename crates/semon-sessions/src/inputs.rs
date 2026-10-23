@@ -1,4 +1,4 @@
-//! The input set: every file the model builder reads, and nothing else.
+//! The input set: native logs/sidecars and transportable compressed history.
 //! Copying exactly these, plus the machine's [`crate::Facts`], is enough to
 //! rebuild the same model elsewhere. `*.key` files are never in it.
 //!
@@ -8,6 +8,8 @@
 //!   metadata;
 //! - `claude/sessions/<pid>.json`: a running Claude process's record;
 //! - `codex/sessions/**/*.jsonl` and `codex/archived_sessions/**/*.jsonl`: Codex rollouts.
+//! - Native `.jsonl.zst` equivalents: the pusher verifies and publishes their
+//!   logical bytes at the corresponding `.jsonl` path before native indexing.
 
 #[cfg(test)]
 thread_local! { pub(crate) static DISCOVERY_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
@@ -126,8 +128,18 @@ fn jsonl(name: &str) -> bool {
         .is_some_and(|stem| !stem.is_empty())
 }
 
-/// Pinned Codex stores active and archived plain JSONL beneath these roots.
-/// Compressed rollouts and database files are not supported viewing inputs.
+// Compressed files are local transport sources, not decoded mirror targets.
+// Keep the receiver's existing path allowlist and source/proof format intact.
+fn archive_input_path(root: &str, rel: &str) -> bool {
+    rel.len() <= MAX_PATH
+        && rel
+            .strip_suffix(".zst")
+            .is_some_and(|plain| plain.ends_with(".jsonl") && is_input_path(root, plain))
+}
+
+/// Pinned Codex stores active and archived rollouts beneath these roots.
+/// Native compressed archives are transport inputs; the pusher publishes their
+/// verified logical JSONL bytes under the corresponding uncompressed path.
 pub(crate) fn codex_rollout_dirs(options: &Options) -> [PathBuf; 2] {
     [
         options.codex_home.join("sessions"),
@@ -296,7 +308,9 @@ fn walk(
             if path.split('/').count() < MAX_DEPTH {
                 walk(root, &entry.path(), path, found)?;
             }
-        } else if kind.is_file() && is_input_path(root.as_str(), &path) {
+        } else if kind.is_file()
+            && (is_input_path(root.as_str(), &path) || archive_input_path(root.as_str(), &path))
+        {
             found.push(Input { root, path });
         }
     }
@@ -339,6 +353,35 @@ mod discovery_tests {
             fs::remove_dir_all(&self.root).unwrap();
         }
     }
+    #[test]
+    fn transport_discovers_compressed_native_logs_without_broadening_mirror_targets() {
+        let fixture = Fixture::new();
+        for path in [
+            "claude/projects/project/history.jsonl.zst",
+            "codex/sessions/2026/rollout.jsonl.zst",
+            "codex/archived_sessions/old.jsonl.zst",
+            "copilot/session-state/session/events.jsonl.zst",
+        ] {
+            fixture.write(path);
+        }
+        for path in [
+            "codex/archived_sessions/.jsonl.zst",
+            "codex/archived_sessions/auth.json.zst",
+            "codex/archived_sessions/rollout.jsonl.zst.zst",
+            "codex/archived_sessions/rollout.jsonl.seal/part.jsonl.zst",
+            "claude/settings.json.zst",
+        ] {
+            fixture.write(path);
+        }
+        let found = inputs(&fixture.options).unwrap();
+        assert_eq!(found.len(), 4);
+        for input in found {
+            assert!(archive_input_path(input.root.as_str(), &input.path));
+            assert!(!is_input_path(input.root.as_str(), &input.path));
+        }
+        assert!(!archive_input_path("codex", "sessions/../auth.jsonl.zst"));
+    }
+
     #[test]
     fn discovery_bounds_unrelated_directory_work_and_resumes_without_losing_sources() {
         let fixture = Fixture::new();

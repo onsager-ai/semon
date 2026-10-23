@@ -65,15 +65,18 @@ The optional `ViewerHost.navigation` supplies generic path overrides and leading
 or trailing destinations; `subscribeNavigation` reports changes without requiring
 a content model. Its unsubscribe belongs to the reader's document lifetime.
 Hosts validate unknown policy JSON with `parseShellNavigation` before rendering.
-The canonical reader keeps source selection in Sessions context and labels scoped
-Recent rows with their machine. Sessions is the default landing page; Analytics shares that reader. A
-`nativePage` mounts the same chrome over server content and preserves native forms
-and server navigation. An authenticated workspace host sets
-`nativePage.workspaceChrome` to share the bounded workspace Recent publication and
-metadata. This reads compact metadata only, with no preview hydration, source
-selection or native observation/repair. Hosts without a workspace retain the
-empty Recent slot and issue no workspace reads. Compatibility markers
-are normalized away without selecting another reader.
+Recent rows with their machine. Sessions is the default landing page at `/`;
+Analytics shares that reader. Host administration pages share the reader's shell,
+routing and metadata lifecycle. `ViewerHost.pages` provides matching/title/
+navigation metadata and abortable authorized content, including the initial
+server page. The router inserts it in the existing content slot, mounts its
+enhancements, and destroys them on departure. Source capability responses and
+host responses are fenced against later destinations. Host reads share the
+bounded compact Recent publication without selected reads or repair. Account or
+workspace changes and redirects require a fresh authorized document; native POST
+forms retain server handling. A legacy static `nativePage` embedding port remains
+supported, but Hub does not use that mode. Compatibility markers are normalized
+away without selecting another application.
 
 `topbar(ShellBar)` commits host-owned `titleSlot` and `actions` nodes, or `mode`
 nodes for Find/error navigation. Supply `lead`, `session`, optional validated
@@ -94,14 +97,11 @@ listeners now exist only while there are mounted account roots. The independent
 consumer tests repeated mount/update/unmount/destroy in both device sizes/themes,
 stale triggers, slot preservation, native link semantics and listener removal.
 
-Native pages mount the same canonical reader with `ViewerHost.nativePage` and
-`mountNativeShell({ chrome: false })`. The shared frame owns chrome; the native
-page retains its content, forms and native links. Mount, capability cadence,
-visibility and history notifications never admit a selected reader. Opted-in
-workspace chrome uses the existing document-owned overview refresh cadence and
-teardown; it does not add a router, poller or native-content loader.
-Home, Analytics and selected-session links enter their reader documents
-through native browser navigation.
+Hub administration mounts the canonical application with `ViewerHost.pages`.
+`mountNativeShell({ chrome: false })` supplies only page-local form enhancements;
+its lifetime belongs to the content page, while chrome and routing stay mounted.
+Sessions, Analytics and host links share ordinary same-document navigation.
+Server fallbacks, identity changes and form submissions retain browser navigation.
 Standalone navigation fragments may use pure `renderShellNavigation` under an
 explicit host owner, with no reader or poller. The former sidebar-only model
 application and its compatibility attributes are removed.
@@ -339,7 +339,7 @@ phase with a stale indicator. Native controls keep their separate authority and
 draft ownership. The focused browser contract poisons transcript block traversal
 while applying final and stale runtime updates and verifies retained input focus.
 
-The current native projection recipe is version 5 (the public API envelope stays
+The current native projection recipe is version 6 (the public API envelope stays
 version 1). Range and field decoders reject other projection versions. Native
 field descriptors and chunks may declare one or two string-encoding layers;
 source byte limits follow that declaration, and decoded text remains bounded.
@@ -362,7 +362,7 @@ source revision with `SEMON_CATALOG_SERVED_SOURCE`; the test uses the embedded m
 retained return without compatibility endpoint requests. This is integration
 evidence for its documented synthetic workload, not a general latency budget.
 
-Recipe 5 binds every qualified source-byte read to the original source before
+Recipe 6 binds every qualified source-byte read to the original source before
 and after the read. Previous recipe headers remain unavailable until rebuilt;
 selected ranges still resynchronize through generation checks. Non-success JSON
 reads cancel their unread response body while retaining the HTTP status, so a

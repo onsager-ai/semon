@@ -24,7 +24,8 @@ pub use overview::{
 };
 pub use overview_repair::{
     overview_repair_candidates, overview_repair_sources, repair_session_overview,
-    repair_session_overview_with_control, session_overview_observe, session_query_sources,
+    repair_session_overview_with_control, request_session_projection_upgrade,
+    session_overview_observe, session_query_sources,
 };
 mod catalog;
 mod catalog_changes;
@@ -53,6 +54,7 @@ pub use claude_usage::ClaudeUsageEvidence;
 mod attachments;
 pub mod comparison;
 mod events;
+mod exec_response;
 mod facts;
 mod handoff;
 pub mod harness;
@@ -99,11 +101,12 @@ pub use transcript_range::{
 };
 mod native_evidence;
 mod native_timing;
-#[cfg(feature = "test-hooks")]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_hooks;
 pub use native_evidence::SessionSources;
 mod query_source;
 mod selected_read;
+mod source_carrier;
 mod source_chunks;
 mod source_reader;
 pub use selected_read::SelectedReadControl;
@@ -1038,7 +1041,9 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
                 } else if let Some(tool_id) = &marker.tool_id {
                     node.via_tool = summaries
                         .get(&parent_key)
-                        .and_then(|summary| summary.tools.get(tool_id))
+                        .map(|summary| summary.tool_name(tool_id))
+                        .transpose()?
+                        .flatten()
                         .map(|name| ToolCall {
                             id: tool_id.clone(),
                             name: name.clone(),
@@ -1093,16 +1098,16 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
     );
     for (child, link) in links {
         parents.insert(child.clone(), link.parent.clone());
-        let via_tool = link.call.as_ref().and_then(|call| {
-            summaries
-                .get(&link.parent)?
-                .tools
-                .get(call)
-                .map(|name| ToolCall {
-                    id: call.clone(),
-                    name: name.clone(),
-                })
-        });
+        let via_tool = if let (Some(call), Some(summary)) =
+            (link.call.as_ref(), summaries.get(&link.parent))
+        {
+            summary.tool_name(call)?.map(|name| ToolCall {
+                id: call.clone(),
+                name,
+            })
+        } else {
+            None
+        };
         if let Some(node) = flat.get_mut(&child) {
             node.parent_source = Some(link.source);
             node.unlinked = false;
@@ -1175,7 +1180,7 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
             flat.insert(format!("copilot:{id}"), node);
         }
     }
-    apply_claude_usage(&mut flat, &summaries);
+    apply_claude_usage(&mut flat, &mut summaries)?;
     evidence.finish(options)?;
     if let Some(id) = &options.session {
         let key = if id.starts_with("claude:")
@@ -1357,7 +1362,13 @@ pub fn parse_duration(value: &str) -> Result<Duration, String> {
         .ok_or_else(|| format!("duration too large: {value}"))
 }
 
-fn apply_claude_usage(flat: &mut BTreeMap<String, Node>, summaries: &BTreeMap<String, Summary>) {
+fn apply_claude_usage(
+    flat: &mut BTreeMap<String, Node>,
+    summaries: &mut BTreeMap<String, Summary>,
+) -> io::Result<()> {
+    for summary in summaries.values_mut() {
+        summary.load_shared_usage()?;
+    }
     let shared = claude_usage::shared(
         summaries
             .iter()
@@ -1365,17 +1376,37 @@ fn apply_claude_usage(flat: &mut BTreeMap<String, Node>, summaries: &BTreeMap<St
     );
     for (key, ids) in shared {
         if let (Some(node), Some(summary)) = (flat.get_mut(&key), summaries.get(&key))
-            && let Some(evidence) = claude_usage::evidence(
+            && let Some(mut evidence) = claude_usage::evidence(
                 summary.usage_by_id.iter().map(|(id, tokens)| {
                     (id, tokens, summary.usage_models.get(id).map(String::as_str))
                 }),
                 &ids,
             )
         {
+            evidence.observed = summary.tokens("claude");
+            evidence.exclusive = evidence.observed.clone();
+            let subtract = |total: u64, used: u64| {
+                total.checked_sub(used).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Tree shared usage exceeds observed aggregate",
+                    )
+                })
+            };
+            for used in evidence.shared.values() {
+                evidence.exclusive.input = subtract(evidence.exclusive.input, used.input)?;
+                evidence.exclusive.cached_input =
+                    subtract(evidence.exclusive.cached_input, used.cached_input)?;
+                evidence.exclusive.output = subtract(evidence.exclusive.output, used.output)?;
+                evidence.exclusive.reasoning_output =
+                    subtract(evidence.exclusive.reasoning_output, used.reasoning_output)?;
+                evidence.exclusive.total = subtract(evidence.exclusive.total, used.total)?;
+            }
             node.tokens = evidence.exclusive.clone();
             node.claude_usage = Some(evidence);
         }
     }
+    Ok(())
 }
 
 /// Open a native input read-only, binding every directory component without
