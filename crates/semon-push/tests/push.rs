@@ -59,7 +59,11 @@ fn native_query_corpus(options: &Options, now: i64) -> serde_json::Value {
         let mut pages = Vec::new();
         let mut after = 0;
         loop {
-            match query.call_at("read_transcript", &json!({"id":id,"after":after}), now) {
+            match query.call_at(
+                "read_transcript",
+                &json!({"id":id,"after":after,"limit":1}),
+                now,
+            ) {
                 Ok(page) => {
                     let to = page["to"].as_u64().unwrap();
                     let total = page["total"].as_u64().unwrap();
@@ -192,6 +196,7 @@ struct Received {
     relocation_supported: bool,
     relocation_requests: Vec<(Append, usize)>,
     grow_source: Option<PathBuf>,
+    grow_archive_source: Option<(PathBuf, Vec<u8>)>,
     discover_source: Option<(PathBuf, String)>,
     move_source: Option<(String, PathBuf, PathBuf)>,
     facts: Option<Facts>,
@@ -440,6 +445,15 @@ fn handle_append(received: &mut Received, body: &str) -> Response<std::io::Curso
             .open(source)
             .unwrap()
             .write_all(b"{}\n")
+            .unwrap();
+    }
+    if let Some((source, bytes)) = received.grow_archive_source.take() {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(source)
+            .unwrap()
+            .write_all(&bytes)
             .unwrap();
     }
     if let Some((source, contents)) = received.discover_source.take() {
@@ -1542,6 +1556,244 @@ fn default_uploads_bound_long_lines_without_changing_redaction_or_one_shot_compl
     }
     // The saved checkpoint is usable by a new default client.
     assert_eq!(home.client(&receiver).pass(&home.options).unwrap().bytes, 0);
+}
+
+fn write_archive(home: &Home, path: &str, bytes: &[u8]) -> Vec<u8> {
+    let path = home.root.join(format!("{path}.zst"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let encoded = zstd::stream::encode_all(bytes, 3).unwrap();
+    fs::write(path, &encoded).unwrap();
+    encoded
+}
+
+#[test]
+fn native_compressed_history_keeps_paginated_query_and_web_parity_after_restart() {
+    let mut home = Home::new();
+    home.options.all = true;
+    let receiver = receiver();
+    let mirrored = Home::new();
+    let expected = Home::new();
+    let parent = "claude/projects/fixture/native-claude-parent.jsonl";
+    let child = "claude/projects/fixture/native-claude-child.jsonl";
+    let parent_text = include_str!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/resumed-transcript.jsonl"
+    );
+    let child_text = include_str!(
+        "../../../tests/fixtures/compatibility/claude-2.1.288/lifecycle/forked-transcript.jsonl"
+    );
+    let encoded = write_archive(&home, parent, parent_text.as_bytes());
+    home.write(child, child_text);
+    // A duplicate encoding must preserve one logical source and session.
+    write_archive(&home, child, child_text.as_bytes());
+    for attempt in 0..2 {
+        semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+        let state = receiver.state.lock().unwrap();
+        assert_eq!(state.files.len(), 2);
+        assert_eq!(state.files[parent], redacted(parent_text));
+        assert_eq!(state.files[child], redacted(child_text));
+        for (path, bytes) in &state.files {
+            for destination in [&mirrored, &expected] {
+                let path = destination.root.join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+        }
+        let facts = state.facts.clone().unwrap();
+        drop(state);
+        let configure = |home: &Home| {
+            let options = Options {
+                all: true,
+                facts: Some(home.root.join("facts.json")),
+                ..home.options.clone()
+            };
+            semon_sessions::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+            options
+        };
+        let local = configure(&expected);
+        let remote = configure(&mirrored);
+        let actual = native_query_corpus(&remote, 1_791_072_000_000);
+        assert!(
+            actual["transcripts"]["native-claude-parent"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 1
+        );
+        assert_eq!(native_query_corpus(&local, 1_791_072_000_000), actual);
+        let core = semon_sessions::ViewerCore::new(remote);
+        let wanted = semon_sessions::ViewerCore::new(local);
+        for id in ["native-claude-parent", "native-claude-child"] {
+            let mut after = 0;
+            let mut generation = String::new();
+            let mut expected_generation = String::new();
+            for page in 0..1000 {
+                let query = format!("machine=local&sid={id}&limit=1&after={after}");
+                let actual = core.respond(
+                    "GET",
+                    "/api/session-transcript",
+                    &format!("{query}{generation}"),
+                    None,
+                );
+                let expected = wanted.respond(
+                    "GET",
+                    "/api/session-transcript",
+                    &format!("{query}{expected_generation}"),
+                    None,
+                );
+                let raw: serde_json::Value = serde_json::from_slice(&actual.body).unwrap();
+                let raw_expected: serde_json::Value =
+                    serde_json::from_slice(&expected.body).unwrap();
+                assert_eq!(
+                    native_reply_content(&actual),
+                    native_reply_content(&expected)
+                );
+                let Some(next) = raw["range"]["next"].as_u64() else {
+                    break;
+                };
+                assert!(next > after);
+                assert!(page < 999, "pagination must finish");
+                after = next;
+                generation = format!(
+                    "&generation={}",
+                    raw["projection"]["generation"].as_str().unwrap()
+                );
+                expected_generation = format!(
+                    "&generation={}",
+                    raw_expected["projection"]["generation"].as_str().unwrap()
+                );
+            }
+        }
+        if attempt == 1 {
+            assert_eq!(receiver.state.lock().unwrap().replaces, 0);
+        }
+    }
+    assert_eq!(
+        fs::read(home.root.join(format!("{parent}.zst"))).unwrap(),
+        encoded
+    );
+}
+
+#[test]
+fn a_compressed_source_growing_between_batches_keeps_its_frozen_logical_target() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logical = "codex/archived_sessions/frozen.jsonl";
+    let text = line("synthetic frozen archive").repeat(5000);
+    assert!(text.len() > 256 * 1024);
+    write_archive(&home, logical, text.as_bytes());
+    let appended = line("next sweep only");
+    let frame = zstd::stream::encode_all(appended.as_bytes(), 3).unwrap();
+    receiver.state.lock().unwrap().grow_archive_source =
+        Some((home.root.join(format!("{logical}.zst")), frame));
+    let mut client = home.client(&receiver);
+    client.pass(&home.options).unwrap();
+    assert_eq!(copy(&receiver, logical), redacted(&text));
+    client.pass(&home.options).unwrap();
+    assert_eq!(copy(&receiver, logical), redacted(&(text + &appended)));
+}
+
+#[test]
+fn compressed_history_reconciles_a_lost_ack_using_its_logical_prefix_after_restart() {
+    let home = Home::new();
+    let receiver = receiver();
+    let logical = "codex/archived_sessions/lost-ack.jsonl";
+    let text = line("synthetic redacted archive").repeat(5000);
+    let encoded = write_archive(&home, logical, text.as_bytes());
+    receiver.state.lock().unwrap().drop_ack_once = true;
+    let options = home.push_options(&receiver.url);
+    assert!(semon_push::push(&options, false).is_err());
+    assert_lock_freed(&options);
+    semon_push::push(&options, false).unwrap();
+    assert_eq!(copy(&receiver, logical), redacted(&text));
+    assert!(receiver.state.lock().unwrap().conflicts > 0);
+    assert_eq!(
+        fs::read(home.root.join(format!("{logical}.zst"))).unwrap(),
+        encoded
+    );
+}
+
+#[test]
+fn same_native_watcher_catches_archives_and_continues_plain_and_compressed_growth() {
+    let home = Home::new();
+    let receiver = receiver();
+    let archive = "codex/archived_sessions/history.jsonl";
+    let active = "codex/sessions/live.jsonl";
+    let history = line(&"synthetic history ".repeat(2048)).repeat(80);
+    let encoded = write_archive(&home, archive, history.as_bytes());
+    home.write(active, &line("initial live"));
+    let options = home.push_options(&receiver.url);
+    let stop = Stop::new();
+    let push = watch_in_background(&options, &stop);
+    wait_for("compressed history catchup", || {
+        copy(&receiver, archive) == redacted(&history)
+    });
+    let next = "codex/archived_sessions/discovered.jsonl";
+    let partial = format!("{}partial", line("new archive"));
+    write_archive(&home, next, partial.as_bytes());
+    home.append(active, &line("appended after archive catchup"));
+    home.write("claude/projects/new/session.jsonl", &line("new plain log"));
+    wait_for("new archive and continuing live appends", || {
+        copy(&receiver, next) == redacted(&line("new archive"))
+            && copy(&receiver, active)
+                == redacted(&(line("initial live") + &line("appended after archive catchup")))
+            && !copy(&receiver, "claude/projects/new/session.jsonl").is_empty()
+    });
+    // Concatenated frames complete the previously incomplete JSONL record.
+    use std::io::Write;
+    let suffix = zstd::stream::encode_all(b" completed\n".as_slice(), 3).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(home.root.join(format!("{next}.zst")))
+        .unwrap()
+        .write_all(&suffix)
+        .unwrap();
+    wait_for("compressed append completes the partial record", || {
+        copy(&receiver, next) == redacted(&(partial.clone() + " completed\n"))
+    });
+    stop_and_join(&stop, push).unwrap();
+    assert_stopped_cleanly(&options);
+    assert_eq!(
+        fs::read(home.root.join(format!("{archive}.zst"))).unwrap(),
+        encoded
+    );
+    let appends = receiver.state.lock().unwrap().appends;
+    semon_push::push(&options, false).unwrap();
+    assert_eq!(
+        receiver.state.lock().unwrap().appends,
+        appends,
+        "restart reuses acknowledged logical cursors"
+    );
+}
+
+#[test]
+fn damaged_archives_do_not_block_live_logs_or_commit_a_partial_inventory() {
+    let home = Home::new();
+    let receiver = receiver();
+    let path = home.root.join("codex/archived_sessions/broken.jsonl.zst");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"corrupt archive").unwrap();
+    home.write(LOG, &line("healthy"));
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    assert_eq!(copy(&receiver, LOG), redacted(&line("healthy")));
+    assert!(receiver.state.lock().unwrap().facts.is_none());
+    assert!(copy(&receiver, "codex/archived_sessions/broken.jsonl").is_empty());
+    write_archive(
+        &home,
+        "codex/archived_sessions/broken.jsonl",
+        line("repaired").as_bytes(),
+    );
+    semon_push::push(&home.push_options(&receiver.url), false).unwrap();
+    let state = receiver.state.lock().unwrap();
+    assert!(
+        state
+            .facts
+            .as_ref()
+            .unwrap()
+            .codex_rollouts
+            .as_ref()
+            .unwrap()
+            .contains("archived_sessions/broken.jsonl")
+    );
 }
 
 #[test]
