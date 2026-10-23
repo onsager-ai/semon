@@ -425,7 +425,10 @@ static FRAMES: Mutex<VecDeque<(FrameKey, Arc<[u8]>)>> = Mutex::new(VecDeque::new
 
 #[cfg(test)]
 pub(crate) fn clear_frame_cache_for_test() {
-    FRAMES.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    FRAMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
 }
 
 fn decompress(segment: &OpenSegment, index: usize) -> io::Result<Vec<u8>> {
