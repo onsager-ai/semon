@@ -1,0 +1,14 @@
+{
+  "upstream": "openai/codex",
+  "revision": "c22a06c18070c3e33bd2648c7210a00a2a9f6f80",
+  "origin": "source-shaped synthetic records; sanitized identities; not a native runtime capture",
+  "runtime_version": "unverified",
+  "sources": [
+    "codex-rs/protocol/src/protocol.rs",
+    "codex-rs/rollout/src/policy.rs",
+    "codex-rs/rollout/src/recorder.rs",
+    "codex-rs/rollout/src/ordinal.rs"
+  ],
+  "modes": ["legacy", "paginated"],
+  "scope": "durable source parsing and ownership; no runtime liveness or control grant"
+}

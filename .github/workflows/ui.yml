@@ -170,6 +170,7 @@ jobs:
         suite: [navigation, transcript, shell, interaction, accessibility, visual, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
     env:
       SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+      SEMON_CATALOG_OUT: ${{ github.workspace }}/tests/ui/out/catalog-phases
       SEMON_BIN: ${{ github.workspace }}/target/debug/semon
       SEMON_UI_COVERAGE: ${{ inputs.exhaustive && 'exhaustive' || 'representative' }}
     steps:
