@@ -133,6 +133,22 @@ its completion witness is the native-publication success message in the CI log.
   stale binding was the runtime fingerprint. Its registry update preserves every
   state, reference, artifact digest and original image-review provenance; the 68
   preservation cases, 113 main frames and 162 strict regions remain required.
+- The Sessions-default review in Source #448 uses the actual
+  [preservation/main captures from run 39943014615](https://github.com/onsager-ai/semon/actions/runs/39943014615/artifacts/12497546002)
+  and its [two-machine/pushed captures](https://github.com/onsager-ai/semon/actions/runs/39943014615/artifacts/12496927958).
+  The settled Foundation decision replaces the root Home inbox with the existing
+  Sessions list and removes Home from navigation; it does not migrate inbox or
+  status sections. Actual root/title, drawer, desktop Analytics, tablet Thinking,
+  phone transcript and multi-machine comparisons retain the shared foundation.
+  The resulting navigation/Recent row shift and the previously approved passive
+  notice/dock changes account for 62 preservation, 90 main and six two-machine
+  raw findings. The 111 earlier records retain their rationale and approval
+  provenance; 47 new records bind only the settled root/title/navigation states.
+  Every record retains the original reference pins and all six exact image/DOM
+  digests. All 68 preservation cases, 113 main frames/162 regions, 12 two-machine
+  frames/20 regions and 15 pushed frames/24 regions remain required. Pushed parity
+  has no raw difference. No threshold, capture input or semantic assertion changes;
+  full required CI must validate the delivered acceptance-data revision.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
