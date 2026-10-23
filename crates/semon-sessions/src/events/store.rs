@@ -6836,7 +6836,10 @@ mod tests {
         // checkpoint the fixture between the baseline and the refusal.
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).is_err());
         let wal_after = read_wal();
-        assert!(wal_after == wal_before, "selected refusal changed WAL bytes");
+        assert!(
+            wal_after == wal_before,
+            "selected refusal changed WAL bytes"
+        );
         assert!(
             fs::read(&cache_path).unwrap() == database_before,
             "selected refusal changed database bytes"
