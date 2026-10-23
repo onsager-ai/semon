@@ -1996,6 +1996,11 @@ export function createCatalogViewer(
     const draw = () => {
       if (disposed || active !== view || sessionPanel !== panel) return;
       const field = script ? null : fieldView(view, item),
+        fieldAction = field?.action,
+        fieldNote = script
+          ? ''
+          : field?.note ||
+            (item.clipped ? 'Recorded text preview. The complete source text is not loaded.' : ''),
         data = {
           ...entry,
           ...(script ? scriptResult : { scriptText: undefined }),
@@ -2016,20 +2021,20 @@ export function createCatalogViewer(
               waiting={selectedSessionState(view.meta!) === 'wait'}
             />
           )}
-          {field && (field.action || view.fields.get(key)?.note) && (
+          {(fieldNote || fieldAction) && (
             <p class="vnote">
-              {field.note}
-              {field.action && (
+              {fieldNote}
+              {fieldAction && (
                 <button
                   class="btn sh-quiet"
                   type="button"
-                  disabled={field.action.busy}
+                  disabled={fieldAction.busy}
                   onClick={() => {
                     void loadField(view, item).then(draw);
                     draw();
                   }}
                 >
-                  {field.action.label}
+                  {fieldAction.label}
                 </button>
               )}
             </p>

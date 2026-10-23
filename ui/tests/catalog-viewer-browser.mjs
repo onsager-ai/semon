@@ -1179,17 +1179,25 @@ for (const width of [390, 1280])
             });
           if (u.pathname === '/api/session-entry') {
             const chunk = Number(u.searchParams.get('field_chunk')),
-              key = u.searchParams.get('sid');
+              key = u.searchParams.get('sid'),
+              slot = Number(u.searchParams.get('after') ?? '6');
             return route.fulfill({
               json: {
                 api: 1,
                 identity: { ...identity(key), read_scope: 'retained_history' },
                 projection: { version: 6, generation: nativeGeneration.repeat(64) },
-                slot: 6,
+                slot,
                 field: { name: 'text', chunk, next: chunk === 0 ? 1 : null, complete: chunk === 1 },
-                text: chunk === 0 ? 'First native text chunk ' : 'and final native text chunk.',
+                text:
+                  slot === 6
+                    ? chunk === 0
+                      ? 'First native text chunk '
+                      : 'and final native text chunk.'
+                    : chunk === 0
+                      ? 'First native tool text chunk '
+                      : 'and final native tool text chunk.',
                 freshness: { state: 'cached' },
-                provenance: { source: source(key), offset: 6, block: 0, native_event_id: null },
+                provenance: { source: source(key), offset: slot, block: 0, native_event_id: null },
                 observation: { source_bytes: 28 },
               },
             });
@@ -1244,6 +1252,23 @@ for (const width of [390, 1280])
               nativeTotal,
               nativeGeneration,
             );
+            if (u.searchParams.get('sid') === 'one')
+              for (const row of value.entries)
+                if ([7, 8, 9].includes(row.slot)) {
+                  delete row.text;
+                  Object.assign(row, {
+                    k: 'tool',
+                    tid: 'tool-' + row.slot,
+                    name: 'Read',
+                    arg: 'file-' + row.slot + '.txt',
+                    out: 'Recorded preview ' + row.slot,
+                    ok: true,
+                    clipped: true,
+                    ...(row.slot === 9
+                      ? {}
+                      : { field: { name: 'text', chunks: 2, complete: false } }),
+                  });
+                }
             value.identity.source_key = u.searchParams.get('machine');
             return route.fulfill({ json: value });
           }
@@ -1347,6 +1372,45 @@ for (const width of [390, 1280])
           await page.locator('#page [data-entry-key="one:6"]').innerText(),
           /and final native text chunk/,
         );
+        assert.equal(
+          await page.locator('#page .vnote').filter({ hasText: 'Recorded text preview' }).count(),
+          0,
+        );
+        assert.equal(await page.locator('#page .tgroup').count(), 1);
+        if (width === 390 && colorScheme === 'light') {
+          const group = page.locator('#page .tgroup');
+          await group.locator('.tsum').click();
+          const tool = page.locator('#page [data-entry-key="one:7"]');
+          await tool.locator('button').click();
+          await tool.getByRole('button', { name: 'View all', exact: true }).click();
+          const loadMoreToolText = page.getByRole('button', {
+            name: 'Load more text',
+            exact: true,
+          });
+          await loadMoreToolText.waitFor();
+          assert.match(await page.locator('body').innerText(), /First native tool text chunk/);
+          await loadMoreToolText.click();
+          await page.getByText('Complete recorded text loaded.', { exact: true }).waitFor();
+          assert.match(await page.locator('body').innerText(), /and final native tool text chunk/);
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !history.state?.sheet);
+
+          const unsupported = page.locator('#page [data-entry-key="one:9"]');
+          await unsupported.locator('button').click();
+          await unsupported.getByRole('button', { name: 'View all', exact: true }).click();
+          await page
+            .getByText('Recorded text preview. The complete source text is not loaded.', {
+              exact: true,
+            })
+            .waitFor();
+          assert.equal(
+            await page.getByRole('button', { name: 'Load recorded text', exact: true }).count(),
+            0,
+          );
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !history.state?.sheet);
+          await group.locator('.tsum').click();
+        }
         await page.keyboard.press('Escape');
         await page.getByRole('button', { name: 'Load earlier records' }).first().click();
         await page.locator('#page [data-entry-key="one:0"]').waitFor();
@@ -1468,7 +1532,13 @@ for (const width of [390, 1280])
           /and final native text chunk/,
         );
         await page.getByRole('button', { name: 'Reload recorded text', exact: true }).waitFor();
-        assert.equal(requests.filter((p) => p.startsWith('/api/session-entry')).length, 2);
+        assert.deepEqual(
+          requests
+            .filter((p) => p.startsWith('/api/session-entry'))
+            .map((p) => new URL('http://catalog.test' + p).searchParams.get('after'))
+            .sort(),
+          width === 390 && colorScheme === 'light' ? ['6', '6', '7', '7'] : ['6', '6'],
+        );
         await page.keyboard.press('Escape');
         await page.getByRole('button', { name: /Jump to bottom/ }).click();
         await page.waitForFunction(
