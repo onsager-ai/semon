@@ -4189,9 +4189,7 @@ export function createCatalogViewer(
     const path = location.pathname,
       search = location.search;
     const route = parseSessionRoute(path, search);
-    const legacyMachine = route.legacyHarness
-      ? new URLSearchParams(search).get('machine')
-      : null;
+    const legacyMachine = route.legacyHarness ? new URLSearchParams(search).get('machine') : null;
     const selectedSource = route.source ?? sourceKey ?? legacyMachine ?? undefined;
     const lookupRoute = selectedSource ? { ...route, source: selectedSource } : route;
     const current = () => !disposed && location.pathname === path && location.search === search;
@@ -4203,7 +4201,10 @@ export function createCatalogViewer(
       const reply = object(
         await api(
           '/api/session-locate?' +
-            new URLSearchParams({ sid: key, ...(selectedSource ? { machine: selectedSource } : {}) }),
+            new URLSearchParams({
+              sid: key,
+              ...(selectedSource ? { machine: selectedSource } : {}),
+            }),
         ),
       );
       if (!current()) return;
