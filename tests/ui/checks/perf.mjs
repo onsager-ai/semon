@@ -154,29 +154,175 @@ async function stopServer(proc) {
   });
 }
 
-async function waitPaint(page, marker) {
-  await page.waitForFunction(
-    (expected) => {
-      const messages = document.querySelectorAll(
-        '#page section[aria-label="Transcript"] .msg.assistant',
-      );
-      const last = messages[messages.length - 1];
-      if (!last || !last.textContent.includes(expected)) return false;
-      if (window.__perfPaintWait?.marker !== expected) {
-        const state = { marker: expected, node: last, done: false };
-        window.__perfPaintWait = state;
-        requestAnimationFrame(() =>
-          requestAnimationFrame(() => {
-            if (state.node.isConnected && state.node.textContent.includes(expected))
-              state.done = true;
-          }),
-        );
+function describeApiRequest(request) {
+  try {
+    const url = new URL(request);
+    if (!url.pathname.startsWith('/api/')) return null;
+    const query = Object.fromEntries(
+      ['machine', 'sid', 'after', 'limit', 'generation', 'errors_generation']
+        .filter((key) => url.searchParams.has(key))
+        .map((key) => [key, url.searchParams.get(key)]),
+    );
+    return { endpoint: url.pathname, query };
+  } catch {
+    return null;
+  }
+}
+
+async function paintFailureDiagnostics(
+  page,
+  marker,
+  apiRequests,
+  server,
+  selectedTranscriptRequests = [],
+) {
+  const dom = await page
+    .evaluate((expected) => {
+      const text = (node) =>
+        String(node?.textContent ?? '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 300);
+      const messages = [
+        ...document.querySelectorAll('#page section[aria-label="Transcript"] .msg.assistant'),
+      ];
+      return {
+        readyState: document.readyState,
+        title: document.title.slice(0, 120),
+        marker: expected,
+        markerVisible: messages.at(-1)?.textContent.includes(expected) ?? false,
+        assistantCount: messages.length,
+        lastAssistantMessages: messages.slice(-4).map((node) => text(node).slice(-300)),
+        emptyStates: [...document.querySelectorAll('#page .empty')].slice(-3).map(text),
+        transcriptObservations: [...document.querySelectorAll('[data-transcript-observation]')]
+          .slice(-4)
+          .map((node) => ({
+            state: node.getAttribute('data-transcript-observation')?.slice(0, 120),
+            text: text(node),
+          })),
+      };
+    }, marker)
+    .catch((error) => ({ readError: error.message.slice(0, 240) }));
+
+  const recentRequests = [];
+  let errorBodies = 0;
+  for (const record of apiRequests.slice(-24)) {
+    const { response, request: _request, ...summary } = record;
+    if (response && summary.status >= 400 && summary.endpoint !== '/api/session-transcript') {
+      const hasContentLength =
+        typeof summary.contentLength === 'string' && summary.contentLength.trim() !== '';
+      const contentLength = hasContentLength ? Number(summary.contentLength) : Number.NaN;
+      if (summary.state !== 'complete') {
+        summary.errorBodySkipped = 'response body did not complete before the paint timeout';
+      } else if (errorBodies >= 4) {
+        summary.errorBodySkipped = 'per-timeout body capture limit reached';
+      } else if (Number.isInteger(contentLength) && contentLength >= 0 && contentLength <= 4096) {
+        errorBodies++;
+        try {
+          summary.errorBody = (await response.text()).slice(0, 1024);
+        } catch (error) {
+          summary.errorBodyReadError = error.message.slice(0, 160);
+        }
+      } else {
+        summary.errorBodySkipped = 'Content-Length missing or greater than 4096 bytes';
       }
-      return window.__perfPaintWait?.done === true;
-    },
-    marker,
-    { timeout: 60_000, polling: 'raf' },
-  );
+    }
+    recentRequests.push(summary);
+  }
+
+  const selectedTranscriptFailures = [];
+  let transcriptErrorBodies = 0;
+  for (const record of selectedTranscriptRequests.slice(-8)) {
+    const { response, request: _request, ...summary } = record;
+    if (summary.state === 'pending') {
+      summary.pendingAtPaintTimeout = true;
+      summary.failure = 'selected transcript request was still pending at the paint timeout';
+    }
+    if (!(summary.status >= 400) && summary.state !== 'failed' && summary.state !== 'pending')
+      continue;
+    if (response && summary.status >= 400) {
+      const hasContentLength =
+        typeof summary.contentLength === 'string' && summary.contentLength.trim() !== '';
+      const contentLength = hasContentLength ? Number(summary.contentLength) : Number.NaN;
+      if (summary.state !== 'complete') {
+        summary.errorBodySkipped = 'response body did not complete before the paint timeout';
+      } else if (transcriptErrorBodies >= 4) {
+        summary.errorBodySkipped = 'per-timeout transcript body capture limit reached';
+      } else if (Number.isInteger(contentLength) && contentLength >= 0 && contentLength <= 4096) {
+        transcriptErrorBodies++;
+        try {
+          summary.errorBody = (await response.text()).slice(0, 1024);
+        } catch (error) {
+          summary.errorBodyReadError = error.message.slice(0, 160);
+        }
+      } else {
+        summary.errorBodySkipped = 'Content-Length missing or greater than 4096 bytes';
+      }
+    }
+    selectedTranscriptFailures.push(summary);
+  }
+
+  const diagnostics = server?.diagnostics?.() ?? { events: [], truncated: false };
+  const serverTimingTail = (diagnostics.events ?? [])
+    .slice(-8)
+    .map(({ at, line }) => ({ at, line: line.slice(0, 512) }));
+  const serverLogTail = (server?.log?.() ?? '')
+    .slice(-2048)
+    .replace(/(\?t=)[0-9a-f]+/g, '$1<redacted>');
+  return {
+    dom,
+    apiRequests: recentRequests,
+    selectedTranscriptFailures,
+    serverTimingTail,
+    serverTimingTruncated: diagnostics.truncated,
+    serverLogTail,
+  };
+}
+
+async function waitPaint(
+  page,
+  marker,
+  apiRequests = [],
+  server = null,
+  selectedTranscriptRequests = [],
+) {
+  try {
+    await page.waitForFunction(
+      (expected) => {
+        const messages = document.querySelectorAll(
+          '#page section[aria-label="Transcript"] .msg.assistant',
+        );
+        const last = messages[messages.length - 1];
+        if (!last || !last.textContent.includes(expected)) return false;
+        if (window.__perfPaintWait?.marker !== expected) {
+          const state = { marker: expected, node: last, done: false };
+          window.__perfPaintWait = state;
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              if (state.node.isConnected && state.node.textContent.includes(expected))
+                state.done = true;
+            }),
+          );
+        }
+        return window.__perfPaintWait?.done === true;
+      },
+      marker,
+      { timeout: 60_000, polling: 'raf' },
+    );
+  } catch (error) {
+    throw new Error(
+      `${error.message}\npaint failure diagnostics: ${JSON.stringify(
+        await paintFailureDiagnostics(
+          page,
+          marker,
+          apiRequests,
+          server,
+          selectedTranscriptRequests,
+        ),
+      )}`,
+      { cause: error },
+    );
+  }
 }
 
 async function checkLongSessionOpenEnd(page) {
@@ -592,6 +738,61 @@ async function runScreen(browser, screen, server, fixture) {
       const cdp = await ctx.newCDPSession(page);
       const byRequest = new Map();
       const traces = new Map();
+      const apiRequests = [];
+      const selectedTranscriptRequests = [];
+      const apiByRequest = new Map();
+      page.on('request', (request) => {
+        const description = describeApiRequest(request.url());
+        if (!description) return;
+        const record = {
+          ...description,
+          method: request.method(),
+          request,
+          startedAt: Date.now(),
+          state: 'pending',
+        };
+        apiRequests.push(record);
+        if (record.endpoint === '/api/session-transcript' && record.query.sid != null) {
+          selectedTranscriptRequests.push(record);
+          if (selectedTranscriptRequests.length > 8) {
+            const evictedTranscript = selectedTranscriptRequests.shift();
+            if (evictedTranscript?.request && !apiRequests.includes(evictedTranscript))
+              apiByRequest.delete(evictedTranscript.request);
+          }
+        }
+        if (apiRequests.length > 24) {
+          const evicted = apiRequests.shift();
+          if (evicted?.request && !selectedTranscriptRequests.includes(evicted))
+            apiByRequest.delete(evicted.request);
+        }
+        apiByRequest.set(request, record);
+      });
+      page.on('response', (response) => {
+        const record = apiByRequest.get(response.request());
+        if (!record) return;
+        const headers = response.headers();
+        record.respondedAt = Date.now();
+        record.status = response.status();
+        record.statusText = response.statusText().slice(0, 120);
+        record.contentType = headers['content-type']?.slice(0, 120) ?? null;
+        record.contentLength = headers['content-length'] ?? null;
+        record.response = response;
+      });
+      page.on('requestfinished', (request) => {
+        const record = apiByRequest.get(request);
+        if (!record) return;
+        record.completedAt = Date.now();
+        record.state = 'complete';
+        apiByRequest.delete(request);
+      });
+      page.on('requestfailed', (request) => {
+        const record = apiByRequest.get(request);
+        if (!record) return;
+        record.failedAt = Date.now();
+        record.failure = request.failure()?.errorText?.slice(0, 160) ?? 'unknown';
+        record.state = 'failed';
+        apiByRequest.delete(request);
+      });
       let clockOffset = null;
       cdp.on('Network.requestWillBeSent', (event) => {
         if (REFRESH_DIAGNOSTICS && new URL(event.request.url).pathname.startsWith('/api/')) {
@@ -654,7 +855,7 @@ async function runScreen(browser, screen, server, fixture) {
       await cdp.send('Network.enable');
       await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
       await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
-      const managed = { page, cdp, byRequest };
+      const managed = { page, cdp, byRequest, apiRequests, selectedTranscriptRequests };
       managedPages.add(managed);
       return managed;
     };
@@ -696,13 +897,19 @@ async function runScreen(browser, screen, server, fixture) {
         await managed.page.close();
       } catch {}
     };
-    const openSession = async (page, id) => {
+    const openSession = async (managed, id) => {
       const started = Date.now();
-      await page.goto(sessionUrl(server.base, server.token, id), { waitUntil: 'load' });
-      await waitPaint(page, PAINT_MARKERS[id]);
+      await managed.page.goto(sessionUrl(server.base, server.token, id), { waitUntil: 'load' });
+      await waitPaint(
+        managed.page,
+        PAINT_MARKERS[id],
+        managed.apiRequests,
+        server,
+        managed.selectedTranscriptRequests,
+      );
       return Date.now() - started;
     };
-    const openMarathon = (managed) => openSession(managed.page, 'marathon');
+    const openMarathon = (managed) => openSession(managed, 'marathon');
     const prepareSidebarRow = async (page, id) => {
       await page.waitForSelector(
         `.srow[data-id=${JSON.stringify(JSON.stringify(['local', id]))}]`,
@@ -829,10 +1036,10 @@ async function runScreen(browser, screen, server, fixture) {
     // Each cold sample starts from a fresh page, so no transcript is cached: marathon then relay, back to marathon (cached), and
     // relay then marathon. The page ends on marathon, where the live samples below need it.
     for (let i = 0; i < 3; i++) {
-      await openSession(switchPage.page, 'marathon');
+      await openSession(switchPage, 'marathon');
       record(metrics.switch.marathonToRelay, await clickAndPaint(switchPage.page, 'relay'));
       record(metrics.switch.cached, await clickAndPaint(switchPage.page, 'marathon'));
-      await openSession(switchPage.page, 'relay');
+      await openSession(switchPage, 'relay');
       record(metrics.switch.relayToMarathon, await clickAndPaint(switchPage.page, 'marathon'));
     }
 
@@ -857,7 +1064,13 @@ async function runScreen(browser, screen, server, fixture) {
           .join(''),
       );
       try {
-        await waitPaint(page, `PERF_LIVE_${i}_LAST`);
+        await waitPaint(
+          page,
+          `PERF_LIVE_${i}_LAST`,
+          switchPage.apiRequests,
+          server,
+          switchPage.selectedTranscriptRequests,
+        );
       } catch (error) {
         if (REFRESH_DIAGNOSTICS)
           refreshSamples.push({

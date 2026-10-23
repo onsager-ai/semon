@@ -28,6 +28,7 @@ import {
 import { CatalogSelectionStore, type CatalogSelectionRequest } from '../state/catalog-selection';
 import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catalog-annotations';
 import { CatalogTranscriptStore } from '../state/catalog-transcript';
+import { CatalogRecovery, type CatalogRecoveryProgress } from '../state/catalog-recovery';
 import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
 import { createRecentRenderer } from '../lib/recent';
@@ -113,7 +114,7 @@ interface SelectedView {
   identityLoading: boolean;
   opening: boolean;
   retry?: number;
-  retryDelay: number;
+  recovery: CatalogRecovery;
   renderedRevision: number;
   renderedNote: string;
   renderedFooter: string;
@@ -167,6 +168,25 @@ interface SelectedView {
     focus: string;
   };
 }
+
+function catalogRecoveryProgress(value: CatalogSession): CatalogRecoveryProgress {
+  return {
+    source: JSON.stringify(
+      value.source_refs.map(({ state, source }) => [
+        state,
+        source.offset,
+        source.prefix_sha256,
+        source.tail_sha256,
+      ]),
+    ),
+    catalog: JSON.stringify(
+      value.transcript
+        ? [value.transcript.generation, value.transcript.errorsGeneration, value.transcript.total]
+        : null,
+    ),
+  };
+}
+
 /** The advertised bounded reader has no complete ModelStore or global content poller. */
 export function createCatalogViewer(
   initialCapabilities: CatalogCapabilities | null,
@@ -2599,22 +2619,43 @@ export function createCatalogViewer(
       void loadList(false);
     shell.closeDrawer(true);
   }
+  function observeSelectedProgress(view: SelectedView, progress: CatalogRecoveryProgress) {
+    if (view.sourceKey !== capabilities.source_key) return;
+    if (!view.recovery.observeProgress(progress)) return;
+    view.note = '';
+    view.transientNote = false;
+    view.renderedRevision = -1;
+    drawSelected(view);
+    if (
+      !disposed &&
+      active === view &&
+      !view.loading &&
+      view.retry === undefined &&
+      capabilities.selected_transcript
+    )
+      void loadSelected(view);
+  }
   function drawSelected(view: SelectedView, captureReading = true) {
     if (disposed || active !== view) return;
     const current = view.store.selectedPage(),
       identity = selection.selectedIdentity(),
-      observationNote = [
-        view.anchorNote,
-        view.note,
-        view.observationFailure?.text,
-        view.meta?.source_refs.some(
-          (reference) => reference.state === 'unavailable' || reference.state === 'incomplete',
-        )
-          ? 'History is incomplete. Previously loaded text is retained.'
-          : undefined,
-      ]
-        .filter(Boolean)
-        .join(' ');
+      recoveryNote = view.recovery.stopped
+        ? 'Recorded history could not be loaded. Retry to try again.'
+        : undefined,
+      observationNote =
+        recoveryNote ??
+        [
+          view.anchorNote,
+          view.note,
+          view.observationFailure?.text,
+          view.meta?.source_refs.some(
+            (reference) => reference.state === 'unavailable' || reference.state === 'incomplete',
+          )
+            ? 'History is incomplete. Previously loaded text is retained.'
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join(' ');
     if (!current) {
       renderSessionScreen(
         view.root,
@@ -2625,18 +2666,23 @@ export function createCatalogViewer(
           runtime: runtimeFor(view),
           blocks: [],
           order: [],
-          observation: 'Recorded history is updating',
+          observation: view.recovery.stopped
+            ? 'Recorded history is unavailable'
+            : 'Recorded history is updating',
           retry:
-            view.note && !view.loading
+            view.recovery.stopped || (view.note && !view.loading)
               ? {
                   label: 'Retry selected transcript',
                   run() {
                     scope.clearTimeout(view.retry);
+                    view.retry = undefined;
+                    view.recovery.reset();
                     void loadSelected(view);
                   },
                 }
               : undefined,
           empty:
+            recoveryNote ||
             observationNote ||
             (capabilities.selected_transcript
               ? 'Loading recorded session…'
@@ -2758,6 +2804,17 @@ export function createCatalogViewer(
         footer,
         control: controlFor(view),
         runtime: runtimeFor(view),
+        retry: view.recovery.stopped
+          ? {
+              label: 'Retry selected transcript',
+              run() {
+                scope.clearTimeout(view.retry);
+                view.retry = undefined;
+                view.recovery.reset();
+                void loadSelected(view);
+              },
+            }
+          : undefined,
         observation:
           observationNote ||
           {
@@ -2864,11 +2921,13 @@ export function createCatalogViewer(
                 busy: view.loading,
               }
             : undefined,
-        empty: visibleEntries(view).length
-          ? undefined
-          : view.store.entries().length
-            ? 'No loaded records match your search or filter.'
-            : 'No native records in this range.',
+        empty: view.recovery.stopped
+          ? view.note
+          : visibleEntries(view).length
+            ? undefined
+            : view.store.entries().length
+              ? 'No loaded records match your search or filter.'
+              : 'No native records in this range.',
       },
       {
         committed() {},
@@ -3142,12 +3201,13 @@ export function createCatalogViewer(
       view.store = candidate;
       pruneSelectedFields(view);
       view.renderedRevision = -1;
+      view.recovery.reset();
       view.meta = {
         ...candidate.selectedPage()!.session,
         ...(view.observedName === undefined ? {} : { name: view.observedName }),
       };
+      view.recovery.observeProgress(catalogRecoveryProgress(view.meta));
       view.note = '';
-      view.retryDelay = 1000;
       if (active === view) {
         void loadIdentity(view);
       }
@@ -3173,6 +3233,8 @@ export function createCatalogViewer(
     if (
       disposed ||
       view.sourceKey !== capabilities.source_key ||
+      view.recovery.stopped ||
+      view.retry !== undefined ||
       !capabilities.selected_transcript
     ) {
       drawSelected(view);
@@ -3201,13 +3263,14 @@ export function createCatalogViewer(
       if (disposed || view.store !== store) return;
       if (view.store.accept(request, value)) {
         void hydrateContext(view);
-        view.retryDelay = 1000;
+        view.recovery.reset();
         const current = view.store.selectedPage()!;
         pruneSelectedFields(view);
         view.meta = {
           ...current.session,
           ...(view.observedName === undefined ? {} : { name: view.observedName }),
         };
+        view.recovery.observeProgress(catalogRecoveryProgress(view.meta));
         if (active === view) {
           if (view.errorMode && view.annotations?.generation !== annotationGeneration(view))
             void readAnnotations(view, true);
@@ -3232,11 +3295,16 @@ export function createCatalogViewer(
         retryable(error) ||
         !!(error && typeof error === 'object' && 'status' in error && error.status === 409);
       if (view.transientNote) {
-        view.retry = scope.timeout(
-          () => void loadSelected(view, after, preservePosition),
-          view.retryDelay,
-        );
-        view.retryDelay = Math.min(8000, view.retryDelay * 2);
+        const delay = view.recovery.fail();
+        if (delay === null) {
+          view.transientNote = false;
+          view.note = 'Recorded history could not be loaded. Retry to try again.';
+        } else {
+          view.retry = scope.timeout(() => {
+            view.retry = undefined;
+            if (active === view) void loadSelected(view, after, preservePosition);
+          }, delay);
+        }
       }
     } finally {
       view.loading = false;
@@ -3269,6 +3337,7 @@ export function createCatalogViewer(
         current = view.store.selectedPage();
       if (!metadata || metadata.key !== view.key || next.machine !== source)
         throw Error('Selected observation changed');
+      const recoveryReopened = view.recovery.observeProgress(catalogRecoveryProgress(metadata));
       const recovered = !!view.observationFailure;
       view.observationFailure = undefined;
       const labelChanged = view.sourceLabel !== next.machine_info.label;
@@ -3278,7 +3347,7 @@ export function createCatalogViewer(
         (metadata.transcript.generation !== current?.projection.generation ||
           metadata.transcript.total !== current?.projection.total ||
           metadata.transcript.errorsGeneration !== current?.projection.errorsGeneration);
-      if (projectionChanged) await loadSelected(view);
+      if (projectionChanged || recoveryReopened) await loadSelected(view);
       else if (
         labelChanged ||
         JSON.stringify(metadata) !== JSON.stringify(view.meta) ||
@@ -3448,9 +3517,12 @@ export function createCatalogViewer(
       if (reply.api !== 1) throw new Error('Unsupported source identity response');
       const previousLabel = sourceLabel(view.sourceKey);
       if (active === view && selection.accept(ticket, reply.identity)) {
-        if (selection.selectedIdentity()?.owner_qualification === 'provisional')
-          view.note = 'Session identity is provisional while history is being discovered.';
-        else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        const accepted = selection.selectedIdentity();
+        if (!view.recovery.stopped) {
+          if (accepted?.owner_qualification === 'provisional')
+            view.note = 'Session identity is provisional while history is being discovered.';
+          else if (view.note.startsWith('Session identity is provisional')) view.note = '';
+        }
         if (previousLabel !== sourceLabel(view.sourceKey)) {
           view.renderedRevision = -1;
           chrome();
@@ -3473,10 +3545,11 @@ export function createCatalogViewer(
           catalog_key: view.key,
         });
       }
-      view.note =
-        error && typeof error === 'object' && 'status' in error && error.status === 404
-          ? 'Current native session selection is unavailable. Retained history remains readable.'
-          : readError(error);
+      if (!view.recovery.stopped)
+        view.note =
+          error && typeof error === 'object' && 'status' in error && error.status === 404
+            ? 'Current native session selection is unavailable. Retained history remains readable.'
+            : readError(error);
       drawSelected(view);
     } finally {
       view.identityLoading = false;
@@ -3507,7 +3580,7 @@ export function createCatalogViewer(
         note: '',
         opening: true,
         identityLoading: false,
-        retryDelay: 1000,
+        recovery: new CatalogRecovery(),
         renderedRevision: -1,
         renderedNote: '',
         renderedFooter: '',
@@ -3518,6 +3591,7 @@ export function createCatalogViewer(
         newCount: 0,
         lastTotal: null,
       };
+      if (meta) view.recovery.observeProgress(catalogRecoveryProgress(meta));
       view.root.className = 'catalog-session';
       readerResize.observe(view.root);
       selected.set(cacheKey(key), view);
@@ -3794,7 +3868,8 @@ export function createCatalogViewer(
     const observed = new Map(value.items.map((item) => [item.key, item]));
     const names = new Map(value.items.map((item) => [item.key, item.name]));
     const view = active;
-    if (view && !names.has(view.key)) {
+    let activeMetadata = view ? observed.get(view.key) : undefined;
+    if (view && !activeMetadata) {
       const selectedParams = params();
       selectedParams.set('sid', view.key);
       const selectedMeta = parseCatalogPage(await api('/api/sessions?' + selectedParams));
@@ -3807,8 +3882,13 @@ export function createCatalogViewer(
       )
         return;
       const match = selectedMeta.items.find((item) => item.key === view.key);
-      if (match) names.set(match.key, match.name);
+      if (match) {
+        names.set(match.key, match.name);
+        activeMetadata = match;
+      }
     }
+    if (view && activeMetadata)
+      observeSelectedProgress(view, catalogRecoveryProgress(activeMetadata));
     // Rotate bounded exact lookups for loaded history and retained Recent views
     // outside the first page. The active reader is always checked above.
     const remaining = [
@@ -3868,6 +3948,7 @@ export function createCatalogViewer(
       if (!active && !sourcesOpen) drawList();
       chrome();
     }
+    if (view && active === view && view.recovery.stopped) drawSelected(view);
   }
   async function recheckCapabilities() {
     const observedSource = capabilities.source_key,

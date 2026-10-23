@@ -37,6 +37,198 @@ fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
+fn sealed_codex_fixture(padding: usize) -> (Home, PathBuf) {
+    let home = Home::new("sealed-pages");
+    let mut records = vec![codex_line(
+        ts(5, 0),
+        "session_meta",
+        json!({"id":"sealed-pages","cwd":"/work/proj","originator":"codex_exec","thread_source":"user"}),
+    )];
+    for index in 0..240 {
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(padding))}]}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"reasoning","summary":[{"type":"summary_text","text":format!("Readable record thinking {index} {}", "synthetic ".repeat(padding))}]}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"function_call","call_id":format!("call-{index}"),"name":"exec_command","arguments":"{\"cmd\":\"echo synthetic\"}"}),
+        ));
+        records.push(codex_line(
+            ts(5, 1),
+            "response_item",
+            json!({"type":"function_call_output","call_id":format!("call-{index}"),"output":format!("Readable record output {index} {}", "synthetic ".repeat(padding))}),
+        ));
+        records.push(codex_line(
+            ts(5, 2),
+            "event_msg",
+            json!({"type":"context_compacted"}),
+        ));
+    }
+    let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    (home, path)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_codex_pages_survive_multi_segment_sealing() {
+    let (home, path) = sealed_codex_fixture(2000);
+    let read_pages = |sealed: bool| {
+        let mut after = 0;
+        let mut pages = Vec::new();
+        loop {
+            crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
+            crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow_mut().clear());
+            crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.set(None));
+            let reply = crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                &format!("sid=sealed-pages&after={after}&limit=60"),
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            let bytes = crate::source_chunks::READ_BYTES.with(|bytes| bytes.get());
+            let blocks = crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow().len());
+            let stage = crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get());
+            println!(
+                "sealed={sealed} after={after} status={} blocks={blocks} bytes={bytes} stage={stage:?}",
+                reply.status
+            );
+            if reply.status != 200 {
+                assert!(sealed, "pre-seal read failed: {body}");
+                assert!(bytes > blocks as u64 * crate::source_chunks::SIZE as u64);
+                assert_eq!(
+                    crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
+                    Some(crate::source_carrier::FailureStage::Budget),
+                    "unexpected underlying source failure: {body}"
+                );
+            }
+            assert_eq!(reply.status, 200, "selected page fence: {body}");
+            assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
+            let entries = body["entries"].as_array().unwrap();
+            assert!(!entries.is_empty());
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.to_string().contains("Readable record"))
+            );
+            pages.push(body.clone());
+            let Some(next) = body["range"]["next"].as_u64() else {
+                break;
+            };
+            assert!(next > after);
+            after = next;
+        }
+        assert!(pages.len() >= 2);
+        pages
+    };
+    let before = read_pages(false);
+    assert!(crate::sealed::punch_supported(&home.root).unwrap());
+    let first = crate::sealed::seal(&path, 1, 32 * 1024).unwrap();
+    assert!(first.added.is_some());
+    let second = crate::sealed::seal(&path, 1, u64::MAX).unwrap();
+    assert!(second.added.is_some());
+    assert!(second.punched);
+    assert_eq!(second.added.unwrap().start, first.added.unwrap().end);
+    crate::sealed::clear_frame_cache_for_test();
+    let after = read_pages(true);
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(before["entries"], after["entries"]);
+        assert_eq!(before["projection"], after["projection"]);
+        assert_eq!(before["range"], after["range"]);
+    }
+    assert_eq!(before.len(), after.len());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_sealed_page_still_rejects_excess_unique_evidence() {
+    let (home, path) = sealed_codex_fixture(4000);
+    let read = || {
+        crate::session_transcript_range_with_mode(
+            &home.options,
+            "local",
+            "sid=sealed-pages&limit=60",
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+    };
+    assert_eq!(read().status, 200);
+    assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+    crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
+    let reply = read();
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "source_budget_exhausted");
+    assert_eq!(body["fence_reason"], "source_budget");
+    assert_eq!(body["stage"], "budget");
+    assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn selected_sealed_pages_reject_replacement_truncation_and_corruption() {
+    for mutation in 0..3 {
+        let (home, path) = sealed_codex_fixture(2000);
+        let read = || {
+            crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                "sid=sealed-pages&limit=60",
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            )
+        };
+        assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+        assert_eq!(read().status, 200);
+        match mutation {
+            0 => {
+                let replacement = path.with_extension("replacement");
+                fs::write(&replacement, b"{}\n").unwrap();
+                fs::rename(replacement, &path).unwrap();
+            }
+            1 => fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(1)
+                .unwrap(),
+            _ => {
+                // A short corrupt segment must fail even after decompressed
+                // bytes have previously entered the process-wide cache.
+                let directory = path.with_file_name("rollout-sealed-pages.jsonl.seal");
+                let segment = fs::read_dir(directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.extension().is_some_and(|extension| extension == "zst"))
+                    .unwrap();
+                fs::write(segment, b"corrupt segment").unwrap();
+            }
+        }
+        let reply = read();
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_ne!(reply.status, 200, "mutation {mutation} accepted");
+        assert_ne!(body["fence_reason"], "source_budget");
+    }
+}
+
 fn admitted(options: Options) -> Arc<SessionSources> {
     Arc::new(SessionSources::with_machines(vec![(
         String::new(),
@@ -3610,11 +3802,11 @@ fn selected_query_completion_fences_its_sources_without_coupling_unrelated_publi
         if selected_changes {
             let error = result.unwrap_err();
             assert_eq!(error.code, "io");
-            assert_eq!(error.stage, Some("proof_changed"));
             assert_eq!(
                 error.message,
-                "Original native transcript proofs are unavailable"
+                "Selected native transcript publication changed"
             );
+            assert_eq!(error.stage, None);
         } else {
             assert_eq!(result.unwrap(), before);
         }
