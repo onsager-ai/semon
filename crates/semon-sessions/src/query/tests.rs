@@ -83,10 +83,13 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         NOW,
     )
     .unwrap();
-    let read_pages = || {
+    let read_pages = |sealed: bool| {
         let mut after = 0;
         let mut pages = Vec::new();
         loop {
+            crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
+            crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow_mut().clear());
+            crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.set(None));
             let reply = crate::session_transcript_range_with_mode(
                 &home.options,
                 "local",
@@ -95,7 +98,16 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
             );
             let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            let bytes = crate::source_chunks::READ_BYTES.with(|bytes| bytes.get());
+            let blocks = crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow().len());
+            let stage = crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get());
+            println!(
+                "sealed={sealed} after={after} status={} blocks={blocks} bytes={bytes} stage={stage:?}",
+                reply.status
+            );
             if reply.status != 200 {
+                assert!(sealed, "pre-seal read failed: {body}");
+                assert!(bytes > blocks as u64 * crate::source_chunks::SIZE as u64);
                 assert_eq!(
                     crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
                     Some(crate::source_carrier::FailureStage::Budget),
@@ -120,13 +132,16 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         assert!(pages.len() >= 2);
         pages
     };
-    let before = read_pages();
+    let before = read_pages(false);
     assert!(crate::sealed::punch_supported(&home.root).unwrap());
     let first = crate::sealed::seal(&path, 1, 32 * 1024).unwrap();
-    assert!(first.punched);
+    assert!(first.added.is_some());
     let second = crate::sealed::seal(&path, 1, u64::MAX).unwrap();
     assert!(second.added.is_some());
-    let after = read_pages();
+    assert!(second.punched);
+    assert_eq!(second.added.unwrap().start, first.added.unwrap().end);
+    crate::sealed::clear_frame_cache_for_test();
+    let after = read_pages(true);
     for (before, after) in before.iter().zip(&after) {
         assert_eq!(before["entries"], after["entries"]);
         assert_eq!(before["projection"], after["projection"]);
