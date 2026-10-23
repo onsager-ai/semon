@@ -99,6 +99,7 @@ pub fn session_source_proof(
         )?;
         connection.busy_timeout(Duration::from_millis(100))?;
         let transaction = connection.transaction()?;
+        crate::events::store::require_current(&transaction)?;
         let encoded: Option<(String, Option<String>)> = transaction.query_row(
             "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
             [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -977,6 +978,7 @@ fn read_page_snapshot(
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    crate::events::store::require_current(transaction)?;
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
             || cursor.machine != machine
@@ -1088,21 +1090,14 @@ fn read_page_snapshot(
     } else {
         (rows(transaction, request)?, None, None)
     };
-    let has_history = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
     let mut partial_history = std::collections::BTreeSet::new();
-    if has_history {
-        for row in &selected {
-            if transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
-                [&row.key],
-                |row| row.get::<_, bool>(0),
-            )? {
-                partial_history.insert(row.key.clone());
-            }
+    for row in &selected {
+        if transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+            [&row.key],
+            |row| row.get::<_, bool>(0),
+        )? {
+            partial_history.insert(row.key.clone());
         }
     }
 
@@ -2311,7 +2306,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_eviction_binds_parent_marker_metadata_and_preserves_prior_v4_rows() {
+    fn archive_eviction_binds_parent_marker_metadata_and_preserves_prior_rows() {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
@@ -2374,7 +2369,29 @@ mod tests {
                 rusqlite::params![archive_key, marker.to_string()],
             )
             .unwrap();
-        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert_eq!(
+            crate::source_event_index_retained(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        // A writable producer now discards obsolete derived contracts; these
+        // assertions exercise the focused custody boundary before that rebuild.
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
+        );
+        // Restore the current fixture to exercise ordinary retained custody.
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![archive_key, encoded],
+            )
+            .unwrap();
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         let before = indexed_rows(&connection, path.to_str().unwrap());
         fs::remove_file(&path).unwrap();
         for _ in 0..2 {
@@ -2383,10 +2400,7 @@ mod tests {
             let count: i64 = connection
                 .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(
-                count, 1,
-                "old v4 custody still preserves the existing index"
-            );
+            assert_eq!(count, 1, "current custody preserves the existing index");
         }
     }
 
@@ -2429,7 +2443,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_eviction_binds_native_launch_metadata_and_preserves_prior_v5_rows() {
+    fn archive_eviction_binds_native_launch_metadata_and_preserves_prior_rows() {
         use sha2::{Digest, Sha256};
         let fixture = Fixture::new();
         fixture.publish(1);
@@ -2492,7 +2506,28 @@ mod tests {
                 rusqlite::params![archive_key, marker.to_string()],
             )
             .unwrap();
-        assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
+        assert_eq!(
+            crate::source_event_index_retained(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert_eq!(
+            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            Err(CatalogIdentityError::Unavailable)
+        );
+        // A writable producer now discards obsolete derived contracts; these
+        // assertions exercise the focused custody boundary before that rebuild.
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
+        );
+        connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                rusqlite::params![archive_key, encoded],
+            )
+            .unwrap();
+        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         let before = indexed_rows(&connection, path.to_str().unwrap());
         fs::remove_file(&path).unwrap();
         for _ in 0..2 {
@@ -2572,9 +2607,15 @@ mod tests {
         connection
             .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
             .unwrap();
+        let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
         assert_eq!(
             crate::retain_source_event_index(&fixture.options, &proof, &ready),
-            Err(CatalogIdentityError::ScopeChanged)
+            Err(CatalogIdentityError::Unavailable)
+        );
+        assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            unsupported
         );
         let count: i64 = connection
             .query_row(
@@ -2837,8 +2878,8 @@ mod tests {
             "unavailable"
         );
         assert!(!path.exists());
-        // Actual pre-overview schema shape, with only the original catalog and
-        // selected slot provenance. Migration must work after native eviction.
+        // A missing current overview must be repairable after native eviction,
+        // using the retained selected source provenance.
         let metadata: String = db
             .query_row(
                 "SELECT metadata FROM session_catalog WHERE session_key='home'",
@@ -2846,22 +2887,22 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let mut legacy: crate::model::summary::CatalogRow =
+        let mut selected: crate::model::summary::CatalogRow =
             serde_json::from_str(&metadata).unwrap();
-        for source in &mut legacy.sources {
+        for source in &mut selected.sources {
             source.native_role = None;
         }
         db.execute(
             "UPDATE session_catalog SET metadata=?1 WHERE session_key='home'",
-            [serde_json::to_string(&legacy).unwrap()],
+            [serde_json::to_string(&selected).unwrap()],
         )
         .unwrap();
         db.execute(
             "UPDATE session_slot_projections SET source_generation=?1 WHERE session_key='home'",
-            [crate::retention::source_generation(&legacy.sources).unwrap()],
+            [crate::retention::source_generation(&selected.sources).unwrap()],
         )
         .unwrap();
-        db.execute_batch("DROP TABLE session_overview; DROP TABLE session_trace_headers; DROP TABLE session_trace_turns; DROP TABLE session_trace_edges; PRAGMA user_version=19;").unwrap();
+        db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
         let migrated = crate::events::EventCache::open_scoped(&fixture.options.cache).unwrap();
         drop(migrated);
         assert!(
@@ -2933,7 +2974,7 @@ mod tests {
     }
 
     #[test]
-    fn archived_overview_migration_reuses_exact_indexes_for_large_native_sources() {
+    fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
         use std::io::Write;
         let fixture = Fixture::new();
         let path = fixture.source("large-original");
@@ -2977,7 +3018,7 @@ mod tests {
         };
         fs::remove_file(&path).unwrap();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        db.execute_batch("DROP TABLE session_overview; DROP TABLE session_trace_headers; DROP TABLE session_trace_turns; DROP TABLE session_trace_edges; PRAGMA user_version=19;").unwrap();
+        db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
         drop(EventCache::open_scoped(&fixture.options.cache).unwrap());
         let refs = crate::overview_repair_sources(&fixture.options, "large-original")
             .unwrap()
@@ -3007,7 +3048,7 @@ mod tests {
     }
 
     #[test]
-    fn large_families_migrate_one_owner_without_replacing_related_publications() {
+    fn large_families_repair_one_owner_without_replacing_related_publications() {
         let fixture = Fixture::new();
         fixture.source("root");
         for i in 0..80 {
@@ -3016,7 +3057,7 @@ mod tests {
         fixture.publish(0);
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         db.execute("UPDATE session_catalog SET parent_key='root',metadata=json_set(metadata,'$.parent','root') WHERE session_key LIKE 'run-%'",[]).unwrap();
-        db.execute_batch("DROP TABLE session_overview; DROP TABLE session_trace_headers; DROP TABLE session_trace_turns; DROP TABLE session_trace_edges; PRAGMA user_version=19;").unwrap();
+        db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT 'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
         drop(EventCache::open_scoped(&fixture.options.cache).unwrap());
         let refs = crate::overview_repair_sources(&fixture.options, "root")
             .unwrap()
@@ -3443,195 +3484,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_eleven_migration_replaces_current_trees_without_rebinding_history() {
-        for schema in [11, 16] {
-            let fixture = Fixture::new();
-            fixture.publish(1);
-            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-            connection
-                .execute("UPDATE session_catalog SET lifecycle='retained'", [])
-                .unwrap();
-            let before: (String, String) = connection.query_row(
-            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
-            [], |row| Ok((row.get(0)?, row.get(1)?))
-        ).unwrap();
-            for (suffix, keys) in [
-                ("order", "last_ms DESC, session_key ASC"),
-                ("harness", "harness, last_ms DESC, session_key ASC"),
-                ("repo", "repo, last_ms DESC, session_key ASC"),
-                (
-                    "harness_repo",
-                    "harness, repo, last_ms DESC, session_key ASC",
-                ),
-                ("parent", "parent_key, last_ms DESC, session_key ASC"),
-            ] {
-                connection.execute_batch(&format!("DROP INDEX session_catalog_current_{suffix}; CREATE INDEX session_catalog_current_{suffix} ON session_catalog(lifecycle, {keys});")).unwrap();
-            }
-            connection
-                .pragma_update(None, "user_version", schema)
-                .unwrap();
-            drop(EventCache::open(&fixture.options.cache));
-            let after: (String, String) = connection.query_row(
-            "SELECT session_catalog.metadata,session_slot_projections.generation FROM session_catalog JOIN session_slot_projections USING(session_key)",
-            [], |row| Ok((row.get(0)?, row.get(1)?))
-        ).unwrap();
-            assert_eq!(before, after);
-            for suffix in ["order", "harness", "repo", "harness_repo", "parent"] {
-                let sql: String = connection
-                    .query_row(
-                        "SELECT sql FROM sqlite_master WHERE name=?1",
-                        [format!("session_catalog_current_{suffix}")],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert!(sql.ends_with("WHERE lifecycle='current'"), "{sql}");
-                let count: i64 = connection.query_row(&format!("SELECT count(*) FROM session_catalog INDEXED BY session_catalog_current_{suffix} WHERE lifecycle='current'"), [], |row| row.get(0)).unwrap();
-                assert_eq!(count, 0);
-            }
-        }
-    }
-
-    #[test]
-    fn schema_ten_retention_migration_binds_only_coherent_supported_recipes() {
-        for coherent in [true, false] {
-            let fixture = Fixture::new();
-            fixture.publish(1);
-            let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-            let before: String = connection
-                .query_row(
-                    "SELECT generation FROM session_slot_projections",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            connection.execute_batch("DROP INDEX session_catalog_current_order; DROP INDEX session_catalog_current_harness; DROP INDEX session_catalog_current_repo; DROP INDEX session_catalog_current_harness_repo; DROP INDEX session_catalog_current_parent; DROP INDEX session_catalog_current_order_model; DROP INDEX session_catalog_current_harness_model; DROP INDEX session_catalog_current_repo_model; DROP INDEX session_catalog_current_harness_repo_model; DROP INDEX session_catalog_current_native; DROP INDEX session_catalog_current_source_path; DROP INDEX session_catalog_query_current_state; DROP INDEX semantic_catalog_parent_key; DROP INDEX semantic_catalog_native_paths; ALTER TABLE session_catalog DROP COLUMN lifecycle; ALTER TABLE session_catalog_sources DROP COLUMN lifecycle; ALTER TABLE session_slot_projections DROP COLUMN source_generation; UPDATE session_catalog SET metadata=json_remove(metadata,'$.lifecycle'); PRAGMA user_version=10;").unwrap();
-            if !coherent {
-                connection.execute("UPDATE meta SET value='stale' WHERE key='slot_projection_catalog_generation'", []).unwrap();
-            }
-            drop(EventCache::open(&fixture.options.cache));
-            let (after, source): (String, Option<String>) = connection
-                .query_row(
-                    "SELECT generation,source_generation FROM session_slot_projections",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(before, after);
-            assert_eq!(source.is_some(), coherent);
-            assert_eq!(
-                connection
-                    .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                    .unwrap(),
-                crate::events::store::SCHEMA_VERSION as u32
-            );
-        }
-    }
-
-    #[test]
-    fn schema_twenty_five_search_upgrade_preserves_qualified_native_custody() {
-        let fixture = Fixture::new();
-        fixture.publish(1);
-        let relative = "projects/project/session-00000.jsonl";
-        let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
-            .unwrap()
-            .unwrap();
-        let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
-            .unwrap()
-            .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
-        let body_before = fixture.body("q=claude");
-        assert_eq!(body_before.0, 200);
-        assert_eq!(body_before.1["items"].as_array().unwrap().len(), 1);
-        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let native_before = indexed_rows(&connection, path.to_str().unwrap());
-        let archive_before: String = connection
-            .query_row(
-                "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        connection.execute_batch("INSERT INTO session_search_postings SELECT 'current',session_key,gram,current_last_ms FROM session_search_memberships WHERE current_last_ms IS NOT NULL; INSERT INTO session_search_postings SELECT 'retained_history',session_key,gram,history_last_ms FROM session_search_memberships WHERE history_last_ms IS NOT NULL; DROP TABLE session_search_memberships; UPDATE meta SET value='1' WHERE key='search_version'; PRAGMA user_version=25;").unwrap();
-        let search_state = |connection: &Connection| {
-            ["SELECT json_array(read_scope,session_key,gram,last_ms) FROM session_search_postings ORDER BY read_scope,session_key,gram", "SELECT json_array(read_scope,gram,members) FROM session_search_counts ORDER BY read_scope,gram", "SELECT json_array(read_scope,session_key,fields,complete) FROM session_search_documents ORDER BY read_scope,session_key", "SELECT json_array(read_scope,incomplete) FROM session_search_coverage ORDER BY read_scope", "SELECT json_array(key,value) FROM meta WHERE key IN ('search_backfill_complete','catalog_generation','catalog_completeness','cache_version') ORDER BY key"]
-                .map(|sql|connection.prepare(sql).unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap())
-        };
-        let legacy_before = search_state(&connection);
-        assert_eq!(
-            fixture.body("q=claude").0,
-            503,
-            "unsupported search format cannot silently omit compact rows"
-        );
-        drop(EventCache::open(&fixture.options.cache));
-        assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            crate::events::store::SCHEMA_VERSION
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT value FROM meta WHERE key='search_version'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            crate::catalog_search::VERSION
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM session_search_memberships",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0,
-            "additive upgrade must not copy unrelated posting history"
-        );
-        assert_eq!(search_state(&connection), legacy_before);
-        assert_eq!(
-            indexed_rows(&connection, path.to_str().unwrap()),
-            native_before
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            archive_before
-        );
-        assert_eq!(
-            crate::source_projection_ready(&fixture.options, "claude", relative)
-                .unwrap()
-                .unwrap(),
-            ready
-        );
-        assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
-        assert_eq!(fixture.body("q=claude"), body_before);
-        drop(EventCache::open(&fixture.options.cache));
-        assert_eq!(
-            search_state(&connection),
-            legacy_before,
-            "restart must not rebuild either search or native history"
-        );
-        connection
-            .execute("UPDATE meta SET value='1' WHERE key='search_version'", [])
-            .unwrap();
-        assert_eq!(
-            fixture.body("q=claude").0,
-            503,
-            "a stale format marker remains unavailable"
-        );
-    }
-
-    #[test]
-    fn retained_projection_survives_parser_reset_and_source_reappearance() {
+    fn retained_projection_survives_source_disappearance_and_reappearance() {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
@@ -3640,9 +3493,6 @@ mod tests {
             .unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         fs::remove_file(fixture.options.claude_home.join(relative)).unwrap();
-        connection
-            .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
-            .unwrap();
         fixture.publish_existing();
         let retained = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
@@ -4843,27 +4693,52 @@ mod tests {
     }
 
     #[test]
-    fn source_observer_upgrades_old_recipes_without_a_source_append() {
+    fn unsupported_storage_is_observable_at_product_read_entrypoints() {
+        for change in [
+            "PRAGMA user_version=2147483647",
+            "DELETE FROM meta WHERE key='cache_version'",
+            "UPDATE meta SET value='invalid' WHERE key='cache_version'",
+        ] {
+            let fixture = Fixture::new();
+            fixture.publish(1);
+            let path = EventCache::path(&fixture.options.cache);
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(change).unwrap();
+            drop(db);
+            let original = fs::read(&path).unwrap();
+            assert!(crate::collect(&fixture.options).is_err());
+            assert!(crate::local_facts(&fixture.options).is_err());
+            assert_eq!(fixture.body("").0, 503);
+            assert_eq!(
+                crate::session_transcript_range(
+                    &fixture.options,
+                    "source",
+                    "sid=session-00000&after=0&limit=1",
+                    None
+                )
+                .status,
+                503
+            );
+            let mut query = crate::Query::new(fixture.options.clone());
+            assert!(query.call("list_sessions", &json!({})).is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn unsupported_recipe_stays_unavailable_without_implicit_upgrade() {
         let fixture = Fixture::new();
         fixture.publish(1);
-        let before = crate::session_transcript_range(
-            &fixture.options,
-            "source",
-            "sid=session-00000&after=0&limit=1",
-            None,
-        );
-        assert_eq!(before.status, 200);
-        let before: Value = serde_json::from_slice(&before.body).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let ledger: (i64, Vec<u8>) = connection
-            .query_row(
-                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
+        connection
+            .execute(
+                "UPDATE session_slot_projections SET version=3 WHERE session_key='session-00000'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        connection.execute("UPDATE session_slot_projections SET version=3,generation=?1 WHERE session_key='session-00000'",["0".repeat(64)]).unwrap();
-        connection.execute("UPDATE session_slots SET metadata=json_remove(metadata,'$.field.layers') WHERE session_key='session-00000'",[]).unwrap();
+        let before = crate::native_timing::cleanup_tests::snapshot(&connection);
+        let cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        assert!(cache.qualified_catalog().unwrap());
         let unavailable = crate::session_transcript_range(
             &fixture.options,
             "source",
@@ -4871,48 +4746,10 @@ mod tests {
             None,
         );
         assert_eq!(unavailable.status, 503);
-        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
-        observer.demand().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let reply = crate::session_transcript_range(
-                &fixture.options,
-                "source",
-                "sid=session-00000&after=0&limit=1",
-                None,
-            );
-            if reply.status == 200 {
-                let after: Value = serde_json::from_slice(&reply.body).unwrap();
-                assert_eq!(
-                    after["projection"]["version"],
-                    crate::slot_projection::VERSION
-                );
-                assert_eq!(
-                    after["entries"][0]["entry_id"],
-                    before["entries"][0]["entry_id"]
-                );
-                assert_eq!(
-                    after["entries"][0]["provenance"],
-                    before["entries"][0]["provenance"]
-                );
-                assert_eq!(after["entries"][0]["field"]["layers"], 1);
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "unchanged-source recipe upgrade did not complete"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        observer.close();
-        let after: (i64, Vec<u8>) = connection
-            .query_row(
-                "SELECT resume_at,head_sha256 FROM files LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(after, ledger);
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&connection),
+            before
+        );
     }
 
     #[test]

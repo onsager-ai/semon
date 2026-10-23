@@ -29,16 +29,8 @@ CREATE TABLE IF NOT EXISTS session_history_slot_parts (
 CREATE INDEX IF NOT EXISTS session_history_slots_turn ON session_history_slots(session_key,json_extract(metadata,'$.turn'),slot);
 ";
 
-/// Optional history metadata is a primary-key read; old stores continue to
-/// expose their existing qualified projection until a producer migrates them.
+/// Optional selected history metadata in the current storage contract.
 pub(crate) fn catalog(connection: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    if !connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )? {
-        return Ok(None);
-    }
     match connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_history_catalog WHERE session_key=?1", [key], |row| row.get::<_, Option<String>>(0)).optional()? {
         Some(None) => Err(rusqlite::Error::InvalidQuery),
         Some(Some(metadata)) => Ok(Some(metadata)),
