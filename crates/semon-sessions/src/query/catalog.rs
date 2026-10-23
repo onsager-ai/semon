@@ -120,6 +120,7 @@ fn open(options: &Options) -> Result<Connection, QueryError> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(unavailable)?;
+    crate::events::store::require_current(&db).map_err(unavailable)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     Ok(db)
@@ -127,6 +128,7 @@ fn open(options: &Options) -> Result<Connection, QueryError> {
 fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
     let db = open(options)?;
     db.execute_batch("BEGIN").map_err(unavailable)?;
+    crate::events::store::require_current(&db).map_err(unavailable)?;
     let generation = generation(&db)?;
     let ready: bool = db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)",rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(),generation],|row|row.get(0)).map_err(unavailable)?;
     if !ready {

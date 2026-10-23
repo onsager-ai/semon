@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Earlier stages may contain parent turns derived from partial receipt sets.
 // Rebuild their witnesses using complete physical sender receipt boundaries.
-const RECIPE: &str = "recorded-origin-turn-complete-receipts-v3";
+pub(super) const RECIPE: &str = "recorded-origin-turn-complete-receipts-v3";
 fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -110,7 +110,7 @@ pub(super) fn active(c: &Connection) -> rusqlite::Result<bool> {
         |r| r.get(0),
     )
 }
-/// An unsupported Current header stays visible until its replacement publishes.
+/// An incomplete Current header stays visible until its replacement publishes.
 /// Admit its repair once, preserving an existing observation or the exact live
 /// stage observation even after ACK. Unreachable GC records own no work.
 pub(super) fn owns_header_repair(c: &Connection, path: &str) -> rusqlite::Result<bool> {
@@ -1418,9 +1418,11 @@ impl SqliteStore {
             // machine activity must not discard this component's progress.
             // Local/unobserved runtime and negative custody keep their original
             // conservative epoch fence.
-            if !recipe_current(&tx).map_err(failure)?
-                || (old != runtime
-                    && (!journaled || withdrawal_authority(&tx).map_err(failure)?.is_some()))
+            if !recipe_current(&tx).map_err(failure)? {
+                return Err(StoreError::Failed("unsupported semantic recipe".into()));
+            }
+            if old != runtime
+                && (!journaled || withdrawal_authority(&tx).map_err(failure)?.is_some())
             {
                 reset(&tx, runtime).map_err(failure)?;
             } else if old != runtime {
@@ -1565,10 +1567,10 @@ impl SqliteStore {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(failure)?;
-        if !recipe_current(&tx).map_err(failure)?
-            || generation(&tx).map_err(failure)? != base
-            || !witnesses(&tx).map_err(failure)?
-        {
+        if !recipe_current(&tx).map_err(failure)? {
+            return Err(StoreError::Failed("unsupported semantic recipe".into()));
+        }
+        if generation(&tx).map_err(failure)? != base || !witnesses(&tx).map_err(failure)? {
             reset(&tx, &runtime).map_err(failure)?;
             record_recipe(&tx).map_err(failure)?;
             epoch = tx
@@ -2667,7 +2669,7 @@ mod tests {
         // readiness. It never manufactures a complete Catalog observation.
         store.connection.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('old',0,'codex','{}')",[]).unwrap();
         store.connection.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('old','codex','old',?1)",[&path]).unwrap();
-        store.connection.execute("INSERT INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES('old','original',NULL,?1,0)",[crate::slot_projection::VERSION-1]).unwrap();
+        store.connection.execute("INSERT INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES('old','original',NULL,?1,0)",[crate::slot_projection::VERSION]).unwrap();
         let tx = store.connection.unchecked_transaction().unwrap();
         invalidate_catalog_source(&tx, &path, "removed").unwrap();
         tx.commit().unwrap();
@@ -2961,61 +2963,27 @@ mod tests {
     }
 
     #[test]
-    fn old_publication_recipe_resumes_through_bounded_reset_without_erasing_history() {
-        let (root, mut store, _) = header_repair_store("origin-recipe");
+    fn unsupported_publication_recipe_refuses_without_erasing_history() {
+        let (root, mut store, _) = header_repair_store("unsupported-recipe");
         store
             .connection
             .execute(
-                "UPDATE catalog_semantic_stage SET phase='publication',keys_done=1",
+                "UPDATE meta SET value='unsupported' WHERE key='catalog_semantic_recipe'",
                 [],
             )
             .unwrap();
-        store
-            .connection
-            .execute(
-                "UPDATE meta SET value='recorded-origin-turn-journaled-runtime-v2' WHERE key='catalog_semantic_recipe'",
-                [],
-            )
-            .unwrap();
-        let epoch: i64 = store
-            .connection
-            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
-            .unwrap();
-        let batch = store
-            .semantic_next(64)
-            .unwrap()
-            .expect("bounded reset work");
-        assert!(batch.epoch > epoch);
-        assert!(batch.paths.is_empty());
-        assert!(matches!(batch.phase, Phase::Identity));
-        assert!(recipe_current(&store.connection).unwrap());
+        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+        assert!(store.semantic_next(64).is_err());
         assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT COUNT(*) FROM session_catalog WHERE session_key='old'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
+            crate::native_timing::cleanup_tests::snapshot(&store.connection),
+            before
         );
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT COUNT(*) FROM session_slot_projections WHERE session_key='old'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-        let _ = std::fs::remove_dir_all(root);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn unsupported_header_repair_preserves_pending_and_live_ack_observations() {
+    fn current_header_repair_preserves_pending_and_live_ack_observations() {
         let (root, mut store, path) = header_repair_store("ack");
         let observed = revision(&store.connection).unwrap();
         for _ in 0..3 {
@@ -3046,7 +3014,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        // Ordinary source observations remain independent of migration repair.
+        // Ordinary source observations remain independent of projection repair.
         let tx = store.connection.unchecked_transaction().unwrap();
         invalidate_catalog_source(&tx, &path, "changed").unwrap();
         tx.commit().unwrap();
@@ -3064,7 +3032,7 @@ mod tests {
             (
                 "original".into(),
                 None,
-                i64::from(crate::slot_projection::VERSION - 1)
+                i64::from(crate::slot_projection::VERSION)
             )
         );
         drop(store);
@@ -3072,7 +3040,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_header_repair_rejects_each_changed_normalized_file_witness() {
+    fn current_header_repair_rejects_each_changed_normalized_file_witness() {
         for assignment in [
             "dev=dev+1",
             "ino=ino+1",
@@ -3107,7 +3075,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_header_repair_requires_live_indexed_stage_ownership() {
+    fn current_header_repair_requires_live_indexed_stage_ownership() {
         for (transition, remaining) in [
             ("UPDATE catalog_semantic_sources SET index_done=0", 1),
             ("UPDATE catalog_semantic_sources SET claim=123456", 1),

@@ -258,3 +258,50 @@ states the aggregate maximum explicitly. A source read failure fails the union;
 it never becomes an empty source or a complete partial success. Capacity and
 source-unavailable responses remain distinct. The hosted adapter adds bounded
 request admission, a deadline and the existing Catalog publication coordinator.
+
+## Current Semon storage contract
+
+The Event Index initializes schema 33 with parser/cache version 28 in one
+transaction, including pricing fingerprints and native usage readiness default
+0. Schema 33 fences the retired proof/tree/usage representations as one contract.
+Normal writable producer opens (complete and scoped/background) automatically
+clear a recognized obsolete Semon index and initialize the current empty schema;
+normal native collection then reindexes supported original sources. This is
+whole-index invalidation, with no old-schema reader, conversion or migration.
+
+Recognition requires Semon's existing canonical parser metadata, stable
+`files`/`events` columns and an exclusively Semon-owned table/trigger namespace.
+At least one recognized schema, parser, publication/search, semantic recipe or
+archive-marker version must be older, and none may be newer or unrecognized.
+The current DDL and the retired `native_usage_migrations`,
+`native_tree_copy_queue` and `session_search_postings` table names delimit the
+owned namespace; unknown tables/views/triggers make ownership ambiguous.
+Nonempty schema zero, missing/malformed metadata, ambiguous or foreign databases,
+and future contracts remain refused without reset. Selected/focused readers
+retain their existing read-only qualification and never trigger invalidation.
+
+Reset and empty initialization share one SQLite immediate writer transaction,
+with reclassification under the lock. Concurrent producers cannot reset a newly
+rebuilt store again; existing WAL readers keep their prior snapshots. No index,
+WAL or SHM file is unlinked, and existing private-file handling remains in place.
+Only the exact configured SQLite derived index is cleared. Native logs, archive
+objects, credentials, unrelated files and retired JSON caches remain untouched.
+Physical corruption retains its existing set-aside/recovery behavior.
+
+Reindexing cannot recover history, retained recipes or reported facts whose
+original supported native source bytes are gone or inaccessible. Archive bytes
+are preserved but old derived archive markers are not converted into new read
+authority; an authorized source/provider must supply supported original bytes.
+Unsupported stores still propagate errors rather than empty in-memory history.
+
+Current native usage writes persist the normalized source facts and dimensions
+with the ledger. Tree writes maintain copied-usage identities through the current
+insert/delete triggers; there is no old-file discovery or copied-identity
+backfill. A missing/corrupt current tree projection may still be repaired in
+receipt-bound slices from authorized, verified source ranges. This repair never
+converts legacy usage accumulators. Unavailable sources/proofs leave repair
+blocked without discarding original facts or archive custody. Upstream harness
+log formats remain supported product inputs.
+
+The [compatibility inventory](prerelease-compatibility-cleanup.md) records the
+removed Semon-only paths and retained current guards.

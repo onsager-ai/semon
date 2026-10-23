@@ -256,6 +256,7 @@ fn read(
         .busy_timeout(std::time::Duration::from_secs(1))
         .map_err(failed)?;
     let db = connection.transaction().map_err(failed)?;
+    crate::events::store::require_current(&db)?;
     let complete = db.query_row("SELECT value FROM meta WHERE key='catalog_completeness'",[],|row|row.get::<_,String>(0)).optional().map_err(failed)?.as_deref()==Some("complete")
         && !db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c LEFT JOIN session_overview o USING(session_key) WHERE c.last_ms>=?1 AND (o.session_key IS NULL OR EXISTS(SELECT 1 FROM meta WHERE key='overview_needed:'||c.session_key)) LIMIT 1)",[since],|row|row.get::<_,bool>(0)).map_err(failed)?;
     let mut generation = db
@@ -472,6 +473,7 @@ pub(crate) fn session_home_details_inner(
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(failed)?;
         let tx = db.transaction().map_err(failed)?;
+        crate::events::store::require_current(&tx)?;
         let generation: String = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='catalog_generation'",
@@ -1014,8 +1016,7 @@ pub fn session_overview_reply(
             let mut value = selected.clone();
             value["event"] = event.clone();
             let seen_result = event["ask"] == "result"
-                && ((sources.len() == 1 && seen.contains(event["id"].as_str().unwrap_or("")))
-                    || seen.contains(&json!([row.source, event["id"]]).to_string()));
+                && seen.contains(&json!([row.source, event["id"]]).to_string());
             if !seen_result && (event["status"] == "wait" || event["ask"] == "result") {
                 has_wait |= event["status"] == "wait";
                 waiting.push(value.clone());
@@ -1111,10 +1112,13 @@ mod tests {
                 cache: root.join("index.json"),
                 ..Options::default()
             };
+            drop(EventCache::open_scoped(&options.cache).unwrap());
             let db = Connection::open(EventCache::path(&options.cache)).unwrap();
-            db.execute_batch(SCHEMA).unwrap();
-            db.execute_batch(crate::causal_trace::SCHEMA).unwrap();
-            db.execute_batch("CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,lifecycle TEXT NOT NULL,last_ms INTEGER NOT NULL,metadata TEXT NOT NULL);CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);INSERT INTO meta VALUES('catalog_completeness','complete');").unwrap();
+            db.execute(
+                "INSERT INTO meta VALUES('catalog_completeness','complete')",
+                [],
+            )
+            .unwrap();
             Self {
                 source: OverviewSource {
                     key: key.into(),
@@ -1129,7 +1133,7 @@ mod tests {
             let mut db = Connection::open(EventCache::path(&self.source.options.cache)).unwrap();
             let tx = db.transaction().unwrap();
             tx.execute(
-                "INSERT OR REPLACE INTO session_catalog VALUES(?1,?2,1000,'{}')",
+                "INSERT OR REPLACE INTO session_catalog(session_key,lifecycle,last_ms,harness,metadata) VALUES(?1,?2,1000,'codex','{}')",
                 params![key, lifecycle],
             )
             .unwrap();
@@ -1325,20 +1329,23 @@ mod tests {
         assert_eq!(output["totals"]["waiting"], 1);
         assert_eq!(output["inbox"][0]["source_key"], "second");
         assert_eq!(output["totals"]["answered"], 2);
-        let legacy = crate::viewer::percent_encode(r#"["answer"]"#);
+        let unscoped = crate::viewer::percent_encode(r#"["answer"]"#);
         assert_eq!(
             home(
                 &[
                     first.source.clone_for_test(),
                     second.source.clone_for_test()
                 ],
-                &format!("seen={legacy}")
+                &format!("seen={unscoped}")
             )["totals"]["waiting"],
             2
         );
         assert_eq!(
-            home(&[first.source.clone_for_test()], &format!("seen={legacy}"))["totals"]["waiting"],
-            0
+            home(
+                &[first.source.clone_for_test()],
+                &format!("seen={unscoped}")
+            )["totals"]["waiting"],
+            1
         );
         assert!(
             session_overview_reply(
