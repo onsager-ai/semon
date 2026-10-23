@@ -613,6 +613,26 @@ impl Viewer {
             respond(request, reply, None);
             return;
         }
+        // Credentials are transport-only. Reject duplicate/invalid URL credentials
+        // even with a cookie, before spending a one-time control bootstrap nonce.
+        let credentials: Vec<_> = query
+            .split('&')
+            .filter(|part| {
+                let name = part.split_once('=').map_or(*part, |(name, _)| name);
+                decoded(name).as_deref() == Some("t")
+            })
+            .collect();
+        if !credentials.is_empty()
+            && (credentials.len() != 1
+                || credentials[0].strip_prefix("t=") != Some(self.bootstrap.as_str()))
+        {
+            respond(
+                request,
+                control_reply(403, serde_json::json!({"error":"Forbidden"})),
+                None,
+            );
+            return;
+        }
         let accepted = if request.method() == &Method::Post && path == "/api/viewer/home" {
             control_authorized(&request, &self.token, self.port).then_some(false)
         } else if self.control.is_some() {
@@ -651,6 +671,12 @@ impl Viewer {
             }
             *used = true;
         }
+        let routing_query = query
+            .split('&')
+            .filter(|part| !part.starts_with("t="))
+            .collect::<Vec<_>>()
+            .join("&");
+        let query = routing_query.as_str();
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
         let mut reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
             let mut bytes = Vec::new();
@@ -1658,6 +1684,10 @@ mod tests {
     }
 
     fn http(fixture: &Fixture, request: &str) -> String {
+        http_with_catalog(fixture, request, false)
+    }
+
+    fn http_with_catalog(fixture: &Fixture, request: &str, catalog: bool) -> String {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let viewer = Viewer {
@@ -1668,6 +1698,16 @@ mod tests {
             bootstrap: "0123456789abcdef0123456789abcdef".into(),
             port,
         };
+        if catalog {
+            viewer.core.demand_catalog_source("local").unwrap();
+            eventually("HTTP session fixture publication", || {
+                let reply = viewer
+                    .core
+                    .respond("GET", "/api/sessions", "limit=60", None);
+                let page: Value = serde_json::from_slice(&reply.body).ok()?;
+                (reply.status == 200 && page["completeness"]["state"] == "complete").then_some(())
+            });
+        }
         let request = request.replace("PORT", &port.to_string());
         let worker = thread::spawn(move || {
             viewer.handle(server.recv().unwrap());
@@ -1799,6 +1839,80 @@ mod tests {
             409
         );
         core.close();
+    }
+
+    #[test]
+    fn http_session_bootstrap_is_consumed_before_routing() {
+        let fixture = Fixture::new();
+        fixture.claude("bootstrap-session", &[
+            json!({"type":"user","sessionId":"bootstrap-session","uuid":"u","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"Bootstrap transcript"}}),
+        ]);
+        let token = "0123456789abcdef0123456789abcdef";
+        for (path, status) in [
+            (format!("/session/local/bootstrap-session?t={token}"), 200),
+            (
+                format!("/s/claude/bootstrap-session?machine=local&t={token}"),
+                308,
+            ),
+            (
+                format!("/session/local/bootstrap-session?native=1&t={token}"),
+                200,
+            ),
+            (
+                format!("/s/claude/bootstrap-session?t={token}&native=1"),
+                308,
+            ),
+        ] {
+            let wire = http_with_catalog(
+                &fixture,
+                &format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
+                ),
+                true,
+            );
+            assert!(wire.starts_with(&format!("HTTP/1.1 {status}")), "{wire}");
+            assert!(wire.contains("Set-Cookie:"), "{wire}");
+            let body = wire.split_once("\r\n\r\n").unwrap().1;
+            assert!(!body.contains(token), "credential leaked into content");
+            if status == 308 {
+                let location = wire
+                    .lines()
+                    .find(|line| line.starts_with("Location:"))
+                    .unwrap();
+                assert!(
+                    location.contains("/session/local/bootstrap-session"),
+                    "{location}"
+                );
+                assert!(!location.contains("t="), "{location}");
+            } else if path.contains("native=1") {
+                assert!(body.contains("Bootstrap transcript"), "{body}");
+            }
+        }
+        let continuation = http_with_catalog(
+            &fixture,
+            &format!(
+                "GET /session/local/bootstrap-session?native=1 HTTP/1.1\r\nHost: localhost:PORT\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n"
+            ),
+            true,
+        );
+        assert!(continuation.starts_with("HTTP/1.1 200"), "{continuation}");
+        assert!(continuation.contains("Bootstrap transcript"));
+        for query in [
+            "t=invalid".to_owned(),
+            format!("t={token}&t={token}"),
+            format!("t={token}&t=invalid"),
+            format!("t={token}&%74={token}"),
+        ] {
+            for cookie in [String::new(), format!("Cookie: semon_session={token}\r\n")] {
+                let wire = http(
+                    &fixture,
+                    &format!(
+                        "GET /session/local/bootstrap-session?{query} HTTP/1.1\r\nHost: localhost:PORT\r\n{cookie}Connection: close\r\n\r\n"
+                    ),
+                );
+                assert!(wire.starts_with("HTTP/1.1 403"), "{wire}");
+            }
+        }
     }
 
     #[test]
@@ -7557,9 +7671,7 @@ mod tests {
                 "{path}"
             );
         };
-        for path in ["/machines/alpha"] {
-            shell(path);
-        }
+        shell("/machines/alpha");
         assert_eq!(
             core.respond("GET", "/session/b/lane-b", "", None).status,
             503

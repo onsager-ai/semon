@@ -47,7 +47,12 @@ All deeper selected-read generation, range and custody validation still applies.
 Unknown keys, duplicate keys, invalid encodings and identity parameters
 `machine`, `source`, `sid`, `catalog_key` are malformed on canonical addresses.
 Browsing context and native paging/expansion links remain usable on reload and
-history navigation. API requests still explicitly carry the resolved source and
+history navigation. Standalone HTTP consumes a successfully authenticated `t` bootstrap credential
+before route parsing, and the frontend removes it before parsing or history
+normalization. Duplicate or invalid URL credentials fail authentication, including
+with a cookie. Existing Host, cookie, one-time control nonce and write protections
+remain in force. Public route parsers and Hub never accept `t` as a route control.
+API requests still explicitly carry the resolved source and
 Catalog key under their existing selected-read contracts.
 
 ## Resolution and compatibility
@@ -62,15 +67,19 @@ the host's existing denial policy, and legacy-only ambiguous or mismatch.
 An unavailable publication remains unavailable; it is not evidence of absence
 or uniqueness. Selected reads retain their generation and custody fences.
 
-Legacy `/s/<native|codex|claude>/<key>` and
-`/trace/<native|codex|claude>/<key>/<turn>` are compatibility inputs only.
+Legacy `/s/<native|codex|claude|copilot>/<key>` and
+`/trace/<native|codex|claude|copilot>/<key>/<turn>` are compatibility inputs only.
 An optional single `machine` binds the exact source. Without it, lookup examines
 only authorized sources. Zero exact matches is not_found; multiple matches show
 canonical source choices without content or automatic selection. One match with
 `native` or its actual harness gives HTTP 308 (JS normalization uses replaceState).
 A different harness is a mismatch with no content or redirect. Duplicate machine
-parameters are malformed. Exact Catalog keys are required; labels and native-ID
-aliases cannot redirect to a different session. Allowed controls survive the
+parameters are malformed. Catalog keys are exact; labels and native-ID aliases
+cannot redirect to a different session. The sole existing bookmark exception is
+legacy `unsent:<target>`: the authorized source's complete bookmark index must map
+that target uniquely to a real Catalog key. Missing, incomplete, unavailable or
+ambiguous mappings never auto-select. This exception applies only to legacy and
+bookmark-locate inputs; canonical addresses always require an exact Catalog key. Allowed controls survive the
 redirect. Trace turns stay in the required trace segment, fragments survive HTTP
 redirect inheritance, and old session `?turn=` targets normalize to `#<turn>`.
 

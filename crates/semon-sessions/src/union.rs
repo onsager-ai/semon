@@ -1089,7 +1089,7 @@ impl ViewerCore {
     }
 
     fn session_page(&self, extras: &Extras, path: &str, query: &str) -> ViewerReply {
-        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
+        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve_bookmark};
         let route = match SessionRoute::parse(path, query) {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
@@ -1142,7 +1142,7 @@ impl ViewerCore {
         if unavailable {
             return text(503, "Session index is updating");
         }
-        let resolution = resolve(&route, &candidates);
+        let resolution = resolve_bookmark(&route, &candidates);
         drop(work_guards);
         match resolution {
             Resolution::Valid(index) => {

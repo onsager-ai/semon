@@ -63,6 +63,9 @@ jobs:
       - name: Session URL shared vectors (ordinary PR gate)
         run: cargo test --locked -p semon-sessions session_route_shared_vectors -- --nocapture
 
+      - name: Standalone session bootstrap HTTP regressions
+        run: cargo test --locked -p semon-sessions http_session_bootstrap_is_consumed_before_routing -- --nocapture
+
       - name: cargo fmt --check
         run: cargo fmt --all --check
 

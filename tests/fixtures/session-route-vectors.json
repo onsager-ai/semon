@@ -116,14 +116,14 @@
     "canonical": "/session/a%2Fb/%252F/trace/%2F"
   },
   {
-    "name": "opaque 机器",
+    "name": "opaque \u673a\u5668",
     "path": "/session/%E6%9C%BA%E5%99%A8/%E4%BC%9A%E8%AF%9D%F0%9F%98%80/trace/%E8%BD%AC%E8%BA%AB",
     "query": "",
     "outcome": "valid",
     "candidates": [
       {
-        "source_key": "机器",
-        "catalog_key": "会话😀",
+        "source_key": "\u673a\u5668",
+        "catalog_key": "\u4f1a\u8bdd\ud83d\ude00",
         "harness": "claude"
       }
     ],
@@ -933,5 +933,166 @@
         "harness": "claude"
       }
     ]
+  },
+  {
+    "name": "/s/copilot/real%2Fkey valid indexed=False",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": false,
+    "canonical": "/session/alpha/real%2Fkey"
+  },
+  {
+    "name": "/trace/copilot/real%2Fkey/turn valid indexed=False",
+    "path": "/trace/copilot/real%2Fkey/turn",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": false,
+    "canonical": "/session/alpha/real%2Fkey/trace/turn"
+  },
+  {
+    "name": "/s/copilot/real%2Fkey mismatch indexed=False",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "",
+    "outcome": "mismatch",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "claude"
+      }
+    ],
+    "indexed_bookmark": false
+  },
+  {
+    "name": "/s/copilot/real%2Fkey ambiguous indexed=False",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "",
+    "outcome": "ambiguous",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": false
+  },
+  {
+    "name": "/s/native/unsent%3Atarget valid indexed=True",
+    "path": "/s/native/unsent%3Atarget",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true,
+    "canonical": "/session/alpha/real%2Fkey"
+  },
+  {
+    "name": "/s/native/unsent%3Atarget ambiguous indexed=True",
+    "path": "/s/native/unsent%3Atarget",
+    "query": "",
+    "outcome": "ambiguous",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      },
+      {
+        "source_key": "alpha",
+        "catalog_key": "another",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/s/native/unsent%3Atarget not_found indexed=True",
+    "path": "/s/native/unsent%3Atarget",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/s/claude/unsent%3Atarget mismatch indexed=True",
+    "path": "/s/claude/unsent%3Atarget",
+    "query": "",
+    "outcome": "mismatch",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/session/alpha/unsent%3Atarget not_found indexed=True",
+    "path": "/session/alpha/unsent%3Atarget",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/s/native/arbitrary-native-id not_found indexed=True",
+    "path": "/s/native/arbitrary-native-id",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "transport credential rejected /session/alpha/real%2Fkey",
+    "path": "/session/alpha/real%2Fkey",
+    "query": "t=secret",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
+    "name": "transport credential rejected /s/copilot/real%2Fkey",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "t=secret",
+    "outcome": "malformed",
+    "candidates": []
   }
 ]

@@ -65,7 +65,7 @@ export default async function sidebarCheck(browser) {
             })
             .click();
           await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
-          assert.equal(new URL(page.url()).searchParams.get('machine'), sourceKey);
+          assert.equal(decodeURIComponent(new URL(page.url()).pathname.split('/')[2]), sourceKey);
           assert.equal(await page.locator('.kids-sheet').count(), 0);
           assert.match(await page.locator('#topbar .t').textContent(), /Find parse_frame callers/);
         } else {

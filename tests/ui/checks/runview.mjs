@@ -56,7 +56,7 @@ export default async function runView(browser) {
         await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
         assert.equal(new URL(page.url()).pathname.endsWith('/swarm-worker-1'), true);
         assert.equal(
-          new URL(page.url()).searchParams.get('machine'),
+          decodeURIComponent(new URL(page.url()).pathname.split('/')[2]),
           reads[0].searchParams.get('machine'),
         );
         assert.equal(await overflow(page), 0);
