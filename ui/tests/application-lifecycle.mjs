@@ -205,10 +205,8 @@ for (const width of [390, 1280])
             }
             await settle();
           };
-          const ready = () => waitFor(
-            () => document.querySelector('#lanes .srow'),
-            'boot did not draw Recent',
-          );
+          const ready = () =>
+            waitFor(() => document.querySelector('#lanes .srow'), 'boot did not draw Recent');
           const effects = () =>
             timers.size +
             intervals.size +
@@ -232,9 +230,12 @@ for (const width of [390, 1280])
               requests++;
               pendingSignal = options?.signal;
               return new Promise((resolve) => {
-                pendingResolve = () => resolve(new Response(JSON.stringify(sources), {
-                  headers: { 'Content-Type': 'application/json' },
-                }));
+                pendingResolve = () =>
+                  resolve(
+                    new Response(JSON.stringify(sources), {
+                      headers: { 'Content-Type': 'application/json' },
+                    }),
+                  );
               });
             }
             if (String(path).startsWith('/api/viewer/home')) {
@@ -457,7 +458,10 @@ for (const width of [390, 1280])
             pendingObservation = true;
             const canceling = Application.mountViewerApplication(host());
             await ready();
-            assert(document.body.textContent.includes('Retrying'), 'cancel fixture was not pending');
+            assert(
+              document.body.textContent.includes('Retrying'),
+              'cancel fixture was not pending',
+            );
             canceling.destroy();
             await settle();
             assert(count() === 0 && effects() === 0, 'pending overview retry survived teardown');
