@@ -357,7 +357,7 @@ impl Home {
     /// Runs the production native Query producer over this synthetic home's
     /// persisted Event Index and checks shared identity/relationship invariants.
     fn build_at(&self, options: &Options, now: i64) -> QueryData {
-        let mut cache = EventCache::open(&options.cache);
+        let mut cache = EventCache::open(&options.cache).unwrap();
         let mut dirty = false;
         if options.facts.is_none() {
             cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
@@ -3642,7 +3642,7 @@ fn overview_prompt_sender_follows_the_recorded_turn_instead_of_session_ancestry(
             .into_iter()
             .filter(|input| input.path.ends_with(".jsonl"))
             .collect::<Vec<_>>();
-        let mut cache = EventCache::open(&home.options.cache);
+        let mut cache = EventCache::open(&home.options.cache).unwrap();
         let prepared = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
         let child = prepared.rows.iter().find(|row| row.key == "child").unwrap();
         assert_eq!(child.parent.as_deref(), Some(ROOT));
@@ -3691,7 +3691,7 @@ fn codex_native_spawn_calls_place_their_exact_task() {
 /// entries with placements. Compare the public persisted artifacts, including
 /// native preview recipes, rather than just checking parent headers.
 fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
-    let mut cache = EventCache::open(&home.options.cache);
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
     let full = prepare_sources(&home.options, &mut cache, inputs, NOW).unwrap();
     let serialized = serde_json::to_vec(&full.relationships).unwrap();
     let mut staged: relation_stage::Context = serde_json::from_slice(&serialized).unwrap();
@@ -8424,7 +8424,7 @@ fn a_changed_session_reuses_other_sessions_with_stable_source_references() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "root prompt")]);
     home.top("other", &[human("other", ts(0, 0), "other prompt")]);
-    let mut cache = EventCache::open(&home.options.cache);
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
     SESSION_DERIVATIONS.with(|counts| counts.borrow_mut().clear());
@@ -8477,7 +8477,7 @@ fn a_changed_session_reuses_other_sessions_with_stable_source_references() {
 fn rewritten_growing_logs_invalidate_cached_prompt_text() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "old prompt")]);
-    let mut cache = EventCache::open(&home.options.cache);
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
     let first = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
@@ -9410,7 +9410,7 @@ fn replay(seed: u64) {
         hold_lock(&home, "lock");
     }
     let steps = generated_steps(seed);
-    let mut cache = EventCache::open(&home.options.cache);
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
 
@@ -9527,7 +9527,7 @@ fn resumed_process_start_invalidates_cached_background_liveness() {
         ],
     );
     home.live(30, "root", "busy", json!({"startedAt":at(1, 0)}));
-    let mut cache = EventCache::open(&home.options.cache);
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
     let mut dirty = false;
     let mut texts = Texts::default();
     let before = build_with_cache(&home.options, &mut cache, &mut dirty, &mut texts, NOW);
@@ -9700,26 +9700,6 @@ fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
     SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
     assert_equivalent(&first, &home.build_query(), NOW);
     SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
-}
-
-#[test]
-fn schema_four_upgrade_preserves_event_indices_and_observed_runs() {
-    let home = Home::new();
-    home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    home.write(".claude.json", &json!({"projects": {"/work/proj": {"lastSessionId": "root", "lastStartTime": at(0, 0), "lastCost": 1.25}}}).to_string());
-    let first = home.build_query();
-    assert_eq!(first.sessions["root"].reported_runs.len(), 1);
-    let connection =
-        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    connection
-        .execute_batch("DROP TABLE session_descriptions; PRAGMA user_version = 4;")
-        .unwrap();
-    home.write(".claude.json", "{}");
-    assert_equivalent(&first, &home.build_query(), NOW);
-    let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, crate::events::store::SCHEMA_VERSION);
 }
 
 #[test]
@@ -10699,243 +10679,6 @@ fn source_disappearance_stays_pending_until_catalog_retirement_commits() {
 }
 
 #[test]
-fn parser_cache_reset_rederives_direct_formatter_catalog_outcome() {
-    use crate::slot_projection::{Outcome, Recipe, SavedSlot};
-
-    let home = Home::new();
-    let call = json!({
-        "timestamp": ts(0, 1),
-        "type": "response_item",
-        "payload": {
-            "type": "function_call",
-            "name": "exec_command",
-            "call_id": "direct-cache",
-            "arguments": "{\"cmd\":\"printf cached\"}"
-        }
-    });
-    let output = json!({
-        "timestamp": ts(0, 2),
-        "type": "response_item",
-        "payload": {
-            "type": "function_call_output",
-            "call_id": "direct-cache",
-            "output": "Wall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\ncached"
-        }
-    });
-    home.codex("direct-cache", json!({}), &[call, output]);
-    let source = home
-        .root
-        .join("codex/sessions/2026/09/24/rollout-direct-cache.jsonl");
-    let original_source = fs::read(&source).unwrap();
-    let observe = || {
-        observe_catalog(
-            &home.options,
-            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
-            &mut false,
-            &mut Texts::default(),
-            NOW,
-        )
-        .unwrap();
-    };
-    observe();
-
-    let (old_catalog_generation, old_rows) = read_catalog(&home);
-    assert_eq!(old_rows.len(), 1);
-    let row = &old_rows[0];
-    let cache_path = EventCache::path(&home.options.cache);
-    let connection = rusqlite::Connection::open(&cache_path).unwrap();
-    let old_projection_generation: String = connection
-        .query_row(
-            "SELECT generation FROM session_slot_projections WHERE session_key=?1",
-            [&row.key],
-            |record| record.get(0),
-        )
-        .unwrap();
-    let mut slots: Vec<(i64, String)> = connection
-        .prepare("SELECT slot,metadata FROM session_slots WHERE session_key=?1 ORDER BY slot")
-        .unwrap()
-        .query_map([&row.key], |record| Ok((record.get(0)?, record.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let tool_at = slots
-        .iter()
-        .position(|(_, metadata)| {
-            let slot: SavedSlot = serde_json::from_str(metadata).unwrap();
-            matches!(slot.recipe, Recipe::Tool { .. })
-        })
-        .expect("direct call has a saved tool slot");
-    let mut stale_slot: SavedSlot = serde_json::from_str(&slots[tool_at].1).unwrap();
-    let Recipe::Tool {
-        outcome,
-        reply: Some(reply),
-        ..
-    } = &mut stale_slot.recipe
-    else {
-        panic!("direct call has a saved tool reply");
-    };
-    assert!(matches!(*outcome, Outcome::Ok));
-    assert_eq!(reply.f & UNKNOWN, 0);
-    *outcome = Outcome::Unknown;
-    reply.f |= UNKNOWN;
-    slots[tool_at].1 = serde_json::to_string(&stale_slot).unwrap();
-    let stale_slot_generation = crate::slot_projection::generation(
-        &slots
-            .iter()
-            .map(|(_, text)| text.clone())
-            .collect::<Vec<_>>(),
-        &row.sources,
-    )
-    .unwrap();
-    assert_ne!(stale_slot_generation, old_projection_generation);
-    connection
-        .execute(
-            "UPDATE session_slots SET metadata=?1 WHERE session_key=?2 AND slot=?3",
-            rusqlite::params![slots[tool_at].1, row.key, slots[tool_at].0],
-        )
-        .unwrap();
-    assert_eq!(
-        connection
-            .execute(
-                "UPDATE session_slot_projections SET generation=?1 WHERE session_key=?2",
-                rusqlite::params![stale_slot_generation, row.key],
-            )
-            .unwrap(),
-        1
-    );
-    // Simulate a v27 event and slot projection that cached this direct result
-    // as unknown and did not persist the new direct-call qualification.
-    assert_eq!(
-        connection
-            .execute(
-                "UPDATE events SET reply_f=reply_f | ?1 WHERE file_id=(SELECT file_id FROM files WHERE path=?2) AND id='direct-cache' AND reply=1",
-                rusqlite::params![i64::from(UNKNOWN), source.to_string_lossy().as_ref()],
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        connection
-            .execute(
-                "UPDATE events SET y=NULL WHERE file_id=(SELECT file_id FROM files WHERE path=?1) AND id='direct-cache'",
-                [source.to_string_lossy().as_ref()],
-            )
-            .unwrap(),
-        1
-    );
-    let stale_state: Option<String> = connection
-        .query_row(
-            "SELECT y FROM events JOIN files USING(file_id) WHERE files.path=?1 AND events.id='direct-cache'",
-            [source.to_string_lossy().as_ref()],
-            |record| record.get(0),
-        )
-        .unwrap();
-    assert!(
-        stale_state.is_none(),
-        "main v27 stored no direct-call envelope"
-    );
-    drop(connection);
-
-    let stale_cache = EventCache::open_scoped(&home.options.cache).unwrap();
-    assert_eq!(
-        stale_cache.session_catalog_generation().as_deref(),
-        Some(old_catalog_generation.as_str())
-    );
-    let stale_projection = stale_cache
-        .session_slots(row, Some(&old_catalog_generation), slots.len())
-        .expect("the coherent v27 projection remains readable under its source fence");
-    assert!(matches!(
-        &stale_projection[tool_at].recipe,
-        crate::slot_projection::Recipe::Tool {
-            outcome: crate::slot_projection::Outcome::Unknown,
-            reply: Some(reply),
-            ..
-        } if reply.f & UNKNOWN != 0
-    ));
-    drop(stale_cache);
-
-    rusqlite::Connection::open(&cache_path)
-        .unwrap()
-        .execute("UPDATE meta SET value='27' WHERE key='cache_version'", [])
-        .unwrap();
-
-    observe();
-    assert_eq!(fs::read(&source).unwrap(), original_source);
-    let (catalog_generation, rows) = read_catalog(&home);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].lifecycle, summary::CatalogLifecycle::Current);
-    assert_eq!(rows[0].key, row.key);
-    let connection = rusqlite::Connection::open(&cache_path).unwrap();
-    let cache_version: String = connection
-        .query_row(
-            "SELECT value FROM meta WHERE key='cache_version'",
-            [],
-            |record| record.get(0),
-        )
-        .unwrap();
-    assert_eq!(cache_version, "28");
-    let (reply_flags, state): (i64, Option<String>) = connection
-        .query_row(
-            "SELECT reply_f,y FROM events JOIN files USING(file_id) WHERE files.path=?1 AND events.id='direct-cache' AND events.reply=1",
-            [source.to_string_lossy().as_ref()],
-            |record| Ok((record.get(0)?, record.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(reply_flags & i64::from(UNKNOWN), 0);
-    let state: Value = serde_json::from_str(&state.unwrap()).unwrap();
-    assert_eq!(state["native_direct_call"], true);
-
-    let saved: Vec<(i64, String)> = connection
-        .prepare("SELECT slot,metadata FROM session_slots WHERE session_key=?1 ORDER BY slot")
-        .unwrap()
-        .query_map([&row.key], |record| Ok((record.get(0)?, record.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    let saved_tool = saved
-        .iter()
-        .map(|(_, metadata)| serde_json::from_str::<SavedSlot>(metadata).unwrap())
-        .find(|slot| matches!(&slot.recipe, Recipe::Tool { .. }))
-        .expect("fresh publication keeps its tool slot");
-    assert!(matches!(
-        &saved_tool.recipe,
-        Recipe::Tool {
-            outcome: Outcome::Ok,
-            reply: Some(reply),
-            ..
-        } if reply.f & UNKNOWN == 0
-    ));
-    let metadata: Vec<_> = saved.iter().map(|(_, text)| text.clone()).collect();
-    let projection_generation =
-        crate::slot_projection::generation(&metadata, &rows[0].sources).unwrap();
-    let (saved_generation, version, total, source_generation): (String, u32, i64, Option<String>) =
-        connection
-            .query_row(
-                "SELECT generation,version,total,source_generation FROM session_slot_projections WHERE session_key=?1",
-                [&row.key],
-                |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?, record.get(3)?)),
-            )
-            .unwrap();
-    assert_eq!(saved_generation, projection_generation);
-    assert_ne!(saved_generation, stale_slot_generation);
-    assert_eq!(version, crate::slot_projection::VERSION);
-    assert_eq!(usize::try_from(total).unwrap(), saved.len());
-    let current_source_generation = crate::retention::source_generation(&rows[0].sources).unwrap();
-    assert_eq!(
-        source_generation.as_deref(),
-        Some(current_source_generation.as_str())
-    );
-    let published_catalog_generation: String = connection
-        .query_row(
-            "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
-            [],
-            |record| record.get(0),
-        )
-        .unwrap();
-    assert_eq!(published_catalog_generation, catalog_generation);
-}
-
-#[test]
 fn native_catalog_does_not_acknowledge_a_rejected_generation() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
@@ -11103,7 +10846,7 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
             source.native_id = "ambiguous-native".into();
         }
     }
-    let mut cache = EventCache::open(&home.options.cache);
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
     cache.publish_session_catalog(&rows, Some(&generation));
     let owners: Vec<String> = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 ORDER BY session_key").unwrap()
         .query_map(["claude", "ambiguous-native"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
@@ -11148,56 +10891,6 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
     );
     let current: i64 = connection.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='root' AND native_id='root'", [], |row| row.get(0)).unwrap();
     assert_eq!(current, 1);
-}
-
-#[test]
-fn schema_six_catalog_migration_populates_relationship_indexes_on_next_complete_publish() {
-    let home = Home::new();
-    home.top("root", &[human("root", ts(0, 0), "prompt")]);
-    home.build_query();
-    let connection =
-        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    connection.execute_batch("DROP TABLE session_catalog_sources; DROP INDEX session_catalog_parent; DROP INDEX session_catalog_current_parent; DROP INDEX IF EXISTS semantic_catalog_parent_key; ALTER TABLE session_catalog DROP COLUMN parent_key; UPDATE meta SET value='1' WHERE key='catalog_version'; PRAGMA user_version=6;").unwrap();
-    use sha2::{Digest, Sha256};
-    let metadata: Vec<String> = read_catalog(&home)
-        .1
-        .iter()
-        .map(|row| serde_json::to_string(row).unwrap())
-        .collect();
-    let old_generation = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_string(&metadata).unwrap().as_bytes())
-    );
-    connection
-        .execute(
-            "UPDATE meta SET value=?1 WHERE key='catalog_generation'",
-            [&old_generation],
-        )
-        .unwrap();
-    let before = read_catalog(&home);
-    home.build_query();
-    let after = read_catalog(&home);
-    assert_ne!(before.0, after.0);
-    assert_eq!(
-        serde_json::to_string(&before.1).unwrap(),
-        serde_json::to_string(&after.1).unwrap()
-    );
-    let version: String = connection
-        .query_row(
-            "SELECT value FROM meta WHERE key='catalog_version'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(version, super::summary::CATALOG_VERSION.to_string());
-    let source: (String, String) = connection
-        .query_row(
-            "SELECT session_key,native_id FROM session_catalog_sources",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(source, ("root".into(), "root".into()));
 }
 
 #[test]

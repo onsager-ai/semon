@@ -4,13 +4,13 @@ use super::*;
 use crate::{events::CodexNativeUsage, native_record::Record, pricing::CostBuild};
 use std::collections::BTreeSet;
 
-mod migration;
+mod repair;
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static RESTORED_DIMENSION_ROWS:std::cell::Cell<u64>=const {std::cell::Cell::new(0)};
 }
-pub(super) use migration::advance;
-pub(super) use migration::pending as migration_pending;
+pub(super) use repair::advance;
+pub(super) use repair::pending as repair_pending;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_usage_sources (
@@ -39,12 +39,12 @@ CREATE TABLE IF NOT EXISTS native_usage_dimensions (
  source_id INTEGER NOT NULL, kind TEXT NOT NULL, dimension TEXT NOT NULL, value TEXT NOT NULL,
  PRIMARY KEY(source_id,kind,dimension)
 ) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS native_usage_migrations (
+CREATE TABLE IF NOT EXISTS native_tree_repairs (
  source_path TEXT PRIMARY KEY, receipt TEXT NOT NULL, source_id INTEGER,
- cursor INTEGER NOT NULL DEFAULT 0, projection_id INTEGER, usage_needed INTEGER NOT NULL DEFAULT 1, last_model TEXT, native_root TEXT,
+ cursor INTEGER NOT NULL DEFAULT 0, projection_id INTEGER, last_model TEXT,
  tree_root TEXT, state TEXT NOT NULL DEFAULT 'ready', last_attempt INTEGER NOT NULL DEFAULT 0
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_usage_migration_queue ON native_usage_migrations(state,last_attempt,source_path);
+CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(state,last_attempt,source_path);
 ";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -102,9 +102,6 @@ pub(super) fn encoded(index: &FileIndex) -> rusqlite::Result<Option<String>> {
     let Some(native) = &index.codex_native_usage else {
         return Ok(None);
     };
-    if index.native_usage_observations.is_none() {
-        return json(native).map(Some);
-    }
     let mut cost = index.codex_cost();
     cost.models.clear();
     cost.by_day.clear();
@@ -167,7 +164,7 @@ pub(super) fn restore(
         return Ok(None);
     };
     if !normalized(c, path, ledger)? {
-        return from_json(26, &encoded).map(Some);
+        return Err(rusqlite::Error::InvalidQuery);
     }
     let id = source(c, path)?.ok_or(rusqlite::Error::InvalidQuery)?.0;
     restore_root(c, id, &encoded).map(Some)
@@ -272,7 +269,7 @@ pub(super) fn begin_source(
         "UPDATE native_usage_sources SET receipt=?2 WHERE source_id=?1",
         params![id, header_ledger(ledger),],
     )?;
-    tx.execute("UPDATE native_usage_migrations SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",params![path,header_ledger(ledger)])?;
+    tx.execute("UPDATE native_tree_repairs SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",params![path,header_ledger(ledger)])?;
     Ok(id)
 }
 

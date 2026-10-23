@@ -83,6 +83,7 @@ fn projection_ready(
     full: &str,
 ) -> Result<Option<SourceProjectionReady>, CatalogIdentityError> {
     use CatalogIdentityError::{InvalidArguments, Unavailable};
+    crate::events::store::require_current(transaction).map_err(|_| Unavailable)?;
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='catalog_version'",
