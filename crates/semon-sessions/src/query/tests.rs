@@ -50,7 +50,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
         records.push(codex_line(
             ts(5, 1),
             "response_item",
-            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(20))}]}),
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(4000))}]}),
         ));
         records.push(codex_line(
             ts(5, 2),
