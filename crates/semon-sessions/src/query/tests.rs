@@ -99,7 +99,7 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
                 assert_eq!(
                     crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
                     Some(crate::source_carrier::FailureStage::Budget),
-                    "unexpected underlying source failure: status={} body={body}", reply.status
+                    "unexpected underlying source failure: {body}"
                 );
             }
             assert_eq!(reply.status, 200, "selected page fence: {body}");
