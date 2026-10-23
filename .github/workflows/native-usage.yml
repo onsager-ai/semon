@@ -51,6 +51,8 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions unsupported_ -- --nocapture
           cargo test --locked -p semon-sessions storage_ -- --nocapture
+      - name: Verify obsolete derived-index rebuild and custody boundaries
+        run: cargo test --locked -p semon-sessions obsolete_ -- --nocapture
       - name: Verify catalog progress during unrelated runtime changes
         run: cargo test --locked -p semon-sessions catalog_runtime_ -- --nocapture
       - name: Verify bounded cross-batch native lineage recovery
