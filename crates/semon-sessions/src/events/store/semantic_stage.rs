@@ -180,7 +180,13 @@ CREATE INDEX catalog_semantic_relation_to ON catalog_semantic_relations(namespac
 // Catalog invalidations/backfill retain their existing admission/assignment
 // lifecycle. This profile does not qualify descriptions or reported facts.
 pub(super) fn support_schema(composite: bool, stage: bool) -> &'static str {
-    if stage { STAGE_SUPPORT_SCHEMA } else if composite { COMPOSITE_SUPPORT_SCHEMA } else { CATALOG_SUPPORT_SCHEMA }
+    if stage {
+        STAGE_SUPPORT_SCHEMA
+    } else if composite {
+        COMPOSITE_SUPPORT_SCHEMA
+    } else {
+        CATALOG_SUPPORT_SCHEMA
+    }
 }
 
 macro_rules! semantic_support_objects {
@@ -204,11 +210,17 @@ CREATE INDEX session_catalog_invalidations_revision ON session_catalog_invalidat
 CREATE TABLE catalog_backfill_sources(namespace TEXT NOT NULL,source_path TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
 ", semantic_support_objects!());
 
-pub(super) fn support_sql<'a>(c: &Connection, singleton: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
-    let version: i64 = c.pragma_query_value(Some(rusqlite::DatabaseName::Main), "schema_version", |r| r.get(0))?;
+pub(super) fn support_sql<'a>(
+    c: &Connection,
+    singleton: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
+    let version: i64 = c.query_row("PRAGMA main.schema_version", [], |r| r.get(0))?;
     let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_support_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
     if cached {
-        let layout: Option<bool> = c.prepare_cached("SELECT semon_semantic_support_layout(?1)")?.query_row([version], |r| r.get(0))?;
+        let layout: Option<bool> = c
+            .prepare_cached("SELECT semon_semantic_support_layout(?1)")?
+            .query_row([version], |r| r.get(0))?;
         if let Some(composite) = layout {
             return Ok(if composite { scoped } else { singleton });
         }
@@ -216,26 +228,49 @@ pub(super) fn support_sql<'a>(c: &Connection, singleton: &'a str, scoped: &'a st
     let mut composite = None;
     for (table, key) in [
         ("catalog_relocation_candidates", "old_path,new_path"),
-        ("catalog_native_dependencies", "source_path,harness,native_id"),
+        (
+            "catalog_native_dependencies",
+            "source_path,harness,native_id",
+        ),
         ("session_source_mutations", "source_path"),
     ] {
         let pk: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1,'main') WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
         let ns = pk == format!("namespace,{key}");
         let namespace_valid: bool = c.prepare_cached("SELECT count(*)=?2 AND coalesce(min(pk=1 AND [notnull]=1 AND type='TEXT'),1) FROM pragma_table_info(?1,'main') WHERE name='namespace'")?.query_row(params![table, i64::from(ns)], |r| r.get(0))?;
-        let physical: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)")?.query_row([table], |r| r.get(0))?;
-        if (!ns && pk != key) || !namespace_valid || !physical || composite.is_some_and(|prior| prior != ns) {
+        let physical: bool = c
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
+            )?
+            .query_row([table], |r| r.get(0))?;
+        if (!ns && pk != key)
+            || !namespace_valid
+            || !physical
+            || composite.is_some_and(|prior| prior != ns)
+        {
             return Err(rusqlite::Error::InvalidQuery);
         }
         composite = Some(ns);
     }
     let composite = composite.ok_or(rusqlite::Error::InvalidQuery)?;
     for (table, name, columns) in [
-        ("catalog_relocation_candidates", "catalog_relocation_new", "new_path,old_path"),
-        ("catalog_native_dependencies", "catalog_native_dependency", "harness,native_id,source_path"),
+        (
+            "catalog_relocation_candidates",
+            "catalog_relocation_new",
+            "new_path,old_path",
+        ),
+        (
+            "catalog_native_dependencies",
+            "catalog_native_dependency",
+            "harness,native_id,source_path",
+        ),
     ] {
         let actual: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_index_info(?1,'main') ORDER BY seqno)")?.query_row([name], |r| r.get(0))?;
         let owned: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name=?1 AND tbl_name=?2) AND EXISTS(SELECT 1 FROM pragma_index_list(?2,'main') WHERE name=?1 AND [unique]=0 AND partial=0)")?.query_row(params![name,table], |r| r.get(0))?;
-        let expected = if composite { format!("namespace,{columns}") } else { columns.to_owned() };
+        let expected = if composite {
+            format!("namespace,{columns}")
+        } else {
+            columns.to_owned()
+        };
         if actual != expected || !owned {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -243,9 +278,16 @@ pub(super) fn support_sql<'a>(c: &Connection, singleton: &'a str, scoped: &'a st
     // Cache only committed main-schema decisions. A rolled-back DDL cookie can
     // be reused; never pin its transient layout or any Source binding.
     if c.is_autocommit() {
-        c.create_scalar_function("semon_semantic_support_layout", 1,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            move |context| { let observed: i64 = context.get(0)?; Ok((observed == version).then_some(composite)) })?;
+        c.create_scalar_function(
+            "semon_semantic_support_layout",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            move |context| {
+                let observed: i64 = context.get(0)?;
+                Ok((observed == version).then_some(composite))
+            },
+        )?;
     }
     Ok(if composite { scoped } else { singleton })
 }
