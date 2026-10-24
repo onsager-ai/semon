@@ -7,7 +7,7 @@ pub type SourceClaims = Vec<(String, Option<i64>)>;
 pub trait SourceObservationStore: Send {
     /// Record newly discovered paths atomically with their invalidations.
     fn discover(&mut self, paths: &[String], complete: bool) -> Result<(), StorageError>;
-    /// Advance observations only if every captured claim is still current.
+    /// Advance distinct paths only if every captured claim is still current.
     /// A conflict changes no row; this never acknowledges or publishes work.
     fn invalidate(&mut self, expected: &[(String, Option<i64>)]) -> Result<bool, StorageError>;
     /// Revisions are durable CAS witnesses, not worker leases.

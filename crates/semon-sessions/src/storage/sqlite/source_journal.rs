@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub(crate) const SOURCE_JOURNAL_QUALIFICATION_VERSION: u32 = 1;
 const MAX_PATHS: usize = 256;
+const PENDING_SQL: &str = "SELECT source_path FROM main.session_catalog_invalidations INDEXED BY storage_ns_source_pending WHERE namespace=?1 ORDER BY revision,source_path LIMIT ?2";
 
 // Shared by the existing native transaction and the configured transaction.
 // The caller owns the transaction: invalidation never commits independently.
@@ -167,7 +168,7 @@ impl crate::storage::source_observations::SourceObservationStore for SourceJourn
     fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
         if limit==0 || limit>MAX_PATHS { return Err(StorageError::InvalidArguments); }
         let db = self.snapshot()?;
-        let mut statement = db.prepare("SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 ORDER BY revision,source_path LIMIT ?2").map_err(failed)?;
+        let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
         let paths = statement.query_map(params![self.0.namespace.as_str(),limit as i64], |r|r.get(0)).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)?;
         Ok(paths)
     }
@@ -238,6 +239,10 @@ mod tests {
         let captured = store.claims(&paths).unwrap();
         assert_eq!(captured, vec![("seed".into(),Some(1)),("new".into(),Some(3))]);
         assert_eq!(store.backfill_state().unwrap().as_deref(),Some("draining"));
+        let plan_db=f.db();
+        let plan:Vec<String>=plan_db.prepare(&format!("EXPLAIN QUERY PLAN {PENDING_SQL}")).unwrap().query_map(params!["A",1],|r|r.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(plan.iter().any(|line|line.contains("storage_ns_source_pending")));
+        assert!(plan.iter().all(|line|!line.contains("TEMP B-TREE")));
         // Repeated discovery is idempotent, including its source claims.
         store.discover(&paths,true).unwrap();
         assert_eq!(store.claims(&paths).unwrap(),captured);
@@ -286,6 +291,20 @@ mod tests {
         assert!(matches!(wrong.source_observations(),Err(StorageError::ScopeChanged)));
         wrong=f.config.clone(); wrong.namespace=LogicalSourceNamespace::new("B").unwrap();
         assert!(matches!(wrong.source_observations(),Err(StorageError::NamespaceMismatch)));
+        wrong=f.config.clone();
+        let missing=f.root.join("absent.sqlite3");
+        wrong.backend=StoreBackend::Sqlite{database:missing.clone()};
+        assert!(matches!(wrong.source_observations(),Err(StorageError::Unavailable)));
+        assert!(!missing.exists());
+        let unbound_cache=f.root.join("unbound.json");
+        drop(EventCache::open_scoped(&unbound_cache).unwrap());
+        let unbound_database=EventCache::path(&unbound_cache);
+        let unbound_db=Connection::open(&unbound_database).unwrap();
+        let unbound_epoch=unbound_db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'",[],|r|r.get(0)).unwrap();
+        wrong.backend=StoreBackend::Sqlite{database:unbound_database};
+        wrong.expected_stream_epoch=Some(unbound_epoch);
+        assert!(matches!(wrong.source_observations(),Err(StorageError::NamespaceUnadmitted)));
+        assert_eq!(unbound_db.query_row("SELECT count(*) FROM sqlite_schema WHERE name='storage_source_journal'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         let mut store=f.config.source_observations().unwrap();
         assert_eq!(store.discover(&["x".repeat(4097)],true),Err(StorageError::InvalidArguments));
         assert_eq!(store.claims(&vec!["x".into();257]),Err(StorageError::InvalidArguments));
@@ -300,6 +319,9 @@ mod tests {
         let publication=crate::slot_projection::Publication{rows:&[],transcripts:None};
         assert!(matches!(index.publish_session_catalog_fenced(&publication,None),Err(StoreError::Configured(StorageError::NamespaceUpgradePending))));
         assert!(matches!(index.begin_semantic_stage(&[],"",false),Err(StoreError::Configured(StorageError::NamespaceUpgradePending))));
+        // A refused family neither detaches nor substitutes this store.
+        index.discover_catalog_sources(&["after-refusal".into()],true).unwrap();
+        assert_eq!(f.config.source_observations().unwrap().claims(&["after-refusal".into()]).unwrap(),vec![("after-refusal".into(),Some(3))]);
         assert!(EventCache::open_scoped(&f.root.join("index.json")).is_err());
         assert_eq!(store.claims(&["seed".into()]).unwrap(),vec![("seed".into(),Some(1))]);
     }

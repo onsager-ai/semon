@@ -326,8 +326,8 @@ pub enum StorageError {
     NamespaceUnadmitted,
     NamespaceUpgradePending,
     MultiSourceUnqualified,
-    /// The client must reconcile epoch/floor and retry the idempotent scoped
-    /// acknowledgement. It must not infer rollback from a missing commit reply.
+    /// Reconcile the epoch and operation's durable observations before retrying.
+    /// A missing commit reply does not establish rollback.
     CommitUncertain,
 }
 
