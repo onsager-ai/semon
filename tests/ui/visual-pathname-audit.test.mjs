@@ -120,3 +120,53 @@ test('refuses changed PNG digests and reference pins', (t) => {
   changedReference.reference = 'different-source-pin';
   assert.match(run({ report: changedReference }).refused[0].reason, /Reference pins changed/);
 });
+
+test('restores only canonical trace paths using the historical fixture encoding', () => {
+  const turn = 'aa0043ac7697ce969';
+  const current = (pathname, text = 'same') =>
+    Buffer.from(JSON.stringify({ pathname, selectors: { text, box: [0, 1] } }));
+  const approved = current(`/trace/claude/atlas/${turn}`);
+  const canonical = current(`/session/local/atlas/trace/${turn}`);
+  const approvedDigest = hash(approved);
+
+  assert.deepEqual(qualifyCandidateEvidence(canonical, approvedDigest), {
+    reason: 'canonical-pathname-only',
+    historicalFixture: { namespace: 'claude', digest: approvedDigest },
+  });
+  assert.throws(
+    () =>
+      qualifyCandidateEvidence(
+        current(`/session/local/atlas/trace/${turn}`, 'changed'),
+        approvedDigest,
+      ),
+    /No unique accepted historical fixture identity hash/,
+  );
+});
+
+test('refuses trace paths with wrong identity, namespace, extra bytes, duplicate or weak encoding', () => {
+  const turn = 'aa0043ac7697ce969';
+  const current = (pathname, text = 'same') =>
+    Buffer.from(JSON.stringify({ pathname, selectors: { text, box: [0, 1] } }));
+  const approvedDigest = hash(current(`/trace/claude/atlas/${turn}`));
+  const refused = [
+    current(`/session/local/atlas/trace/${turn}0`),
+    current(`/session/local/other/trace/${turn}`),
+    current(`/session/claude/atlas/trace/${turn}`),
+    current(`/session/local/atlas/trace/${turn}`, 'changed'),
+    Buffer.from(
+      `{"pathname":"/session/local/atlas/trace/${turn}","pathname":"/session/local/atlas/trace/${turn}","selectors":{"text":"same","box":[0,1]}}`,
+    ),
+    Buffer.from(JSON.stringify({ selectors: { text: 'same', box: [0, 1] } })),
+    current(`/session/local/atlas%2fchild/trace/${turn}`),
+  ];
+  for (const bytes of refused) assert.throws(() => qualifyCandidateEvidence(bytes, approvedDigest));
+
+  const unsupportedNamespaceDigest = hash(current(`/trace/native/atlas/${turn}`));
+  assert.throws(
+    () =>
+      qualifyCandidateEvidence(
+        current(`/session/local/atlas/trace/${turn}`),
+        unsupportedNamespaceDigest,
+      ),
+  );
+});

@@ -1178,8 +1178,8 @@ const routeSegment = (value) =>
 export async function goto(page, route, D) {
   const sid = route.id ?? route.sid,
     session = D.SESS[sid],
-    source = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
-    key = D.KEYS?.[sid] ?? sid,
+    source = session ? D.SOURCES?.[session.machine] : undefined,
+    key = D.KEYS?.[sid],
     machineKey = D.SOURCES?.[route.id] ?? route.id,
     paths = { home: '/', analytics: '/analytics', sessions: '/sessions', machines: '/machines' },
     destination =
@@ -1195,6 +1195,11 @@ export async function goto(page, route, D) {
           : route.v === 'machine'
             ? '/machines/' + encodeURIComponent(machineKey)
             : paths[route.v];
+  if (['session', 'trace'].includes(route.v)) {
+    if (!session) throw new Error(`Unknown session fixture: ${String(sid)}`);
+    if (!source) throw new Error(`Missing source mapping for session fixture: ${String(sid)}`);
+    if (!key) throw new Error(`Missing catalog-key mapping for session fixture: ${String(sid)}`);
+  }
   const url = new URL(destination, page.url());
   if (route.v === 'session' && route.turn) url.hash = routeSegment(route.turn);
   const current = JSON.stringify(route);
