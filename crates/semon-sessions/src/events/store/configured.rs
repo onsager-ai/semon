@@ -119,6 +119,14 @@ CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON
 END;
 ";
 
+pub(super) fn pricing_file_schema(meta_composite: bool) -> &'static str {
+    if meta_composite {
+        PRICING_FILE_SCHEMA_META
+    } else {
+        PRICING_FILE_SCHEMA
+    }
+}
+
 /// Select an authored statement for the physical family shape, never rewrite
 /// SQL or retry errors against another schema. Singleton stores still support
 /// read-only admission/assignment; configured writes require validate_core.
@@ -249,16 +257,9 @@ pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
-    for ddl in storage_ddl() {
-        let ddl = if ddl == LEGACY_EVENT_SCHEMA {
-            CORE_SCHEMA
-        } else if ddl == reprice::FILE_SCHEMA {
-            metadata_sql(&tx, PRICING_FILE_SCHEMA, PRICING_FILE_SCHEMA_META).map_err(failed)?
-        } else if ddl == semantic_stage::SEMANTIC_CORE_INDEXES {
-            semantic_stage::SEMANTIC_CORE_INDEXES_NS
-        } else {
-            ddl
-        };
+    for ddl in authored_storage_ddl(PhysicalLayout::CONFIGURED)
+        .map_err(|_| StorageError::InvalidArguments)?
+    {
         tx.execute_batch(ddl).map_err(failed)?;
     }
     tx.execute(

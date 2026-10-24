@@ -1425,6 +1425,137 @@ mod tests {
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
 
+    fn foreign_change_state(db: &Connection) -> Vec<(i64, String, String)> {
+        let composite: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog_changes') WHERE name='namespace')", [], |r| r.get(0)).unwrap();
+        db.prepare(if composite {
+            "SELECT revision,session_key,read_scope FROM session_catalog_changes WHERE namespace='b' ORDER BY revision"
+        } else {
+            "SELECT revision,session_key,read_scope FROM session_catalog_changes WHERE session_key IN ('session-b','child-b') ORDER BY revision"
+        }).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    }
+
+    #[test]
+    fn native_usage_authored_assembly_preserves_factories_and_complete_dependencies() {
+        // Freeze both existing factory selections at the chunk boundary. These
+        // are authored schemas, not a parallel test implementation of a writer.
+        let [usage, repair] = native_usage::schema(false);
+        let original = [
+            SLOT_SCHEMA,
+            crate::events::store::catalog_schema(false),
+            CATALOG_SUPPORT_SCHEMA,
+            metadata_schema(false),
+            LEGACY_EVENT_SCHEMA,
+            copied_usage_schema(false),
+            usage,
+            repair,
+            tree_state::schema(false),
+            semantic_stage::SCHEMA,
+            semantic_stage::SEMANTIC_CORE_INDEXES,
+            semantic_stage::metadata_indexes(false),
+            crate::overview::SCHEMA,
+            crate::causal_trace::header_schema(false),
+            crate::causal_trace::SCHEMA,
+            crate::history_projection::SCHEMA,
+            crate::catalog_search::SCHEMA,
+            crate::storage::sqlite::changes::SCHEMA,
+            queue_schema(false),
+            catalog_schema(false, false, false),
+            file_schema(false, false),
+        ];
+        assert_eq!(storage_ddl(), original);
+        let mut configured_original = original;
+        configured_original[4] = configured::CORE_SCHEMA;
+        configured_original[10] = semantic_stage::SEMANTIC_CORE_INDEXES_NS;
+        configured_original[20] = configured::pricing_file_schema(false);
+        assert_eq!(
+            authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap(),
+            configured_original
+        );
+        let reference = Connection::open_in_memory().unwrap();
+        for ddl in original {
+            reference.execute_batch(ddl).unwrap();
+        }
+        let objects = |db: &Connection| {
+            db.prepare("SELECT type,name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name").unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        // Every table, index and trigger from all 21 dependencies is required,
+        // including history, overview, support, slots, search and semantic stage.
+        let required_objects = objects(&reference);
+        for copied in [false, true] {
+            for metadata in [false, true] {
+                for catalog in [false, true] {
+                    for trace in [false, true] {
+                        let db = Connection::open_in_memory().unwrap();
+                        bind_fixture(&db, "a");
+                        db.pragma_update(None, "foreign_keys", true).unwrap();
+                        for ddl in authored_storage_ddl(PhysicalLayout {
+                            core: true,
+                            native_usage: true,
+                            pricing_queue: true,
+                            copied_usage: copied,
+                            tree: copied,
+                            metadata,
+                            catalog,
+                            trace,
+                        })
+                        .unwrap()
+                        {
+                            db.execute_batch(ddl).unwrap();
+                        }
+                        assert_eq!(objects(&db), required_objects);
+                        assert_eq!(db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                        assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), if copied { "scoped" } else { "legacy" });
+                        for table in ["usage_identity", "usage", "codex_usage"] {
+                            assert_eq!(db.query_row("SELECT count(*) FROM pragma_foreign_key_list(?1)", [table], |r| r.get::<_, i64>(0)).unwrap(), if copied { 2 } else { 0 });
+                        }
+                        if metadata {
+                            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+                        }
+                        if catalog {
+                            // Catalog triggers use the row's owner, even when
+                            // the executing connection is bound to Source A.
+                            db.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('b','same-session',1,'codex','{}')", []).unwrap();
+                            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+                            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='a'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                        }
+                    }
+                }
+            }
+        }
+        // Invalid cross-family combinations are rejected before any execution.
+        for bad in [
+            PhysicalLayout {
+                copied_usage: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+            PhysicalLayout {
+                tree: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+            PhysicalLayout {
+                metadata: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+            PhysicalLayout {
+                pricing_queue: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+            PhysicalLayout {
+                native_usage: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+        ] {
+            assert_eq!(
+                authored_storage_ddl(bad),
+                Err(DdlProfileError::UnsupportedFamilyCombination)
+            );
+        }
+    }
+
     #[test]
     fn native_usage_copied_family_rejects_mixed_shapes_before_payload_dml() {
         for composite in [false, true] {
@@ -1500,20 +1631,76 @@ mod tests {
     }
 
     #[test]
+    fn native_usage_copied_family_rejects_corrupt_constraints_before_payload_dml() {
+        for corrupt in [
+            "DROP INDEX usage_identity_peers",
+            "DROP INDEX usage_identity_peers; CREATE INDEX usage_identity_peers ON usage_identity(namespace,message_id,record_uuid,file_id) WHERE file_id>0",
+            "ALTER TABLE files RENAME TO foreign_files",
+        ] {
+            let mut db = Connection::open_in_memory().unwrap();
+            bind_fixture(&db, "a");
+            for ddl in authored_storage_ddl(PhysicalLayout {
+                core: true,
+                native_usage: true,
+                pricing_queue: true,
+                copied_usage: true,
+                tree: true,
+                ..PhysicalLayout::default()
+            })
+            .unwrap()
+            {
+                db.execute_batch(ddl).unwrap();
+            }
+            // Cache the admitted shape, then invalidate a real authored schema.
+            assert_eq!(
+                copied_usage_sql(&db, "legacy", "scoped").unwrap(),
+                "scoped"
+            );
+            db.execute_batch(corrupt).unwrap();
+            let tx = db.transaction().unwrap();
+            let before: i64 = tx
+                .query_row("SELECT total_changes()", [], |r| r.get(0))
+                .unwrap();
+            let index = FileIndex::default();
+            let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
+            assert!(matches!(
+                write_file(
+                    &tx,
+                    "source",
+                    &ledger(),
+                    &changes,
+                    &index,
+                    &mut crate::native_timing::Measurements::default()
+                ),
+                Err(rusqlite::Error::InvalidQuery)
+            ));
+            assert!(matches!(clear(&tx, 1), Err(rusqlite::Error::InvalidQuery)));
+            assert_eq!(
+                tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                before
+            );
+            tx.rollback().unwrap();
+        }
+    }
+
+    #[test]
     fn native_usage_copied_layout_is_independent_of_core_and_native_layout() {
         for copied_composite in [false, true] {
             let mut db = Connection::open_in_memory().unwrap();
-            db.execute_batch(configured::CORE_SCHEMA).unwrap();
-            db.execute_batch(crate::events::store::SCHEMA).unwrap();
-            db.execute_batch(metadata_schema(false)).unwrap();
-            for ddl in native_usage::schema(true) {
+            bind_fixture(&db, "a");
+            for ddl in authored_storage_ddl(PhysicalLayout {
+                core: true,
+                native_usage: true,
+                copied_usage: copied_composite,
+                tree: copied_composite,
+                pricing_queue: true,
+                ..PhysicalLayout::default()
+            })
+            .unwrap()
+            {
                 db.execute_batch(ddl).unwrap();
             }
-            db.execute_batch(copied_usage_schema(copied_composite))
-                .unwrap();
-            db.execute_batch(tree_state::schema(copied_composite))
-                .unwrap();
-            bind_fixture(&db, "a");
             let mut index = FileIndex::default();
             index.usage_by_id.insert(
                 "message".into(),
@@ -1605,23 +1792,21 @@ mod tests {
                     let mut db = Connection::open(&database).unwrap();
                     db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
                         .unwrap();
-                    db.execute_batch(configured::CORE_SCHEMA).unwrap();
-                    db.execute_batch(metadata_schema(meta_composite)).unwrap();
-                    db.execute_batch(copied_usage_schema(true)).unwrap();
-                    for ddl in native_usage::schema(true) {
+                    bind_fixture(&db, "a");
+                    for ddl in authored_storage_ddl(PhysicalLayout {
+                        core: true,
+                        metadata: meta_composite,
+                        catalog: catalog_composite,
+                        trace: trace_composite,
+                        copied_usage: true,
+                        native_usage: true,
+                        tree: true,
+                        pricing_queue: true,
+                    })
+                    .unwrap()
+                    {
                         db.execute_batch(ddl).unwrap();
                     }
-                    db.execute_batch(tree_state::schema(true)).unwrap();
-                    db.execute_batch(queue_schema(true)).unwrap();
-                    db.execute_batch(crate::events::store::catalog_schema(catalog_composite))
-                        .unwrap();
-                    db.execute_batch(crate::events::store::SCHEMA).unwrap();
-                    db.execute_batch(crate::causal_trace::header_schema(trace_composite))
-                        .unwrap();
-                    db.execute_batch(catalog_schema(true, catalog_composite, meta_composite))
-                        .unwrap();
-                    db.execute_batch(file_schema(true, meta_composite)).unwrap();
-                    bind_fixture(&db, "a");
                     db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"])
                         .unwrap();
                     if meta_composite {
@@ -1793,6 +1978,7 @@ mod tests {
                     let trace_before = trace_family_state(&db);
                     let family_key = if collide { "same-session" } else { "session-a" };
                     let b_trace = foreign_trace_state(&db);
+                    let b_changes = foreign_change_state(&db);
                     bind_fixture(&db, "a");
                     {
                         let tx = db.transaction().unwrap();
@@ -1801,6 +1987,7 @@ mod tests {
                             let before: i64 = tx
                                 .query_row("SELECT total_changes()", [], |r| r.get(0))
                                 .unwrap();
+                            let decodes = REPRICE_PAYLOAD_DECODES.with(|count| count.get());
                             assert!(matches!(
                                 catalog_step(&tx, &mut Work::default(), &target, Some(family_key)),
                                 Err(rusqlite::Error::InvalidQuery)
@@ -1810,6 +1997,7 @@ mod tests {
                                     .unwrap(),
                                 before
                             );
+                            assert_eq!(REPRICE_PAYLOAD_DECODES.with(|count| count.get()), decodes);
                         }
                         assert!(source_step(&tx, &mut Work::default(), &target, Some(1)).unwrap());
                         let mut appended = FileIndex::default();
@@ -1851,12 +2039,14 @@ mod tests {
                         clear(&tx, 1).unwrap();
                         assert_eq!(tree_state::shared_usage(&tx, 2, 2).unwrap().0.len(), 0);
                         assert_eq!(usage_family_state(&tx, "b"), b);
+                        assert_eq!(foreign_change_state(&tx), b_changes);
                         tx.rollback().unwrap();
                     }
                     assert_eq!(usage_family_state(&db, "a"), a);
                     assert_eq!(usage_family_state(&db, "b"), b);
                     assert_eq!(catalog_family_state(&db), catalog_before);
                     assert_eq!(trace_family_state(&db), trace_before);
+                    assert_eq!(foreign_change_state(&db), b_changes);
                     drop(db);
                     let mut db = Connection::open(&database).unwrap();
                     db.pragma_update(None, "foreign_keys", true).unwrap();
@@ -1888,6 +2078,7 @@ mod tests {
                     };
                     family_step(&tx, &mut work).unwrap();
                     assert_eq!(foreign_trace_state(&tx), b_trace);
+                    assert_eq!(foreign_change_state(&tx), b_changes);
                     assert_eq!(catalog_family_state(&tx), catalog_before);
                     clear(&tx, 1).unwrap();
                     assert!(tree_state::shared_usage(&tx, 2, 2).unwrap().0.is_empty());
