@@ -1,0 +1,250 @@
+//! Native Catalog SQL and snapshot lifecycle. Rendering/identity stay shared.
+use crate::{Options, events::EventCache, model::summary::{CatalogRow, CatalogSource}, viewer::ViewerReply, catalog::Request};
+use crate::storage::catalog::CatalogSnapshot;
+use rusqlite::{Connection, Transaction, OpenFlags, OptionalExtension, types::Value as SqlValue};
+use std::{io, time::Duration};
+use serde_json::Value;
+
+/// Two direct keyset ranges avoid scanning earlier keys when many sessions
+/// share the same timestamp. OFFSET and mixed-order tuple comparisons do not
+/// provide that property. All ranges are read in one SQLite snapshot.
+pub(crate) fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<CatalogRow>> {
+    if let Some(sid) = &request.sid {
+        return read_range(
+            connection,
+            "sqlite_autoindex_session_catalog_1",
+            if request.require_complete && request.scope == CatalogReadScope::Current {
+                "lifecycle='current' AND "
+            } else {
+                ""
+            },
+            "session_key = ?",
+            vec![SqlValue::Text(sid.clone())],
+            1,
+        );
+    }
+    let (filters, index) = match (request.harness.is_some(), request.repo.is_some()) {
+        (false, false) => ("", "session_catalog_order"),
+        (true, false) => ("harness = ? AND ", "session_catalog_harness"),
+        (false, true) => ("repo = ? AND ", "session_catalog_repo"),
+        (true, true) => (
+            "harness = ? AND repo = ? AND ",
+            "session_catalog_harness_repo",
+        ),
+    };
+    let mut filters = filters.to_owned();
+    let mut index = index.to_owned();
+    if request.repo.as_deref() == Some("") {
+        filters = filters.replace("repo = ?", "repo IS NULL");
+    }
+    if request.model.is_some() {
+        filters.push_str("json_extract(metadata,'$.model') = ? AND ");
+        index.push_str("_model");
+    }
+    let (filters, index) = match request.scope {
+        CatalogReadScope::Current => (
+            format!("lifecycle='current' AND {filters}"),
+            index.replacen("session_catalog_", "session_catalog_current_", 1),
+        ),
+        CatalogReadScope::RetainedHistory => (filters, index),
+    };
+    let mut base = Vec::new();
+    if let Some(value) = &request.harness {
+        base.push(SqlValue::Text(value.clone()));
+    }
+    if let Some(value) = &request.repo
+        && !value.is_empty()
+    {
+        base.push(SqlValue::Text(value.clone()));
+    }
+    if let Some(value) = &request.model {
+        base.push(SqlValue::Text(value.clone()));
+    }
+    let limit = request.limit + 1;
+    let mut found = if let Some(cursor) = &request.cursor {
+        let mut args = base.clone();
+        args.push(SqlValue::Integer(cursor.last));
+        args.push(SqlValue::Text(cursor.key.clone()));
+        let mut found = read_range(
+            connection,
+            &index,
+            &filters,
+            if cursor.inclusive {
+                "last_ms = ? AND session_key >= ?"
+            } else {
+                "last_ms = ? AND session_key > ?"
+            },
+            args,
+            limit,
+        )?;
+        let remaining = limit - found.len();
+        if remaining > 0 {
+            let mut args = base;
+            args.push(SqlValue::Integer(cursor.last));
+            found.extend(read_range(
+                connection,
+                &index,
+                &filters,
+                "last_ms < ?",
+                args,
+                remaining,
+            )?);
+        }
+        found
+    } else {
+        read_range(connection, &index, &filters, "1", base, limit)?
+    };
+    // Capacity returned by SQLite is bounded by the requested page plus one.
+    found.shrink_to_fit();
+    Ok(found)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SQL_STEPS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+fn read_range(
+    connection: &Connection,
+    index: &str,
+    filters: &str,
+    range: &str,
+    mut args: Vec<SqlValue>,
+    limit: usize,
+) -> rusqlite::Result<Vec<CatalogRow>> {
+    let sql = format!(
+        "SELECT metadata,session_key,last_ms,harness,repo FROM session_catalog INDEXED BY {index} WHERE {filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
+    );
+    args.push(SqlValue::Integer(limit as i64));
+    let mut statement = connection.prepare(&sql)?;
+    let mut found = Vec::new();
+    {
+        let mut selected = statement.query(rusqlite::params_from_iter(args))?;
+        while let Some(row) = selected.next()? {
+            let encoded: String = row.get(0)?;
+            let metadata: CatalogRow = serde_json::from_str(&encoded).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            if metadata.key != row.get::<_, String>(1)?
+                || metadata.last.unwrap_or(0) != row.get::<_, i64>(2)?
+                || metadata.harness != row.get::<_, String>(3)?
+                || metadata.repo != row.get::<_, Option<String>>(4)?
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            found.push(metadata);
+        }
+    }
+    #[cfg(test)]
+    SQL_STEPS.with(|steps| {
+        steps.set(steps.get() + statement.get_status(rusqlite::StatementStatus::VmStep))
+    });
+    Ok(found)
+}
+
+pub(crate) fn read_page(
+    options: &Options,
+    machine: &str,
+    request: &Request,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let mut connection = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(100))?;
+    let transaction = connection.transaction()?;
+    let reply = crate::catalog::read_page_snapshot(options, machine, request, &transaction)?;
+    transaction.commit()?;
+    Ok(reply)
+}
+
+
+pub(crate) fn source_proof_observation(options: &Options, root: &str, absolute: &str) -> Result<Option<(String, CatalogSource, String)>, Box<dyn std::error::Error>> {
+    let mut connection = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(100))?;
+    let transaction = connection.transaction()?;
+    crate::events::store::require_current(&transaction)?;
+    let encoded: Option<(String, Option<String>)> = transaction.query_row(
+        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
+        [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((key, encoded)) = encoded else {
+        return Ok(None);
+    };
+    let encoded = encoded.ok_or_else(|| io::Error::other("source metadata bound"))?;
+    // Decode only the selected relationship metadata, never a native body.
+    if encoded.len() > 1024 * 1024 {
+        return Err(io::Error::other("source metadata bound").into());
+    }
+    let row: CatalogRow = serde_json::from_str(&encoded)?;
+    if row.key != key || row.harness != root || row.sources.len() > 64 {
+        return Err(io::Error::other("source mapping changed").into());
+    }
+    let source = row
+        .sources
+        .iter()
+        .find(|source| source.path.to_str() == Some(absolute))
+        .ok_or_else(|| io::Error::other("source mapping absent"))?;
+    type Revision = (
+        u64,
+        u64,
+        u64,
+        [u8; 16],
+        u64,
+        [u8; 32],
+        [u8; 32],
+        Option<[u8; 16]>,
+    );
+    let revision: Option<Revision> = transaction.query_row(
+        "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM files WHERE path=?1",
+        [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?,row.get(7)?)),
+    ).optional()?;
+    if revision
+        != Some((
+        source.dev,
+        source.ino,
+        source.size,
+        source.modified_ns.to_be_bytes(),
+        source.offset,
+        source.prefix_sha256,
+        source.tail_sha256,
+        source.changed_ns.map(i128::to_be_bytes),
+        ))
+    {
+        return Err(io::Error::other("source ledger changed").into());
+    }
+    let generation: String = transaction.query_row(
+        "SELECT value FROM meta WHERE key='catalog_generation'",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.commit()?;
+    Ok(Some((key, source.clone(), generation)))
+}
+
+impl CatalogSnapshot for Transaction<'_> {
+    fn require_current(&self) -> io::Result<()> { crate::events::store::require_current(self) }
+    fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
+        self.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0)).optional().map_err(io::Error::other)
+    }
+    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> { rows(self, request).map_err(io::Error::other) }
+    fn search(&self, query: crate::catalog_search::Query<'_>) -> io::Result<crate::catalog_search::Selection> { crate::catalog_search::read(self, query).map_err(io::Error::other) }
+    fn has_history(&self, key: &str) -> io::Result<bool> {
+        self.query_row("SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)", [key], |row| row.get(0)).map_err(io::Error::other)
+    }
+    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> { crate::history_projection::catalog(self, key).map_err(io::Error::other) }
+    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> { crate::history_projection::qualified(self, row).map_err(io::Error::other) }
+    fn selected_details(&self, key: &str, sources: &[CatalogSource], status: &mut dyn FnMut(&CatalogRow) -> Value) -> io::Result<Option<Value>> {
+        crate::causal_trace::selected_details(self, key, sources, &mut |row| status(row)).map_err(io::Error::other)
+    }
+    fn transcript_observation(&self, key: &str, generation: &str, history: bool) -> io::Result<Option<Value>> {
+        crate::transcript_range::observation(self, key, generation, history).map_err(io::Error::other)
+    }
+}

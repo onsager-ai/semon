@@ -4,6 +4,20 @@
 #[cfg(test)]
 mod conformance;
 pub(crate) mod sqlite;
+pub(crate) mod query;
+pub(crate) mod catalog;
+
+pub(crate) fn read_local_catalog_page(options: &crate::Options, source_key: &str, request: &crate::catalog::Request) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
+    sqlite::catalog::read_page(options, source_key, request)
+}
+
+pub(crate) fn source_proof_observation(options: &crate::Options, root: &str, absolute: &str) -> Result<Option<(String, crate::model::summary::CatalogSource, String)>, Box<dyn std::error::Error>> {
+    sqlite::catalog::source_proof_observation(options, root, absolute)
+}
+
+pub(crate) fn local_query_catalog(options: &crate::Options, namespace: LogicalSourceNamespace) -> Box<dyn query::QueryCatalogStore> {
+    Box::new(sqlite::query::SqliteQueryCatalog { options: options.clone(), namespace })
+}
 
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogIdentityError, CatalogReadScope};
 use std::path::PathBuf;
@@ -63,6 +77,17 @@ impl StoreConfig {
         Ok(Box::new(sqlite::SqliteMetadataStore::new(self)))
     }
 
+    /// Explicitly bind a supported current single-source store. This stages
+    /// admission and fences native writes until their namespace port completes;
+    /// it is not a finished row migration or permission to admit another source.
+    pub fn admit_namespace(&self) -> Result<NamespaceAdmission, StorageError> {
+        sqlite::namespace::admit(self)
+    }
+
+    pub(crate) fn open_local(self) -> Result<Box<dyn SessionMetadataStore>, StorageError> {
+        Ok(Box::new(sqlite::SqliteMetadataStore::legacy_local(self)))
+    }
+
     /// Transitional one-source local binding. Only this existing API bridge
     /// derives coordinates from Options.cache; the contract never receives it.
     pub(crate) fn local_metadata(
@@ -86,6 +111,9 @@ pub enum StorageError {
     Busy,
     ScopeChanged,
     NamespaceMismatch,
+    NamespaceUnadmitted,
+    NamespaceUpgradePending,
+    MultiSourceUnqualified,
     /// The client must reconcile epoch/floor and retry the idempotent scoped
     /// acknowledgement. It must not infer rollback from a missing commit reply.
     CommitUncertain,
@@ -99,9 +127,20 @@ impl std::fmt::Display for StorageError {
             Self::Busy => "Configured storage is busy.",
             Self::ScopeChanged => "Storage epoch or scope changed.",
             Self::NamespaceMismatch => "Logical storage namespace changed.",
+            Self::NamespaceUnadmitted => "Logical storage namespace is not admitted.",
+            Self::NamespaceUpgradePending => "Native namespace writer upgrade is pending.",
+            Self::MultiSourceUnqualified => "Multi-source writers are not qualified.",
             Self::CommitUncertain => "Storage commit requires reconciliation.",
         })
     }
+}
+
+/// Durable admission witness, independent of a database row ID or pathname.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceAdmission {
+    pub namespace: LogicalSourceNamespace,
+    pub generation: u64,
+    pub admitted_at: i64,
 }
 impl std::error::Error for StorageError {}
 

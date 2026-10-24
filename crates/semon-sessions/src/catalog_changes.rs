@@ -51,7 +51,7 @@ pub fn compact_session_catalog_changes(
         return Err(CatalogIdentityError::InvalidArguments);
     }
     let namespace = LogicalSourceNamespace::new("local")?;
-    let store = StoreConfig::local_metadata(options, namespace.clone()).open()?;
+    let store = StoreConfig::local_metadata(options, namespace.clone()).open_local()?;
     store
         .compact_catalog_changes(&namespace, scope, stream_epoch, acknowledged_through, limit)
         .map_err(Into::into)
@@ -75,7 +75,7 @@ pub fn session_catalog_changes(
         limit,
     };
     request.validate()?;
-    let store = StoreConfig::local_metadata(options, namespace.clone()).open()?;
+    let store = StoreConfig::local_metadata(options, namespace.clone()).open_local()?;
     store
         .read_snapshot(&namespace)?
         .catalog_changes(&namespace, request)

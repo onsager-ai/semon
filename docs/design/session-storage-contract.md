@@ -24,7 +24,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | --- | --- | --- |
 | `catalog_changes.rs` | ported | Public change API and data types; no SQL or physical path access. |
 | `storage.rs` | direct | Transitional local Options.cache coordinate bridge only; native ports remain open. |
-| `catalog.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `catalog.rs` | ported | Semantic snapshot reads; SQL and SQL fixtures in storage/sqlite/catalog*.rs. |
 | `catalog_observer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `catalog_search.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `catalog_union.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -56,7 +56,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `native_tree/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `overview.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `overview_repair.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `query/catalog.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query/catalog.rs` | ported | Cohort, search-slot and final-witness reads use the Query metadata contract. |
 | `query/tests/recovery_tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `query/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `query/transcript.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
