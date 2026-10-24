@@ -284,16 +284,22 @@ pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
         tx.execute_batch(ddl).map_err(failed)?;
     }
     tx.execute(
-        metadata_sql(&tx,
+        metadata_sql(
+            &tx,
             "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
-            "INSERT INTO meta(namespace,key,value) VALUES('','cache_version',?1)").map_err(failed)?,
+            "INSERT INTO meta(namespace,key,value) VALUES('','cache_version',?1)",
+        )
+        .map_err(failed)?,
         [CACHE_VERSION.to_string()],
     )
     .map_err(failed)?;
     tx.execute(
-        metadata_sql(&tx,
+        metadata_sql(
+            &tx,
             "UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'",
-            "UPDATE meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'").map_err(failed)?,
+            "UPDATE meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'",
+        )
+        .map_err(failed)?,
         [epoch],
     )
     .map_err(failed)?;

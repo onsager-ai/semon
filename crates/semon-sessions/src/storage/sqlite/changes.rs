@@ -141,7 +141,9 @@ pub(crate) fn initialize_source_floors(
     tx: &rusqlite::Transaction<'_>,
     namespace: &crate::storage::LogicalSourceNamespace,
 ) -> Result<(), StorageError> {
-    let bound: String = tx.query_row("SELECT semon_namespace()", [], |r| r.get(0)).map_err(failed)?;
+    let bound: String = tx
+        .query_row("SELECT semon_namespace()", [], |r| r.get(0))
+        .map_err(failed)?;
     if bound != namespace.as_str() {
         return Err(StorageError::NamespaceMismatch);
     }
@@ -153,15 +155,28 @@ pub(crate) fn initialize_source_floors(
         return Err(StorageError::NamespaceUnadmitted);
     }
     let mut missing = Vec::new();
-    for key in ["catalog_changes_floor_current", "catalog_changes_floor_retained_history"] {
-        let value: Option<String> = tx.query_row(
-            crate::events::store::configured::metadata_sql(tx,
-                "SELECT value FROM meta WHERE key=?1",
-                "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1").map_err(failed)?,
-            [key], |r| r.get(0),
-        ).optional().map_err(failed)?;
+    for key in [
+        "catalog_changes_floor_current",
+        "catalog_changes_floor_retained_history",
+    ] {
+        let value: Option<String> = tx
+            .query_row(
+                crate::events::store::configured::metadata_sql(
+                    tx,
+                    "SELECT value FROM meta WHERE key=?1",
+                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
+                )
+                .map_err(failed)?,
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(failed)?;
         if let Some(value) = value {
-            if !value.parse::<i64>().is_ok_and(|n| n>=0 && value==n.to_string()) {
+            if !value
+                .parse::<i64>()
+                .is_ok_and(|n| n >= 0 && value == n.to_string())
+            {
                 return Err(StorageError::NamespaceUpgradePending);
             }
         } else {
@@ -170,11 +185,15 @@ pub(crate) fn initialize_source_floors(
     }
     for key in missing {
         tx.execute(
-            crate::events::store::configured::metadata_sql(tx,
+            crate::events::store::configured::metadata_sql(
+                tx,
                 "INSERT INTO meta(key,value) VALUES(?1,'0')",
-                "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,'0')").map_err(failed)?,
+                "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,'0')",
+            )
+            .map_err(failed)?,
             [key],
-        ).map_err(failed)?;
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }

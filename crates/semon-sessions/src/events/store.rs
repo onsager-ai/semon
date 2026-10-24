@@ -5216,8 +5216,15 @@ fn current_file_count(
     connection: &Connection,
     sources: &BTreeMap<String, &crate::model::summary::CatalogSource>,
 ) -> rusqlite::Result<i64> {
-    let mut count: i64 =
-        connection.query_row(configured::sql(connection, "SELECT count(*) FROM files", "SELECT count(*) FROM files WHERE namespace=semon_namespace()")?, [], |row| row.get(0))?;
+    let mut count: i64 = connection.query_row(
+        configured::sql(
+            connection,
+            "SELECT count(*) FROM files",
+            "SELECT count(*) FROM files WHERE namespace=semon_namespace()",
+        )?,
+        [],
+        |row| row.get(0),
+    )?;
     let mut statement = connection.prepare(
         configured::sql(connection,
             configured::metadata_sql(connection, "SELECT f.file_id,f.dev,f.ino,f.size,f.mtime_ns,f.resume_at,f.head_sha256,f.tail_sha256,f.ctime_ns,f.path,\
