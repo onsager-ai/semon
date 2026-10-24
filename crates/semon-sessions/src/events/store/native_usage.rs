@@ -84,7 +84,6 @@ CREATE TABLE native_usage_dimensions (
 ) STRICT, WITHOUT ROWID;
 ";
 
-
 const COMPOSITE_REPAIR_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_tree_repairs (
  namespace TEXT NOT NULL,source_path TEXT NOT NULL,receipt TEXT NOT NULL,source_id INTEGER,
@@ -97,10 +96,18 @@ CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(names
 ";
 
 pub(super) fn schema(composite: bool) -> [&'static str; 2] {
-    if composite { [COMPOSITE_SCHEMA, COMPOSITE_REPAIR_SCHEMA] } else { [SCHEMA, REPAIR_SCHEMA] }
+    if composite {
+        [COMPOSITE_SCHEMA, COMPOSITE_REPAIR_SCHEMA]
+    } else {
+        [SCHEMA, REPAIR_SCHEMA]
+    }
 }
 
-pub(super) fn sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+pub(super) fn sql<'a>(
+    c: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
     Ok(if composite(c)? { scoped } else { legacy })
 }
 
@@ -505,7 +512,9 @@ mod namespace_tests {
         // Exercise usage and repair queue isolation. Tree/pricing and retained
         // readers still prevent public multi-source qualification.
         let mut db = Connection::open_in_memory().unwrap();
-        for ddl in schema(true) { db.execute_batch(ddl).unwrap(); }
+        for ddl in schema(true) {
+            db.execute_batch(ddl).unwrap();
+        }
         db.pragma_update(None, "foreign_keys", true).unwrap();
         let bind = |db: &Connection, namespace: &str| {
             let namespace = namespace.to_owned();
@@ -637,36 +646,64 @@ mod file_namespace_tests {
     // Exercise the production bound-selector API, including after reopening.
     fn bind(db: &Connection, namespace: &str) {
         let namespace = namespace.to_owned();
-        db.create_scalar_function("semon_namespace", 0,
+        db.create_scalar_function(
+            "semon_namespace",
+            0,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            move |_| Ok(namespace.clone())).unwrap();
+            move |_| Ok(namespace.clone()),
+        )
+        .unwrap();
     }
-    fn begin_source(tx: &Transaction<'_>, namespace: &str, path: &str,
-        expected: Option<&Ledger>, ledger: &Ledger, append: bool) -> rusqlite::Result<i64> {
+    fn begin_source(
+        tx: &Transaction<'_>,
+        namespace: &str,
+        path: &str,
+        expected: Option<&Ledger>,
+        ledger: &Ledger,
+        append: bool,
+    ) -> rusqlite::Result<i64> {
         bind(tx, namespace);
         super::begin_source(tx, path, expected, ledger, append)
     }
-    fn write(tx: &Transaction<'_>, namespace: &str, path: &str,
-        ledger: &Ledger, index: &FileIndex) -> rusqlite::Result<()> {
+    fn write(
+        tx: &Transaction<'_>,
+        namespace: &str,
+        path: &str,
+        ledger: &Ledger,
+        index: &FileIndex,
+    ) -> rusqlite::Result<()> {
         bind(tx, namespace);
         super::write(tx, path, ledger, index)
     }
-    fn normalized(db: &Connection, namespace: &str, path: &str,
-        ledger: &Ledger) -> rusqlite::Result<bool> {
+    fn normalized(
+        db: &Connection,
+        namespace: &str,
+        path: &str,
+        ledger: &Ledger,
+    ) -> rusqlite::Result<bool> {
         bind(db, namespace);
         super::normalized(db, path, ledger)
     }
-    fn seen(db: &Connection, namespace: &str, path: &str,
-        ledger: &Ledger, identity: &str) -> rusqlite::Result<Seen> {
+    fn seen(
+        db: &Connection,
+        namespace: &str,
+        path: &str,
+        ledger: &Ledger,
+        identity: &str,
+    ) -> rusqlite::Result<Seen> {
         bind(db, namespace);
         super::seen(db, path, ledger, identity)
     }
-    fn restore(db: &Connection, namespace: &str, path: &str,
-        ledger: &Ledger, encoded: Option<String>) -> rusqlite::Result<Option<CodexNativeUsage>> {
+    fn restore(
+        db: &Connection,
+        namespace: &str,
+        path: &str,
+        ledger: &Ledger,
+        encoded: Option<String>,
+    ) -> rusqlite::Result<Option<CodexNativeUsage>> {
         bind(db, namespace);
         super::restore(db, path, ledger, encoded)
     }
-
 
     fn fixture_path() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -728,11 +765,9 @@ mod file_namespace_tests {
                 "model-shared".into(),
                 Some(1_800_000_000),
             );
-            index
-                .native_usage_observations
-                .as_mut()
-                .unwrap()
-                .push(Observation::capture(&record, &bytes, *offset, Some("model-shared")).unwrap());
+            index.native_usage_observations.as_mut().unwrap().push(
+                Observation::capture(&record, &bytes, *offset, Some("model-shared")).unwrap(),
+            );
         }
         index
     }
@@ -749,7 +784,9 @@ mod file_namespace_tests {
 
         let mut db = Connection::open(&path).unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
-        for ddl in schema(true) { db.execute_batch(ddl).unwrap(); }
+        for ddl in schema(true) {
+            db.execute_batch(ddl).unwrap();
+        }
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
@@ -810,11 +847,21 @@ mod file_namespace_tests {
         write(&tx, namespace_a, source_path, &ledger_appended, &appended).unwrap();
         tx.commit().unwrap();
         assert_eq!(
-            db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace=?1", [namespace_a], |r| r.get::<_, i64>(0)).unwrap(),
+            db.query_row(
+                "SELECT count(*) FROM native_usage_facts WHERE namespace=?1",
+                [namespace_a],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
             2
         );
         assert_eq!(
-            db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace=?1", [namespace_b], |r| r.get::<_, i64>(0)).unwrap(),
+            db.query_row(
+                "SELECT count(*) FROM native_usage_facts WHERE namespace=?1",
+                [namespace_b],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
             1
         );
         let restored = restore(
@@ -826,12 +873,18 @@ mod file_namespace_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(restored.codex_usage().get("model-shared").unwrap().input, 20);
+        assert_eq!(restored.by_model.get("model-shared").unwrap().input, 20);
         let second_identity = appended.native_usage_observations.as_ref().unwrap()[1]
             .identity()
             .to_owned();
-        let second_a = seen(&db, namespace_a, source_path, &ledger_appended, &second_identity)
-            .unwrap();
+        let second_a = seen(
+            &db,
+            namespace_a,
+            source_path,
+            &ledger_appended,
+            &second_identity,
+        )
+        .unwrap();
         let second_b = seen(&db, namespace_b, source_path, &ledger_b, &second_identity).unwrap();
         assert!(second_a.tree && second_a.model);
         assert!(!second_b.tree && !second_b.model);
@@ -857,7 +910,12 @@ mod file_namespace_tests {
         assert!(write(&tx, namespace_a, source_path, &ledger_appended, &failing).is_err());
         tx.rollback().unwrap();
         assert_eq!(
-            db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace=?1", [namespace_a], |r| r.get::<_, i64>(0)).unwrap(),
+            db.query_row(
+                "SELECT count(*) FROM native_usage_facts WHERE namespace=?1",
+                [namespace_a],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
             2
         );
         drop(db);
@@ -872,7 +930,7 @@ mod file_namespace_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(reopened.codex_usage().get("model-shared").unwrap().input, 20);
+        assert_eq!(reopened.by_model.get("model-shared").unwrap().input, 20);
         assert!(normalized(&db, namespace_b, source_path, &ledger_b).unwrap());
         drop(db);
         let _ = std::fs::remove_file(path);
