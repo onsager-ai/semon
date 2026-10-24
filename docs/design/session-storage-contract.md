@@ -11,6 +11,56 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 14 checkpoint: Tree completion witness and metadata ownership
+
+Fresh operation IDs over unchanged Raw still receive their own durable completion.
+In the same completion transaction, preserving a current Tree now requires its
+file identity, ledger, complete generation, parser version and stored dimension
+digest to agree, together with pricing and semantic-recipe interpretation
+witnesses and the observed sidecar/header dependencies. An unchanged verified
+Tree avoids header, generation and label writes. Missing/stale headers, damaged
+labels or a changed pricing interpretation retire the bad header and repair a
+new generation. The original state-equality oracle remains; an audit also checks
+that no Tree writes occur. These regressions require CI; no local execution is
+claimed. The digest scans the same labels/models/open-tools dimensions used by
+ordinary restoration, not historical usage identities or closed tool history.
+
+`catalog_semantic_recipe`, Catalog generation, semantic progress/epoch and
+pricing work/completion belong to a logical source. A's completed recipe cannot
+qualify B's older stage. The configured source revision comes from the existing
+namespace-keyed SourceJournal, not a second metadata counter. The existing
+`catalog_changes_epoch` remains the physical-store stream incarnation; page
+`source_key`, source generation, namespace admission and per-source stream floors
+provide the logical-source coordinates. `cache_version`, Catalog/search format
+versions, the pricing target and the repair scheduling clock are store-wide.
+The empty reserved namespace remains unavailable to logical sources.
+
+Authored metadata statements now cover semantic recipe/header frontier/progress
+operations, SourceJournal seeds, reader epoch checks, change-stream floor reads
+and updates, pricing work/completion and the repair clock. The configured core
+pricing DDL has a separately authored composite-meta alternative whose target
+join binds the reserved store scope. A private fixture checks stale recipes,
+independent source epochs/revisions, rollback, unique store keys, unknown-key
+refusal and a poisoned non-owner pricing target. This does not qualify the
+semantic stage's physical tables or the Catalog publisher.
+
+C2 also has scoped operational helpers and private composite DDL for the five
+native usage tables (sources/current/facts/identities/dimensions), including
+namespace-leading PKs, indexes, unique keys and foreign keys. A private fixture
+collides source IDs, paths and observation identities, reconciles exact replay,
+rolls back relocation/dimension writes and preserves an earlier incarnation's
+facts. Production usage DDL stays singleton until the Tree/repair/pricing and
+retained-reader owners are ported. Usage and meta qualification remain **0**.
+
+Meta activation still depends on the Catalog publication/recovery/archive and
+qualification queries in `store.rs`, the Catalog pricing triggers and initial
+change-stream metadata DDL, plus complete key/owner qualification. Those are
+listed in `writer-inventory.json`. This does not block further C2 key ports.
+Public second-source admission, global qualification, publication and `current()`
+remain fenced. No database was reset or migrated. Full #478/#477, PG #479 and
+Hub #313 remain incomplete; the #380 merge hold stays in effect. Exact-pin CI,
+formatting, performance and independent acceptance remain pending.
+
 ## Worker 13 checkpoint: assembled DDL repair and C1b source-proof subunit
 
 The five semantic indexes on `files`/`events` are now a separate authored DDL
@@ -43,12 +93,12 @@ multi-source ingest. The shared Catalog reference used by the retention test
 only exercises the metadata copy's namespace predicate.
 
 `SOURCE_METADATA_PREFIXES` explicitly classifies the converted proof key
-families. `STORE_METADATA_KEYS` currently classifies only `cache_version`,
-`catalog_changes_epoch`, `catalog_semantic_recipe` and `native_tree_repair_clock`.
+families. Worker 14 corrected the recipe to source ownership and extended the
+explicit store/source key lists as described above.
 The reserved store scope is the empty string, which `LogicalSourceNamespace`
 rejects; it is bound through the key classifier, never a column default. Scoped
 inserts refuse unclassified keys. Tests check unknown-key refusal, same-key
-source isolation and a unique store-global recipe across both source bindings.
+source isolation and a unique store-global pricing target across source bindings.
 **This is not a complete inventory of global keys.**
 
 The public fresh store still assembles singleton meta, and preparation retains
@@ -65,17 +115,16 @@ existing authored statements rather than claiming a corpus-wide port):
   publication metadata; `qualify_contract`, `qualify`, `qualify_producer`,
   `init`, `current`; archive GLOB validation and `current_file_count` membership
   join; `claude_json_stamp`. These include arbitrary-key global readers/writers.
-- `semantic_stage.rs`: recipe read/write, `generation`, `revision`, native Codex
-  header existence/frontier scans, semantic epoch read/increment, GC and
-  completeness/backfill/push markers. Scope the stage/dependency joins together.
-- `reprice.rs` and configured pricing DDL: all `pricing_recompute_target` joins,
-  applied/work metadata, progress updates and `overview_generation`.
-- `native_usage/repair.rs`: `native_tree_repair_clock` increment and repair
-  timestamp subquery; its native table scope is also part of C2.
-- `storage/sqlite/source_journal.rs`: revision increment/read, invalidation
-  revision subquery and backfill state read/write. `reader.rs`: stream epoch
-  validation. `changes.rs`: initial epoch/floors DDL, epoch/version/generation/
-  floor reads and floor update. Extend the global classifier before activation.
+- `semantic_stage.rs`: metadata statements are ported; the stage/dependency
+  physical row keys and namespace joins remain unqualified.
+- `reprice.rs`: Catalog pricing trigger joins, pending owner keys and native
+  source/fact/dimension queries; metadata work/completion is ported. Configured
+  core pricing triggers have an authored composite-meta alternative.
+- `native_usage/repair.rs`: native repair/Tree table scope remains C2; the clock
+  increment and timestamp metadata subquery are ported.
+- `changes.rs`: initial epoch/floors DDL and Catalog publication triggers remain;
+  read/compaction metadata is scoped. SourceJournal's legacy-only unbound writes
+  keep their existing refusal fence; configured writes use the source journal.
 
 Other direct owners remain in the unchanged unqualified path inventory and need
 CI inventory/conformance, including selected-reader lifetime qualification.

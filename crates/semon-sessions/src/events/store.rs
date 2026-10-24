@@ -4491,12 +4491,13 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set, shared by cold initialization and whole-index rebuilds.
-fn storage_ddl() -> [&'static str; 15] {
+fn storage_ddl() -> [&'static str; 16] {
     [
         SCHEMA,
         metadata_schema(false),
         LEGACY_EVENT_SCHEMA,
         native_usage::SCHEMA,
+        native_usage::REPAIR_SCHEMA,
         tree_state::SCHEMA,
         semantic_stage::SCHEMA,
         semantic_stage::SEMANTIC_CORE_INDEXES,
@@ -4768,7 +4769,9 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
     Ok(connection
-        .prepare_cached("SELECT value FROM meta WHERE key = 'cache_version'")?
+        .prepare_cached(configured::metadata_sql(connection,
+            "SELECT value FROM meta WHERE key = 'cache_version'",
+            "SELECT value FROM meta WHERE namespace='' AND key = 'cache_version'")?)?
         .query_row([], |row| row.get::<_, String>(0))
         .optional()?
         .and_then(|value| value.parse().ok()))
@@ -5155,7 +5158,7 @@ fn native_metadata_value(connection: &Connection) -> rusqlite::Result<&'static s
     configured::metadata_sql(
         connection,
         NATIVE_METADATA_VALUE,
-        "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1",
+        "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
     )
 }
 
@@ -5164,6 +5167,14 @@ fn native_metadata_put(connection: &Connection) -> rusqlite::Result<&'static str
         connection,
         "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+    )
+}
+
+fn metadata_increment(connection: &Connection) -> rusqlite::Result<&'static str> {
+    configured::metadata_sql(
+        connection,
+        "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
     )
 }
 
@@ -5181,11 +5192,73 @@ struct TreeSummaryRecord {
     version: u32,
     parser_version: u32,
     ledger: String,
+    #[serde(default)]
+    projection_witness: Option<String>,
+    #[serde(default)]
+    interpretation_witness: Option<String>,
     summary: crate::native_tree::Summary,
 }
 
 fn tree_summary_key(path: &str) -> String {
     format!("native_tree_summary:{path}")
+}
+
+fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<String> {
+    let mut statement = connection.prepare(native_metadata_value(connection)?)?;
+    let mut values = Vec::<Option<String>>::new();
+    for key in ["pricing_recompute_target", "catalog_semantic_recipe"] {
+        let value: Option<Option<String>> = statement.query_row([key], |r| r.get(0)).optional()?;
+        if value == Some(None) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        values.push(value.flatten());
+    }
+    let pricing: Option<String> = connection.query_row(configured::sql(connection,
+        "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
+        "SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1")?,
+        [path], |r| r.get(0))?;
+    values.push(pricing);
+    Ok(format!("{:x}", Sha256::digest(json(&values)?.as_bytes())))
+}
+
+fn tree_reusable(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(native_metadata_value(connection)?)?;
+    let encoded: Option<Option<String>> = statement
+        .query_row([tree_summary_key(path)], |r| r.get(0))
+        .optional()?;
+    let Some(record) = encoded.flatten().and_then(|value| {
+        serde_json::from_str::<TreeSummaryRecord>(&value).ok()
+    }) else {
+        return Ok(false);
+    };
+    let Some(summary) = index.tree_summary.as_ref() else {
+        return Ok(false);
+    };
+    if record.version != 3
+        || record.parser_version != CACHE_VERSION
+        || record.ledger != header_ledger(ledger)
+        || record.projection_witness.is_none()
+        || tree_state::witness(connection, path, ledger)? != record.projection_witness
+        || record.interpretation_witness.as_deref() != Some(tree_interpretation(connection, path)?.as_str())
+        || json(&record.summary)? != json(&summary.compact(index.native_usage_observations.is_some()))?
+    {
+        return Ok(false);
+    }
+    // Interpretation dependencies are independent of the Raw ledger. They are
+    // checked again under the completion reservation, before preserving a Tree.
+    if crate::native_sidecar::agent_path(Path::new(path))
+        && read_claude_sidecar(&mut statement, path, ledger)?.as_ref()
+            != index.claude_sidecar.as_ref()
+    {
+        return Ok(false);
+    }
+    Ok(json(&read_codex_header(&mut statement, path, ledger)?)?
+        == json(&index.codex_header)?)
 }
 
 fn read_tree_summary(
@@ -5212,6 +5285,16 @@ fn read_tree_summary(
     {
         return Ok(None);
     }
+    if let Some(witness) = &record.projection_witness
+        && tree_state::witness(connection, path, ledger)?.as_ref() != Some(witness)
+    {
+        return Ok(None);
+    }
+    if let Some(witness) = &record.interpretation_witness
+        && tree_interpretation(connection, path)? != *witness
+    {
+        return Ok(None);
+    }
     let mut summary = record.summary;
     if !tree_state::restore(connection, path, ledger, &mut summary)? {
         return Ok(None);
@@ -5226,6 +5309,28 @@ fn write_tree_summary(
     summary: Option<&crate::native_tree::Summary>,
     normalized_usage: bool,
 ) -> rusqlite::Result<()> {
+    if let Some(summary) = summary {
+        let current = TreeSummaryRecord {
+            version: 3,
+            parser_version: CACHE_VERSION,
+            ledger: header_ledger(ledger),
+            projection_witness: tree_state::witness(transaction, path, ledger)?,
+            interpretation_witness: Some(tree_interpretation(transaction, path)?),
+            summary: summary.compact(normalized_usage),
+        };
+        if current.projection_witness.is_some() {
+            let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
+            let encoded: Option<Option<String>> = statement
+                .query_row([tree_summary_key(path)], |r| r.get(0))
+                .optional()?;
+            let failed: Option<Option<String>> = statement
+                .query_row([format!("native_tree_failure:{path}")], |r| r.get(0))
+                .optional()?;
+            if failed.is_none() && encoded.flatten().as_deref() == Some(json(&current)?.as_str()) {
+                return Ok(());
+            }
+        }
+    }
     let encoded = summary
         .map(|summary| {
             tree_state::write(transaction, path, ledger, summary)?;
@@ -5233,6 +5338,8 @@ fn write_tree_summary(
                 version: 3,
                 parser_version: CACHE_VERSION,
                 ledger: header_ledger(ledger),
+                projection_witness: tree_state::witness(transaction, path, ledger)?,
+                interpretation_witness: Some(tree_interpretation(transaction, path)?),
                 summary: summary.compact(normalized_usage),
             })
         })
@@ -5876,6 +5983,14 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
 
 /// Deletes a file's child rows, keeping its `files` row and id.
 fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
+    clear_preserving_tree(transaction, file_id, false)
+}
+
+fn clear_preserving_tree(
+    transaction: &Transaction<'_>,
+    file_id: i64,
+    preserve_tree: bool,
+) -> rusqlite::Result<()> {
     for table in ["events", "signals"] {
         transaction.execute(
             &format!(
@@ -5896,10 +6011,12 @@ fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
             [file_id],
         )?;
     }
-    transaction.execute(
-        "DELETE FROM native_tree_headers WHERE file_id=?1",
-        [file_id],
-    )?;
+    if !preserve_tree {
+        transaction.execute(
+            "DELETE FROM native_tree_headers WHERE file_id=?1",
+            [file_id],
+        )?;
+    }
     Ok(())
 }
 

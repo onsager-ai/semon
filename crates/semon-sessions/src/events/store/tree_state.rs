@@ -337,6 +337,50 @@ pub(super) fn ready(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Re
         "SELECT EXISTS(SELECT 1 FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current c ON c.source_path=h.source_path AND c.source_id=g.source_id JOIN meta m ON m.namespace=semon_namespace() AND m.key='native_tree_summary:'||h.source_path WHERE h.source_path=?1 AND h.ledger=?2 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger AND CASE WHEN octet_length(m.value)<=1048576 AND json_valid(m.value) THEN json_extract(m.value,'$.version')=3 ELSE 0 END)")?,params![path,header_ledger(ledger)],|r|r.get(0))
 }
 
+/// Fingerprint the current Tree dimensions, including their identity binding.
+/// The compact summary deliberately omits these dimensions. A stored digest
+/// lets a later completion distinguish an unchanged projection from a missing
+/// or damaged witness without trusting the source ledger alone.
+pub(super) fn witness(
+    c: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<String>> {
+    let Some((file_id, actual)) = ledger_row(c, path)? else {
+        return Ok(None);
+    };
+    if actual != *ledger {
+        return Ok(None);
+    }
+    let projection: Option<i64> = c.query_row(
+        "SELECT h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current u ON u.source_path=h.source_path AND u.source_id=g.source_id JOIN native_usage_sources s ON s.source_id=g.source_id WHERE h.source_path=?1 AND h.file_id=?2 AND h.ledger=?3 AND g.receipt=h.ledger AND g.complete=1 AND g.version=3 AND s.parser_version=?4",
+        params![path, file_id, header_ledger(ledger), CACHE_VERSION],
+        |r| r.get(0),
+    ).optional()?;
+    let Some(projection) = projection else {
+        return Ok(None);
+    };
+    let mut digest = Sha256::new();
+    for sql in [
+        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+        "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+    ] {
+        digest.update(sql.as_bytes());
+        let mut statement = c.prepare(sql)?;
+        let mut rows = statement.query([projection])?;
+        while let Some(row) = rows.next()? {
+            crate::selected_read::row(row, 64)?;
+            crate::selected_read::checkpoint("tree_witness")
+                .map_err(crate::selected_read::sql_error)?;
+            let value: String = row.get(0)?;
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    Ok(Some(format!("{:x}", digest.finalize())))
+}
+
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
     c.query_row(
         "SELECT EXISTS(SELECT 1 FROM native_tree_generations WHERE complete=1 AND work_pending=1)",

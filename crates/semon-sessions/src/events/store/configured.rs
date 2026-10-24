@@ -95,6 +95,30 @@ CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON
 END;
 ";
 
+// Same core family with composite meta. Pricing's target is a store-wide
+// interpretation setting, unlike per-source progress/completion cursors.
+const PRICING_FILE_SCHEMA_META: &str = "
+CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint)
+ WHERE codex_native_usage IS NOT NULL;
+CREATE TRIGGER pricing_pending_file_insert AFTER INSERT ON files
+ WHEN NEW.codex_native_usage IS NOT NULL BEGIN
+ UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
+ WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+ INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+ SELECT 'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER pricing_pending_file_update AFTER UPDATE OF codex_native_usage ON files BEGIN
+ UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
+ WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+ INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+ SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON native_usage_sources WHEN NEW.usage_ready=1 BEGIN
+ INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+ SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.namespace=semon_namespace() AND f.path=NEW.source_path AND m.namespace='' AND m.key='pricing_recompute_target' AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+";
+
 /// Select an authored statement for the physical family shape, never rewrite
 /// SQL or retry errors against another schema. Singleton stores still support
 /// read-only admission/assignment; configured writes require validate_core.
@@ -142,18 +166,37 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
 ];
 const STORE_METADATA_KEYS: &[&str] = &[
     "cache_version",
+    "catalog_version",
+    "search_version",
     "catalog_changes_epoch",
-    "catalog_semantic_recipe",
     "native_tree_repair_clock",
+    "pricing_recompute_target",
+];
+// These describe completed/ongoing work for one logical source, rather than
+// the shared SQL schema or physical-store incarnation.
+const SOURCE_METADATA_KEYS: &[&str] = &[
+    "catalog_semantic_recipe",
+    "catalog_generation",
+    "catalog_source_revision",
+    "catalog_backfill_state",
+    "catalog_semantic_gc",
+    "catalog_push_driven",
+    "catalog_completeness",
+    "semantic_epoch",
+    "pricing_recompute_v2",
+    "pricing_recompute_completed",
+    "overview_generation",
+    "catalog_changes_floor_current",
+    "catalog_changes_floor_retained_history",
 ];
 
 fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, StorageError> {
     if STORE_METADATA_KEYS.contains(&key) {
         Ok(STORE_METADATA_NAMESPACE)
     } else if !namespace.is_empty()
-        && SOURCE_METADATA_PREFIXES
+        && (SOURCE_METADATA_KEYS.contains(&key) || SOURCE_METADATA_PREFIXES
             .iter()
-            .any(|prefix| key.starts_with(prefix) && key.len() > prefix.len())
+            .any(|prefix| key.starts_with(prefix) && key.len() > prefix.len()))
     {
         Ok(namespace)
     } else {
@@ -161,7 +204,7 @@ fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, Stor
     }
 }
 
-fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite::Result<()> {
+pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite::Result<()> {
     let namespace = namespace.to_owned();
     db.create_scalar_function(
         "semon_meta_scope",
@@ -209,7 +252,7 @@ pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
         let ddl = if ddl == LEGACY_EVENT_SCHEMA {
             CORE_SCHEMA
         } else if ddl == reprice::FILE_SCHEMA {
-            PRICING_FILE_SCHEMA
+            metadata_sql(&tx, PRICING_FILE_SCHEMA, PRICING_FILE_SCHEMA_META).map_err(failed)?
         } else if ddl == semantic_stage::SEMANTIC_CORE_INDEXES {
             semantic_stage::SEMANTIC_CORE_INDEXES_NS
         } else {
@@ -307,7 +350,6 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
-    bind_metadata_scope(&db, config.namespace.as_str()).map_err(failed)?;
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
     db.create_scalar_function(
@@ -703,10 +745,17 @@ impl Writer {
             if !write {
                 continue;
             }
-            if changes.is_none()
-                && let Some((id, _)) = ledger_row(&tx, path).map_err(failed)?
-            {
-                clear(&tx, id).map_err(failed)?;
+            if let Some((id, _)) = ledger_row(&tx, path).map_err(failed)? {
+                let preserve_tree = *expected == Some(*ledger)
+                    && tree_reusable(&tx, path, ledger, index).map_err(failed)?;
+                if changes.is_none() {
+                    clear_preserving_tree(&tx, id, preserve_tree).map_err(failed)?;
+                } else if *expected == Some(*ledger) && !preserve_tree {
+                    // A repaired summary may arrive as an empty append delta.
+                    // Retire the bad header so write() cannot reuse its generation.
+                    tx.execute("DELETE FROM native_tree_headers WHERE file_id=?1", [id])
+                        .map_err(failed)?;
+                }
             }
             write_index_changes_measured(
                 &tx,
@@ -780,6 +829,66 @@ mod tests {
     use crate::events::EventCache;
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn private_composite_metadata_recipe_epochs_and_pricing_have_explicit_owners() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch("CREATE TABLE storage_source_journal(namespace TEXT PRIMARY KEY,revision INTEGER NOT NULL); INSERT INTO storage_source_journal VALUES('a',11),('b',22);
+            CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,codex_native_usage TEXT,codex_pricing_fingerprint TEXT,PRIMARY KEY(namespace,file_id));
+            CREATE TABLE native_usage_sources(source_path TEXT,usage_ready INTEGER);
+            CREATE TABLE pricing_recompute_pending(owner_kind TEXT,owner_key TEXT,PRIMARY KEY(owner_kind,owner_key));").unwrap();
+        db.execute_batch(PRICING_FILE_SCHEMA_META).unwrap();
+        let bind = |db: &Connection, namespace: &str| {
+            bind_metadata_scope(db, namespace).unwrap();
+            let namespace = namespace.to_owned();
+            db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8,
+                move |_| Ok(namespace.clone())).unwrap();
+        };
+        bind(&db, "a");
+        semantic_stage::record_recipe(&db).unwrap();
+        db.execute(native_metadata_put(&db).unwrap(), params!["catalog_generation", "generation-a"]).unwrap();
+        db.execute(metadata_increment(&db).unwrap(), ["semantic_epoch"]).unwrap();
+        db.execute(metadata_increment(&db).unwrap(), ["native_tree_repair_clock"]).unwrap();
+        assert!(semantic_stage::recipe_current(&db).unwrap());
+        assert_eq!(semantic_stage::revision(&db).unwrap(), 11);
+        bind(&db, "b");
+        assert!(!semantic_stage::recipe_current(&db).unwrap(), "A cannot qualify B's stale stage");
+        assert_eq!(semantic_stage::generation(&db).unwrap(), None);
+        assert_eq!(semantic_stage::revision(&db).unwrap(), 22);
+        db.execute(native_metadata_put(&db).unwrap(), params!["catalog_semantic_recipe", "stale-recipe"]).unwrap();
+        assert!(!semantic_stage::recipe_current(&db).unwrap());
+        semantic_stage::record_recipe(&db).unwrap();
+        db.execute(native_metadata_put(&db).unwrap(), params!["catalog_generation", "generation-b"]).unwrap();
+        db.execute(metadata_increment(&db).unwrap(), ["semantic_epoch"]).unwrap();
+        db.execute(metadata_increment(&db).unwrap(), ["native_tree_repair_clock"]).unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            tx.execute(metadata_increment(&tx).unwrap(), ["semantic_epoch"]).unwrap();
+            tx.execute(native_metadata_put(&tx).unwrap(), params!["catalog_semantic_recipe", "rolled-back"]).unwrap();
+        }
+        assert!(semantic_stage::recipe_current(&db).unwrap());
+        let epochs: Vec<(String, String)> = db.prepare("SELECT namespace,value FROM meta WHERE key='semantic_epoch' ORDER BY namespace").unwrap()
+            .query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(epochs, vec![("a".into(), "1".into()), ("b".into(), "1".into())]);
+        assert_eq!(db.query_row("SELECT value FROM meta WHERE namespace='' AND key='native_tree_repair_clock'", [], |r| r.get::<_, String>(0)).unwrap(), "2");
+        bind(&db, "a");
+        assert_eq!(semantic_stage::generation(&db).unwrap().as_deref(), Some("generation-a"));
+        db.execute(native_metadata_put(&db).unwrap(), params!["pricing_recompute_target", "current"]).unwrap();
+        // Poison a non-owner row directly in this private fixture. Authored
+        // triggers must ignore it and consult only the reserved store scope.
+        db.execute("INSERT INTO meta VALUES('a','pricing_recompute_target','wrong')", []).unwrap();
+        db.execute("INSERT INTO files VALUES('a',1,'same',?1,NULL)", [r#"{"cost":{"pricing_fingerprint":"current"}}"#]).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        db.execute(native_metadata_put(&db).unwrap(), params!["pricing_recompute_target", "next"]).unwrap();
+        db.execute("UPDATE files SET codex_native_usage=codex_native_usage", []).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        for key in SOURCE_METADATA_KEYS {
+            assert_eq!(metadata_namespace("a", key), Ok("a"));
+            assert_eq!(metadata_namespace("b", key), Ok("b"));
+        }
+        assert_eq!(metadata_namespace("a", "unclassified-owner"), Err(StorageError::InvalidArguments));
+    }
 
     #[test]
     fn private_composite_meta_proofs_collide_without_crossing_namespaces() {
@@ -874,7 +983,7 @@ mod tests {
             // supplied by DEFAULT or adopted from the first source.
             tx.execute(
                 native_metadata_put(&tx).unwrap(),
-                params!["catalog_semantic_recipe", "one-store-recipe"],
+                params!["pricing_recompute_target", "one-store-pricing-table"],
             )
             .unwrap();
             tx.commit().unwrap();
@@ -1567,6 +1676,13 @@ mod tests {
         let mut writer = f.config.native_events().unwrap();
         let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let before = f.state();
+        let audit = f.db();
+        audit.execute_batch("CREATE TABLE tree_write_audit(writes INTEGER); INSERT INTO tree_write_audit VALUES(0);").unwrap();
+        for table in ["native_tree_headers", "native_tree_generations", "native_tree_labels"] {
+            for operation in ["INSERT", "UPDATE", "DELETE"] {
+                audit.execute_batch(&format!("CREATE TRIGGER audit_{table}_{operation} AFTER {operation} ON {table} BEGIN UPDATE tree_write_audit SET writes=writes+1; END;")).unwrap();
+            }
+        }
         let second = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
         assert_eq!(second.operation_id, "b".repeat(64));
         assert!(!second.replayed);
@@ -1578,6 +1694,7 @@ mod tests {
             before,
             "unchanged core must not advance source effects"
         );
+        assert_eq!(audit.query_row("SELECT writes FROM tree_write_audit", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "a verified unchanged Tree must not be rewritten");
         drop(writer);
         fs::remove_file(&f.raw).unwrap();
         let mut restarted = f.config.native_events().unwrap();
@@ -1585,6 +1702,45 @@ mod tests {
         assert!(replay.replayed);
         assert_eq!(replay.operation_id, second.operation_id);
         assert_eq!(replay.consumed_bytes, second.consumed_bytes);
+    }
+
+    #[test]
+    fn unchanged_fresh_operation_repairs_missing_or_damaged_tree_witness() {
+        for damage in [
+            "DELETE FROM native_tree_headers",
+            "UPDATE native_tree_headers SET ledger='stale'",
+            "UPDATE native_tree_labels SET value='damaged' WHERE label='cwd'",
+            "UPDATE files SET codex_pricing_fingerprint='changed-interpretation'",
+        ] {
+            let f = Fixture::new();
+            let mut writer = f.config.native_events().unwrap();
+            let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+            let before = f.state();
+            let generation: i64 = f.db().query_row(
+                "SELECT projection_id FROM native_tree_headers", [], |r| r.get(0),
+            ).unwrap();
+            // Fixture-owned corruption, never a recovery API or real store edit.
+            connection(&f.config).unwrap().execute(damage, []).unwrap();
+            drop(writer);
+            let mut writer = f.config.native_events().unwrap();
+            let repaired = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+            assert_eq!(repaired.consumed_bytes, first.consumed_bytes);
+            let db = connection(&f.config).unwrap();
+            let (path, ledger): (String, String) = db.query_row(
+                "SELECT source_path,ledger FROM native_tree_headers WHERE projection_id>?1",
+                [generation], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            let actual = ledger_row(&db, &path).unwrap().unwrap().1;
+            assert_eq!(ledger, header_ledger(&actual));
+            assert!(tree_state::witness(&db, &path, &actual).unwrap().is_some());
+            let cwd: String = db.query_row("SELECT value FROM native_tree_labels WHERE projection_id=(SELECT projection_id FROM native_tree_headers WHERE source_path=?1) AND label='cwd'", [&path], |r| r.get(0)).unwrap();
+            assert_eq!(cwd, "/sanitized");
+            assert_eq!(f.state()["files"], before["files"]);
+            assert_eq!(f.state()["events"], before["events"]);
+            let repaired_state = f.state();
+            writer.ingest(&"c".repeat(64), &f.raw, "codex").unwrap();
+            assert_eq!(f.state(), repaired_state, "repaired witness must be reusable");
+        }
     }
 
     #[test]

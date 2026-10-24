@@ -443,8 +443,10 @@ pub(in crate::events::store) fn advance(
     )
     .map_err(sql_error)?;
     let complete = batch.cursor == ledger.offset;
-    tx.execute("INSERT INTO meta VALUES('native_tree_repair_clock','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[]).map_err(sql_error)?;
-    tx.execute("UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST((SELECT value FROM meta WHERE key='native_tree_repair_clock') AS INTEGER) WHERE source_path=?1",params![path,batch.cursor as i64,batch.index.last_model,json(&tree_root).map_err(sql_error)?,if complete {"done"} else {"running"}]).map_err(sql_error)?;
+    tx.execute(metadata_increment(&tx).map_err(sql_error)?, ["native_tree_repair_clock"]).map_err(sql_error)?;
+    tx.execute(configured::metadata_sql(&tx,
+        "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST((SELECT value FROM meta WHERE key='native_tree_repair_clock') AS INTEGER) WHERE source_path=?1",
+        "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST((SELECT value FROM meta WHERE namespace='' AND key='native_tree_repair_clock') AS INTEGER) WHERE source_path=?1").map_err(sql_error)?,params![path,batch.cursor as i64,batch.index.last_model,json(&tree_root).map_err(sql_error)?,if complete {"done"} else {"running"}]).map_err(sql_error)?;
     if complete {
         tree_state::bind_generation(&tx, &path, &ledger, projection_id).map_err(sql_error)?;
         write_tree_summary(&tx, &path, &ledger, Some(&tree_root), true).map_err(sql_error)?;

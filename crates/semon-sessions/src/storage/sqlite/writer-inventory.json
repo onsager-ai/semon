@@ -9,15 +9,27 @@
     "native headers, parent markers, tree summaries/failures and archive markers",
     "chunk pages, tree witnesses and retained proof copy/cleanup",
     "launch pages and bounded measured cleanup",
-    "relocation evidence and Tree metadata readiness join"
+    "relocation evidence and Tree metadata readiness join",
+    "source-owned semantic recipe, generation, journal revision, header frontiers and progress metadata",
+    "store pricing target versus source pricing work/completion metadata; repair clock",
+    "SourceJournal seed reads, physical reader epoch and source change-stream floors"
+  ],
+  "native_tree_noop_witness": "transaction-local current header/generation/dimension digest plus parser/ledger/pricing/recipe interpretation; missing or stale witnesses repair",
+  "native_usage_composite": false,
+  "native_usage_scoped_helpers": "five-table source/current/facts/identities/dimensions family; private composite DDL and collision/replay/rollback/retained-incarnation fixture only",
+  "native_usage_activation_pending": [
+    "Tree joins, snapshots, repair queues and projection generations",
+    "reprice source/fact/dimension queries and pending owner row keys",
+    "remaining direct owners and retained-reader lifetime ports",
+    "production DDL registration, namespace guards and complete qualification"
   ],
   "native_event_metadata_public_shape": "singleton; composite shape private-fixture only",
   "native_event_metadata_pending": [
-    "store-global key classification beyond the four explicitly classified keys",
-    "Catalog publication/recovery/qualification and archive membership queries",
-    "semantic stage source header scans and global metadata operations",
-    "pricing triggers/work state and native usage repair clock",
-    "SourceJournal, reader epoch and change-stream metadata operations",
+    "complete key classification beyond the explicit STORE/SOURCE keys and proof prefixes",
+    "store.rs Catalog observation/recovery/backfill/publication/slot/search metadata; qualify_contract/qualify/qualify_producer/init and archive membership/GLOB operations",
+    "semantic stage/dependency physical row keys and namespace joins (metadata statements are scoped)",
+    "reprice.rs SCHEMA Catalog pricing trigger meta joins; pricing pending owner and native source/fact/dimension row keys (core pricing meta trigger alternative is authored)",
+    "changes.rs initial epoch/floors DDL and Catalog trigger publication; SourceJournal legacy unbound-only invalidate/discover statements remain fenced",
     "fresh configured meta activation, DEFAULT removal and complete qualification"
   ],
   "unqualified_paths": [
