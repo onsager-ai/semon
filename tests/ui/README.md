@@ -57,6 +57,35 @@ its completion witness is the native-publication success message in the CI log.
   viewer and 15 full frames/24 regions for pushed-data parity. The actual UI
   reference runs through its original `compat=1` route and history states; the
   pushed-data comparison is served against the machine's own viewer.
+- The #380 task-branch visual/transport CI additionally runs
+  `visual-pathname-audit.mjs` against the existing accepted registry records.
+  `SEMON_UI_OUT` supplies current captures; no earlier-run artifact download,
+  token or network access is used. Each raw state must have exactly one accepted
+  record with the same reference pins. The five non-candidate-evidence digests
+  must match that record, and current candidate evidence bytes must match their
+  reported SHA-256. Identical accepted candidate evidence is fingerprint-only.
+  Otherwise, the audit permits only a canonical top-level pathname replacement
+  from `/s/claude/<id>` or `/s/codex/<id>` to `/session/local/<same encoded id>`:
+  restoring either exact historical fixture namespace must produce exactly one
+  byte sequence with the accepted candidate-evidence SHA-256. This digest-bound
+  mapping is local to the audit; other namespaces, identities, escaping, or any
+  text, geometry, style or history change are refused. `visual-pathname-audit.json`
+  lists qualified and refused exact states; CI prints bounded state summaries.
+  This diagnostic never edits the registry, establishes appearance approval or
+  excuses missing coverage/execution errors. A follow-up may refresh only
+  justified exact bindings while preserving original review/decision/provenance/
+  history; final CI and independent review still apply.
+- The exact visual binding maintenance from CI run 40113982012 uses artifact
+  12568435116 and updates 155 existing records: all 155 candidate fingerprints,
+  123 pathname-restored candidate evidence digests, and 32 fingerprint-only
+  records whose candidate evidence digest already matched. Candidate/reference/
+  diff PNG hashes are unchanged, as are all reference pins. This maintenance
+  does not approve a new appearance or alter any comparator, mask, threshold or
+  capture coverage.
+- CI run 40116009494 and artifact 12568905474 support six two-machine transport
+  fingerprint updates. The exact adopted patch changes only candidate runtime
+  fingerprints; all 36 image/DOM digests and reference pins remain unchanged.
+  This is binding maintenance only and creates no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
