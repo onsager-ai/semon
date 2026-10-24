@@ -43,6 +43,8 @@ type CommitFile<'a> = (
     &'a FileIndex,
 );
 
+type CompletionRow = (String, String, Option<i64>, Option<i64>, String);
+
 #[cfg(test)]
 thread_local! {
     static FAIL_EFFECT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
@@ -467,7 +469,7 @@ impl Writer {
             return Err(StorageError::InvalidArguments);
         }
         let db = self.snapshot()?;
-        let row: Option<(String, String, Option<i64>, Option<i64>, String)> = db.query_row("SELECT source_path,state,consumed_bytes,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(failed)?;
+        let row: Option<CompletionRow> = db.query_row("SELECT source_path,state,consumed_bytes,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(failed)?;
         let Some((source, state, consumed, revision, stored_request)) = row else {
             return Ok(None);
         };
