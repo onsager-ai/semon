@@ -223,7 +223,11 @@ pub(super) fn shared_usage(
     id: i64,
     projection_id: i64,
 ) -> rusqlite::Result<SharedUsage> {
-    let query = sql(c, "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid", "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.namespace=semon_namespace() AND i.file_id=?1 ORDER BY i.message_id,i.record_uuid")?;
+    let query = sql(
+        c,
+        "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid",
+        "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.namespace=semon_namespace() AND i.file_id=?1 ORDER BY i.message_id,i.record_uuid",
+    )?;
     let mut statement = c.prepare(query)?;
     let mut rows = statement.query([id])?;
     let mut records = crate::claude_usage::Records::new();

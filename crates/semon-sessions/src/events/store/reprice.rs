@@ -98,11 +98,7 @@ pub(super) fn queue_schema(composite: bool) -> &'static str {
     }
 }
 
-fn queue_sql<'a>(
-    c: &Connection,
-    legacy: &'a str,
-    scoped: &'a str,
-) -> rusqlite::Result<&'a str> {
+fn queue_sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
     let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('pricing_recompute_pending') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
     Ok(if composite { scoped } else { legacy })
 }
@@ -330,13 +326,18 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
 }
 
 fn progress_sql(c: &Connection) -> rusqlite::Result<&'static str> {
-    queue_sql(c,
-        configured::metadata_sql(c,
+    queue_sql(
+        c,
+        configured::metadata_sql(
+            c,
             "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)")?,
-        configured::metadata_sql(c,
+            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+        )?,
+        configured::metadata_sql(
+            c,
             "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
-            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())")?,
+            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
+        )?,
     )
 }
 
@@ -1329,21 +1330,46 @@ mod tests {
     fn usage_family_state(db: &Connection, namespace: &str) -> Vec<Vec<rusqlite::types::Value>> {
         let mut state = Vec::new();
         for table in [
-            "files", "events", "signals", "usage_identity", "usage", "codex_usage",
-            "native_usage_sources", "native_usage_current", "native_usage_facts",
-            "native_usage_identities", "native_usage_dimensions", "native_tree_repairs",
-            "native_tree_generations", "native_tree_usage_work", "native_tree_codex_work",
-            "native_tree_headers", "native_tree_models", "native_tree_labels",
-            "native_tree_tools", "native_tree_usage_models", "native_tree_copied_identities",
+            "files",
+            "events",
+            "signals",
+            "usage_identity",
+            "usage",
+            "codex_usage",
+            "native_usage_sources",
+            "native_usage_current",
+            "native_usage_facts",
+            "native_usage_identities",
+            "native_usage_dimensions",
+            "native_tree_repairs",
+            "native_tree_generations",
+            "native_tree_usage_work",
+            "native_tree_codex_work",
+            "native_tree_headers",
+            "native_tree_models",
+            "native_tree_labels",
+            "native_tree_tools",
+            "native_tree_usage_models",
+            "native_tree_copied_identities",
             "pricing_recompute_pending",
         ] {
-            let mut statement = db.prepare(&format!(
-                "SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3"
-            )).unwrap();
+            let mut statement = db
+                .prepare(&format!(
+                    "SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3"
+                ))
+                .unwrap();
             let columns = statement.column_count();
-            state.extend(statement.query_map([namespace], |r| {
-                (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<Vec<_>>>()
-            }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap());
+            state.extend(
+                statement
+                    .query_map([namespace], |r| {
+                        (0..columns)
+                            .map(|i| r.get(i))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap(),
+            );
         }
         state
     }
@@ -1357,31 +1383,85 @@ mod tests {
             for ddl in native_usage::schema(true) {
                 db.execute_batch(ddl).unwrap();
             }
-            db.execute_batch(copied_usage_schema(copied_composite)).unwrap();
-            db.execute_batch(tree_state::schema(copied_composite)).unwrap();
+            db.execute_batch(copied_usage_schema(copied_composite))
+                .unwrap();
+            db.execute_batch(tree_state::schema(copied_composite))
+                .unwrap();
             bind_fixture(&db, "a");
             let mut index = FileIndex::default();
-            index.usage_by_id.insert("message".into(), MessageUsage {
-                tokens: Tokens { input: 31, total: 31, ..Default::default() },
-                record_ids: ["record".to_owned()].into_iter().collect(),
-                ..Default::default()
-            });
+            index.usage_by_id.insert(
+                "message".into(),
+                MessageUsage {
+                    tokens: Tokens {
+                        input: 31,
+                        total: 31,
+                        ..Default::default()
+                    },
+                    record_ids: ["record".to_owned()].into_iter().collect(),
+                    ..Default::default()
+                },
+            );
             index.codex_usage_events.push(CodexUsageEvent {
-                model: "fixture".into(), tokens: ModelTokens { input: 41, ..Default::default() }, timestamp: None,
+                model: "fixture".into(),
+                tokens: ModelTokens {
+                    input: 41,
+                    ..Default::default()
+                },
+                timestamp: None,
             });
             let tx = db.transaction().unwrap();
             let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
-            write_file(&tx, "source", &ledger(), &changes, &index, &mut crate::native_timing::Measurements::default()).unwrap();
+            write_file(
+                &tx,
+                "source",
+                &ledger(),
+                &changes,
+                &index,
+                &mut crate::native_timing::Measurements::default(),
+            )
+            .unwrap();
             tx.commit().unwrap();
             let mut readers = Readers::new(&db).unwrap();
-            assert_eq!(readers.usage.query([1]).unwrap().next().unwrap().unwrap().get::<_, i64>(2).unwrap(), 31);
-            assert_eq!(readers.codex_usage.query([1]).unwrap().next().unwrap().unwrap().get::<_, i64>(2).unwrap(), 41);
+            assert_eq!(
+                readers
+                    .usage
+                    .query([1])
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .get::<_, i64>(2)
+                    .unwrap(),
+                31
+            );
+            assert_eq!(
+                readers
+                    .codex_usage
+                    .query([1])
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .get::<_, i64>(2)
+                    .unwrap(),
+                41
+            );
             drop(readers);
             let tx = db.transaction().unwrap();
             clear(&tx, 1).unwrap();
             tx.commit().unwrap();
-            for table in ["usage", "codex_usage", "usage_identity", "native_tree_copied_identities"] {
-                assert_eq!(db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            for table in [
+                "usage",
+                "codex_usage",
+                "usage_identity",
+                "native_tree_copied_identities",
+            ] {
+                assert_eq!(
+                    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
             }
         }
     }
@@ -1395,7 +1475,8 @@ mod tests {
                 let root = root();
                 let database = root.join("families.sqlite3");
                 let mut db = Connection::open(&database).unwrap();
-                db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;").unwrap();
+                db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
+                    .unwrap();
                 db.execute_batch(configured::CORE_SCHEMA).unwrap();
                 db.execute_batch(metadata_schema(meta_composite)).unwrap();
                 db.execute_batch(copied_usage_schema(true)).unwrap();
@@ -1409,37 +1490,70 @@ mod tests {
                 } else {
                     "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT NOT NULL,pricing_fingerprint TEXT) STRICT;"
                 }).unwrap();
-                db.execute_batch(catalog_schema(true, catalog_composite, meta_composite)).unwrap();
+                db.execute_batch(catalog_schema(true, catalog_composite, meta_composite))
+                    .unwrap();
                 db.execute_batch(file_schema(true, meta_composite)).unwrap();
                 bind_fixture(&db, "a");
-                db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"]).unwrap();
+                db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"])
+                    .unwrap();
                 if meta_composite {
                     // A source-owned poison target must not replace the store target.
-                    db.execute("INSERT INTO meta VALUES('a',?1,'stale')", [TARGET]).unwrap();
+                    db.execute("INSERT INTO meta VALUES('a',?1,'stale')", [TARGET])
+                        .unwrap();
                 }
                 let ledger = ledger();
                 for (namespace, amount) in [("a", 11), ("b", 23)] {
                     bind_fixture(&db, namespace);
                     let tx = db.transaction().unwrap();
-                    for (ordinal, path) in ["same/source.jsonl", "same/peer.jsonl"].into_iter().enumerate() {
+                    for (ordinal, path) in ["same/source.jsonl", "same/peer.jsonl"]
+                        .into_iter()
+                        .enumerate()
+                    {
                         let mut index = if ordinal == 0 {
                             codex_index("gpt-6.1-sol", 3)
                         } else {
-                            FileIndex { native_usage_observations: Some(Vec::new()), ..Default::default() }
+                            FileIndex {
+                                native_usage_observations: Some(Vec::new()),
+                                ..Default::default()
+                            }
                         };
-                        index.usage_by_id.insert("same-message".into(), MessageUsage {
-                            model: Some(namespace.into()),
-                            tokens: Tokens { input: amount, total: amount, ..Default::default() },
-                            record_ids: ["same-record".to_owned()].into_iter().collect(),
-                            ..Default::default()
-                        });
+                        index.usage_by_id.insert(
+                            "same-message".into(),
+                            MessageUsage {
+                                model: Some(namespace.into()),
+                                tokens: Tokens {
+                                    input: amount,
+                                    total: amount,
+                                    ..Default::default()
+                                },
+                                record_ids: ["same-record".to_owned()].into_iter().collect(),
+                                ..Default::default()
+                            },
+                        );
                         index.codex_usage_events.push(CodexUsageEvent {
-                            model: namespace.into(), tokens: ModelTokens { input: amount, ..Default::default() }, timestamp: None,
+                            model: namespace.into(),
+                            tokens: ModelTokens {
+                                input: amount,
+                                ..Default::default()
+                            },
+                            timestamp: None,
                         });
                         index.tree_summary = Some(crate::native_tree::Summary::default());
-                        assert_eq!(native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(), ordinal as i64 + 1);
-                        let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
-                        write_file(&tx, path, &ledger, &changes, &index, &mut crate::native_timing::Measurements::default()).unwrap();
+                        assert_eq!(
+                            native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),
+                            ordinal as i64 + 1
+                        );
+                        let changes =
+                            crate::events::DirtyRows::between(&FileIndex::default(), &index);
+                        write_file(
+                            &tx,
+                            path,
+                            &ledger,
+                            &changes,
+                            &index,
+                            &mut crate::native_timing::Measurements::default(),
+                        )
+                        .unwrap();
                         native_usage::write(&tx, path, &ledger, &index).unwrap();
                     }
                     tx.execute(native_usage::repair_sql(&tx,
@@ -1451,11 +1565,19 @@ mod tests {
                     assert_eq!(tx.query_row(queue_sql(&tx,
                         "SELECT count(*) FROM pricing_recompute_pending WHERE owner_kind='source'",
                         "SELECT count(*) FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source'").unwrap(), [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-                    let key = if catalog_composite { "same-session".to_owned() } else { format!("session-{namespace}") };
+                    let key = if catalog_composite {
+                        "same-session".to_owned()
+                    } else {
+                        format!("session-{namespace}")
+                    };
                     if catalog_composite {
                         tx.execute("INSERT INTO session_catalog(namespace,session_key,metadata) VALUES(semon_namespace(),?1,?2)", params![key, r#"{"cost":{"pricing_fingerprint":"stale"}}"#]).unwrap();
                     } else {
-                        tx.execute("INSERT INTO session_catalog(session_key,metadata) VALUES(?1,?2)", params![key, r#"{"cost":{"pricing_fingerprint":"stale"}}"#]).unwrap();
+                        tx.execute(
+                            "INSERT INTO session_catalog(session_key,metadata) VALUES(?1,?2)",
+                            params![key, r#"{"cost":{"pricing_fingerprint":"stale"}}"#],
+                        )
+                        .unwrap();
                     }
                     assert!(tx.query_row(queue_sql(&tx,
                         "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1)",
@@ -1465,23 +1587,41 @@ mod tests {
                 bind_fixture(&db, "a");
                 if meta_composite {
                     let stamp: String = db.query_row("SELECT codex_pricing_fingerprint FROM files WHERE namespace='a' AND file_id=1", [], |r| r.get(0)).unwrap();
-                    db.execute(native_metadata_put(&db).unwrap(), params![TARGET, stamp]).unwrap();
-                    db.execute("DELETE FROM pricing_recompute_pending WHERE owner_kind='source'", []).unwrap();
+                    db.execute(native_metadata_put(&db).unwrap(), params![TARGET, stamp])
+                        .unwrap();
+                    db.execute(
+                        "DELETE FROM pricing_recompute_pending WHERE owner_kind='source'",
+                        [],
+                    )
+                    .unwrap();
                     db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='a' AND file_id=1", []).unwrap();
                     assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "a source-owned poison target must not enqueue a currently priced file");
-                    db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"]).unwrap();
+                    db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"])
+                        .unwrap();
                 }
                 // Trigger ownership comes from the changed row, not the current
                 // connection binding. These are private DDL fixtures, without
                 // public writer guards or multi-source admission.
-                db.execute("DELETE FROM pricing_recompute_pending WHERE owner_kind='source'", []).unwrap();
+                db.execute(
+                    "DELETE FROM pricing_recompute_pending WHERE owner_kind='source'",
+                    [],
+                )
+                .unwrap();
                 db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='b' AND file_id=1", []).unwrap();
                 assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='a' AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                 assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='b' AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
                 db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='a' AND file_id=1", []).unwrap();
                 if catalog_composite {
-                    db.execute("DELETE FROM pricing_recompute_pending WHERE owner_kind='session'", []).unwrap();
-                    db.execute("UPDATE session_catalog SET metadata=metadata WHERE namespace='b'", []).unwrap();
+                    db.execute(
+                        "DELETE FROM pricing_recompute_pending WHERE owner_kind='session'",
+                        [],
+                    )
+                    .unwrap();
+                    db.execute(
+                        "UPDATE session_catalog SET metadata=metadata WHERE namespace='b'",
+                        [],
+                    )
+                    .unwrap();
                     assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='a' AND owner_kind='session'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                     assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='b' AND owner_kind='session'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
                 }
@@ -1520,10 +1660,21 @@ mod tests {
                 tx.commit().unwrap();
                 assert_eq!(usage_family_state(&db, "b"), b);
                 bind_fixture(&db, "b");
-                assert_eq!(tree_state::shared_usage(&db, 1, 1).unwrap().1["same-message"].input, 23);
+                assert_eq!(
+                    tree_state::shared_usage(&db, 1, 1).unwrap().1["same-message"].input,
+                    23
+                );
                 let mut readers = Readers::new(&db).unwrap();
                 assert!(readers.usage.query([1]).unwrap().next().unwrap().is_some());
-                assert!(readers.codex_usage.query([1]).unwrap().next().unwrap().is_some());
+                assert!(
+                    readers
+                        .codex_usage
+                        .query([1])
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .is_some()
+                );
                 drop(readers);
                 drop(db);
                 fs::remove_dir_all(root).unwrap();

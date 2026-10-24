@@ -4138,7 +4138,14 @@ impl SqliteStore {
                 tree_state::sql(&transaction, "DELETE FROM native_tree_headers WHERE source_path=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
                 [path],
             )?;
-            transaction.execute(configured::sql(&transaction, "DELETE FROM files WHERE path = ?1", "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1")?, [path])?;
+            transaction.execute(
+                configured::sql(
+                    &transaction,
+                    "DELETE FROM files WHERE path = ?1",
+                    "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1",
+                )?,
+                [path],
+            )?;
             transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
             transaction.execute(
                 native_metadata_delete(&transaction)?,
