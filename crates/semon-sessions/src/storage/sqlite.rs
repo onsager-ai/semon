@@ -1,8 +1,10 @@
 //! Single-source SQLite adapter for the metadata contract.
 pub(crate) mod changes;
 
-use super::{CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot,
-    SessionMetadataStore, StorageError, StoreBackend, StoreConfig};
+use super::{
+    CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
+    StorageError, StoreBackend, StoreConfig,
+};
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::time::Duration;
@@ -21,16 +23,25 @@ impl SqliteMetadataStore {
         Self(config)
     }
 
-    fn admit(&self, namespace: &LogicalSourceNamespace, write: bool) -> Result<Connection, StorageError> {
+    fn admit(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        write: bool,
+    ) -> Result<Connection, StorageError> {
         if namespace != &self.0.namespace {
             return Err(StorageError::NamespaceMismatch);
         }
         let StoreBackend::Sqlite { database } = &self.0.backend;
-        let flags = if write { OpenFlags::SQLITE_OPEN_READ_WRITE } else { OpenFlags::SQLITE_OPEN_READ_ONLY };
+        let flags = if write {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        };
         // Never CREATE, URI, in-memory, repair, or alternate-engine fallback.
         let db = Connection::open_with_flags(database, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .map_err(failed)?;
-        db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
+        db.busy_timeout(Duration::from_millis(100))
+            .map_err(failed)?;
         Ok(db)
     }
 
@@ -39,11 +50,22 @@ impl SqliteMetadataStore {
             return Err(StorageError::Unavailable);
         }
         // This read establishes the snapshot even when discovery has no expected epoch.
-        let epoch: String = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).map_err(failed)?;
+        let epoch: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
         if epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(StorageError::Unavailable);
         }
-        if self.0.expected_stream_epoch.as_ref().is_some_and(|expected| expected != &epoch) {
+        if self
+            .0
+            .expected_stream_epoch
+            .as_ref()
+            .is_some_and(|expected| expected != &epoch)
+        {
             return Err(StorageError::ScopeChanged);
         }
         Ok(())
@@ -63,28 +85,57 @@ impl Drop for Snapshot {
 }
 
 impl MetadataReadSnapshot for Snapshot {
-    fn catalog_changes(&mut self, namespace: &LogicalSourceNamespace, request: CatalogChangesRequest<'_>) -> Result<CatalogChangePage, StorageError> {
+    fn catalog_changes(
+        &mut self,
+        namespace: &LogicalSourceNamespace,
+        request: CatalogChangesRequest<'_>,
+    ) -> Result<CatalogChangePage, StorageError> {
         if namespace != &self.namespace {
             return Err(StorageError::NamespaceMismatch);
         }
         request.validate()?;
-        changes::read_snapshot(&self.db, namespace.as_str(), request.scope, request.stream_epoch, request.after, request.limit)
+        changes::read_snapshot(
+            &self.db,
+            namespace.as_str(),
+            request.scope,
+            request.stream_epoch,
+            request.after,
+            request.limit,
+        )
     }
 }
 
 impl SessionMetadataStore for SqliteMetadataStore {
-    fn read_snapshot(&self, namespace: &LogicalSourceNamespace) -> Result<Box<dyn MetadataReadSnapshot>, StorageError> {
+    fn read_snapshot(
+        &self,
+        namespace: &LogicalSourceNamespace,
+    ) -> Result<Box<dyn MetadataReadSnapshot>, StorageError> {
         let db = self.admit(namespace, false)?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         self.check_epoch(&db)?;
-        Ok(Box::new(Snapshot { db, namespace: namespace.clone() }))
+        Ok(Box::new(Snapshot {
+            db,
+            namespace: namespace.clone(),
+        }))
     }
 
-    fn compact_catalog_changes(&self, namespace: &LogicalSourceNamespace, scope: CatalogReadScope, stream_epoch: &str, acknowledged_through: u64, limit: usize) -> Result<CatalogChangeCompaction, StorageError> {
+    fn compact_catalog_changes(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        scope: CatalogReadScope,
+        stream_epoch: &str,
+        acknowledged_through: u64,
+        limit: usize,
+    ) -> Result<CatalogChangeCompaction, StorageError> {
         if limit == 0 || limit > 256 || acknowledged_through > i64::MAX as u64 {
             return Err(StorageError::InvalidArguments);
         }
-        if self.0.expected_stream_epoch.as_deref().is_some_and(|expected| expected != stream_epoch) {
+        if self
+            .0
+            .expected_stream_epoch
+            .as_deref()
+            .is_some_and(|expected| expected != stream_epoch)
+        {
             return Err(StorageError::ScopeChanged);
         }
         let mut db = self.admit(namespace, true)?;
@@ -96,52 +147,108 @@ impl SessionMetadataStore for SqliteMetadataStore {
 mod tests {
     use super::*;
     use crate::storage::conformance::{MetadataFixture, metadata_conformance};
-    use std::{path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
-    struct Fixture { root: PathBuf, db: Connection }
+    struct Fixture {
+        root: PathBuf,
+        db: Connection,
+    }
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!("semon-storage-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let root = std::env::temp_dir().join(format!(
+                "semon-storage-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             std::fs::create_dir(&root).unwrap();
             let db = Connection::open(root.join("store.sqlite3")).unwrap();
             db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
             db.execute_batch(changes::SCHEMA).unwrap();
-            db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION).unwrap();
-            for (key, value) in [("cache_version", crate::events::CACHE_VERSION.to_string()), ("catalog_version", crate::model::summary::CATALOG_VERSION.to_string()), ("catalog_generation", "a".repeat(64))] {
-                db.execute("INSERT INTO meta VALUES(?1,?2)", (key, value)).unwrap();
+            db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION)
+                .unwrap();
+            for (key, value) in [
+                ("cache_version", crate::events::CACHE_VERSION.to_string()),
+                (
+                    "catalog_version",
+                    crate::model::summary::CATALOG_VERSION.to_string(),
+                ),
+                ("catalog_generation", "a".repeat(64)),
+            ] {
+                db.execute("INSERT INTO meta VALUES(?1,?2)", (key, value))
+                    .unwrap();
             }
             Self { root, db }
         }
         fn config(&self) -> StoreConfig {
-            StoreConfig { backend: StoreBackend::Sqlite { database: self.root.join("store.sqlite3") }, namespace: self.namespace(), expected_stream_epoch: None }
+            StoreConfig {
+                backend: StoreBackend::Sqlite {
+                    database: self.root.join("store.sqlite3"),
+                },
+                namespace: self.namespace(),
+                expected_stream_epoch: None,
+            }
         }
     }
     impl Drop for Fixture {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
     impl MetadataFixture for Fixture {
-        fn store(&self) -> Box<dyn SessionMetadataStore> { self.config().open().unwrap() }
-        fn namespace(&self) -> LogicalSourceNamespace { LogicalSourceNamespace::new("authorized-source").unwrap() }
-        fn publish(&mut self, key: &str) { self.db.execute("INSERT INTO session_catalog VALUES(?1,'metadata')", [key]).unwrap(); }
-        fn restart(&mut self) { self.db = Connection::open(self.root.join("store.sqlite3")).unwrap(); }
+        fn store(&self) -> Box<dyn SessionMetadataStore> {
+            self.config().open().unwrap()
+        }
+        fn namespace(&self) -> LogicalSourceNamespace {
+            LogicalSourceNamespace::new("authorized-source").unwrap()
+        }
+        fn publish(&mut self, key: &str) {
+            self.db
+                .execute("INSERT INTO session_catalog VALUES(?1,'metadata')", [key])
+                .unwrap();
+        }
+        fn restart(&mut self) {
+            self.db = Connection::open(self.root.join("store.sqlite3")).unwrap();
+        }
     }
     #[test]
-    fn sqlite_metadata_contract_conformance() { metadata_conformance(&mut Fixture::new()); }
+    fn sqlite_metadata_contract_conformance() {
+        metadata_conformance(&mut Fixture::new());
+    }
 
     #[test]
     fn configured_store_refuses_replaced_epoch_and_missing_storage_without_creating_it() {
         let fixture = Fixture::new();
         let mut config = fixture.config();
         config.expected_stream_epoch = Some("0".repeat(64));
-        assert!(matches!(config.open().unwrap().read_snapshot(&fixture.namespace()), Err(StorageError::ScopeChanged)));
+        assert!(matches!(
+            config.open().unwrap().read_snapshot(&fixture.namespace()),
+            Err(StorageError::ScopeChanged)
+        ));
         let mut config = fixture.config();
         let absent = fixture.root.join("absent.sqlite3");
-        config.backend = StoreBackend::Sqlite { database: absent.clone() };
+        config.backend = StoreBackend::Sqlite {
+            database: absent.clone(),
+        };
         let store = config.open().unwrap();
-        assert!(matches!(store.read_snapshot(&fixture.namespace()), Err(StorageError::Unavailable)));
+        assert!(matches!(
+            store.read_snapshot(&fixture.namespace()),
+            Err(StorageError::Unavailable)
+        ));
         assert!(!absent.exists());
-        assert_eq!(store.compact_catalog_changes(&fixture.namespace(), CatalogReadScope::Current, &"a".repeat(64), 0, 1), Err(StorageError::Unavailable));
+        assert_eq!(
+            store.compact_catalog_changes(
+                &fixture.namespace(),
+                CatalogReadScope::Current,
+                &"a".repeat(64),
+                0,
+                1
+            ),
+            Err(StorageError::Unavailable)
+        );
         assert!(!absent.exists());
     }
 }

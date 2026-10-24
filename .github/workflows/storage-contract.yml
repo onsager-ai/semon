@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Inventory native SQLite coupling
-        run: python3 scripts/check-native-storage-boundary.py --discover
+        run: python3 scripts/check-native-storage-boundary.py
   conformance:
     runs-on: ubuntu-latest
     env:

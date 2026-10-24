@@ -1,7 +1,9 @@
 //! SQLite change delivery. SQL and transaction ownership stay inside the adapter.
 use super::failed;
-use crate::{CatalogReadScope, CatalogChange, CatalogChangePage, CatalogChangeCompaction,
-    model::summary::CATALOG_VERSION, storage::StorageError};
+use crate::{
+    CatalogChange, CatalogChangeCompaction, CatalogChangePage, CatalogReadScope,
+    model::summary::CATALOG_VERSION, storage::StorageError,
+};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) const SCHEMA: &str = r#"
@@ -138,11 +140,12 @@ pub(super) fn read_snapshot(
         return Err(StorageError::Unavailable);
     }
     let meta = |key: &str| {
-        connection.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(failed)
+        connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(failed)
     };
     let valid = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
     if meta("catalog_version")?.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
@@ -194,7 +197,6 @@ pub(super) fn read_snapshot(
         changes,
     })
 }
-
 
 #[cfg(test)]
 fn read(

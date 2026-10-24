@@ -29,8 +29,8 @@ pub use overview_repair::{
 };
 mod catalog;
 mod catalog_changes;
-pub mod storage;
 mod catalog_observer;
+pub mod storage;
 pub use catalog_changes::{
     CatalogChange, CatalogChangeCompaction, CatalogChangePage, compact_session_catalog_changes,
     session_catalog_changes,
