@@ -58,21 +58,23 @@ its completion witness is the native-publication success message in the CI log.
   reference runs through its original `compat=1` route and history states; the
   pushed-data comparison is served against the machine's own viewer.
 - The #380 task-branch visual/transport CI additionally runs
-  `visual-pathname-audit.mjs` against exact run `39948275965`, artifacts
-  `12500060720` (visual) and `12499047700` (transport), documented below.
-  `SEMON_UI_OUT` supplies current captures and `SEMON_VISUAL_PREVIOUS` the
-  extracted previous artifact. Every raw state must have one registry record,
-  the same reference pins and all six prior digests equal to that record.
-  Current images and reference/diff evidence must remain exact. Changed candidate
-  evidence must hash to its recorded digest and differ byte-for-byte only at
-  the top-level pathname: `/s/{claude,codex}/<id>` to `/session/local/<id>`.
-  Other namespaces/paths and all text, geometry, style or history differences
-  are refused. Unchanged six-digest states qualify as fingerprint-only evidence.
-  `visual-pathname-audit.json` lists qualified and refused exact states; CI prints
-  only bounded counts/examples. This diagnostic never edits the registry,
-  establishes appearance approval or excuses missing coverage/execution errors.
-  A follow-up may refresh only justified exact bindings while preserving original
-  review/decision/provenance/history; final CI and independent review still apply.
+  `visual-pathname-audit.mjs` against the existing accepted registry records.
+  `SEMON_UI_OUT` supplies current captures; no earlier-run artifact download,
+  token or network access is used. Each raw state must have exactly one accepted
+  record with the same reference pins. The five non-candidate-evidence digests
+  must match that record, and current candidate evidence bytes must match their
+  reported SHA-256. Identical accepted candidate evidence is fingerprint-only.
+  Otherwise, the audit permits only a canonical top-level pathname replacement
+  from `/s/claude/<id>` or `/s/codex/<id>` to `/session/local/<same encoded id>`:
+  restoring either exact historical fixture namespace must produce exactly one
+  byte sequence with the accepted candidate-evidence SHA-256. This digest-bound
+  mapping is local to the audit; other namespaces, identities, escaping, or any
+  text, geometry, style or history change are refused. `visual-pathname-audit.json`
+  lists qualified and refused exact states; CI prints bounded state summaries.
+  This diagnostic never edits the registry, establishes appearance approval or
+  excuses missing coverage/execution errors. A follow-up may refresh only
+  justified exact bindings while preserving original review/decision/provenance/
+  history; final CI and independent review still apply.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
