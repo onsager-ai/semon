@@ -408,6 +408,9 @@ pub(crate) fn validate_semantic_schema(config: &StoreConfig) -> Result<(), Stora
 #[cfg(test)]
 pub(crate) fn semantic_tables() -> &'static [&'static str] { semantic_stage::STAGE_TABLES }
 pub(crate) fn semantic_recipe() -> &'static str { semantic_stage::RECIPE }
+pub(crate) fn validate_staging_owner(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
+    validate(db, config)
+}
 
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
     SourceJournal(config.clone()).validate(db)?;
