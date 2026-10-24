@@ -186,7 +186,9 @@ test(
         { timeout: 5000 },
       );
       assert.ok(bookmarkReads >= 3, 'incomplete native lookups retry before selection');
-      assert.equal(new URL(bookmark.url()).searchParams.get('machine'), 'local');
+      const bookmarkPath = new URL(bookmark.url()).pathname;
+      assert.equal(bookmarkPath, '/session/local/deps');
+      assert.deepEqual(bookmarkPath.split('/').filter(Boolean), ['session', 'local', 'deps']);
       const sourceLabel = (await readFile(join(home, 'proc/sys/kernel/hostname'), 'utf8')).trim();
       await bookmark.waitForFunction(
         (label) =>
