@@ -176,7 +176,7 @@ impl FactsSource {
             .cache
             .as_mut()
             .map_err(|error| io::Error::other(error.clone()))?;
-        cache.refresh_reported_runs(&self.options.claude_json, model::now_ms(), &mut self.dirty);
+        cache.refresh_reported_runs(&self.options.claude_json, model::now_ms(), &mut self.dirty)?;
         collect_facts(&self.options, cache, &mut self.dirty)
     }
 

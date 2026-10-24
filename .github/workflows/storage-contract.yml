@@ -42,3 +42,7 @@ jobs:
           cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::published_catalog -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::catalog_query -- --nocapture
+      - name: Reported facts persistence after typed error propagation
+        run: |
+          cargo test --locked -p semon-sessions --lib events::tests::reported_runs -- --nocapture
+          cargo test --locked -p semon-sessions --lib facts::tests::reported_runs -- --nocapture

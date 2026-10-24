@@ -1484,7 +1484,7 @@ fn scan(
     if let Some(selected) = selected {
         cache.retire_scoped_sources(options, selected, &seen, machine)?;
     } else {
-        cache.retain(&seen, dirty);
+        cache.retain(&seen, dirty)?;
     }
     cache.end_scan();
     texts

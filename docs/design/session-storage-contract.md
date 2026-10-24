@@ -11,6 +11,45 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 11 checkpoint: request identity and recoverable errors (partial)
+
+Configured native operation IDs now bind a length-delimited SHA-256 request
+digest containing namespace, exact UTF-8 path, harness and `CACHE_VERSION`.
+Non-UTF-8 public paths refuse rather than alias through lossy conversion.
+The completion lookup precedes Raw I/O. A completed ID with the same request
+returns its original consumed boundary and observation revision even after Raw
+append, replacement or disappearance. `EventReceipt.replayed` distinguishes that
+result from new work; it never acknowledges a new Raw intent. New work requires
+a fresh operation ID. A different request returns `Conflict`, including while
+an intent is incomplete. Earlier pre-release operation tables without request
+binding refuse `NamespaceUpgradePending`; this does not copy or reset rows.
+
+Every `store_failed` caller now propagates a typed error in explicit mode.
+`save_runs`, reported-run refresh and retention return results through their
+Facts/model callers. Tree reads also propagate configured decode/refusal errors
+instead of taking the rebuild path. There is no permanent `configured_failure`
+latch, store loss or in-memory-success fallback on these configured failures.
+Legacy unbound Options busy/reopen behavior remains transitional. CI covers
+same-handle Busy recovery, retention refusal followed by successful reconciliation,
+append/replay/restart, fresh-ID advancement, mismatched harness and absent Raw.
+Existing effect rollback and batch tests remain enabled.
+
+**The primary Worker 11 namespace-composite port is unfinished.** All 25 native
+tables still have singleton keys, including metadata. No two-source qualification
+or connected Catalog publication is claimed, and no public gate is opened.
+The inventory retains all 43 unqualified owners and qualification zero.
+Reading the shared writer confirms that its transaction reaches relocation,
+usage source allocation, all native proof writers, copied-usage Tree triggers,
+dependencies, metadata, source invalidation and mutation retirement. The Tree
+snapshot opens a configured connection and rechecks its exact ledger and
+projection; these queries also need namespace keys. A namespace-column-only
+change would leave path/ID joins and copied-usage triggers crossing sources.
+Complete those helpers, retained proofs and every configured read/write together
+with the fresh composite schema and private two-namespace collision fixtures.
+The shared parser/identity algorithm has not changed. PG remains serial pending
+this contract; semantic stage/publication and the remaining original scope are
+still outstanding. This checkpoint is WIP, not full #478/#477 delivery.
+
 ## Persistence inventory and port status
 
 Paths below are relative to `crates/semon-sessions/src`. The CI guard scans

@@ -1032,6 +1032,7 @@ pub(crate) trait IndexStore: Send {
         &self,
         _operation_id: &str,
         _path: &str,
+        _harness: &str,
     ) -> Result<Option<crate::storage::native_events::EventReceipt>, StoreError> {
         Err(StoreError::Configured(
             crate::storage::StorageError::NamespaceUpgradePending,
@@ -1044,6 +1045,7 @@ pub(crate) trait IndexStore: Send {
         _path: &str,
         _expected: Option<&Ledger>,
         _operation_id: &str,
+        _harness: &str,
     ) -> Result<(), StoreError> {
         Ok(())
     }
@@ -1355,7 +1357,11 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
             .store
             .as_ref()
             .ok_or(crate::storage::StorageError::Unavailable)?
-            .reconcile_event(operation_id, &path.to_string_lossy())
+            .reconcile_event(
+                operation_id,
+                path.to_str().ok_or(crate::storage::StorageError::InvalidArguments)?,
+                harness,
+            )
             .map_err(configured_error)?
         {
             return Ok(receipt);
@@ -1414,7 +1420,6 @@ pub(crate) struct EventCache {
     store: Option<Box<dyn IndexStore>>,
     scoped: bool,
     explicit_store: bool,
-    configured_failure: Option<crate::storage::StorageError>,
     event_operation: Option<String>,
     retention_base: Vec<(String, Option<Ledger>)>,
     /// Source fences for the lazy producer, independently of legacy reopen state.
@@ -2254,9 +2259,6 @@ impl EventCache {
 
     fn require_configured_store(&self) -> io::Result<()> {
         if self.explicit_store {
-            if let Some(error) = &self.configured_failure {
-                return Err(io::Error::other(*error));
-            }
             if self.store.is_none() {
                 return Err(io::Error::other(crate::storage::StorageError::Unavailable));
             }
@@ -2300,7 +2302,7 @@ impl EventCache {
                             .insert(run.last_start_time, run.clone());
                     }
                     self.claude_json_stamp = Some(stamp.clone());
-                    self.save_runs(&runs, &stamp);
+                    self.save_runs(&runs, &stamp)?;
                 }
             }
             Err(store::Unopened::Unsupported(reason)) => return Err(io::Error::other(reason)),
@@ -2359,32 +2361,24 @@ impl EventCache {
     /// Handles a failed store call: a busy store keeps this change in
     /// memory and skips the store's other writes in this scan; any other
     /// failure stops using the store until it is opened again.
-    fn store_failed(&mut self, error: &StoreError) {
+    fn store_failed(&mut self, error: &StoreError) -> io::Result<()> {
         if self.explicit_store {
-            self.configured_failure = Some(match error {
+            return Err(io::Error::other(match error {
                 StoreError::Configured(error) => *error,
                 StoreError::Busy(_) => crate::storage::StorageError::Busy,
-                StoreError::Data(_) | StoreError::Failed(_) => {
-                    crate::storage::StorageError::Unavailable
-                }
-            });
-            return;
+                StoreError::Data(_) | StoreError::Failed(_) => crate::storage::StorageError::Unavailable,
+            }));
         }
         match error {
-            StoreError::Configured(error) => {
-                self.configured_failure = Some(*error);
-            }
+            StoreError::Configured(error) => return Err(io::Error::other(*error)),
             StoreError::Busy(_) => {
                 self.busy = true;
-                let what = self
-                    .store
-                    .as_ref()
-                    .map(|store| store.describe())
-                    .unwrap_or_default();
+                let what = self.store.as_ref().map(|store| store.describe()).unwrap_or_default();
                 warn_busy(&what, error);
             }
             StoreError::Data(_) | StoreError::Failed(_) => self.lose_store(error),
         }
+        Ok(())
     }
 
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
@@ -2436,6 +2430,7 @@ impl EventCache {
         crate::model::summary::CatalogSource,
         crate::native_tree::Metadata,
     )> {
+        self.require_configured_store()?;
         let key = path.to_string_lossy();
         let stat = Stat::of(path)?;
         if !self.unpersisted.contains(key.as_ref()) {
@@ -2454,8 +2449,9 @@ impl EventCache {
                 Some(Ok(Some((ledger, metadata)))) if ledger.stat == stat => {
                     return Ok((ledger.source(path, native_id), metadata));
                 }
+                Some(Err(error)) if self.explicit_store => return Err(store_io_error(error)),
                 Some(Err(StoreError::Data(_))) | Some(Ok(_)) | None => {}
-                Some(Err(error)) => self.store_failed(&error),
+                Some(Err(error)) => self.store_failed(&error)?,
             }
         }
         let index = scan_file(path, harness, self, dirty)?;
@@ -2481,9 +2477,10 @@ impl EventCache {
     /// Reads only selected fields from the sibling state file when its
     /// identity, size or modified time changes. A missing/unreadable file is
     /// an empty input and leaves prior snapshots intact.
-    pub(crate) fn refresh_reported_runs(&mut self, path: &Path, capture_at: i64, dirty: &mut bool) {
+    pub(crate) fn refresh_reported_runs(&mut self, path: &Path, capture_at: i64, dirty: &mut bool) -> io::Result<()> {
+        self.require_configured_store()?;
         let Ok(metadata) = fs::metadata(path) else {
-            return;
+            return Ok(());
         };
         let modified_ns = metadata
             .modified()
@@ -2503,15 +2500,15 @@ impl EventCache {
         if self.claude_json_stamp.as_ref() == Some(&stamp) {
             if self.runs_unsaved {
                 let runs: Vec<_> = self.reported_runs().cloned().collect();
-                self.save_runs(&runs, &stamp);
+                self.save_runs(&runs, &stamp)?;
             }
-            return;
+            return Ok(());
         }
         let Ok(file) = crate::open_input(path) else {
-            return;
+            return Ok(());
         };
         let Ok(root) = serde_json::from_reader::<_, ClaudeJson>(file) else {
-            return;
+            return Ok(());
         };
         self.claude_json_stamp = Some(stamp.clone());
         *dirty = true;
@@ -2528,36 +2525,42 @@ impl EventCache {
                 .or_default()
                 .insert(start, snapshot);
         }
-        self.save_runs(&read, &stamp);
+        self.save_runs(&read, &stamp)
     }
 
     /// Writes reported runs through to the store, and takes back every run
     /// it holds.
-    fn save_runs(&mut self, runs: &[crate::facts::ReportedRunSnapshot], stamp: &ReportedFileStamp) {
+    fn save_runs(&mut self, runs: &[crate::facts::ReportedRunSnapshot], stamp: &ReportedFileStamp) -> io::Result<()> {
+        self.require_configured_store()?;
         if self.store.is_none() {
-            return;
+            return Ok(());
         }
         self.runs_unsaved = true;
         if self.busy {
-            return;
+            return Ok(());
         }
         let saved = self
             .store
             .as_mut()
             .map(|store| store.save_runs(runs, stamp));
         match saved {
+            Some(Ok(None)) if self.explicit_store => {
+                return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+            }
             Some(Ok(Some(all))) => {
                 self.runs_unsaved = false;
                 self.set_reported_runs(all);
             }
             Some(Ok(None)) => self.lose_store(&"another version of semon rebuilt it"),
-            Some(Err(error)) => self.store_failed(&error),
+            Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
+        Ok(())
     }
 
     /// Drops files that are gone, so the index doesn't grow without bound.
-    pub(crate) fn retain(&mut self, seen: &BTreeSet<String>, dirty: &mut bool) {
+    pub(crate) fn retain(&mut self, seen: &BTreeSet<String>, dirty: &mut bool) -> io::Result<()> {
+        self.require_configured_store()?;
         let mut gone: Vec<(String, Option<Ledger>)> = self
             .files
             .iter()
@@ -2577,22 +2580,26 @@ impl EventCache {
         }
         *dirty |= !gone.is_empty();
         if self.store.is_none() {
-            return;
+            return Ok(());
         }
         self.gone.extend(gone);
         if self.gone.is_empty() || self.busy {
-            return;
+            return Ok(());
         }
         let removed = self
             .store
             .as_mut()
             .map(|store| store.remove_files(&self.gone));
         match removed {
+            Some(Ok(Outcome::Stale)) if self.explicit_store => {
+                return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+            }
             Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) => self.gone.clear(),
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
-            Some(Err(error)) => self.store_failed(&error),
+            Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
+        Ok(())
     }
 
     /// What the index last recorded for `path`: the store's ledger, which
@@ -2617,13 +2624,13 @@ impl EventCache {
                     Some(Ok(Outcome::Stale)) => {
                         self.lose_store(&"another version of semon rebuilt it");
                     }
-                    Some(Err(error)) => self.store_failed(&error),
+                    Some(Err(error)) => self.store_failed(&error)?,
                     Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) | None => {
                         return Ok(None);
                     }
                 }
             }
-            Some(Err(error)) => self.store_failed(&error),
+            Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
         Ok(self.files.get(path).map(|entry| entry.ledger.clone()))
@@ -2659,7 +2666,7 @@ impl EventCache {
             Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
             Some(Err(StoreError::Data(_))) | None => Base::Unreadable,
             Some(Err(error)) => {
-                self.store_failed(&error);
+                self.store_failed(&error)?;
                 Base::Unreadable
             }
         })
@@ -2767,7 +2774,7 @@ impl EventCache {
             Some(Ok(Outcome::Conflict | Outcome::Deferred)) => return Ok(true),
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
             Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
-            Some(Err(error)) => self.store_failed(&error),
+            Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
         Ok(false)
@@ -2877,6 +2884,7 @@ pub(crate) fn scan_file(
                     cache.event_operation.as_deref().ok_or_else(|| {
                         io::Error::other(crate::storage::StorageError::InvalidArguments)
                     })?,
+                    harness,
                 )
                 .map_err(store_io_error)?;
             expected
@@ -6579,9 +6587,10 @@ mod tests {
             explicit_store: true,
             ..EventCache::default()
         };
-        cache.store_failed(&StoreError::Configured(
+        let refusal = cache.store_failed(&StoreError::Configured(
             crate::storage::StorageError::NamespaceUpgradePending,
-        ));
+        )).unwrap_err();
+        assert_eq!(refusal.get_ref().and_then(|error| error.downcast_ref::<crate::storage::StorageError>()), Some(&crate::storage::StorageError::NamespaceUpgradePending));
         assert!(!cache.busy);
         let mut dirty = false;
         let error = scan_file(
@@ -6595,11 +6604,10 @@ mod tests {
             error
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<crate::storage::StorageError>()),
-            Some(&crate::storage::StorageError::NamespaceUpgradePending)
+            Some(&crate::storage::StorageError::Unavailable)
         );
         assert!(cache.files.is_empty());
         assert!(!dirty);
-        cache.configured_failure = None;
         let error = cache.require_configured_store().unwrap_err();
         assert_eq!(
             error
@@ -7820,7 +7828,7 @@ mod tests {
         fs::write(&claude_json, first.to_string()).unwrap();
         let mut cache = EventCache::open(&v1).unwrap();
         let mut dirty = false;
-        cache.refresh_reported_runs(&claude_json, 2000, &mut dirty);
+        cache.refresh_reported_runs(&claude_json, 2000, &mut dirty).unwrap();
         assert!(dirty);
         drop(cache);
         let mut cache = EventCache::open(&v1).unwrap();
@@ -7850,7 +7858,7 @@ mod tests {
             "oauthAccount":{"emailAddress":secrets[0],"accountUuid":secrets[1]}
         });
         fs::write(&claude_json, second.to_string()).unwrap();
-        cache.refresh_reported_runs(&claude_json, 5000, &mut dirty);
+        cache.refresh_reported_runs(&claude_json, 5000, &mut dirty).unwrap();
         assert_eq!(cache.reported_runs().count(), 2);
         drop(cache);
         let reopened = EventCache::open(&v1).unwrap();
@@ -7873,10 +7881,10 @@ mod tests {
         let root = scratch("reported-runs-missing");
         let mut cache = EventCache::open(&root.join("index.json")).unwrap();
         let mut dirty = false;
-        cache.refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty);
+        cache.refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty).unwrap();
         assert!(cache.reported_runs().next().is_none());
         fs::create_dir(root.join("unreadable.json")).unwrap();
-        cache.refresh_reported_runs(&root.join("unreadable.json"), 2000, &mut dirty);
+        cache.refresh_reported_runs(&root.join("unreadable.json"), 2000, &mut dirty).unwrap();
         assert!(cache.reported_runs().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }
@@ -9832,7 +9840,7 @@ mod tests {
 
         // Gone: its rows go with it.
         fs::remove_file(&log).unwrap();
-        cache.retain(&BTreeSet::new(), &mut false);
+        cache.retain(&BTreeSet::new(), &mut false).unwrap();
         assert_eq!(EventCache::open(&v1).unwrap().paths().count(), 0);
         fs::remove_dir_all(root).unwrap();
     }

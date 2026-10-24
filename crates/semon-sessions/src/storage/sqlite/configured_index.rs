@@ -27,18 +27,20 @@ impl IndexStore for ConfiguredIndex {
         path: &str,
         expected: Option<&Ledger>,
         operation_id: &str,
+        harness: &str,
     ) -> Result<(), StoreError> {
         self.native
-            .begin(path, expected, operation_id)
+            .begin(path, expected, operation_id, harness)
             .map_err(StoreError::Configured)
     }
     fn reconcile_event(
         &self,
         operation_id: &str,
         path: &str,
+        harness: &str,
     ) -> Result<Option<crate::storage::native_events::EventReceipt>, StoreError> {
         self.native
-            .reconcile(operation_id, path)
+            .reconcile(operation_id, path, harness)
             .map_err(StoreError::Configured)
     }
     fn event_receipt(

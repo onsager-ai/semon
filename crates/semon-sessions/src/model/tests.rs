@@ -360,7 +360,7 @@ impl Home {
         let mut cache = EventCache::open(&options.cache).unwrap();
         let mut dirty = false;
         if options.facts.is_none() {
-            cache.refresh_reported_runs(&options.claude_json, now, &mut dirty);
+            cache.refresh_reported_runs(&options.claude_json, now, &mut dirty).unwrap();
         }
         let built =
             build_query(options, &mut cache, &mut dirty, &mut Texts::default(), now).unwrap();
@@ -9421,7 +9421,7 @@ fn build_with_cache(
     now: i64,
 ) -> QueryData {
     if options.facts.is_none() {
-        cache.refresh_reported_runs(&options.claude_json, now, dirty);
+        cache.refresh_reported_runs(&options.claude_json, now, dirty).unwrap();
     }
     let built = build_query(options, cache, dirty, texts, now).unwrap();
     invariants(&built, options.all || options.scan_window);
