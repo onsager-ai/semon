@@ -202,6 +202,11 @@ impl StoreConfig {
         crate::native_resolution::resolve_with_store(options, self.namespace.as_str(), harness, native_id, scope, expected_generation, store.as_ref())
     }
 
+    /// Bounded metadata-only permalink target lookup in this admitted source.
+    pub fn bookmarked_target_keys(&self, target: &str) -> Result<Vec<String>, StorageError> {
+        navigation_store(NativeReaderBinding::Admitted(self.clone())).bookmarked_target_keys(target)
+    }
+
     pub fn session_bookmark(&self, options: &crate::Options, query: &str) -> crate::ViewerReply {
         crate::session_bookmark::with_binding(options, self.namespace.as_str(), query, &NativeReaderBinding::Admitted(self.clone()))
     }

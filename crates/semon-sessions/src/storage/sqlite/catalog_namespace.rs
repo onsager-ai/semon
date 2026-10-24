@@ -778,7 +778,7 @@ mod tests {
         db.execute("INSERT INTO session_trace_bookmarks VALUES('B','target','foreign','edge')", []).unwrap();
         db.execute("INSERT INTO session_catalog_sources VALUES('B','foreign','current','codex','native-same','relative/same.jsonl')", []).unwrap();
         let store = SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()));
-        assert_eq!(store.bookmarked_target_keys("target").unwrap(), ["same"]);
+        assert_eq!(f.config.bookmarked_target_keys("target").unwrap(), ["same"]);
         let observation = store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&generation)).unwrap();
         assert_eq!(observation.keys, ["same"]);
         assert_eq!(observation.metadata.as_deref(), Some("{\"owner\":\"A\"}"));
