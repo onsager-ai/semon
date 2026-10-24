@@ -455,6 +455,9 @@ pub(crate) fn assign(
         if table == "session_catalog" {
             tx.execute_batch("CREATE INDEX storage_ns_catalog_identity ON session_catalog(namespace,session_key);").map_err(failed)?;
         }
+        if table == "session_catalog_invalidations" {
+            tx.execute_batch("CREATE INDEX storage_ns_source_pending ON session_catalog_invalidations(namespace,revision,source_path);").map_err(failed)?;
+        }
         tx.execute(
             "UPDATE storage_catalog_assignment SET complete=1 WHERE table_name=?1",
             [table],
