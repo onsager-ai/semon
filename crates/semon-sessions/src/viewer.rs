@@ -1684,10 +1684,15 @@ mod tests {
     }
 
     fn http(fixture: &Fixture, request: &str) -> String {
-        http_with_catalog(fixture, request, false)
+        http_with_publication(fixture, request, None, false)
     }
 
-    fn http_with_catalog(fixture: &Fixture, request: &str, catalog: bool) -> String {
+    fn http_with_publication(
+        fixture: &Fixture,
+        request: &str,
+        expected_session: Option<&str>,
+        hold_busy: bool,
+    ) -> String {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let viewer = Viewer {
@@ -1698,16 +1703,36 @@ mod tests {
             bootstrap: "0123456789abcdef0123456789abcdef".into(),
             port,
         };
-        if catalog {
+        if let Some(expected_session) = expected_session {
             viewer.core.demand_catalog_source("local").unwrap();
             eventually("HTTP session fixture publication", || {
-                let reply = viewer
+                let page = viewer
                     .core
                     .respond("GET", "/api/sessions", "limit=60", None);
-                let page: Value = serde_json::from_slice(&reply.body).ok()?;
-                (reply.status == 200 && page["completeness"]["state"] == "complete").then_some(())
+                let page_body: Value = serde_json::from_slice(&page.body).ok()?;
+                let located = viewer.core.respond(
+                    "GET",
+                    "/api/session-locate",
+                    &format!("machine=local&sid={expected_session}"),
+                    None,
+                );
+                let located_body: Value = serde_json::from_slice(&located.body).ok()?;
+                (page.status == 200
+                    && page_body["completeness"]["state"] == "complete"
+                    && located.status == 200
+                    && located_body["unavailable"] == 0
+                    && located_body["matches"].as_array().is_some_and(|matches| {
+                        matches.iter().any(|item| {
+                            item["source_key"] == "local" && item["catalog_key"] == expected_session
+                        })
+                    }))
+                .then_some(())
             });
         }
+        let busy_view = hold_busy.then(|| viewer.core.machine_views().into_iter().next().unwrap());
+        let _busy = busy_view
+            .as_ref()
+            .map(|view| view.evidence.work.lock().unwrap());
         let request = request.replace("PORT", &port.to_string());
         let worker = thread::spawn(move || {
             viewer.handle(server.recv().unwrap());
@@ -1848,52 +1873,77 @@ mod tests {
             json!({"type":"user","sessionId":"bootstrap-session","uuid":"u","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"Bootstrap transcript"}}),
         ]);
         let token = "0123456789abcdef0123456789abcdef";
-        for (path, status) in [
-            (format!("/session/local/bootstrap-session?t={token}"), 200),
-            (
-                format!("/s/claude/bootstrap-session?machine=local&t={token}"),
-                308,
+        let cold = http_with_publication(
+            &fixture,
+            &format!(
+                "GET /s/claude/bootstrap-session?machine=local&t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
             ),
-            (
-                format!("/session/local/bootstrap-session?native=1&t={token}"),
-                200,
-            ),
-            (
-                format!("/s/claude/bootstrap-session?t={token}&native=1"),
-                308,
-            ),
+            None,
+            true,
+        );
+        assert!(cold.starts_with("HTTP/1.1 200"), "{cold}");
+        let (cold_headers, cold_body) = cold.split_once("\r\n\r\n").unwrap();
+        assert!(!cold_body.contains(token), "credential leaked into content");
+        assert!(cold_body.contains("<!doctype html") || cold_body.contains("<!DOCTYPE html"));
+        let cookie = cold_headers
+            .lines()
+            .find(|line| line.starts_with("Set-Cookie:"))
+            .unwrap();
+        assert!(cookie.contains(token), "{cookie}");
+        for header in cold_headers.lines().skip(1) {
+            if !header.starts_with("Set-Cookie:") {
+                assert!(
+                    !header.contains(token),
+                    "credential leaked into header: {header}"
+                );
+            }
+        }
+
+        for path in [
+            format!("/s/claude/bootstrap-session?machine=local&t={token}"),
+            format!("/s/claude/bootstrap-session?t={token}&native=1"),
         ] {
-            let wire = http_with_catalog(
+            let wire = http_with_publication(
                 &fixture,
                 &format!(
                     "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
                 ),
-                true,
+                Some("bootstrap-session"),
+                false,
             );
-            assert!(wire.starts_with(&format!("HTTP/1.1 {status}")), "{wire}");
-            assert!(wire.contains("Set-Cookie:"), "{wire}");
-            let body = wire.split_once("\r\n\r\n").unwrap().1;
+            assert!(wire.starts_with("HTTP/1.1 308"), "{wire}");
+            let (headers, body) = wire.split_once("\r\n\r\n").unwrap();
             assert!(!body.contains(token), "credential leaked into content");
-            if status == 308 {
-                let location = wire
-                    .lines()
-                    .find(|line| line.starts_with("Location:"))
-                    .unwrap();
-                assert!(
-                    location.contains("/session/local/bootstrap-session"),
-                    "{location}"
-                );
-                assert!(!location.contains("t="), "{location}");
-            } else if path.contains("native=1") {
-                assert!(body.contains("Bootstrap transcript"), "{body}");
+            let cookie = headers
+                .lines()
+                .find(|line| line.starts_with("Set-Cookie:"))
+                .unwrap();
+            assert!(cookie.contains(token), "{cookie}");
+            for header in headers.lines().skip(1) {
+                if !header.starts_with("Set-Cookie:") {
+                    assert!(
+                        !header.contains(token),
+                        "credential leaked into header: {header}"
+                    );
+                }
             }
+            let location = headers
+                .lines()
+                .find(|line| line.starts_with("Location:"))
+                .unwrap();
+            assert!(
+                location.contains("/session/local/bootstrap-session"),
+                "{location}"
+            );
+            assert!(!location.contains("t="), "{location}");
         }
-        let continuation = http_with_catalog(
+        let continuation = http_with_publication(
             &fixture,
             &format!(
                 "GET /session/local/bootstrap-session?native=1 HTTP/1.1\r\nHost: localhost:PORT\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n"
             ),
-            true,
+            Some("bootstrap-session"),
+            false,
         );
         assert!(continuation.starts_with("HTTP/1.1 200"), "{continuation}");
         assert!(continuation.contains("Bootstrap transcript"));
