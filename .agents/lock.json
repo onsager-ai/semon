@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "be019483c36e0d4afb9aca1b94b2dc7eccb20eceb8c9b8ab88e540a204da0590",
+  "manifest_sha256": "5fae9532e9e0c6ecaeb8157905964a85c400e465f4586200c6ecd188f7e5aedc",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -148,7 +148,7 @@
       "mode": "100644"
     },
     ".claude/skills/harness-compatibility/SKILL.md": {
-      "sha256": "cc10b45b6d710808239735b38a77c967fc58cfc32e5aa969c1430582f3eea788",
+      "sha256": "6bb9305d45410d15122333f663b0113aab8c251d5097cd24f93bb91209ba4049",
       "owner": "local-projection",
       "mode": "100644"
     },
@@ -205,6 +205,11 @@
     ".claude/skills/pre-push/SKILL.md": {
       "sha256": "f2371605bc3ca58df3596af0362f633462a5da6fb8a0c3410d43d00167c77aae",
       "owner": "shared",
+      "mode": "100644"
+    },
+    ".claude/skills/semon-evolution/SKILL.md": {
+      "sha256": "6d2559aeac45360827cf4abd9d289e95ccfd029a037f8c05bd3c99edc020bb91",
+      "owner": "local-projection",
       "mode": "100644"
     },
     ".claude/skills/ui-design/references/integrations.md": {
