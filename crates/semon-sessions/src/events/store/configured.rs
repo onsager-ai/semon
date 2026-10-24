@@ -111,6 +111,71 @@ pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
     sql(db, "", "namespace=semon_namespace() AND ")
 }
 
+/// Meta is qualified separately from the core rows. Until all store-global
+/// owners are ported, a composite files table must not imply composite meta.
+/// Select authored statements only; never retry or rewrite SQL on failure.
+pub(crate) fn metadata_sql<'a>(
+    db: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
+    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    Ok(if composite { scoped } else { legacy })
+}
+
+// Empty is reserved for store metadata: LogicalSourceNamespace refuses it.
+// New globals must be classified deliberately before composite meta is exposed.
+const STORE_METADATA_NAMESPACE: &str = "";
+const SOURCE_METADATA_PREFIXES: &[&str] = &[
+    "archive_event_index:",
+    "native_catalog_relocation:",
+    "native_claude_sidecar:",
+    "native_codex_header:",
+    "native_launch_calls:",
+    "native_parent_marker:",
+    "native_proof_tree:",
+    "native_published_chunks:",
+    "native_published_chunks_manifest:",
+    "native_source_chunks:",
+    "native_tree_failure:",
+    "native_tree_summary:",
+];
+const STORE_METADATA_KEYS: &[&str] = &[
+    "cache_version",
+    "catalog_changes_epoch",
+    "catalog_semantic_recipe",
+    "native_tree_repair_clock",
+];
+
+fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, StorageError> {
+    if STORE_METADATA_KEYS.contains(&key) {
+        Ok(STORE_METADATA_NAMESPACE)
+    } else if !namespace.is_empty()
+        && SOURCE_METADATA_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix) && key.len() > prefix.len())
+    {
+        Ok(namespace)
+    } else {
+        Err(StorageError::InvalidArguments)
+    }
+}
+
+fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite::Result<()> {
+    let namespace = namespace.to_owned();
+    db.create_scalar_function(
+        "semon_meta_scope",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+        move |context| {
+            let key = context.get::<String>(0)?;
+            metadata_namespace(&namespace, &key)
+                .map(str::to_owned)
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+        },
+    )
+}
+
 /// Create a new physical store only. Existing files, even empty ones, refuse.
 /// Enrollment and bounded Catalog assignment remain separate explicit steps.
 pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
@@ -145,6 +210,8 @@ pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
             CORE_SCHEMA
         } else if ddl == reprice::FILE_SCHEMA {
             PRICING_FILE_SCHEMA
+        } else if ddl == semantic_stage::SEMANTIC_CORE_INDEXES {
+            semantic_stage::SEMANTIC_CORE_INDEXES_NS
         } else {
             ddl
         };
@@ -240,6 +307,7 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
+    bind_metadata_scope(&db, config.namespace.as_str()).map_err(failed)?;
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
     db.create_scalar_function(
@@ -714,6 +782,156 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn private_composite_meta_proofs_collide_without_crossing_namespaces() {
+        // Only the metadata/proof family is under test. Catalog ownership,
+        // public enrollment and the complete native writer remain unqualified.
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(metadata_schema(true)).unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(crate::history_projection::SCHEMA).unwrap();
+        db.execute_batch(semantic_stage::metadata_indexes(true)).unwrap();
+        let bind = |db: &Connection, namespace: &str| {
+            bind_metadata_scope(db, namespace).unwrap();
+            let namespace = namespace.to_owned();
+            db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8, move |_| Ok(namespace.clone())).unwrap();
+        };
+        let state = |db: &Connection, namespace: &str| -> Vec<(String, String)> {
+            db.prepare("SELECT key,value FROM meta WHERE namespace=?1 ORDER BY key")
+                .unwrap()
+                .query_map([namespace], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        for index in ["sqlite_autoindex_meta_1", "semantic_codex_header_native", "semantic_codex_header_parent"] {
+            let first: String = db.query_row("SELECT name FROM pragma_index_xinfo(?1) WHERE seqno=0", [index], |r| r.get(0)).unwrap();
+            assert_eq!(first, "namespace", "{index}");
+        }
+        assert!(crate::storage::LogicalSourceNamespace::new(STORE_METADATA_NAMESPACE).is_err());
+        assert_eq!(metadata_namespace("a", "native_unclassified:original"), Err(StorageError::InvalidArguments));
+        for prefix in SOURCE_METADATA_PREFIXES {
+            assert_eq!(metadata_namespace("a", &format!("{prefix}same")), Ok("a"));
+            assert_eq!(metadata_namespace("b", &format!("{prefix}same")), Ok("b"));
+        }
+        for key in STORE_METADATA_KEYS {
+            assert_eq!(metadata_namespace("a", key), Ok(STORE_METADATA_NAMESPACE));
+            assert_eq!(metadata_namespace("b", key), Ok(STORE_METADATA_NAMESPACE));
+        }
+        let path = "same/relative.jsonl";
+        let offset = crate::source_chunks::SIZE as u64 * 1024 + 19;
+        let ledger = Ledger {
+            stat: Stat { dev: 1, ino: 2, size: offset, modified_ns: 3, changed_ns: Some(4) },
+            offset, prefix: [5; 32], tail: [6; 32],
+        };
+        for (namespace, marker) in [("a", 11), ("b", 22)] {
+            bind(&db, namespace);
+            let chunks = crate::source_chunks::Chunks { offset, hashes: vec![[marker; 32]; 1025], resume: None };
+            let mut calls = crate::native_handoff::Index::default();
+            let value = serde_json::json!({"message":{"content":[{"type":"tool_use","id":namespace,"name":"Bash","input":{"command":"codex exec"}}]}});
+            let bytes = format!("{value}\n");
+            calls.observe(bytes.as_bytes(), 0, true, &value).unwrap();
+            let tx = db.transaction().unwrap();
+            chunk_proofs::write(&tx, path, &ledger, Some(&chunks)).unwrap();
+            launch_calls::write(&tx, path, &ledger, Some(&calls)).unwrap();
+            tx.execute(native_metadata_put(&tx).unwrap(), params![format!("native_tree_failure:{path}"), namespace]).unwrap();
+            // The reserved store scope is bound by the classified key, never
+            // supplied by DEFAULT or adopted from the first source.
+            tx.execute(native_metadata_put(&tx).unwrap(), params!["catalog_semantic_recipe", "one-store-recipe"]).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(chunk_proofs::read(&db, path, &ledger).unwrap().unwrap().as_ref(), &chunks);
+            assert_eq!(launch_calls::read(&db, path, &ledger).unwrap(), Some(calls));
+            assert!(chunk_proofs::header_ready(&db, path, &ledger).unwrap());
+        }
+        let b = state(&db, "b");
+        // An intentionally shared reference fixture tests only the scoped
+        // retention copy/GC statements, not Catalog publication qualification.
+        let published = serde_json::json!({
+            "key":"owner","name":"Synthetic owner","harness":"codex","kind":"Codex",
+            "native_ids":["owner"],"model":"unknown","tokens":[0,0,0],
+            "cost":{"pricing_fingerprint":"","usd":null,"unpriced_models":[],
+                "split_unknown_messages":0,"by_model":{},"by_day":{}},
+            "sources":[{"path":path,"native_id":"owner","dev":ledger.stat.dev,
+                "ino":ledger.stat.ino,"size":ledger.stat.size,"modified_ns":ledger.stat.modified_ns,
+                "changed_ns":ledger.stat.changed_ns,"offset":ledger.offset,
+                "prefix_sha256":ledger.prefix,"tail_sha256":ledger.tail}]
+        }).to_string();
+        db.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,metadata) VALUES('owner','current',0,'codex',?1)", [published]).unwrap();
+        db.execute("INSERT INTO session_catalog_sources VALUES('owner','current','codex','owner',?1)", [path]).unwrap();
+        bind(&db, "a");
+        {
+            let tx = db.transaction().unwrap();
+            chunk_proofs::clear(&tx, path).unwrap();
+            let retained: i64 = tx.query_row("SELECT count(*) FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*'", ["a"], |r| r.get(0)).unwrap();
+            assert!(retained >= 3, "header and both proof pages must be retained");
+            assert_eq!(state(&tx, "b"), b);
+            // Rollback must restore the live proofs and remove retention copies.
+        }
+        assert_eq!(state(&db, "b"), b);
+        db.execute("DELETE FROM session_catalog_sources", []).unwrap();
+        db.execute("DELETE FROM session_catalog", []).unwrap();
+        let global = state(&db, STORE_METADATA_NAMESPACE);
+        assert_eq!(global.len(), 1);
+        bind(&db, "a");
+        let a = state(&db, "a");
+        assert!(db.execute(native_metadata_put(&db).unwrap(), params!["native_unclassified:original", "refuse"]).is_err());
+        assert_eq!(state(&db, "a"), a);
+        {
+            let tx = db.transaction().unwrap();
+            chunk_proofs::clear(&tx, path).unwrap();
+            launch_calls::clear(&tx, path).unwrap();
+            tx.execute(native_metadata_delete(&tx).unwrap(), [format!("native_tree_failure:{path}")]).unwrap();
+            assert!(state(&tx, "a").is_empty());
+            assert_eq!(state(&tx, "b"), b);
+            assert_eq!(state(&tx, STORE_METADATA_NAMESPACE), global);
+            // Dropping restores source A's headers, pages and tree witnesses.
+        }
+        assert_eq!(state(&db, "a"), a);
+        let tx = db.transaction().unwrap();
+        chunk_proofs::clear(&tx, path).unwrap();
+        launch_calls::clear(&tx, path).unwrap();
+        tx.execute(native_metadata_delete(&tx).unwrap(), [format!("native_tree_failure:{path}")]).unwrap();
+        tx.commit().unwrap();
+        assert!(chunk_proofs::read(&db, path, &ledger).unwrap().is_none());
+        assert!(launch_calls::read(&db, path, &ledger).unwrap().is_none());
+        assert_eq!(state(&db, "b"), b);
+        assert_eq!(state(&db, STORE_METADATA_NAMESPACE), global);
+        bind(&db, "b");
+        assert_eq!(chunk_proofs::read(&db, path, &ledger).unwrap().unwrap().hashes, vec![[22; 32]; 1025]);
+        assert!(launch_calls::read(&db, path, &ledger).unwrap().is_some());
+    }
+
+    #[test]
+    fn fresh_assembled_core_indexes_are_scoped_before_factory() {
+        let f = Fixture::new();
+        let db = f.db();
+        // Inspect the complete create_native_store DDL, before native_events
+        // can refuse it. The private core fixture omits semantic-stage DDL.
+        let objects: Vec<(String, String, String)> = db
+            .prepare("SELECT type,name,coalesce(sql,'') FROM sqlite_schema WHERE type IN('index','trigger') AND tbl_name IN('files','events','signals') ORDER BY name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let mut semantic_indexes = 0;
+        for (kind, name, definition) in objects {
+            if kind == "index" {
+                let first: Option<String> = db
+                    .query_row("SELECT name FROM pragma_index_xinfo(?1) WHERE seqno=0 AND key=1", [&name], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(first.as_deref(), Some("namespace"), "{name}: {definition}");
+                semantic_indexes += usize::from(name.starts_with("semantic_"));
+            } else if name.starts_with("pricing_pending_file_") {
+                assert!(definition.contains("namespace=NEW.namespace"), "{name}");
+            } else {
+                assert!(name.starts_with("storage_namespace_fence_"), "unexpected core trigger {name}");
+            }
+        }
+        assert_eq!(semantic_indexes, 5);
+        validate_core(&db).unwrap();
+    }
+
+    #[test]
     fn composite_core_schema_and_qualification_are_physical() {
         let f = Fixture::new();
         drop(f.config.native_events().unwrap());
@@ -800,6 +1018,7 @@ mod tests {
         // The rest of the native writer is still unqualified for two sources.
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(metadata_schema(false)).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(tree_state::SCHEMA).unwrap();
         db.execute_batch(

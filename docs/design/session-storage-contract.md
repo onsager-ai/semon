@@ -11,6 +11,81 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 13 checkpoint: assembled DDL repair and C1b source-proof subunit
+
+The five semantic indexes on `files`/`events` are now a separate authored DDL
+chunk. Cold initialization and rebuilds use their original definitions; fresh
+configured creation selects namespace-leading definitions with the same
+expressions and partial predicates. No schema guard is relaxed. A regression
+inspects every core index through `sqlite_schema`/`pragma_index_xinfo` before
+calling the Event factory, also checking the scope of file-pricing triggers.
+This covers the complete DDL assembly that the earlier private core fixture
+omitted. Existing configured ingestion/replay/Busy/effect/batch tests remain
+unchanged and must pass again in exact-pin CI; no local execution is claimed.
+
+C1b is split at source-owned metadata operations versus store-global owners.
+The source proof helpers now select authored scoped SQL for native headers,
+sidecars, parent markers, summaries/failures, archive markers, chunk pages and
+Merkle witnesses, retained proof copy/cleanup/manifests, launch pages, relocation
+evidence and the Tree readiness metadata join. The bounded cleanup predicate
+and all its bindings are preserved. Metadata shape is checked independently of
+`files`: a composite core does not imply composite metadata. There is no SQL
+rewriting, fallback retry, alternate engine or new parser.
+
+The candidate physical meta DDL is `(namespace,key,value)` with
+`PRIMARY KEY(namespace,key)` and no namespace default. Its two semantic JSON
+indexes lead with namespace. A private fixture runs the actual chunk and launch
+proof writers/readers with equal paths and keys in two namespaces, two proof
+pages and Merkle witnesses, retained-generation copying, source deletion and
+rollback. It verifies the other namespace's complete metadata rows are unchanged.
+This fixture deliberately does not qualify Catalog membership or a full native
+multi-source ingest. The shared Catalog reference used by the retention test
+only exercises the metadata copy's namespace predicate.
+
+`SOURCE_METADATA_PREFIXES` explicitly classifies the converted proof key
+families. `STORE_METADATA_KEYS` currently classifies only `cache_version`,
+`catalog_changes_epoch`, `catalog_semantic_recipe` and `native_tree_repair_clock`.
+The reserved store scope is the empty string, which `LogicalSourceNamespace`
+rejects; it is bound through the key classifier, never a column default. Scoped
+inserts refuse unclassified keys. Tests check unknown-key refusal, same-key
+source isolation and a unique store-global recipe across both source bindings.
+**This is not a complete inventory of global keys.**
+
+The public fresh store still assembles singleton meta, and preparation retains
+its transitional first-source default. Meta qualification remains **0**, as do
+global writer qualification, public second-source admission and publication.
+Activating composite meta or removing that default before completing the next
+list would break unported global operations. Supported-current bounded migration
+remains pending; no original, proof, fact or existing database is converted/reset.
+
+Exact remaining statement groups for the next C1b unit (names identify the
+existing authored statements rather than claiming a corpus-wide port):
+
+- `store.rs`: Catalog observation/recovery/backfill/generation/slot/search and
+  publication metadata; `qualify_contract`, `qualify`, `qualify_producer`,
+  `init`, `current`; archive GLOB validation and `current_file_count` membership
+  join; `claude_json_stamp`. These include arbitrary-key global readers/writers.
+- `semantic_stage.rs`: recipe read/write, `generation`, `revision`, native Codex
+  header existence/frontier scans, semantic epoch read/increment, GC and
+  completeness/backfill/push markers. Scope the stage/dependency joins together.
+- `reprice.rs` and configured pricing DDL: all `pricing_recompute_target` joins,
+  applied/work metadata, progress updates and `overview_generation`.
+- `native_usage/repair.rs`: `native_tree_repair_clock` increment and repair
+  timestamp subquery; its native table scope is also part of C2.
+- `storage/sqlite/source_journal.rs`: revision increment/read, invalidation
+  revision subquery and backfill state read/write. `reader.rs`: stream epoch
+  validation. `changes.rs`: initial epoch/floors DDL, epoch/version/generation/
+  floor reads and floor update. Extend the global classifier before activation.
+
+Other direct owners remain in the unchanged unqualified path inventory and need
+CI inventory/conformance, including selected-reader lifetime qualification.
+Do not set meta to 1 until all relevant callers are ported and the public fresh
+fixture passes. C2 usage/Tree/dependency/mutation keys, full migration/cutover,
+PG #479 and Hub #313 remain pending. PG stays serial until C1b/C2 key-schema
+review. Per-statement schema probes need performance CI; no performance pass is
+claimed. The two memory-before-persist retry regressions remain required before
+exposing those methods, and the #380 merge hold remains.
+
 ## Worker 12 checkpoint: composite core Event rows (C1a WIP)
 
 Fresh stores created explicitly with `StoreConfig::create_native_store` have

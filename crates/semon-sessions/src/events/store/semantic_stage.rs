@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS catalog_semantic_sources (
 CREATE TABLE IF NOT EXISTS catalog_semantic_inputs(source_path TEXT PRIMARY KEY,harness TEXT NOT NULL,native_id TEXT NOT NULL,is_top INTEGER NOT NULL,metadata TEXT NOT NULL) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS catalog_semantic_keys(harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL,key_epoch INTEGER NOT NULL,PRIMARY KEY(harness,native_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS semantic_input_collision ON catalog_semantic_inputs(native_id,harness);
-CREATE INDEX IF NOT EXISTS semantic_copilot_source_id ON files(substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1),path) WHERE path GLOB '*/session-state/*/events.jsonl';
 CREATE INDEX IF NOT EXISTS semantic_copilot_pending_id ON session_catalog_invalidations(substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1),source_path) WHERE source_path GLOB '*/session-state/*/events.jsonl';
 CREATE INDEX IF NOT EXISTS catalog_semantic_input_native ON catalog_semantic_inputs(harness,native_id,is_top,source_path);
 CREATE INDEX IF NOT EXISTS catalog_semantic_index ON catalog_semantic_sources(index_done,source_path);
@@ -78,16 +77,12 @@ CREATE TABLE IF NOT EXISTS catalog_semantic_paths (
  PRIMARY KEY(path,session_key)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS catalog_semantic_root_path ON catalog_semantic_paths(root_key,path,session_key);
-CREATE INDEX IF NOT EXISTS semantic_source_filename ON files(substr(path,length(rtrim(path,replace(path,'/','')))+1),path);
 CREATE INDEX IF NOT EXISTS semantic_pending_filename ON session_catalog_invalidations(substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1),source_path);
-CREATE INDEX IF NOT EXISTS semantic_index_receipt ON events(id,file_id,o,b,seq) WHERE k='xsm';
-CREATE INDEX IF NOT EXISTS semantic_index_send ON events(reply_m,file_id,o,b,seq) WHERE k='tool' AND n='SendMessage';
 CREATE TABLE IF NOT EXISTS catalog_semantic_names(name TEXT NOT NULL,session_key TEXT NOT NULL,PRIMARY KEY(name,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS catalog_semantic_events(
  source_path TEXT NOT NULL,event_key TEXT NOT NULL,owner TEXT NOT NULL,kind TEXT NOT NULL,msg_id TEXT,tool_id TEXT,name TEXT,metadata TEXT NOT NULL,native_seq INTEGER NOT NULL,copy_key TEXT,copied INTEGER NOT NULL DEFAULT 0,qualified INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(source_path,event_key)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS semantic_index_copy ON events(file_id,COALESCE(u,CASE WHEN k IN ('tool','xsm') THEN id END));
 CREATE INDEX IF NOT EXISTS catalog_semantic_event_qualification ON catalog_semantic_events(qualified,source_path,event_key);
 CREATE INDEX IF NOT EXISTS catalog_semantic_message ON catalog_semantic_events(msg_id,kind,copied,qualified,source_path,native_seq);
 CREATE INDEX IF NOT EXISTS catalog_semantic_call ON catalog_semantic_events(tool_id,kind,source_path,event_key);
@@ -96,10 +91,35 @@ CREATE TABLE IF NOT EXISTS catalog_semantic_relations (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS catalog_semantic_relation_from ON catalog_semantic_relations(from_key,relation_id);
 CREATE INDEX IF NOT EXISTS catalog_semantic_relation_to ON catalog_semantic_relations(to_key,relation_id);
-CREATE INDEX IF NOT EXISTS semantic_codex_header_native ON meta(json_extract(value,'$.header.id'),key)
+";
+pub(super) fn metadata_indexes(composite: bool) -> &'static str {
+    if composite {
+        "CREATE INDEX IF NOT EXISTS semantic_codex_header_native ON meta(namespace,json_extract(value,'$.header.id'),key)
+ WHERE key GLOB 'native_codex_header:*' AND json_valid(value);
+CREATE INDEX IF NOT EXISTS semantic_codex_header_parent ON meta(namespace,json_extract(value,'$.header.metadata.parent_thread'),key)
+ WHERE key GLOB 'native_codex_header:*' AND json_valid(value);"
+    } else {
+        "CREATE INDEX IF NOT EXISTS semantic_codex_header_native ON meta(json_extract(value,'$.header.id'),key)
  WHERE key GLOB 'native_codex_header:*' AND json_valid(value);
 CREATE INDEX IF NOT EXISTS semantic_codex_header_parent ON meta(json_extract(value,'$.header.metadata.parent_thread'),key)
- WHERE key GLOB 'native_codex_header:*' AND json_valid(value);
+ WHERE key GLOB 'native_codex_header:*' AND json_valid(value);"
+    }
+}
+// Keep physical core indexes separate from the semantic stage's own objects.
+// Both cold initialization and rebuilds assemble these authored DDL chunks.
+pub(super) const SEMANTIC_CORE_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS semantic_copilot_source_id ON files(substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1),path) WHERE path GLOB '*/session-state/*/events.jsonl';
+CREATE INDEX IF NOT EXISTS semantic_source_filename ON files(substr(path,length(rtrim(path,replace(path,'/','')))+1),path);
+CREATE INDEX IF NOT EXISTS semantic_index_receipt ON events(id,file_id,o,b,seq) WHERE k='xsm';
+CREATE INDEX IF NOT EXISTS semantic_index_send ON events(reply_m,file_id,o,b,seq) WHERE k='tool' AND n='SendMessage';
+CREATE INDEX IF NOT EXISTS semantic_index_copy ON events(file_id,COALESCE(u,CASE WHEN k IN ('tool','xsm') THEN id END));
+";
+pub(super) const SEMANTIC_CORE_INDEXES_NS: &str = "
+CREATE INDEX IF NOT EXISTS semantic_copilot_source_id ON files(namespace,substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1),path) WHERE path GLOB '*/session-state/*/events.jsonl';
+CREATE INDEX IF NOT EXISTS semantic_source_filename ON files(namespace,substr(path,length(rtrim(path,replace(path,'/','')))+1),path);
+CREATE INDEX IF NOT EXISTS semantic_index_receipt ON events(namespace,id,file_id,o,b,seq) WHERE k='xsm';
+CREATE INDEX IF NOT EXISTS semantic_index_send ON events(namespace,reply_m,file_id,o,b,seq) WHERE k='tool' AND n='SendMessage';
+CREATE INDEX IF NOT EXISTS semantic_index_copy ON events(namespace,file_id,COALESCE(u,CASE WHEN k IN ('tool','xsm') THEN id END));
 ";
 const MAX_CONTEXT: usize = 1024 * 1024;
 

@@ -50,7 +50,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         crate::source_carrier::source_hash(path)
     );
     let prior: Option<String> = tx
-        .query_row(NATIVE_METADATA_VALUE, [&key], |r| r.get(0))
+        .query_row(native_metadata_value(tx)?, [&key], |r| r.get(0))
         .optional()?
         .flatten();
     let mut saved: BTreeSet<String> = prior
@@ -62,7 +62,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     for digest in saved.clone() {
         let retained = prefix(path, &digest);
         let header: Option<String> = tx
-            .query_row(NATIVE_METADATA_VALUE, [format!("{retained}header")], |r| {
+            .query_row(native_metadata_value(tx)?, [format!("{retained}header")], |r| {
                 r.get(0)
             })
             .optional()?
@@ -76,7 +76,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         }
         for namespace in namespaces(&retained) {
             tx.execute(
-                "DELETE FROM meta WHERE key>=?1 AND key<?2",
+                configured::metadata_sql(tx, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
                 params![&namespace, format!("{namespace}~")],
             )?;
         }
@@ -84,7 +84,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     }
     let live = super::prefix(path);
     let header: Option<String> = tx
-        .query_row(NATIVE_METADATA_VALUE, [format!("{live}header")], |r| {
+        .query_row(native_metadata_value(tx)?, [format!("{live}header")], |r| {
             r.get(0)
         })
         .optional()?
@@ -99,7 +99,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
             let retained = prefix(path, &digest);
             for (from, to) in namespaces(&live).iter().zip(namespaces(&retained)) {
                 tx.execute(
-                    "INSERT INTO meta(key,value) SELECT ?2 || substr(key,length(?1)+1),value FROM meta WHERE key>=?1 AND key<?3",
+                    configured::metadata_sql(tx, "INSERT INTO meta(key,value) SELECT ?2 || substr(key,length(?1)+1),value FROM meta WHERE key>=?1 AND key<?3", "INSERT INTO meta(namespace,key,value) SELECT semon_namespace(),?2 || substr(key,length(?1)+1),value FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?3")?,
                     params![from, to, format!("{from}~")],
                 )?;
             }
@@ -109,7 +109,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     if !saved.is_empty() || prior.is_some() {
         let encoded = json(&saved)?;
         if prior.as_deref() != Some(&encoded) {
-            tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,encoded])?;
+            tx.execute(native_metadata_put(tx)?, params![key,encoded])?;
         }
     }
     Ok(())
