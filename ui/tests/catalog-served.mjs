@@ -456,11 +456,8 @@ test(
         const navigateNativeWithRetry = async (label, action, canonicalPath) => {
           let record = await captureNativeNavigation(label, action);
           const detail = JSON.stringify(record);
-          assert.equal(
-            record.canonicalPath,
-            canonicalPath,
-            `${label} canonical path: ${detail}`,
-          );
+          assert.equal(record.method, 'GET', `${label} navigation is a read: ${detail}`);
+          assert.equal(record.canonicalPath, canonicalPath, `${label} canonical path: ${detail}`);
           assert.ok(
             record.status === 200 || record.status === 503,
             `${label} unexpected HTTP status: ${detail}`,
@@ -487,9 +484,9 @@ test(
               `${label} retry keeps native mode`,
             );
             assert.equal(
-              retryURL.searchParams.get('t'),
-              url[2],
-              `${label} retry keeps bootstrap access`,
+              retryURL.searchParams.has('t'),
+              false,
+              `${label} retry omits the bootstrap secret`,
             );
             for (const name of ['machine', 'generation']) {
               if (currentURL.searchParams.has(name)) {
@@ -503,6 +500,7 @@ test(
             record = await captureNativeNavigation(`${label} documented GET retry`, (timeout) =>
               nativePage.goto(retryURL.href, { timeout }),
             );
+            assert.equal(record.method, 'GET', `${label} documented retry is a read`);
             assert.equal(
               record.canonicalPath,
               canonicalPath,
