@@ -993,6 +993,9 @@ impl ViewerCore {
                 etag: None,
             };
         }
+        if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
+            return self.session_page(extras, path, query);
+        }
         if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
             return crate::native_page::reply(path, query, |endpoint, args| {
                 self.respond_with(extras, "GET", endpoint, args, None)
@@ -1085,9 +1088,247 @@ impl ViewerCore {
         views[0].1.respond(method, path, query, if_none_match)
     }
 
+    fn session_page(&self, extras: &Extras, path: &str, query: &str) -> ViewerReply {
+        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve_bookmark};
+        let route = match SessionRoute::parse(path, query) {
+            Ok(route) => route,
+            Err(_) => return text(400, "Malformed session address"),
+        };
+        let native_requested = route
+            .controls
+            .get("native")
+            .is_some_and(|value| value == "1");
+        self.follow();
+        let views = self.views();
+        let inventory = self.source_inventory(&views);
+        let shell = || {
+            let selected = route
+                .source
+                .as_deref()
+                .and_then(|source| inventory.index(source))
+                .and_then(|index| views.get(index))
+                .or_else(|| views.first());
+            selected
+                .map(|(_, view)| view.respond("GET", "/", "", None))
+                .unwrap_or_else(|| text(404, "Not found"))
+        };
+        let mut candidates = Vec::<Candidate>::new();
+        let mut unavailable = false;
+        let mut unavailable_views = Vec::new();
+        let mut work_guards = Vec::new();
+        for (index, (internal, view)) in views.iter().enumerate() {
+            let source = if internal.is_empty() {
+                "local"
+            } else {
+                internal
+            };
+            if route
+                .source
+                .as_ref()
+                .is_some_and(|selected| selected != source)
+            {
+                continue;
+            }
+            // Inventory qualification also rejects duplicated or unstable source keys.
+            if !inventory.valid() || inventory.index(source) != Some(index) {
+                continue;
+            }
+            let work_guard = match view.evidence.work.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    unavailable = true;
+                    unavailable_views.push(view);
+                    continue;
+                }
+            };
+            work_guards.push(work_guard);
+            let reply = crate::session_bookmark(
+                view.options(),
+                source,
+                &format!("sid={}", percent_encode(&route.key)),
+            );
+            let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+            if reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0) {
+                unavailable = true;
+                unavailable_views.push(view);
+            }
+            for candidate in value["matches"].as_array().into_iter().flatten() {
+                if let Ok(candidate) = serde_json::from_value(candidate.clone()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        if unavailable {
+            drop(work_guards);
+            if native_requested {
+                // No selected API follows a no-JavaScript retry. Request the
+                // ordinary coalesced source producer after releasing all work
+                // guards; note_catalog_read never waits for that producer.
+                for view in unavailable_views {
+                    let _ = view.note_catalog_read();
+                }
+                // Keep the unavailable observation: rereading the old Catalog
+                // without the producer lock could infer absence from stale rows.
+                let mut arguments = route.controls.clone();
+                if route.legacy_harness.is_some() {
+                    if let Some(source) = &route.source {
+                        arguments.insert("machine".into(), source.clone());
+                    }
+                    if let Some(anchor) = &route.anchor {
+                        arguments.insert("turn".into(), anchor.clone());
+                    }
+                }
+                return crate::native_page::retry_unavailable(path, &arguments);
+            }
+            // A valid address can load before its bounded source observation
+            // finishes. Keep the shell available so the selected APIs own the
+            // retry state and content still waits for exact resolution.
+            return shell();
+        }
+        let resolution = resolve_bookmark(&route, &candidates);
+        match resolution {
+            Resolution::Valid(index) => {
+                let candidate = &candidates[index];
+                if let Some(turn) = &route.turn {
+                    let Some(source_index) = inventory.index(&candidate.source_key) else {
+                        return text(404, "Not found");
+                    };
+                    // Page validation reads the indexed anchor under the same
+                    // producer guards; only focused APIs schedule observation.
+                    let anchor = crate::session_turn_anchor(
+                        views[source_index].1.options(),
+                        &candidate.source_key,
+                        &crate::native_html::query(&[
+                            ("machine", &candidate.source_key),
+                            ("sid", &candidate.catalog_key),
+                            ("turn", turn),
+                            ("scope", "retained_history"),
+                        ]),
+                    );
+                    if anchor.status == 404 {
+                        return anchor;
+                    }
+                    if anchor.status != 200 {
+                        if anchor.status >= 500 || matches!(anchor.status, 409 | 423 | 429) {
+                            if native_requested {
+                                return crate::native_page::reply(path, query, |endpoint, args| {
+                                    self.respond_with(extras, "GET", endpoint, args, None)
+                                });
+                            }
+                            return shell();
+                        }
+                        return anchor;
+                    }
+                    let anchor_body = serde_json::from_slice::<Value>(&anchor.body).ok();
+                    let exact_anchor =
+                        anchor_body
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .is_some_and(|object| {
+                                object.get("api").and_then(Value::as_u64) == Some(1)
+                                    && object.get("source_key").and_then(Value::as_str)
+                                        == Some(candidate.source_key.as_str())
+                                    && object.get("catalog_key").and_then(Value::as_str)
+                                        == Some(candidate.catalog_key.as_str())
+                                    && object.get("turn").and_then(Value::as_str)
+                                        == Some(turn.as_str())
+                                    && object
+                                        .get("generation")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|value| !value.is_empty())
+                                    && object.contains_key("slot")
+                                    && object
+                                        .get("unavailable")
+                                        .is_none_or(|value| value.as_u64() == Some(0))
+                                    && object.get("busy").and_then(Value::as_bool) != Some(true)
+                                    && object.get("incomplete").and_then(Value::as_bool)
+                                        != Some(true)
+                                    && object
+                                        .get("freshness")
+                                        .and_then(|value| value.get("state"))
+                                        .and_then(Value::as_str)
+                                        != Some("incomplete")
+                            });
+                    if !exact_anchor {
+                        if native_requested {
+                            return crate::native_page::reply(path, query, |endpoint, args| {
+                                self.respond_with(extras, "GET", endpoint, args, None)
+                            });
+                        }
+                        return shell();
+                    }
+                    match anchor_body.as_ref().and_then(|value| value.get("slot")) {
+                        Some(slot) if slot.is_null() => return text(404, "Not found"),
+                        Some(slot) if slot.as_u64().is_some() => {}
+                        _ => {
+                            if native_requested {
+                                return crate::native_page::reply(path, query, |endpoint, args| {
+                                    self.respond_with(extras, "GET", endpoint, args, None)
+                                });
+                            }
+                            return shell();
+                        }
+                    }
+                }
+                drop(work_guards);
+                if route.legacy_harness.is_some() {
+                    return ViewerReply::redirect(
+                        route.canonical(&candidate.source_key, &candidate.catalog_key),
+                    );
+                }
+                if native_requested {
+                    crate::native_page::reply(path, query, |endpoint, args| {
+                        self.respond_with(extras, "GET", endpoint, args, None)
+                    })
+                } else if let Some((_, view)) = views.first() {
+                    view.respond("GET", "/", "", None)
+                } else {
+                    text(404, "Not found")
+                }
+            }
+            Resolution::Ambiguous => crate::native_page::reply(path, query, |endpoint, args| {
+                self.respond_with(extras, "GET", endpoint, args, None)
+            }),
+            Resolution::NotFound | Resolution::Mismatch => text(404, "Not found"),
+        }
+    }
+
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
     fn catalog(&self, views: &Arc<Views>, path: &str, query: &str) -> ViewerReply {
+        if path == "/api/session-locate"
+            && query_value(query, "machine").is_none()
+            && views.len() > 1
+        {
+            let inventory = self.source_inventory(views);
+            if !inventory.valid() || views.len() > 100 {
+                return text(503, "Choose a source explicitly");
+            }
+            let mut matches = Vec::<Value>::new();
+            let mut unavailable = 0_u64;
+            for (source, view) in views.iter() {
+                let source = if source.is_empty() { "local" } else { source };
+                let _ = view.note_catalog_read();
+                let reply = crate::session_bookmark(view.options(), source, query);
+                if reply.status != 200 {
+                    return reply;
+                }
+                let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+                unavailable += value["unavailable"].as_u64().unwrap_or(1);
+                matches.extend(value["matches"].as_array().into_iter().flatten().cloned());
+                if matches.len() > 100 {
+                    return text(503, "Choose a source explicitly");
+                }
+            }
+            return ViewerReply {
+                status: 200,
+                content_type: "application/json; charset=utf-8",
+                body: json!({"api":1,"matches":matches,"unavailable":unavailable})
+                    .to_string()
+                    .into_bytes(),
+                etag: None,
+            };
+        }
         let request = if path == "/api/sessions" {
             match crate::catalog::Request::parse(query) {
                 Ok(request) => Some(request),
@@ -1407,118 +1648,22 @@ impl ViewerCore {
         let Some(parts) = page_parts(path) else {
             return Some(text(400, "Invalid request"));
         };
-        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        let shell = || views[0].1.respond("GET", "/", "", None);
-        let labels = native_machine_ids(views);
-        let (harness, id, turn) = match parts.as_slice() {
-            ["machines", id] => {
-                return Some(
-                    if labels.iter().any(|label| label == id)
-                        || views
-                            .iter()
-                            .any(|(key, _)| key == id || (key.is_empty() && *id == "local"))
-                    {
-                        shell()
-                    } else {
-                        text(404, "Not found")
-                    },
-                );
-            }
-            ["s", harness, id] => (*harness, *id, None),
-            ["trace", harness, id, turn] => (*harness, *id, Some(*turn)),
-            _ => return Some(text(404, "Not found")),
-        };
-        if !matches!(harness, "claude" | "codex" | "copilot")
-            || id.is_empty()
-            || id.len() > 4096
-            || id.chars().any(char::is_control)
-            || turn.is_some_and(|turn| {
-                turn.is_empty() || turn.len() > 4096 || turn.chars().any(char::is_control)
-            })
-        {
+        let parts: Vec<_> = parts.iter().map(String::as_str).collect();
+        let ["machines", id] = parts.as_slice() else {
             return Some(text(404, "Not found"));
-        }
-        // A literal native id wins before interpreting a multi-machine alias.
-        let aliases = id.rsplit_once('@').filter(|(_, label)| {
-            views.len() > 1 && labels.iter().any(|candidate| candidate == label)
-        });
-        for (own, selected_label) in
-            std::iter::once((id, None)).chain(aliases.map(|(own, label)| (own, Some(label))))
-        {
-            let mut found = Vec::new();
-            let mut unavailable = false;
-            for (index, (key, view)) in views.iter().enumerate() {
-                let source_key = if key.is_empty() && views.len() == 1 {
-                    "local"
-                } else {
-                    key
-                };
-                let query = format!("sid={}", percent_encode(own));
-                // A publication in progress can contain a newly discovered id.
-                // Serve the shell while its focused APIs wait for that index.
-                unavailable |= view.evidence.work.try_lock().is_err();
-                let reply = crate::session_bookmark(view.options(), source_key, &query);
-                let body = serde_json::from_slice::<Value>(&reply.body).unwrap_or(Value::Null);
-                unavailable |= reply.status >= 500
-                    || body["unavailable"].as_u64().is_some_and(|count| count > 0);
-                let matches = body["matches"].as_array().into_iter().flatten();
-                let mut matched = false;
-                for item in matches {
-                    if item["harness"] != harness {
-                        continue;
-                    }
-                    if let Some(turn) = turn {
-                        let Some(catalog_key) = item["catalog_key"].as_str() else {
-                            continue;
-                        };
-                        let anchor = crate::session_turn_anchor(
-                            view.options(),
-                            source_key,
-                            &format!(
-                                "sid={}&turn={}&scope=retained_history",
-                                percent_encode(catalog_key),
-                                percent_encode(turn)
-                            ),
-                        );
-                        let value =
-                            serde_json::from_slice::<Value>(&anchor.body).unwrap_or(Value::Null);
-                        unavailable |= anchor.status >= 500 || anchor.status == 409;
-                        matched |= anchor.status == 200 && value["slot"].is_number();
-                    } else {
-                        matched = true;
-                    }
-                }
-                // Far-end handoff stubs have indexed owners but no native file.
-                if !matched
-                    && turn.is_none()
-                    && harness == "claude"
-                    && body["matches"].as_array().is_some_and(Vec::is_empty)
-                {
-                    matched = crate::session_query_sources(view.options(), own).is_ok();
-                }
-                if matched && (index < self.droppable() || found.is_empty()) {
-                    found.push(index);
-                }
-            }
-            let candidates: Vec<_> = found
-                .into_iter()
-                .filter(|index| selected_label.is_none_or(|label| labels[*index] == label))
-                .collect();
-            if candidates.len() == 1 {
-                return Some(shell());
-            }
-            if candidates.len() > 1 {
-                return Some(text(404, "Not found"));
-            }
-            if selected_label.is_some() || aliases.is_none() {
-                return Some(if unavailable {
-                    shell()
-                } else {
-                    text(404, "Not found")
-                });
-            }
-        }
-        Some(text(404, "Not found"))
+        };
+        let labels = native_machine_ids(views);
+        Some(
+            if labels.iter().any(|label| label == id)
+                || views
+                    .iter()
+                    .any(|(key, _)| key == id || (key.is_empty() && *id == "local"))
+            {
+                views[0].1.respond("GET", "/", "", None)
+            } else {
+                text(404, "Not found")
+            },
+        )
     }
 }
 

@@ -377,7 +377,7 @@ export default async function attachCheck(browser) {
       await page.waitForFunction(() => !document.querySelector('dialog.image-viewer'));
       const stayed = await page.evaluate(() => location.pathname);
       r.expect(
-        stayed === '/s/claude/' + SID,
+        stayed === '/session/local/' + SID,
         tag + ': the back gesture closes the sheet and stays on the session: ' + stayed,
       );
     }
@@ -390,7 +390,7 @@ export default async function attachCheck(browser) {
     const page = await served(browser, {
       account: true,
       size: 'desktop',
-      path: '/s/claude/' + SID,
+      path: '/session/local/' + SID,
     });
     const got = (await page.evaluate(attachmentApi, SID)).ok;
     R.embedding = got;
