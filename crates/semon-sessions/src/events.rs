@@ -1359,7 +1359,8 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
             .ok_or(crate::storage::StorageError::Unavailable)?
             .reconcile_event(
                 operation_id,
-                path.to_str().ok_or(crate::storage::StorageError::InvalidArguments)?,
+                path.to_str()
+                    .ok_or(crate::storage::StorageError::InvalidArguments)?,
                 harness,
             )
             .map_err(configured_error)?
@@ -2366,14 +2367,20 @@ impl EventCache {
             return Err(io::Error::other(match error {
                 StoreError::Configured(error) => *error,
                 StoreError::Busy(_) => crate::storage::StorageError::Busy,
-                StoreError::Data(_) | StoreError::Failed(_) => crate::storage::StorageError::Unavailable,
+                StoreError::Data(_) | StoreError::Failed(_) => {
+                    crate::storage::StorageError::Unavailable
+                }
             }));
         }
         match error {
             StoreError::Configured(error) => return Err(io::Error::other(*error)),
             StoreError::Busy(_) => {
                 self.busy = true;
-                let what = self.store.as_ref().map(|store| store.describe()).unwrap_or_default();
+                let what = self
+                    .store
+                    .as_ref()
+                    .map(|store| store.describe())
+                    .unwrap_or_default();
                 warn_busy(&what, error);
             }
             StoreError::Data(_) | StoreError::Failed(_) => self.lose_store(error),
@@ -2480,7 +2487,12 @@ impl EventCache {
     /// Reads only selected fields from the sibling state file when its
     /// identity, size or modified time changes. A missing/unreadable file is
     /// an empty input and leaves prior snapshots intact.
-    pub(crate) fn refresh_reported_runs(&mut self, path: &Path, capture_at: i64, dirty: &mut bool) -> io::Result<()> {
+    pub(crate) fn refresh_reported_runs(
+        &mut self,
+        path: &Path,
+        capture_at: i64,
+        dirty: &mut bool,
+    ) -> io::Result<()> {
         self.require_configured_store()?;
         let Ok(metadata) = fs::metadata(path) else {
             return Ok(());
@@ -2533,7 +2545,11 @@ impl EventCache {
 
     /// Writes reported runs through to the store, and takes back every run
     /// it holds.
-    fn save_runs(&mut self, runs: &[crate::facts::ReportedRunSnapshot], stamp: &ReportedFileStamp) -> io::Result<()> {
+    fn save_runs(
+        &mut self,
+        runs: &[crate::facts::ReportedRunSnapshot],
+        stamp: &ReportedFileStamp,
+    ) -> io::Result<()> {
         self.require_configured_store()?;
         if self.store.is_none() {
             return Ok(());
@@ -6590,10 +6606,17 @@ mod tests {
             explicit_store: true,
             ..EventCache::default()
         };
-        let refusal = cache.store_failed(&StoreError::Configured(
-            crate::storage::StorageError::NamespaceUpgradePending,
-        )).unwrap_err();
-        assert_eq!(refusal.get_ref().and_then(|error| error.downcast_ref::<crate::storage::StorageError>()), Some(&crate::storage::StorageError::NamespaceUpgradePending));
+        let refusal = cache
+            .store_failed(&StoreError::Configured(
+                crate::storage::StorageError::NamespaceUpgradePending,
+            ))
+            .unwrap_err();
+        assert_eq!(
+            refusal
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<crate::storage::StorageError>()),
+            Some(&crate::storage::StorageError::NamespaceUpgradePending)
+        );
         assert!(!cache.busy);
         let mut dirty = false;
         let error = scan_file(
@@ -7831,7 +7854,9 @@ mod tests {
         fs::write(&claude_json, first.to_string()).unwrap();
         let mut cache = EventCache::open(&v1).unwrap();
         let mut dirty = false;
-        cache.refresh_reported_runs(&claude_json, 2000, &mut dirty).unwrap();
+        cache
+            .refresh_reported_runs(&claude_json, 2000, &mut dirty)
+            .unwrap();
         assert!(dirty);
         drop(cache);
         let mut cache = EventCache::open(&v1).unwrap();
@@ -7861,7 +7886,9 @@ mod tests {
             "oauthAccount":{"emailAddress":secrets[0],"accountUuid":secrets[1]}
         });
         fs::write(&claude_json, second.to_string()).unwrap();
-        cache.refresh_reported_runs(&claude_json, 5000, &mut dirty).unwrap();
+        cache
+            .refresh_reported_runs(&claude_json, 5000, &mut dirty)
+            .unwrap();
         assert_eq!(cache.reported_runs().count(), 2);
         drop(cache);
         let reopened = EventCache::open(&v1).unwrap();
@@ -7884,10 +7911,14 @@ mod tests {
         let root = scratch("reported-runs-missing");
         let mut cache = EventCache::open(&root.join("index.json")).unwrap();
         let mut dirty = false;
-        cache.refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty).unwrap();
+        cache
+            .refresh_reported_runs(&root.join("missing.json"), 1000, &mut dirty)
+            .unwrap();
         assert!(cache.reported_runs().next().is_none());
         fs::create_dir(root.join("unreadable.json")).unwrap();
-        cache.refresh_reported_runs(&root.join("unreadable.json"), 2000, &mut dirty).unwrap();
+        cache
+            .refresh_reported_runs(&root.join("unreadable.json"), 2000, &mut dirty)
+            .unwrap();
         assert!(cache.reported_runs().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }

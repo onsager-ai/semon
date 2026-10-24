@@ -197,7 +197,10 @@ impl Writer {
     }
 
     fn request_digest(&self, path: &str, harness: &str) -> Result<String, StorageError> {
-        if path.is_empty() || path.len() > 4096 || !matches!(harness, "claude" | "codex" | "copilot") {
+        if path.is_empty()
+            || path.len() > 4096
+            || !matches!(harness, "claude" | "codex" | "copilot")
+        {
             return Err(StorageError::InvalidArguments);
         }
         let mut digest = Sha256::new();
@@ -338,7 +341,11 @@ impl Writer {
         let base = expected.map(header_ledger).unwrap_or_default();
         let prior: Option<(String, String, Option<i64>, String)> = tx.query_row("SELECT source_path,base,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
         if let Some((old_path, old_base, old_revision, old_request)) = prior {
-            if old_path != path || old_base != base || old_revision != revision || old_request != request_digest {
+            if old_path != path
+                || old_base != base
+                || old_revision != revision
+                || old_request != request_digest
+            {
                 return Err(StorageError::Conflict);
             }
         } else {
@@ -598,7 +605,10 @@ mod tests {
         let receipt = restarted.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(receipt.consumed_bytes > 0);
         assert!(receipt.replayed);
-        assert_eq!(restarted.ingest(&"a".repeat(64), &f.raw, "claude"), Err(StorageError::Conflict));
+        assert_eq!(
+            restarted.ingest(&"a".repeat(64), &f.raw, "claude"),
+            Err(StorageError::Conflict)
+        );
         assert_eq!(state, f.state());
         assert_eq!(
             restarted.ingest(&"a".repeat(64), &f.root.join("other"), "codex"),
@@ -676,12 +686,18 @@ mod tests {
         assert_eq!(replay.consumed_bytes, first.consumed_bytes);
         assert_eq!(replay.observed_revision, first.observed_revision);
         assert_eq!(before, f.state());
-        assert_eq!(writer.ingest(&"a".repeat(64), &f.raw, "claude"), Err(StorageError::Conflict));
+        assert_eq!(
+            writer.ingest(&"a".repeat(64), &f.raw, "claude"),
+            Err(StorageError::Conflict)
+        );
         let fresh = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
         assert!(!fresh.replayed);
         assert!(fresh.consumed_bytes > replay.consumed_bytes);
         assert!(f.state()["events"].len() > before["events"].len());
-        assert_eq!(writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap(), replay);
+        assert_eq!(
+            writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap(),
+            replay
+        );
     }
 
     #[test]
@@ -692,19 +708,44 @@ mod tests {
         let mut cache = EventCache::open_configured(&f.config).unwrap();
         let lock = f.db();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        assert_eq!(cache.ingest(&"a".repeat(64), &f.raw, "codex"), Err(StorageError::Busy));
+        assert_eq!(
+            cache.ingest(&"a".repeat(64), &f.raw, "codex"),
+            Err(StorageError::Busy)
+        );
         lock.execute_batch("ROLLBACK").unwrap();
         let receipt = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(!receipt.replayed);
-        let error = cache.retain(&std::collections::BTreeSet::new(), &mut false).unwrap_err();
-        assert_eq!(error.get_ref().and_then(|error| error.downcast_ref::<StorageError>()), Some(&StorageError::NamespaceUpgradePending));
+        let error = cache
+            .retain(&std::collections::BTreeSet::new(), &mut false)
+            .unwrap_err();
+        assert_eq!(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<StorageError>()),
+            Some(&StorageError::NamespaceUpgradePending)
+        );
         let replay = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
-        let stamp = ReportedFileStamp { dev: 0, ino: 0, size: 0, modified_ns: 0 };
+        let stamp = ReportedFileStamp {
+            dev: 0,
+            ino: 0,
+            size: 0,
+            modified_ns: 0,
+        };
         let error = cache.save_runs(&[], &stamp).unwrap_err();
-        assert_eq!(error.get_ref().and_then(|error| error.downcast_ref::<StorageError>()), Some(&StorageError::NamespaceUpgradePending));
-        assert!(cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap().replayed);
+        assert_eq!(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<StorageError>()),
+            Some(&StorageError::NamespaceUpgradePending)
+        );
+        assert!(
+            cache
+                .ingest(&"a".repeat(64), &f.raw, "codex")
+                .unwrap()
+                .replayed
+        );
     }
 
     #[test]
