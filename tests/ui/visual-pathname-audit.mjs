@@ -33,7 +33,8 @@ function read(file) {
 function evidenceFile(root, relative) {
   if (typeof relative !== 'string') throw new Error('Missing evidence path');
   const result = path.resolve(root, relative);
-  if (!result.startsWith(path.resolve(root) + path.sep)) throw new Error('Evidence path escapes root');
+  if (!result.startsWith(path.resolve(root) + path.sep))
+    throw new Error('Evidence path escapes root');
   return result;
 }
 function rows(report) {
@@ -77,10 +78,10 @@ export function audit({ root, previousRoot, registry }) {
     for (const { kind, row } of currentRows.filter(({ row }) => row.pass === false)) {
       const state = { comparator, scope, kind, key: row.key };
       try {
-        if (
-          currentRows.filter((entry) => entry.kind === kind && entry.row.key === row.key).length !== 1
-        )
-          throw new Error('Current exact state duplicated');
+        const currentMatches = currentRows.filter(
+          (entry) => entry.kind === kind && entry.row.key === row.key,
+        );
+        if (currentMatches.length !== 1) throw new Error('Current exact state duplicated');
         const matches = registry.acceptances.filter((entry) => identity(entry) === identity(state));
         if (matches.length !== 1) throw new Error('Expected one accepted state');
         const accepted = matches[0];
@@ -100,7 +101,9 @@ export function audit({ root, previousRoot, registry }) {
           for (const type of TYPES) {
             const approved = accepted.artifactDigests?.[side]?.[type];
             if (!approved || prior.artifactDigests?.[side]?.[type] !== approved)
-              throw new Error('Previous artifact is not the accepted binding: ' + side + '.' + type);
+              throw new Error(
+                'Previous artifact is not the accepted binding: ' + side + '.' + type,
+              );
             if (
               (side !== 'candidate' || type !== 'evidence') &&
               row.artifactDigests?.[side]?.[type] !== approved
@@ -112,7 +115,9 @@ export function audit({ root, previousRoot, registry }) {
         const currentDigest = row.artifactDigests?.candidate?.evidence;
         let reason = 'all-six-digests-identical';
         if (currentDigest !== approvedDigest) {
-          const oldBytes = bytes(evidenceFile(previousRoot, prior.artifactPaths?.candidateEvidence));
+          const oldBytes = bytes(
+            evidenceFile(previousRoot, prior.artifactPaths?.candidateEvidence),
+          );
           const newBytes = bytes(evidenceFile(root, row.artifactPaths?.candidateEvidence));
           if (digest(oldBytes) !== approvedDigest || digest(newBytes) !== currentDigest)
             throw new Error('Candidate evidence bytes do not match recorded digests');
@@ -147,13 +152,17 @@ export function audit({ root, previousRoot, registry }) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const root = process.env.SEMON_UI_OUT,
     previousRoot = process.env.SEMON_VISUAL_PREVIOUS;
-  if (!root || !previousRoot) throw new Error('SEMON_UI_OUT and SEMON_VISUAL_PREVIOUS are required');
+  if (!root || !previousRoot)
+    throw new Error('SEMON_UI_OUT and SEMON_VISUAL_PREVIOUS are required');
   const result = audit({
     root,
     previousRoot,
     registry: read(new URL('./visual-acceptance.json', import.meta.url)),
   });
-  fs.writeFileSync(path.join(root, 'visual-pathname-audit.json'), JSON.stringify(result, null, 2) + '\n');
+  fs.writeFileSync(
+    path.join(root, 'visual-pathname-audit.json'),
+    JSON.stringify(result, null, 2) + '\n',
+  );
   console.log(
     JSON.stringify({
       qualified: result.qualified.length,
