@@ -120,7 +120,7 @@ fn prepare(
     if Stat::from_metadata(&file.metadata()?)? != ledger.stat {
         return Err(io::ErrorKind::WouldBlock.into());
     }
-    let snapshot = input.binding.proof_snapshot().map_err(sql_error)?;
+    let snapshot = input.binding.proof_snapshot().map_err(io::Error::other)?;
     let crate::storage::StoreBackend::Sqlite { database } = &input.binding.config().backend;
     if database != &store.path {
         return Err(io::ErrorKind::PermissionDenied.into());
@@ -280,7 +280,7 @@ pub(in crate::events::store) fn advance(
                 database: store.path.clone(),
             },
             namespace: crate::storage::LogicalSourceNamespace::new("native-repair-local")
-                .map_err(sql_error)?,
+                .map_err(io::Error::other)?,
             expected_stream_epoch: None,
         },
     );

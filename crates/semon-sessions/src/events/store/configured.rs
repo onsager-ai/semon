@@ -1575,18 +1575,34 @@ mod tests {
         let f = Fixture::new();
         let binding = crate::storage::NativeReaderBinding::Admitted(f.config.clone());
         assert!(binding.proof_snapshot().is_ok());
-        let transitional = crate::storage::NativeReaderBinding::TransitionalUnboundLocal(f.config.clone());
-        assert!(matches!(transitional.proof_snapshot(), Err(StorageError::NamespaceUpgradePending)));
+        let transitional =
+            crate::storage::NativeReaderBinding::TransitionalUnboundLocal(f.config.clone());
+        assert!(matches!(
+            transitional.proof_snapshot(),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("0".repeat(64));
-        assert!(matches!(crate::storage::NativeReaderBinding::Admitted(stale).proof_snapshot(), Err(StorageError::ScopeChanged)));
+        assert!(matches!(
+            crate::storage::NativeReaderBinding::Admitted(stale).proof_snapshot(),
+            Err(StorageError::ScopeChanged)
+        ));
         let mut foreign = f.config.clone();
         foreign.namespace = LogicalSourceNamespace::new("foreign").unwrap();
-        assert!(matches!(crate::storage::NativeReaderBinding::Admitted(foreign).proof_snapshot(), Err(StorageError::NamespaceMismatch)));
+        assert!(matches!(
+            crate::storage::NativeReaderBinding::Admitted(foreign).proof_snapshot(),
+            Err(StorageError::NamespaceMismatch)
+        ));
         let mut absent = f.config.clone();
         let database = f.root.join("absent.sqlite3");
-        absent.backend = StoreBackend::Sqlite { database: database.clone() };
-        assert!(crate::storage::NativeReaderBinding::Admitted(absent).proof_snapshot().is_err());
+        absent.backend = StoreBackend::Sqlite {
+            database: database.clone(),
+        };
+        assert!(
+            crate::storage::NativeReaderBinding::Admitted(absent)
+                .proof_snapshot()
+                .is_err()
+        );
         assert!(!database.exists());
     }
 
