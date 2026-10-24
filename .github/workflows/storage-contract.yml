@@ -8,6 +8,29 @@ concurrency:
   group: storage-contract-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting independently of compilation
+        id: rustfmt
+        run: cargo fmt --all --check
+      - name: Prepare formatting patch for thermal-restricted review
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        run: |
+          cargo fmt --all
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/storage-rustfmt.patch"
+      - name: Retain exact formatting patch
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: storage-rustfmt
+          path: ${{ runner.temp }}/storage-rustfmt.patch
   boundary:
     runs-on: ubuntu-latest
     steps:
