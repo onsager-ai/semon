@@ -1704,17 +1704,20 @@ mod tests {
             port,
         };
         if let Some(expected_session) = expected_session {
-            viewer.core.demand_catalog_source("local").unwrap();
+            // This fixture owns a known warm publication. Prepare it directly,
+            // without scheduling an unrelated producer between qualification
+            // and the HTTP request. Busy-index behavior has its own held fixture.
+            let view = viewer.core.machine_views().into_iter().next().unwrap();
+            let mut work = lock(&view.evidence.work);
             eventually("HTTP session fixture publication", || {
-                let page = viewer
-                    .core
-                    .respond("GET", "/api/sessions", "limit=60", None);
+                view.refresh_catalog_locked(&mut work, model::now_ms())
+                    .unwrap();
+                let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
                 let page_body: Value = serde_json::from_slice(&page.body).ok()?;
-                let located = viewer.core.respond(
-                    "GET",
-                    "/api/session-locate",
+                let located = crate::session_bookmark(
+                    &fixture.options,
+                    "local",
                     &format!("machine=local&sid={expected_session}"),
-                    None,
                 );
                 let located_body: Value = serde_json::from_slice(&located.body).ok()?;
                 (page.status == 200
