@@ -1506,10 +1506,29 @@ mod tests {
                             db.execute_batch(ddl).unwrap();
                         }
                         assert_eq!(objects(&db), required_objects);
-                        assert_eq!(db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-                        assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), if copied { "scoped" } else { "legacy" });
+                        assert_eq!(
+                            db.query_row(
+                                "SELECT count(*) FROM pragma_foreign_key_check",
+                                [],
+                                |r| r.get::<_, i64>(0)
+                            )
+                            .unwrap(),
+                            0
+                        );
+                        assert_eq!(
+                            copied_usage_sql(&db, "legacy", "scoped").unwrap(),
+                            if copied { "scoped" } else { "legacy" }
+                        );
                         for table in ["usage_identity", "usage", "codex_usage"] {
-                            assert_eq!(db.query_row("SELECT count(*) FROM pragma_foreign_key_list(?1)", [table], |r| r.get::<_, i64>(0)).unwrap(), if copied { 2 } else { 0 });
+                            assert_eq!(
+                                db.query_row(
+                                    "SELECT count(*) FROM pragma_foreign_key_list(?1)",
+                                    [table],
+                                    |r| r.get::<_, i64>(0)
+                                )
+                                .unwrap(),
+                                if copied { 2 } else { 0 }
+                            );
                         }
                         if metadata {
                             assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
@@ -1652,10 +1671,7 @@ mod tests {
                 db.execute_batch(ddl).unwrap();
             }
             // Cache the admitted shape, then invalidate a real authored schema.
-            assert_eq!(
-                copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                "scoped"
-            );
+            assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(), "scoped");
             db.execute_batch(corrupt).unwrap();
             let tx = db.transaction().unwrap();
             let before: i64 = tx
