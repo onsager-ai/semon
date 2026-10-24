@@ -58,6 +58,9 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
     .map_err(failed)?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(failed)?;
+    // Fresh composite native families qualify their scoped read statements
+    // before enrollment; the namespace still comes only from explicit config.
+    super::catalog_namespace::register(&db, &config.namespace)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;

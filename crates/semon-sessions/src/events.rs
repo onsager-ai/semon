@@ -1369,7 +1369,11 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
         }
         self.event_operation = Some(operation_id.to_owned());
         let mut dirty = false;
-        scan_file(path, harness, self, &mut dirty).map_err(|error| {
+        let scanned = scan_file(path, harness, self, &mut dirty);
+        // Operation identity is request-scoped. Clear it on both scan outcomes
+        // before propagating an error or performing receipt reads.
+        self.event_operation = None;
+        scanned.map_err(|error| {
             error
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())

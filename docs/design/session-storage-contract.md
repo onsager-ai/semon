@@ -11,6 +11,52 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 12 checkpoint: composite core Event rows (C1a WIP)
+
+Fresh stores created explicitly with `StoreConfig::create_native_store` have
+namespace-leading physical primary, unique and secondary keys on `files`,
+`events` and `signals`. Child foreign keys include namespace. Creation requires
+a previously absent physical path and a host-chosen stream epoch; any existing
+file refuses, without repair, copying or reset. Enrollment and bounded Catalog
+assignment remain separate explicit operations. Old singleton Event stores
+return `NamespaceUpgradePending` before Event preparation changes native state.
+Their facts, originals and retained proofs are preserved; the required bounded
+supported-current migration is still pending.
+
+The shared file/Event/Signal writers and row decoders now select authored SQL
+for that physical family shape. Configured statements explicitly scope the
+namespace, including ledger/read queries, file ID allocation, upserts, tail cuts,
+replacement deletes and the Tree writer's file lookup. This keeps one parser,
+identity and projection pipeline. The attached file-pricing indexes and triggers
+also scope file IDs by namespace. No SQL is rewritten at runtime, no view UPSERT
+is used, and a failed statement never selects another schema or engine.
+
+`storage_event_tables.qualification` is per-family: 1 for these three composite
+tables and 0 for the 22 remaining singleton families, including `meta`.
+Operation and reconciliation tables retain their namespace-leading keys. Global
+writer qualification remains zero, public second-source admission remains
+closed, and Catalog publication remains fenced. **Full Manager C1 is not yet
+finished: namespace-composite `meta` and connected proof/metadata helpers remain
+C1b.** This is a primary schema/writer increment, not full #478/#477 acceptance.
+
+CI-only regressions enumerate physical keys/indexes/foreign keys and honest
+per-table qualification, exercise private equal-path/equal-ID core writes,
+append/upsert, scoped row reads, deletes and rollback, and preserve all existing
+configured ingestion/restart/reconciliation/Busy/effect/batch tests. The private
+fixture bypasses public admission only for the qualified core; it does not claim
+a full two-namespace parser/usage/proof writer. No local tests or formatter ran.
+
+Immediate continuation: port fresh `meta` DDL plus every connected metadata
+statement in `store.rs`, `chunk_proofs{,/published}.rs`, `launch_calls.rs`,
+`relocation.rs`, `tree_state.rs` and `native_timing.rs` together. Preserve global
+Catalog epoch/custody facts and original metadata without in-place row copying.
+Then port usage/proof/Tree/relocation/dependency/mutation families (C2) and run the
+full public-path two-source fixture before reconsidering PG parallel readiness.
+The two memory-before-persist retry regressions remain pending and must precede
+exposing those currently refused methods. Ingestion now clears its operation
+context after both scan outcomes, before receipt reads or error propagation;
+same-handle Busy and success checks assert that cleanup.
+
 ## Worker 11 checkpoint: request identity and recoverable errors (partial)
 
 Configured native operation IDs now bind a length-delimited SHA-256 request
@@ -34,8 +80,9 @@ same-handle Busy recovery, retention refusal followed by successful reconciliati
 append/replay/restart, fresh-ID advancement, mismatched harness and absent Raw.
 Existing effect rollback and batch tests remain enabled.
 
-**The primary Worker 11 namespace-composite port is unfinished.** All 25 native
-tables still have singleton keys, including metadata. No two-source qualification
+**At the Worker 11 pin the namespace-composite port was unfinished.** All 25
+native tables then had singleton keys, including metadata; see C1a above for
+the current three-table increment. No two-source qualification
 or connected Catalog publication is claimed, and no public gate is opened.
 The inventory retains all 43 unqualified owners and qualification zero.
 Reading the shared writer confirms that its transaction reaches relocation,
@@ -79,7 +126,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/reprice.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/semantic_stage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `events/store/configured.rs` | direct | Configured singleton Event transaction; native row keys remain single-source and global qualification stays zero. |
+| `events/store/configured.rs` | direct | Configured composite files/events/signals transaction; 22 native families remain singleton and global qualification stays zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |

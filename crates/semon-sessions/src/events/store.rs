@@ -353,6 +353,67 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS usage_identity (
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    record_uuid TEXT NOT NULL,
+    PRIMARY KEY(file_id, message_id, record_uuid)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(message_id, record_uuid, file_id);
+CREATE TABLE IF NOT EXISTS usage (
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    model TEXT,
+    input INTEGER NOT NULL,
+    cached_input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    reasoning_output INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    model_input INTEGER NOT NULL,
+    model_output INTEGER NOT NULL,
+    model_cache_write INTEGER NOT NULL,
+    model_cache_read INTEGER NOT NULL,
+    billing_input INTEGER NOT NULL,
+    billing_output INTEGER NOT NULL,
+    billing_cache_read INTEGER NOT NULL,
+    billing_cache_write_5m INTEGER NOT NULL,
+    billing_cache_write_1h INTEGER NOT NULL,
+    billing_web_search_requests INTEGER NOT NULL,
+    billing_speed TEXT,
+    billing_service_tier TEXT,
+    billing_prompt_size INTEGER NOT NULL,
+    billing_timestamp INTEGER,
+    billing_split_unknown INTEGER NOT NULL,
+    record_ids TEXT NOT NULL,
+    PRIMARY KEY (file_id, message_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS codex_usage (
+    file_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    t INTEGER,
+    PRIMARY KEY (file_id, seq)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS reported_runs (
+    session_id TEXT NOT NULL,
+    start INTEGER NOT NULL,
+    cost REAL,
+    duration INTEGER,
+    api_duration INTEGER,
+    tool_duration INTEGER,
+    lines_added INTEGER,
+    lines_removed INTEGER,
+    model_usage TEXT NOT NULL,
+    capture_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, start)
+) STRICT, WITHOUT ROWID;
+";
+
+const LEGACY_EVENT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
     file_id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
@@ -427,65 +488,7 @@ CREATE TABLE IF NOT EXISTS signals (
     v INTEGER,
     PRIMARY KEY (file_id, seq)
 ) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS usage_identity (
-    file_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    record_uuid TEXT NOT NULL,
-    PRIMARY KEY(file_id, message_id, record_uuid)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(message_id, record_uuid, file_id);
-CREATE TABLE IF NOT EXISTS usage (
-    file_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    model TEXT,
-    input INTEGER NOT NULL,
-    cached_input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    reasoning_output INTEGER NOT NULL,
-    total INTEGER NOT NULL,
-    model_input INTEGER NOT NULL,
-    model_output INTEGER NOT NULL,
-    model_cache_write INTEGER NOT NULL,
-    model_cache_read INTEGER NOT NULL,
-    billing_input INTEGER NOT NULL,
-    billing_output INTEGER NOT NULL,
-    billing_cache_read INTEGER NOT NULL,
-    billing_cache_write_5m INTEGER NOT NULL,
-    billing_cache_write_1h INTEGER NOT NULL,
-    billing_web_search_requests INTEGER NOT NULL,
-    billing_speed TEXT,
-    billing_service_tier TEXT,
-    billing_prompt_size INTEGER NOT NULL,
-    billing_timestamp INTEGER,
-    billing_split_unknown INTEGER NOT NULL,
-    record_ids TEXT NOT NULL,
-    PRIMARY KEY (file_id, message_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS codex_usage (
-    file_id INTEGER NOT NULL,
-    seq INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    cache_write INTEGER NOT NULL,
-    cache_read INTEGER NOT NULL,
-    t INTEGER,
-    PRIMARY KEY (file_id, seq)
-) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS files_cwd ON files(cwd,path);
-CREATE TABLE IF NOT EXISTS reported_runs (
-    session_id TEXT NOT NULL,
-    start INTEGER NOT NULL,
-    cost REAL,
-    duration INTEGER,
-    api_duration INTEGER,
-    tool_duration INTEGER,
-    lines_added INTEGER,
-    lines_removed INTEGER,
-    model_usage TEXT NOT NULL,
-    capture_at INTEGER NOT NULL,
-    PRIMARY KEY (session_id, start)
-) STRICT, WITHOUT ROWID;
 ";
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
@@ -4472,9 +4475,10 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set, shared by cold initialization and whole-index rebuilds.
-fn storage_ddl() -> [&'static str; 10] {
+fn storage_ddl() -> [&'static str; 12] {
     [
         SCHEMA,
+        LEGACY_EVENT_SCHEMA,
         native_usage::SCHEMA,
         tree_state::SCHEMA,
         semantic_stage::SCHEMA,
@@ -4484,6 +4488,7 @@ fn storage_ddl() -> [&'static str; 10] {
         crate::catalog_search::SCHEMA,
         crate::storage::sqlite::changes::SCHEMA,
         reprice::SCHEMA,
+        reprice::FILE_SCHEMA,
     ]
 }
 
@@ -5444,8 +5449,9 @@ pub(crate) fn ledger_row(
 ) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .prepare_cached(
-            "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns \
-             FROM files WHERE path = ?1",
+            configured::sql(connection,
+                "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns FROM files WHERE path=?1",
+                "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns FROM files WHERE namespace=semon_namespace() AND path=?1")?,
         )?
         .query_row(
             [path],
@@ -5490,10 +5496,10 @@ impl<'c> Readers<'c> {
         Ok(Self {
             connection,
             events: connection.prepare(&format!(
-                "SELECT {EVENT_COLUMNS} FROM events WHERE file_id = ?1 ORDER BY extra, seq"
+                "SELECT {EVENT_COLUMNS} FROM events WHERE {}file_id = ?1 ORDER BY extra, seq", configured::predicate(connection)?
             ))?,
             signals: connection.prepare(&format!(
-                "SELECT {SIGNAL_COLUMNS} FROM signals WHERE file_id = ?1 ORDER BY seq"
+                "SELECT {SIGNAL_COLUMNS} FROM signals WHERE {}file_id = ?1 ORDER BY seq", configured::predicate(connection)?
             ))?,
             usage: connection.prepare(&format!(
                 "SELECT {USAGE_COLUMNS} FROM usage WHERE file_id = ?1"
@@ -5792,9 +5798,10 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
 
 /// Deletes a file's child rows, keeping its `files` row and id.
 fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
+    for table in ["events", "signals"] {
+        transaction.execute(&format!("DELETE FROM {table} WHERE {}file_id=?1", configured::predicate(transaction)?), [file_id])?;
+    }
     for table in [
-        "events",
-        "signals",
         "usage_identity",
         "usage",
         "codex_usage",
@@ -6086,7 +6093,7 @@ fn write_file(
     measurements.record("rate_limit_serialization", started, 1);
     let file_id: i64 = {
         let started = measurements.start();
-        let mut statement = transaction.prepare_cached(PUT_FILE)?;
+        let mut statement = transaction.prepare_cached(configured::sql(transaction, PUT_FILE, configured::PUT_FILE)?)?;
         measurements.record("file_prepare", started, 1);
         let started = measurements.start();
         let parameters = params![
@@ -6140,9 +6147,9 @@ fn write_file(
     #[cfg(test)]
     configured::effect("proof_tree")?;
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(PUT_EVENT)?;
+    let mut put = transaction.prepare_cached(configured::sql(transaction, PUT_EVENT, configured::PUT_EVENT)?)?;
     let mut cut = transaction
-        .prepare_cached("DELETE FROM events WHERE file_id = ?1 AND extra = ?2 AND seq >= ?3")?;
+        .prepare_cached(configured::sql(transaction, "DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3")?)?;
     for (extra, before, touched, new_rows) in [
         (false, changes.before_events, &changes.events, events),
         (true, changes.before_extras, &changes.extras, extras),
@@ -6164,7 +6171,7 @@ fn write_file(
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(PUT_SIGNAL)?;
+    let mut put = transaction.prepare_cached(configured::sql(transaction, PUT_SIGNAL, configured::PUT_SIGNAL)?)?;
     changed(
         changes.before_signals,
         &changes.signals,
@@ -6186,7 +6193,7 @@ fn write_file(
         |from| {
             transaction
                 .execute(
-                    "DELETE FROM signals WHERE file_id = ?1 AND seq >= ?2",
+                    configured::sql(transaction, "DELETE FROM signals WHERE file_id=?1 AND seq>=?2", "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2")?,
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
