@@ -10,7 +10,7 @@ export default async function stepNames(browser) {
   for (const live of [true, false]) {
     const page = await served(browser, { size: 'desktop' });
     try {
-      await page.waitForFunction(() => history.state?.v === 'home');
+      await page.waitForFunction(() => history.state?.v === 'sessions');
       await selectedFixture(page, sid, (tx) => {
         const tool = tx.entries.find((e) => e.k === 'tool');
         Object.assign(tool, {

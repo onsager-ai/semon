@@ -88,6 +88,8 @@ for (const width of [390, 1280])
             await new Promise((resolve) => setTimeout(resolve, 50));
           }
           assert(model.recent?.length, 'bounded producer did not publish Home');
+          const sources = await originalFetch('/api/session-sources').then((r) => r.json());
+          assert(sources.items?.length, 'bounded producer did not publish source discovery');
           const add = EventTarget.prototype.addEventListener,
             remove = EventTarget.prototype.removeEventListener;
           const registrations = new Map();
@@ -195,14 +197,16 @@ for (const width of [390, 1280])
                 super.disconnect();
               }
             };
-          const ready = async () => {
+          const waitFor = async (condition, message) => {
             const deadline = performance.now() + 10000;
-            while (!document.querySelector('#lanes .srow')) {
-              assert(performance.now() < deadline, 'boot did not draw Recent');
+            while (!condition()) {
+              assert(performance.now() < deadline, message);
               await new Promise((resolve) => originalTimers.setTimeout.call(window, resolve, 25));
             }
             await settle();
           };
+          const ready = () =>
+            waitFor(() => document.querySelector('#lanes .srow'), 'boot did not draw Recent');
           const effects = () =>
             timers.size +
             intervals.size +
@@ -220,36 +224,40 @@ for (const width of [390, 1280])
           const requestPaths = [];
           window.fetch = (path, options) => {
             requestPaths.push(String(path).split('?')[0]);
+            // Sessions boot owns source discovery before scoped capabilities.
+            // Hold that exact request, independent of overview timing.
+            if (hold && String(path).startsWith('/api/session-sources')) {
+              requests++;
+              pendingSignal = options?.signal;
+              return new Promise((resolve) => {
+                pendingResolve = () =>
+                  resolve(
+                    new Response(JSON.stringify(sources), {
+                      headers: { 'Content-Type': 'application/json' },
+                    }),
+                  );
+              });
+            }
             if (String(path).startsWith('/api/viewer/home')) {
               requests++;
-              if (hold) {
-                pendingSignal = options?.signal;
-                return new Promise((resolve) => {
-                  pendingResolve = () =>
-                    resolve(
-                      new Response(JSON.stringify(model), {
-                        headers: { 'Content-Type': 'application/json' },
-                      }),
-                    );
-                });
-              }
-              return Promise.resolve(
-                new Response(
+              // Keep the producer's current scoped generation. Replaying the boot
+              // snapshot can make preview reads permanently stale after discovery.
+              return originalFetch(path, options).then(async (response) => {
+                const current = await response.json();
+                return new Response(
                   JSON.stringify(
                     pendingObservation
                       ? {
-                          ...model,
+                          ...current,
                           observations: [
-                            { source_key: model.machines[0].key, state: 'catalog_unavailable' },
+                            { source_key: current.machines[0].key, state: 'catalog_unavailable' },
                           ],
                         }
-                      : model,
+                      : current,
                   ),
-                  {
-                    headers: { 'Content-Type': 'application/json' },
-                  },
-                ),
-              );
+                  { headers: { 'Content-Type': 'application/json' } },
+                );
+              });
             }
             if (String(path).startsWith('/api/session-transcript'))
               return new Promise((resolve) =>
@@ -402,7 +410,7 @@ for (const width of [390, 1280])
                 panelBody = document.querySelector('dialog .panel-b');
               }
               if (mode === 'host') {
-                document.querySelector('#nav [data-go="home"]').click();
+                document.querySelector('#nav [data-go="analytics"]').click();
                 await settle();
                 assert(
                   document.querySelector('#nav [data-go="machines"]').getAttribute('href') ===
@@ -427,7 +435,11 @@ for (const width of [390, 1280])
               await settle();
               assert(requests === before, 'disposed refresh listener polled');
             }
-            history.replaceState(null, '', '/');
+            history.replaceState(
+              null,
+              '',
+              '/machines/' + encodeURIComponent(model.machines[0].key),
+            );
             pendingObservation = true;
             const retrying = Application.mountViewerApplication(host());
             await ready();
@@ -435,7 +447,23 @@ for (const width of [390, 1280])
               document.body.textContent.includes('Retrying'),
               'pending observation was not shown',
             );
+            const retryRequests = requests;
+            pendingObservation = false;
+            await waitFor(
+              () => requests > retryRequests && !document.body.textContent.includes('Retrying'),
+              'pending observation did not retry to success',
+            );
             retrying.destroy();
+            await settle();
+            assert(count() === 0 && effects() === 0, 'successful retry leaked effects');
+            pendingObservation = true;
+            const canceling = Application.mountViewerApplication(host());
+            await ready();
+            assert(
+              document.body.textContent.includes('Retrying'),
+              'cancel fixture was not pending',
+            );
+            canceling.destroy();
             await settle();
             assert(count() === 0 && effects() === 0, 'pending overview retry survived teardown');
             const retiredRequests = requests;
@@ -445,14 +473,18 @@ for (const width of [390, 1280])
             history.replaceState(null, '', '/');
             hold = true;
             const old = Application.mountViewerApplication(host());
-            await settle();
-            assert(pendingResolve, 'boot was not pending');
+            await waitFor(() => pendingResolve, 'source discovery was not pending');
             old.destroy();
-            assert(pendingSignal?.aborted, 'pending model was not aborted');
+            assert(pendingSignal?.aborted, 'pending source discovery was not aborted');
             const before = document.body.textContent;
+            const retiredDiscoveryRequests = requestPaths.length;
             pendingResolve();
             await settle();
-            assert(document.body.textContent === before, 'late overview revived a root');
+            assert(document.body.textContent === before, 'late source discovery revived a root');
+            assert(
+              requestPaths.length === retiredDiscoveryRequests && count() === 0 && effects() === 0,
+              'late discovery admitted scoped work or leaked effects',
+            );
             hold = false;
             const first = Application.mountViewerApplication(host());
             await ready();

@@ -420,7 +420,7 @@ jobs:
       # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
       # the local one does: the fixture gaps (the served model and every transcript against the retained fixture data, so the
       # pushed transcripts are the machine's own), and the pixel comparison, served against served (the pushed copy against the
-      # machine's own server), of Home, the sessions list, Analytics and two
+      # machine's own server), of root Sessions, the sessions list, Analytics and two
       # session transcripts (harbor, a Claude session with a Codex run and a subagent under it, and deps, a Codex run), at
       # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
       # local fixture above.

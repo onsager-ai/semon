@@ -400,7 +400,7 @@ export function createCatalogViewer(
         navigateApplication(destination.href);
         return true;
       }
-      if (destination.key === 'home' || destination.key === 'analytics') {
+      if (destination.key === 'analytics') {
         goOverview(destination.key);
         return true;
       }
@@ -494,6 +494,13 @@ export function createCatalogViewer(
     jumpSlot = document.createElement('span'),
     jumpTarget = document.createElement('div');
   const readerResize = new ResizeObserver(() => {
+    // Annotation navigation owns its target across paged/group layout commits,
+    // just as opening-end navigation owns the tail across those same commits.
+    if (active?.errorMode) {
+      const view = active;
+      scope.frame(() => highlightAnnotation(view));
+      return;
+    }
     if (
       active &&
       active === pinView &&
@@ -864,7 +871,7 @@ export function createCatalogViewer(
     history.pushState(null, '', url);
     fromLocation();
   }
-  function leaveScreen() {
+  function leaveScreen(keepOverview = false) {
     if (navigation.route.v === 'host') {
       hostScroll.delete(navigation.route.id);
       hostScroll.set(navigation.route.id, {
@@ -891,9 +898,11 @@ export function createCatalogViewer(
       // survive a destination change.
       closeSessionComposer(active.root);
     }
-    overview.leave();
-    for (const request of overviewRequests) request.abort();
-    overviewRequests.clear();
+    if (!keepOverview) {
+      overview.leave();
+      for (const request of overviewRequests) request.abort();
+      overviewRequests.clear();
+    }
     ++listEpoch;
     updating = false;
     scope.clearTimeout(listRetry);
@@ -1018,10 +1027,10 @@ export function createCatalogViewer(
     event.preventDefault();
     navigateApplication(url.pathname + url.search + url.hash);
   });
-  function goOverview(route: 'home' | 'analytics' | 'machines', push = true) {
+  function goOverview(route: 'analytics' | 'machines', push = true) {
     leaveScreen();
     navigation.route = { v: route };
-    if (push) history.pushState(navigation.route, '', route === 'home' ? '/' : '/' + route);
+    if (push) history.pushState(navigation.route, '', '/' + route);
     shell.closeDrawer(true);
     overview.draw();
     void overview.refresh();
@@ -1366,7 +1375,6 @@ export function createCatalogViewer(
                 ? 'sessions'
                 : route,
         {
-          home: viewerHost?.navigation?.paths?.home ?? '/',
           analytics: viewerHost?.navigation?.paths?.analytics ?? '/analytics',
           sessions:
             '/sessions?' +
@@ -1380,7 +1388,6 @@ export function createCatalogViewer(
             })(),
           machines: machinesHref(),
         },
-        overview.waitingCount() === undefined ? {} : { home: overview.waitingCount()! },
       ),
       rail,
     );
@@ -1774,6 +1781,9 @@ export function createCatalogViewer(
       .closest('.tgroup')
       ?.querySelector<HTMLButtonElement>('.tgroup > button[aria-expanded="false"]')
       ?.click();
+    // Opening a group changes retained content-visibility turn heights. Commit
+    // those heights before computing the target's viewport-relative position.
+    measureSessionScreen(view.root);
     const phone = matchMedia('(max-width: 760px)').matches,
       main = document.querySelector<HTMLElement>('#main')!;
     const row = (node.querySelector(':scope > button') ?? node).getBoundingClientRect();
@@ -2595,7 +2605,7 @@ export function createCatalogViewer(
     if (active) active.scroll = scroll;
     else if (!sourcesOpen) listScroll = scroll;
   }
-  function goList(push = true) {
+  function goList(push = true, keepOverview = false) {
     if (push && active && new URLSearchParams(location.search).get('all_machines') === '1') {
       const p = browsingParams();
       p.delete('machine');
@@ -2604,7 +2614,7 @@ export function createCatalogViewer(
       fromLocation();
       return;
     }
-    leaveScreen();
+    leaveScreen(keepOverview);
     navigation.route = { v: 'sessions' };
     if (push) history.pushState(navigation.route, '', '/sessions?' + browsingParams());
     root.replaceChildren();
@@ -2783,6 +2793,9 @@ export function createCatalogViewer(
           disabled: view.loading,
           busy: view.loading,
         });
+      // A cached redraw can still change clamp/pager geometry. Keep the same
+      // post-commit annotation placement as a full transcript redraw.
+      if (view.errorMode) scope.frame(() => highlightAnnotation(view));
       return;
     }
     view.renderedRevision = view.store.revision;
@@ -4047,6 +4060,19 @@ export function createCatalogViewer(
       sourceItems = append ? [...sourceItems, ...next.items] : next.items;
       sourceCursor = next.next_cursor;
       sourcesRetryDelay = 1000;
+      // Standalone readers discover source authority before scoped reads.
+      // A sole source preserves the single-machine landing behavior; several
+      // sources retain the existing picker until the user chooses one.
+      if (
+        !viewerHost?.catalogSources &&
+        !capabilities.source_key &&
+        sourcesOpen &&
+        navigation.route.v === 'sessions' &&
+        sourceCursor === null &&
+        sourceItems.length === 1 &&
+        new URLSearchParams(location.search).get('choose_source') !== '1'
+      )
+        await switchSource(sourceItems[0].source_key, false, true);
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
@@ -4098,9 +4124,17 @@ export function createCatalogViewer(
     drawSources();
     if (!sourceItems.length) await loadSources(false);
   }
-  async function switchSource(key: string, push = true) {
+  async function switchSource(key: string, push = true, fromChooser = push) {
     if (disposed) return;
-    const epoch = ++sourcesEpoch;
+    const epoch = ++sourcesEpoch,
+      requestedURL = location.href,
+      // Discovery and chooser clicks already started workspace metadata. Direct
+      // scoped entry has not, and must perform fromLocation's normal refresh.
+      keepOverview =
+        fromChooser &&
+        sourcesOpen &&
+        navigation.route.v === 'sessions' &&
+        (location.pathname === '/' || location.pathname === '/sessions');
     sourcesUpdating = true;
     sourcesNote = '';
     drawSources();
@@ -4108,7 +4142,7 @@ export function createCatalogViewer(
       const next = parseCatalogCapabilities(
         await api('/api/session-capabilities?' + new URLSearchParams(key ? { machine: key } : {})),
       );
-      if (disposed || epoch !== sourcesEpoch) return;
+      if (disposed || epoch !== sourcesEpoch || location.href !== requestedURL) return;
       if (next.source_key !== key)
         throw new Error('Source capability identity does not match this selection');
       if (!sourcesOpen) saveSource();
@@ -4141,13 +4175,21 @@ export function createCatalogViewer(
       sourcesOpen = false;
       active = null;
       const bookmark = location.pathname.startsWith('/s/') ? location.pathname.split('/')[3] : null;
+      if (!push) {
+        // The current URL owns this transition. Re-enter it once, rather than
+        // admitting a list before and after fromLocation's own goList call.
+        fromLocation(keepOverview);
+        chrome();
+        if (!sourcesOpen && !updating) void loadList(false);
+        return;
+      }
       if (push && bookmark) {
         await goSession(decodeURIComponent(bookmark), undefined, true);
         chrome();
         return;
       }
       if (push && retained?.selectedKey) await goSession(retained.selectedKey, undefined, false);
-      else goList(false);
+      else goList(false, keepOverview);
       const url = retained?.selectedKey
         ? '/s/' +
           encodeURIComponent(
@@ -4156,10 +4198,9 @@ export function createCatalogViewer(
           '/' +
           encodeURIComponent(retained.selectedKey)
         : '/sessions';
-      if (push) history.pushState(navigation.route, '', url + '?' + browsingParams());
-      else fromLocation();
+      history.pushState(navigation.route, '', url + '?' + browsingParams());
       chrome();
-      void loadList(false);
+      if (!updating) void loadList(false);
     } catch (error) {
       if (disposed || epoch !== sourcesEpoch) return;
       sourcesNote = readError(error);
@@ -4173,9 +4214,17 @@ export function createCatalogViewer(
           if (
             !disposed &&
             epoch === sourcesEpoch &&
-            (new URLSearchParams(location.search).get('machine') ?? '') === key
+            location.href === requestedURL &&
+            ((new URLSearchParams(location.search).get('machine') ?? '') === key ||
+              (!viewerHost?.catalogSources &&
+                !capabilities.source_key &&
+                sourcesOpen &&
+                navigation.route.v === 'sessions' &&
+                sourceCursor === null &&
+                sourceItems.length === 1 &&
+                sourceItems[0].source_key === key))
           )
-            void switchSource(key, false);
+            void switchSource(key, false, keepOverview);
         }, 1000);
     } finally {
       if (!disposed && epoch === sourcesEpoch) {
@@ -4264,7 +4313,7 @@ export function createCatalogViewer(
       locating = false;
     }
   }
-  function fromLocation() {
+  function fromLocation(keepOverview = false) {
     const url = new URL(location.href);
     if (viewerHost?.pages?.match(url)) {
       void showHostPage(url);
@@ -4275,6 +4324,9 @@ export function createCatalogViewer(
       chrome();
       if (viewerHost.nativePage.workspaceChrome) void overview.refresh();
       return;
+    }
+    if (location.pathname === '/') {
+      history.replaceState({ v: 'sessions' }, '', '/sessions' + location.search + location.hash);
     }
     const queryParams = new URLSearchParams(location.search);
     const machineBookmark = location.pathname.match(/^\/(?:m|machines)\/([^/]+)$/);
@@ -4299,12 +4351,8 @@ export function createCatalogViewer(
       goOverview('machines', false);
       return;
     }
-    if (
-      location.pathname === '/' ||
-      location.pathname === '/analytics' ||
-      location.pathname === '/timeline'
-    ) {
-      goOverview(location.pathname === '/' ? 'home' : 'analytics', false);
+    if (location.pathname === '/analytics' || location.pathname === '/timeline') {
+      goOverview('analytics', false);
       return;
     }
     const machine = queryParams.get('machine');
@@ -4340,28 +4388,10 @@ export function createCatalogViewer(
         drawSources();
       }
       if (machine || viewerHost?.catalogSources) void switchSource(machine ?? '', false);
-      else
-        void api('/api/session-capabilities')
-          .then((value) => {
-            if (disposed) return;
-            Object.assign(capabilities, parseCatalogCapabilities(value));
-            fromLocation();
-          })
-          .catch((error) => {
-            if (disposed) return;
-            sourcesNote = readError(error);
-            drawSources();
-            if (retryable(error))
-              scope.timeout(() => {
-                if (
-                  !disposed &&
-                  !capabilities.source_key &&
-                  location.pathname !== '/' &&
-                  location.pathname !== '/analytics'
-                )
-                  fromLocation();
-              }, 1000);
-          });
+      else {
+        void showSources();
+        void overview.refresh();
+      }
       return;
     }
     const beforeFilters = countFilters();
@@ -4395,8 +4425,8 @@ export function createCatalogViewer(
       shell.closeDrawer(true);
       overview.draw();
       void overview.refresh(true);
-    } else goList(false);
-    if (!machineBookmark) void overview.refresh();
+    } else goList(false, keepOverview);
+    if (!machineBookmark && !keepOverview) void overview.refresh();
   }
   scope.listen(window, 'popstate', () => {
     if (overlayBackPending) {

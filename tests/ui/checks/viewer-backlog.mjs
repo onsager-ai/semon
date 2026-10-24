@@ -23,7 +23,7 @@ export default async function viewerBacklog(browser) {
   for (const size of ['phone', 'desktop']) {
     const page = await served(browser, { size });
     try {
-      await ready(page, 'home');
+      await ready(page, 'sessions');
       await page.evaluate(() => document.querySelector('.nav-item[data-go="sessions"]').click());
       await ready(page, 'sessions');
       await page.locator('#sq').fill('harbor');
@@ -189,7 +189,7 @@ export default async function viewerBacklog(browser) {
     }
   }
 
-  // A pid permission wait with no handoff must still appear once on Home.
+  // Legacy inbox metadata must not restore the removed Home surface.
   const page = await served(browser, { size: 'desktop' });
   try {
     const home = await (await page.request.get(ENV.base + '/api/viewer/home')).json(),
@@ -217,10 +217,11 @@ export default async function viewerBacklog(browser) {
     });
     await page.route('**/api/viewer/home**', (r) => r.fulfill({ json: home }));
     await page.reload();
-    await ready(page, 'home');
+    await ready(page, 'sessions');
     const inbox = page.locator('[data-h]').filter({ hasText: 'permission prompt' });
-    assert.equal(await inbox.count(), 1);
-    assert.equal(await inbox.getAttribute('data-h'), JSON.stringify([row.source_key, waitId]));
+    assert.equal(await inbox.count(), 0, 'Home inbox must not move into Sessions');
+    assert.equal(await page.locator('#nav [data-go="home"]').count(), 0);
+    assert.ok(await page.locator('#lanes .srow').count(), 'Recent remains available');
     const versions = [];
     await page.route('**/api/sessions?**', async (route) => {
       const response = await route.fetch();
@@ -236,7 +237,16 @@ export default async function viewerBacklog(browser) {
       }
       await route.fulfill({ response, json: catalog });
     });
-    await goto(page, { v: 'sessions' }, D);
+    // Re-enter through a fresh document so this interceptor observes a real
+    // Catalog read instead of the current Sessions page's retained cache.
+    const modeled = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/sessions' && !url.searchParams.has('sid') && response.ok();
+    });
+    await page.reload();
+    await modeled;
+    await ready(page, 'sessions');
+    assert.equal(versions.length, 2, 'model-label fixture read did not complete');
     assert.equal(
       await page.locator('.nrow[data-id="' + versions[0] + '"] .row-model').textContent(),
       'sol',

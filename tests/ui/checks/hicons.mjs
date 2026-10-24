@@ -44,8 +44,6 @@ const PLACES = {
   sidebar: { selector: '#lanes .srow .hicon', alone: true, size: 14 },
   'sessions-row': { selector: '.page .nrow .session-row-meta > .hicon', alone: true, size: 14 },
   'sessions-group': { selector: '.page .sec-h > .hicon', size: 14, text: (h) => NAME[h] },
-  'home-working': { selector: '.page .nrow .ag > .hicon', size: 14, text: (h) => NAME[h] },
-  'home-inbox': { selector: '.page .ib .ctx > span > .hicon', size: 14, text: (h) => NAME[h] },
   'analytics-top': {
     selector: '.page .analytics-session .hlabel > .hicon',
     size: 14,
@@ -407,12 +405,8 @@ export default async function hiconsCheck(browser) {
     await page.waitForFunction(() => !document.querySelector('#page[aria-busy="true"]'));
     await shot('sessions');
 
-    // ---- Home: a working row names its harness, and an inbox item's context line ----
-    await goto(page, { v: 'home' }, D);
-    await loaded(page);
-    judge('home-working', await read(page, PLACES['home-working'].selector));
-    judge('home-inbox', await read(page, PLACES['home-inbox'].selector));
-    await shot('home');
+    // Home working/inbox marks belonged only to the removed Home surface.
+    // Sessions rows, Recent, Analytics and transcript marks remain audited.
 
     // ---- Analytics: the harness label in the ranked lists, and the chart legends ----
     await goto(page, { v: 'analytics' }, D);
