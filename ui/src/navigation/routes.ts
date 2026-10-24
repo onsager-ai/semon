@@ -2,7 +2,7 @@ import type { ViewerRoute } from '../lib/routes';
 /** Route observation shared by the canonical reader and scoped controls. */
 export class NavigationController {
   constructor(private readonly observe?: (route: ViewerRoute) => void) {}
-  private currentRoute: ViewerRoute = { v: 'home' };
+  private currentRoute: ViewerRoute = { v: 'sessions' };
   private readonly routeListeners = new Set<() => void>();
   private disposed = false;
   get route() {

@@ -1,5 +1,5 @@
-// Ported from the mockup's home.js: Home, the sidebar drawer, the Sessions and Machines pages, group-by, and that
-// Home's rows and items actually lead somewhere — phone, default (light) colour scheme, plus a small desktop pass
+// Ported from the mockup's home.js: root Sessions, the sidebar drawer, Sessions filters and Machines, and that
+// Sessions rows actually lead to the reader — phone, default (light) colour scheme, plus a small desktop pass
 // for two reference screenshots. The original never set colorScheme, so it only ever ran light; this port keeps
 // that (bar.mjs and turns.mjs cover phone dark).
 //
@@ -11,12 +11,12 @@
 //
 // Assertions:
 //  - no page errors.
-//  - zero overflow on every screen visited: Home, the drawer, Sessions (each grouping), Machines, every machine page.
+//  - zero overflow on every screen visited: root Sessions, the drawer, filtered Sessions, Machines and every machine page.
 //  - the sidebar shows the 8 most recent top-level sessions with children nested beneath their parent, and expand/collapse preferences survive reloads.
 //  - every grouping on the Sessions page (project/machine/harness) still shows the same row count as ungrouped —
 //    grouping reshuffles into sections, it doesn't drop or duplicate rows.
-//  - a live-row tap and a Needs-you item tap on Home both navigate away from Home (liveRowOpens/itemOpens change the
-//    page's <h1>), and the item's flash lands on the turn its own data-h resolves to.
+//  - a Sessions row tap opens the reader at the end; removed Home inbox content stays absent.
+//    Anchored turn navigation remains covered by turns.mjs.
 //  - a machine page's "up" link goes back to Machines (backTo === "Machines"), and every machine page carries no
 //    sideways overflow.
 import path from 'node:path';
@@ -118,26 +118,17 @@ export default async function homeCheck(browser) {
       await page.waitForTimeout(150);
     };
 
-    out.home = await page.evaluate(() => ({
-      h1: document.querySelector('.page h1')?.textContent,
-      sub: document.querySelector('.ph .sub')?.textContent,
-      secs: [...document.querySelectorAll('.page .sec-h')].map((s) => s.textContent),
-      needs: document.querySelectorAll('.page .ib:not(.quiet)').length,
-      items: [...document.querySelectorAll('.page .ib')].map((x) => ({
-        role: x.getAttribute('role'),
-        tab: x.tabIndex,
-        org: x.querySelector('.org')?.textContent.slice(0, 60) ?? null,
-        trace: !!x.querySelector('.tracebtn'),
-        nestedButton: x.tagName === 'BUTTON',
-      })),
-      fors: [...document.querySelectorAll('.page .nrow .for')].map((x) =>
-        x.textContent.slice(0, 60),
-      ),
-      live: document.querySelectorAll('.page .nrow').length,
-      liveWithAct: document.querySelectorAll('.page .nrow .act').length,
+    await page.waitForFunction(() =>
+      document.querySelector('[data-session-row="list"] .nm')?.textContent?.trim(),
+    );
+    out.root = await page.evaluate(() => ({
+      title: document.querySelector('#topbar .t')?.textContent,
+      path: location.pathname,
+      rows: document.querySelectorAll('[data-session-row="list"]').length,
+      removedInbox: document.querySelectorAll('#page .ib, #nav [data-go="home"]').length,
     }));
     out.homeOver = await over();
-    await page.screenshot({ path: path.join(ENV.out, 'sample-home.png') });
+    await page.screenshot({ path: path.join(ENV.out, 'sample-root-sessions.png') });
 
     await page.click('#lead-btn');
     await page.waitForTimeout(280);
@@ -180,6 +171,13 @@ export default async function homeCheck(browser) {
       }, out.tree.pair);
       await page.reload({ waitUntil: 'load' });
       await settled(page);
+      await page.waitForFunction(
+        (parent) =>
+          [...document.querySelectorAll('#lanes > .treeitem')].some(
+            (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
+          ),
+        out.tree.pair.parent,
+      );
       out.tree.collapseReload = await page.evaluate(({ parent, child }) => {
         const item = [...document.querySelectorAll('#lanes > .treeitem')].find(
           (x) => x.dataset.id === parent,
@@ -212,6 +210,13 @@ export default async function homeCheck(browser) {
       }, out.tree.pair);
       await page.reload({ waitUntil: 'load' });
       await settled(page);
+      await page.waitForFunction(
+        (parent) =>
+          [...document.querySelectorAll('#lanes > .treeitem')].some(
+            (item) => item.dataset.id === parent && item.querySelector('.tree-toggle'),
+          ),
+        out.tree.pair.parent,
+      );
       out.tree.expandReload = await page.evaluate(({ parent, child }) => {
         const item = [...document.querySelectorAll('#lanes > .treeitem')].find(
           (x) => x.dataset.id === parent,
@@ -349,10 +354,10 @@ export default async function homeCheck(browser) {
       await page.waitForTimeout(150);
       info.backTo = await page.evaluate(() => document.querySelector('.page h1')?.textContent);
     }
-    // Home rows lead somewhere.
-    await nav('home');
+    // Sessions rows open the retained reader at its end.
+    await nav('sessions');
     const first = await page.$('.page .nrow');
-    r.expect(!!first, 'no live row (.page .nrow) found on Home');
+    r.expect(!!first, 'no session row (.page .nrow) found on Sessions');
     if (first) {
       await first.click();
       await page.waitForFunction(
@@ -370,30 +375,10 @@ export default async function homeCheck(browser) {
         };
       });
     }
-    await nav('home');
-    const q = await page.$('.page .ib .q');
-    r.expect(!!q, 'no Needs-you item (.page .ib .q) found on Home');
-    if (q) {
-      await q.click();
-      await page.waitForFunction(
-        () =>
-          history.state?.v === 'session' &&
-          !!history.state?.turn &&
-          !!document.querySelector(
-            '.turn.flash[data-turn="' + CSS.escape(history.state.turn) + '"]',
-          ),
-      );
-      out.itemOpens = await page.evaluate(() => {
-        const t = document.querySelector('.turn.flash'),
-          bar = document.querySelector('#topbar').getBoundingClientRect();
-        return {
-          h1: document.querySelector('#topbar .t')?.textContent,
-          turn: history.state?.turn,
-          flash: t?.dataset.turn,
-          belowBar: !!t && t.getBoundingClientRect().top >= bar.bottom - 1,
-        };
-      });
-    }
+    // Needs-you cards belonged only to the removed Home inbox. Retain row
+    // opening/end and history checks here; turns.mjs covers anchored links.
+    await nav('sessions');
+    out.removedInbox = await page.locator('#page .ib, #nav [data-go="home"]').count();
     errs.push(...page.errors);
     await page.context().close();
   }
@@ -426,7 +411,7 @@ export default async function homeCheck(browser) {
       wideStored: localStorage.getItem('semon.wide'),
       railStored: localStorage.getItem('semon.rail'),
     }));
-    await page.screenshot({ path: path.join(ENV.out, 'desk-home.png') });
+    await page.screenshot({ path: path.join(ENV.out, 'desk-session.png') });
     const longSid = Object.keys(D.TX).sort(
       (a, b) => (D.TX[b]?.length ?? 0) - (D.TX[a]?.length ?? 0),
     )[0];
@@ -491,7 +476,14 @@ export default async function homeCheck(browser) {
 
   r.results = out;
   r.expect(errs.length === 0, 'page errors: ' + errs.join(' | '));
-  r.expect(out.homeOver === 0, 'home overflow=' + out.homeOver);
+  r.expect(out.homeOver === 0, 'root Sessions overflow=' + out.homeOver);
+  r.expect(
+    out.root.title === 'Sessions' &&
+      out.root.path === '/sessions' &&
+      out.root.rows > 0 &&
+      out.root.removedInbox === 0,
+    'root retains the existing Sessions list without Home',
+  );
   r.expect(out.sessionsOver === 0, 'sessions overflow=' + out.sessionsOver);
   r.expect(out.machinesOver === 0, 'machines overflow=' + out.machinesOver);
   for (const mp of out.machinePages)
@@ -577,17 +569,10 @@ export default async function homeCheck(browser) {
       'a machine opens bounded native activity under its exact source and name',
     );
   r.expect(
-    !!out.liveRowOpens && out.liveRowOpens.title !== 'Home' && out.liveRowOpens.gap <= 1,
-    'a Home live row did not open at the end: ' + JSON.stringify(out.liveRowOpens),
+    !!out.liveRowOpens && out.liveRowOpens.title !== 'Sessions' && out.liveRowOpens.gap <= 1,
+    'a Sessions row did not open at the end: ' + JSON.stringify(out.liveRowOpens),
   );
-  r.expect(
-    !!out.itemOpens &&
-      out.itemOpens.h1 !== 'Home' &&
-      !!out.itemOpens.turn &&
-      out.itemOpens.flash === out.itemOpens.turn &&
-      out.itemOpens.belowBar,
-    'the first Needs-you item did not reveal its own turn: ' + JSON.stringify(out.itemOpens),
-  );
+  r.expect(out.removedInbox === 0, 'Home inbox/navigation must not move into Sessions');
   r.expect(
     out.layout?.wide === true &&
       out.layout.rail === true &&
