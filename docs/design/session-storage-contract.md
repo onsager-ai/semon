@@ -17,13 +17,59 @@ each Rust file for driver references and physical index-path derivation, includi
 test-only uses. Every remaining direct file must appear in this table. Removing
 an entry requires porting its SQL/path ownership; moving files alone is not a port.
 The adapter lives in `storage/sqlite.rs` and `storage/sqlite/changes.rs`.
-The complete file inventory is populated from the first CI discovery run before
-enabling the rejecting guard; this draft is not yet an accepted inventory.
+The file inventory below was discovered by CI run 40101653609 at Source
+`1d953b2e`; the rejecting guard checks additions and stale entries on every PR.
 
 | Path | Status | Responsibility |
 | --- | --- | --- |
 | `catalog_changes.rs` | ported | Public change API and data types; no SQL or physical path access. |
 | `storage.rs` | direct | Transitional local Options.cache coordinate bridge only; native ports remain open. |
+| `catalog.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `catalog_observer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `catalog_search.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `catalog_union.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `causal_trace.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `codex_lifecycle.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/chunk_proofs/published.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/chunk_proofs.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/launch_calls.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/native_usage/repair.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/native_usage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/relocation.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/reprice.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/semantic_stage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `facts/source_authority.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `history_projection.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `mcp.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `model/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `model.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_evidence/runtime.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_evidence.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_header.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_resolution.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_sidecar.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_timing.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_tree/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `overview.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `overview_repair.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query/catalog.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query/tests/recovery_tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query/transcript.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query_projection.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query_source.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `received.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `retention.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `session_bookmark.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 
 Authoritative ownership that must be ported, even where access is indirect:
 

@@ -1,9 +1,9 @@
 //! Explicit metadata storage boundary. This first increment covers change
 //! delivery only; Index, Catalog, Query and byte-proof ports remain in #478.
 //! A namespace is an authorized logical binding, never a path or a credential.
-pub(crate) mod sqlite;
 #[cfg(test)]
 mod conformance;
+pub(crate) mod sqlite;
 
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogIdentityError, CatalogReadScope};
 use std::path::PathBuf;
@@ -65,7 +65,10 @@ impl StoreConfig {
 
     /// Transitional one-source local binding. Only this existing API bridge
     /// derives coordinates from Options.cache; the contract never receives it.
-    pub(crate) fn local_metadata(options: &crate::Options, namespace: LogicalSourceNamespace) -> Self {
+    pub(crate) fn local_metadata(
+        options: &crate::Options,
+        namespace: LogicalSourceNamespace,
+    ) -> Self {
         Self {
             backend: StoreBackend::Sqlite {
                 database: crate::events::EventCache::path(&options.cache),
@@ -122,7 +125,9 @@ pub struct CatalogChangesRequest<'a> {
 
 impl CatalogChangesRequest<'_> {
     pub(crate) fn validate(self) -> Result<(), StorageError> {
-        if self.limit == 0 || self.limit > 256 || self.after > i64::MAX as u64
+        if self.limit == 0
+            || self.limit > 256
+            || self.after > i64::MAX as u64
             || (self.after > 0 && self.stream_epoch.is_none())
         {
             return Err(StorageError::InvalidArguments);

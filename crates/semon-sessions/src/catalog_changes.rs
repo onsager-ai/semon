@@ -1,6 +1,8 @@
 //! Backend-neutral public change delivery helpers for the local source binding.
-use crate::{CatalogIdentityError, CatalogReadScope, Options,
-    storage::{CatalogChangesRequest, LogicalSourceNamespace, SessionMetadataStore, StoreConfig}};
+use crate::{
+    CatalogIdentityError, CatalogReadScope, Options,
+    storage::{CatalogChangesRequest, LogicalSourceNamespace, StoreConfig},
+};
 use serde::{Deserialize, Serialize};
 
 /// A changed key is a hydration hint, not a native identity or an authorization.
@@ -45,9 +47,13 @@ pub fn compact_session_catalog_changes(
     acknowledged_through: u64,
     limit: usize,
 ) -> Result<CatalogChangeCompaction, CatalogIdentityError> {
+    if limit == 0 || limit > 256 || acknowledged_through > i64::MAX as u64 {
+        return Err(CatalogIdentityError::InvalidArguments);
+    }
     let namespace = LogicalSourceNamespace::new("local")?;
     let store = StoreConfig::local_metadata(options, namespace.clone()).open()?;
-    store.compact_catalog_changes(&namespace, scope, stream_epoch, acknowledged_through, limit)
+    store
+        .compact_catalog_changes(&namespace, scope, stream_epoch, acknowledged_through, limit)
         .map_err(Into::into)
 }
 
@@ -62,8 +68,16 @@ pub fn session_catalog_changes(
     limit: usize,
 ) -> Result<CatalogChangePage, CatalogIdentityError> {
     let namespace = LogicalSourceNamespace::new(source_key)?;
-    let request = CatalogChangesRequest { scope, stream_epoch, after, limit };
+    let request = CatalogChangesRequest {
+        scope,
+        stream_epoch,
+        after,
+        limit,
+    };
     request.validate()?;
     let store = StoreConfig::local_metadata(options, namespace.clone()).open()?;
-    store.read_snapshot(&namespace)?.catalog_changes(&namespace, request).map_err(Into::into)
+    store
+        .read_snapshot(&namespace)?
+        .catalog_changes(&namespace, request)
+        .map_err(Into::into)
 }
