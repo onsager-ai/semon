@@ -1114,7 +1114,9 @@ try {
   report.candidateFingerprint = sha256(fs.readFileSync(candidateBinary));
   if (ENV.base === referenceBase)
     throw new Error('Candidate and reference servers must be independent');
-  browser = await launch({ baselineRaster: scope === 'main' });
+  // Exact two-machine bindings include fractional-size harness SVGs too. Use
+  // the same deterministic Skia path on both independent readers as main.
+  browser = await launch({ baselineRaster: scope === 'main' || scope === 'two-machines' });
   const D = await data(),
     original = sample('overhaul.json'),
     pinnedModel = selfParity ? null : await pinnedReferenceModel(referenceBase, referenceToken);
