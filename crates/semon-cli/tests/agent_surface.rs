@@ -40,7 +40,7 @@ struct Home {
 
 impl Home {
     /// `done` ended, `asker` waits on a question, and the Codex run `cx`
-    /// ended.
+    /// has unknown turn outcome (no durable lifecycle records).
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "semon-agent-surface-{}-{}",
@@ -271,7 +271,7 @@ fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
         asker[key] = value;
     }
     let cx = json!({"id": "cx", "harness": "codex", "kind": "codex-run", "name": "Codex run", "model": "codex",
-        "repo": null, "branch": null, "machine": "testbox", "parent": null, "children": [], "state": "ended",
+        "repo": null, "branch": null, "machine": "testbox", "parent": null, "children": [], "state": "unknown",
         "start": at(5, 0), "last_activity": at(5, 2), "pid": null, "alive": null, "exit": null,
         "open_question": null, "tokens": {"input": 0, "cached": 0, "output": 0}, "run": null,
         "turns_truncated": false});

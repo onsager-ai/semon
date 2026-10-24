@@ -33,6 +33,7 @@ export function state(value: unknown) {
     case 'idle':
     case 'done':
     case 'err':
+    case 'off':
       return value;
     default:
       throw new Error('Invalid session state');
@@ -45,6 +46,8 @@ export function status(value: unknown) {
     case 'done':
     case 'err':
     case 'new':
+    case 'idle':
+    case 'off':
       return value;
     default:
       throw new Error('Invalid handoff status');

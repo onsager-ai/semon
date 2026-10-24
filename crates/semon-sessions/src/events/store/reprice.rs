@@ -1709,7 +1709,7 @@ mod tests {
             before
         );
         assert_eq!(parser_version(&c).unwrap(), Some(CACHE_VERSION));
-        assert_eq!(CACHE_VERSION, 28);
+        assert_eq!(CACHE_VERSION, 29);
         drop(c);
         let second = table("anthropic", "claude-opus-5-5", 12.0, 2);
         drain(&path, &second);

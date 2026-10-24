@@ -67,19 +67,20 @@ jobs:
         run: cargo test --locked -p semon-sessions http_session_bootstrap_is_consumed_before_routing -- --nocapture
 
       - name: cargo fmt --check
+        id: rustfmt
         run: cargo fmt --all --check
 
-      - name: Prepare Rust formatting review patch
-        if: failure()
+      - name: Prepare Rust formatting changes for thermal-restricted review
+        if: failure() && steps.rustfmt.outcome == 'failure'
         run: |
           cargo fmt --all
-          git diff --binary -- crates > "$RUNNER_TEMP/rust-format-review.patch"
-      - name: Retain formatting changes without bypassing checks
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/rustfmt-review.patch"
+      - name: Retain formatting changes without bypassing the check
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rust-format-review
-          path: ${{ runner.temp }}/rust-format-review.patch
+          name: rustfmt-review
+          path: ${{ runner.temp }}/rustfmt-review.patch
           if-no-files-found: error
 
       - name: Measure bounded upload codecs on non-private native fixtures

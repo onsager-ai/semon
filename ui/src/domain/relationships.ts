@@ -38,7 +38,7 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
   const row = object(value),
     kind = text(row.kind),
     status = text(row.status);
-  if (!['work', 'wait', 'done', 'err', 'new'].includes(status))
+  if (!['work', 'wait', 'idle', 'done', 'err', 'new', 'off'].includes(status))
     throw Error('Invalid recorded handoff state');
   const base = {
     id: text(row.id),
