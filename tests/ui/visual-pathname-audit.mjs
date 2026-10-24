@@ -57,7 +57,11 @@ function pathnameToken(text) {
         while (/\s/.test(text[after] ?? '')) after++;
         if (text[after] !== '"') throw new Error('Pathname value must be a JSON string');
         const valueEnd = stringEnd(text, after);
-        matches.push({ start: after, end: valueEnd, value: JSON.parse(text.slice(after, valueEnd)) });
+        matches.push({
+          start: after,
+          end: valueEnd,
+          value: JSON.parse(text.slice(after, valueEnd)),
+        });
       }
       index = end;
     } else {
@@ -96,8 +100,7 @@ function historicalPathname(bytes, approvedDigest) {
     );
     if (digest(restored) === approvedDigest) matches.push(namespace);
   }
-  if (matches.length !== 1)
-    throw new Error('No unique accepted historical fixture identity hash');
+  if (matches.length !== 1) throw new Error('No unique accepted historical fixture identity hash');
   return { namespace: matches[0], digest: approvedDigest };
 }
 
@@ -196,9 +199,7 @@ export function audit({ root, registry }) {
           }
         }
 
-        const candidateBytes = readBytes(
-          evidenceFile(root, row.artifactPaths?.candidateEvidence),
-        );
+        const candidateBytes = readBytes(evidenceFile(root, row.artifactPaths?.candidateEvidence));
         const candidateDigest = digest(candidateBytes);
         if (row.artifactDigests?.candidate?.evidence !== candidateDigest)
           throw new Error('Current candidate evidence bytes do not match recorded digest');
