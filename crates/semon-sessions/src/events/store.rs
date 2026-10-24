@@ -4330,6 +4330,9 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
 /// Classify in a read snapshot, before journal, schema or recovery writes.
 /// Version zero is fresh only when there are no schema objects.
 fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
+    if crate::storage::sqlite::namespace::is_bound(connection)? {
+        return Ok(Init::Unsupported("namespace writer upgrade is pending"));
+    }
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if schema == 0 {
         let nonempty: bool =
@@ -4579,6 +4582,9 @@ fn contract_number(value: &str) -> Option<u32> {
 /// into a fresh index. Every known version must be readable and <= current;
 /// a single newer/unrecognized contract wins over any older contract.
 fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
+    if crate::storage::sqlite::namespace::is_bound(connection)? {
+        return Ok(Init::Unsupported("namespace writer upgrade is pending"));
+    }
     let found = qualify(connection)?;
     if !matches!(found, Init::Unsupported(_)) {
         return Ok(found);
@@ -4782,6 +4788,10 @@ fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
 /// The store still has this binary's schema and parser: no other version
 /// replaced it since it was opened.
 pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
+    Ok(current_contract(connection)? && !crate::storage::sqlite::namespace::is_bound(connection)?)
+}
+
+pub(crate) fn current_contract(connection: &Connection) -> rusqlite::Result<bool> {
     let schema: i64 = connection
         .prepare_cached("PRAGMA user_version")?
         .query_row([], |row| row.get(0))?;

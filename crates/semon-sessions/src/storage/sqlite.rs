@@ -1,5 +1,8 @@
 //! Single-source SQLite adapter for the metadata contract.
 pub(crate) mod changes;
+pub(crate) mod query;
+pub(crate) mod catalog;
+pub(crate) mod namespace;
 
 use super::{
     CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
@@ -16,12 +19,14 @@ pub(super) fn failed(error: rusqlite::Error) -> StorageError {
     }
 }
 
-pub(super) struct SqliteMetadataStore(StoreConfig);
+pub(super) struct SqliteMetadataStore(StoreConfig, bool);
 
 impl SqliteMetadataStore {
     pub(super) fn new(config: StoreConfig) -> Self {
-        Self(config)
+        Self(config, false)
     }
+
+    pub(super) fn legacy_local(config: StoreConfig) -> Self { Self(config, true) }
 
     fn admit(
         &self,
@@ -46,7 +51,12 @@ impl SqliteMetadataStore {
     }
 
     fn check_epoch(&self, db: &Connection) -> Result<(), StorageError> {
-        if !crate::events::store::current(db).map_err(failed)? {
+        if self.1 {
+            if namespace::is_bound(db).map_err(failed)? { return Err(StorageError::NamespaceUpgradePending); }
+        } else {
+            namespace::require_admitted(db, &self.0.namespace)?;
+        }
+        if !crate::events::store::current_contract(db).map_err(failed)? {
             return Err(StorageError::Unavailable);
         }
         // This read establishes the snapshot even when discovery has no expected epoch.
@@ -139,6 +149,11 @@ impl SessionMetadataStore for SqliteMetadataStore {
             return Err(StorageError::ScopeChanged);
         }
         let mut db = self.admit(namespace, true)?;
+        if namespace::is_bound(&db).map_err(failed)? {
+            namespace::require_admitted(&db, namespace)?;
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        if !self.1 { return Err(StorageError::NamespaceUnadmitted); }
         changes::compact(&mut db, scope, stream_epoch, acknowledged_through, limit)
     }
 }
@@ -200,7 +215,7 @@ mod tests {
     }
     impl MetadataFixture for Fixture {
         fn store(&self) -> Box<dyn SessionMetadataStore> {
-            self.config().open().unwrap()
+            self.config().open_local().unwrap()
         }
         fn namespace(&self) -> LogicalSourceNamespace {
             LogicalSourceNamespace::new("authorized-source").unwrap()
@@ -225,7 +240,7 @@ mod tests {
         let mut config = fixture.config();
         config.expected_stream_epoch = Some("0".repeat(64));
         assert!(matches!(
-            config.open().unwrap().read_snapshot(&fixture.namespace()),
+            config.open_local().unwrap().read_snapshot(&fixture.namespace()),
             Err(StorageError::ScopeChanged)
         ));
         let mut config = fixture.config();
@@ -233,7 +248,7 @@ mod tests {
         config.backend = StoreBackend::Sqlite {
             database: absent.clone(),
         };
-        let store = config.open().unwrap();
+        let store = config.open_local().unwrap();
         assert!(matches!(
             store.read_snapshot(&fixture.namespace()),
             Err(StorageError::Unavailable)
