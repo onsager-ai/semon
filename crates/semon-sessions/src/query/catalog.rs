@@ -1,9 +1,9 @@
 //! Exact summaries from the native Catalog publication. Source text is resolved
 //! only for returned open questions, using the existing native preview reader.
 use super::*;
-use crate::storage::{LogicalSourceNamespace, query::Part};
 #[cfg(test)]
-pub(super) use crate::storage::query::{Work, WORK};
+pub(super) use crate::storage::query::{WORK, Work};
+use crate::storage::{LogicalSourceNamespace, query::Part};
 
 pub(super) fn list_response(
     mut rows: Vec<Value>,
@@ -103,7 +103,9 @@ impl Query {
             // before creating another archive reader or decoding its evidence.
             if search.at_capacity() {
                 let namespace = LogicalSourceNamespace::new(machine).map_err(unavailable)?;
-                if crate::storage::local_query_catalog(&source.options, namespace.clone()).has_search_slots(&namespace, key, since)? {
+                if crate::storage::local_query_catalog(&source.options, namespace.clone())
+                    .has_search_slots(&namespace, key, since)?
+                {
                     search.stop();
                     break;
                 }
@@ -265,8 +267,15 @@ impl Query {
                     "Catalog summaries require a complete native output window",
                 ));
             }
-            let namespace = LogicalSourceNamespace::new(if self.sources.machines[index].0.is_empty() { "local" } else { &self.sources.machines[index].0 }).map_err(unavailable)?;
-            let part = crate::storage::local_query_catalog(&source.options, namespace.clone()).read_cohort(&namespace, now, &mut bytes_left)?;
+            let namespace =
+                LogicalSourceNamespace::new(if self.sources.machines[index].0.is_empty() {
+                    "local"
+                } else {
+                    &self.sources.machines[index].0
+                })
+                .map_err(unavailable)?;
+            let part = crate::storage::local_query_catalog(&source.options, namespace.clone())
+                .read_cohort(&namespace, now, &mut bytes_left)?;
             if part.runtime != identity_observations[index] {
                 return Err(unavailable(
                     "Native machine identity changed during the query",
@@ -402,8 +411,14 @@ impl Query {
         // Remote preview I/O does not hold a collection transaction. Recheck the
         // published generation and process observations before returning it.
         for ((source_key, source), part) in self.sources.machines.iter().zip(parts) {
-            let namespace = LogicalSourceNamespace::new(if source_key.is_empty() { "local" } else { source_key }).map_err(unavailable)?;
-            crate::storage::local_query_catalog(&source.options, namespace.clone()).validate(&namespace, &part)?;
+            let namespace = LogicalSourceNamespace::new(if source_key.is_empty() {
+                "local"
+            } else {
+                source_key
+            })
+            .map_err(unavailable)?;
+            crate::storage::local_query_catalog(&source.options, namespace.clone())
+                .validate(&namespace, &part)?;
         }
         if self.sources.is_retired() {
             return Err(unavailable("Native sources are closed"));

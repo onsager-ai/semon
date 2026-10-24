@@ -1,8 +1,8 @@
 //! Single-source SQLite adapter for the metadata contract.
-pub(crate) mod changes;
-pub(crate) mod query;
 pub(crate) mod catalog;
+pub(crate) mod changes;
 pub(crate) mod namespace;
+pub(crate) mod query;
 
 use super::{
     CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
@@ -26,7 +26,9 @@ impl SqliteMetadataStore {
         Self(config, false)
     }
 
-    pub(super) fn legacy_local(config: StoreConfig) -> Self { Self(config, true) }
+    pub(super) fn legacy_local(config: StoreConfig) -> Self {
+        Self(config, true)
+    }
 
     fn admit(
         &self,
@@ -52,7 +54,9 @@ impl SqliteMetadataStore {
 
     fn check_epoch(&self, db: &Connection) -> Result<(), StorageError> {
         if self.1 {
-            if namespace::is_bound(db).map_err(failed)? { return Err(StorageError::NamespaceUpgradePending); }
+            if namespace::is_bound(db).map_err(failed)? {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
         } else {
             namespace::require_admitted(db, &self.0.namespace)?;
         }
@@ -153,7 +157,9 @@ impl SessionMetadataStore for SqliteMetadataStore {
             namespace::require_admitted(&db, namespace)?;
             return Err(StorageError::NamespaceUpgradePending);
         }
-        if !self.1 { return Err(StorageError::NamespaceUnadmitted); }
+        if !self.1 {
+            return Err(StorageError::NamespaceUnadmitted);
+        }
         changes::compact(&mut db, scope, stream_epoch, acknowledged_through, limit)
     }
 }
@@ -240,7 +246,10 @@ mod tests {
         let mut config = fixture.config();
         config.expected_stream_epoch = Some("0".repeat(64));
         assert!(matches!(
-            config.open_local().unwrap().read_snapshot(&fixture.namespace()),
+            config
+                .open_local()
+                .unwrap()
+                .read_snapshot(&fixture.namespace()),
             Err(StorageError::ScopeChanged)
         ));
         let mut config = fixture.config();

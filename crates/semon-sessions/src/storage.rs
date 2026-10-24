@@ -1,22 +1,39 @@
 //! Explicit metadata storage boundary. This first increment covers change
 //! delivery only; Index, Catalog, Query and byte-proof ports remain in #478.
 //! A namespace is an authorized logical binding, never a path or a credential.
+pub(crate) mod catalog;
 #[cfg(test)]
 mod conformance;
-pub(crate) mod sqlite;
 pub(crate) mod query;
-pub(crate) mod catalog;
+pub(crate) mod sqlite;
 
-pub(crate) fn read_local_catalog_page(options: &crate::Options, source_key: &str, request: &crate::catalog::Request) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
+pub(crate) fn read_local_catalog_page(
+    options: &crate::Options,
+    source_key: &str,
+    request: &crate::catalog::Request,
+) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
     sqlite::catalog::read_page(options, source_key, request)
 }
 
-pub(crate) fn source_proof_observation(options: &crate::Options, root: &str, absolute: &str) -> Result<Option<(String, crate::model::summary::CatalogSource, String)>, Box<dyn std::error::Error>> {
+pub(crate) fn source_proof_observation(
+    options: &crate::Options,
+    root: &str,
+    absolute: &str,
+) -> Result<
+    Option<(String, crate::model::summary::CatalogSource, String)>,
+    Box<dyn std::error::Error>,
+> {
     sqlite::catalog::source_proof_observation(options, root, absolute)
 }
 
-pub(crate) fn local_query_catalog(options: &crate::Options, namespace: LogicalSourceNamespace) -> Box<dyn query::QueryCatalogStore> {
-    Box::new(sqlite::query::SqliteQueryCatalog { options: options.clone(), namespace })
+pub(crate) fn local_query_catalog(
+    options: &crate::Options,
+    namespace: LogicalSourceNamespace,
+) -> Box<dyn query::QueryCatalogStore> {
+    Box::new(sqlite::query::SqliteQueryCatalog {
+        options: options.clone(),
+        namespace,
+    })
 }
 
 use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogIdentityError, CatalogReadScope};
@@ -62,6 +79,9 @@ impl StoreConfig {
     /// Resolve configuration without creating, resetting or repairing storage.
     /// Every operation opens the configured backend or returns an explicit error.
     pub fn open(self) -> Result<Box<dyn SessionMetadataStore>, StorageError> {
+        if self.expected_stream_epoch.is_none() {
+            return Err(StorageError::InvalidArguments);
+        }
         if self.expected_stream_epoch.as_ref().is_some_and(|epoch| {
             epoch.len() != 64 || !epoch.bytes().all(|byte| byte.is_ascii_hexdigit())
         }) {

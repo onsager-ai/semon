@@ -136,7 +136,7 @@ pub(super) fn read_snapshot(
     after: u64,
     limit: usize,
 ) -> Result<CatalogChangePage, StorageError> {
-    if !crate::events::store::current(connection).map_err(failed)? {
+    if !crate::events::store::current_contract(connection).map_err(failed)? {
         return Err(StorageError::Unavailable);
     }
     let meta = |key: &str| {

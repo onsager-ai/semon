@@ -1,46 +1,67 @@
 //! SQLite implementation of semantic Query metadata operations.
-use crate::{Options, QueryError, events::EventCache};
-use crate::storage::{LogicalSourceNamespace, query::{Part, QueryCatalogStore}};
 #[cfg(test)]
 use crate::storage::query::measured;
-use std::{collections::{BTreeMap, BTreeSet}, time::Duration};
-use serde_json::{Value, json};
+use crate::storage::{
+    LogicalSourceNamespace,
+    query::{Part, QueryCatalogStore},
+};
+use crate::{Options, QueryError, events::EventCache};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
-pub(crate) struct SqliteQueryCatalog { pub(crate) options: Options, pub(crate) namespace: LogicalSourceNamespace }
+pub(crate) struct SqliteQueryCatalog {
+    pub(crate) options: Options,
+    pub(crate) namespace: LogicalSourceNamespace,
+}
 impl QueryCatalogStore for SqliteQueryCatalog {
-    fn read_cohort(&self, namespace: &LogicalSourceNamespace, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
+    fn read_cohort(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        now: i64,
+        bytes_left: &mut usize,
+    ) -> Result<Part, QueryError> {
         self.require_namespace(namespace)?;
         read(&self.options, now, bytes_left)
     }
-    fn has_search_slots(&self, namespace: &LogicalSourceNamespace, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
+    fn has_search_slots(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        key: &str,
+        since: Option<i64>,
+    ) -> Result<bool, QueryError> {
         self.require_namespace(namespace)?;
         has_search_slots(&self.options, key, since)
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
         self.require_namespace(namespace)?;
         let options = &self.options;
-    let db = open(options)?;
-    if generation(&db)? != part.generation
-        || crate::native_evidence::query_runtime_generation(options)
-            .map_err(|error| QueryError::io(&error))?
-            != part.runtime
-    {
-        return Err(unavailable("Native Catalog changed during the query"));
-    }
-    for (key, expected) in &part.witnesses {
-        let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1",[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
-        let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
-            return Err(unavailable("Native Query facts changed during the query"));
+        let db = open(options)?;
+        if generation(&db)? != part.generation
+            || crate::native_evidence::query_runtime_generation(options)
+                .map_err(|error| QueryError::io(&error))?
+                != part.runtime
+        {
+            return Err(unavailable("Native Catalog changed during the query"));
         }
-    }
+        for (key, expected) in &part.witnesses {
+            let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1",[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
+            let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
+                return Err(unavailable("Native Query facts changed during the query"));
+            }
+        }
         Ok(())
     }
 }
 impl SqliteQueryCatalog {
     fn require_namespace(&self, namespace: &LogicalSourceNamespace) -> Result<(), QueryError> {
-        if namespace != &self.namespace { return Err(unavailable("Logical source namespace changed")); }
+        if namespace != &self.namespace {
+            return Err(unavailable("Logical source namespace changed"));
+        }
         Ok(())
     }
 }
