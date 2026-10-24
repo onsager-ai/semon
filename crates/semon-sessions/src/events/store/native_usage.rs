@@ -11,6 +11,7 @@ std::thread_local! {
 }
 pub(super) use repair::advance;
 pub(super) use repair::pending as repair_pending;
+pub(super) use repair::sql as repair_sql;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_usage_sources (
@@ -50,7 +51,6 @@ CREATE TABLE IF NOT EXISTS native_tree_repairs (
 CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(state,last_attempt,source_path);
 ";
 
-#[cfg(test)]
 const COMPOSITE_SCHEMA: &str = "
 CREATE TABLE native_usage_sources (
  namespace TEXT NOT NULL,source_id INTEGER NOT NULL,source_path TEXT NOT NULL,
@@ -84,7 +84,23 @@ CREATE TABLE native_usage_dimensions (
 ) STRICT, WITHOUT ROWID;
 ";
 
-fn sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+
+const COMPOSITE_REPAIR_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_tree_repairs (
+ namespace TEXT NOT NULL,source_path TEXT NOT NULL,receipt TEXT NOT NULL,source_id INTEGER,
+ cursor INTEGER NOT NULL DEFAULT 0,projection_id INTEGER,last_model TEXT,
+ tree_root TEXT,state TEXT NOT NULL DEFAULT 'ready',last_attempt INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(namespace,source_path),
+ FOREIGN KEY(namespace,source_id) REFERENCES native_usage_sources(namespace,source_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS native_tree_repair_queue ON native_tree_repairs(namespace,state,last_attempt,source_path);
+";
+
+pub(super) fn schema(composite: bool) -> [&'static str; 2] {
+    if composite { [COMPOSITE_SCHEMA, COMPOSITE_REPAIR_SCHEMA] } else { [SCHEMA, REPAIR_SCHEMA] }
+}
+
+pub(super) fn sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
     Ok(if composite(c)? { scoped } else { legacy })
 }
 
@@ -331,7 +347,9 @@ pub(super) fn begin_source(
             "UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1")?,
         params![id, header_ledger(ledger),],
     )?;
-    tx.execute("UPDATE native_tree_repairs SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",params![path,header_ledger(ledger)])?;
+    tx.execute(repair::sql(tx,
+        "UPDATE native_tree_repairs SET state='ready' WHERE source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",
+        "UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')")?,params![path,header_ledger(ledger)])?;
     Ok(id)
 }
 
@@ -484,11 +502,10 @@ mod namespace_tests {
 
     #[test]
     fn private_usage_same_ids_paths_observations_and_rollback_are_scoped() {
-        // Only this five-table family is exercised. Tree, repair, pricing and
-        // retained readers still prevent public multi-source qualification.
+        // Exercise usage and repair queue isolation. Tree/pricing and retained
+        // readers still prevent public multi-source qualification.
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(COMPOSITE_SCHEMA).unwrap();
-        db.execute_batch(REPAIR_SCHEMA).unwrap();
+        for ddl in schema(true) { db.execute_batch(ddl).unwrap(); }
         db.pragma_update(None, "foreign_keys", true).unwrap();
         let bind = |db: &Connection, namespace: &str| {
             let namespace = namespace.to_owned();
@@ -560,6 +577,10 @@ mod namespace_tests {
                 ..FileIndex::default()
             };
             write(&tx, path, &ledger, &index).unwrap();
+            tx.execute(repair_sql(&tx,
+                "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2)",
+                "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2)").unwrap(),
+                params![path,header_ledger(&ledger)]).unwrap();
             put_dimension(&tx, 1, "model", "same-model", &namespace).unwrap();
             // The original observation at the same offset reconciles exactly.
             write(&tx, path, &ledger, &index).unwrap();
@@ -569,6 +590,14 @@ mod namespace_tests {
             assert!(seen.tree && seen.model);
         }
         let b = state(&db, "b");
+        assert!(repair_pending(&db).unwrap());
+        bind(&db, "a");
+        db.execute(repair_sql(&db,
+            "UPDATE native_tree_repairs SET state='done' WHERE source_path=?1",
+            "UPDATE native_tree_repairs SET state='done' WHERE namespace=semon_namespace() AND source_path=?1").unwrap(), [path]).unwrap();
+        assert!(!repair_pending(&db).unwrap());
+        bind(&db, "b");
+        assert!(repair_pending(&db).unwrap());
         bind(&db, "a");
         let a = state(&db, "a");
         {
@@ -597,5 +626,255 @@ mod namespace_tests {
         assert_eq!(state(&db, "b"), b);
         bind(&db, "b");
         assert_eq!(source(&db, path).unwrap().unwrap().0, 1);
+    }
+}
+
+#[cfg(test)]
+mod file_namespace_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Exercise the production bound-selector API, including after reopening.
+    fn bind(db: &Connection, namespace: &str) {
+        let namespace = namespace.to_owned();
+        db.create_scalar_function("semon_namespace", 0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |_| Ok(namespace.clone())).unwrap();
+    }
+    fn begin_source(tx: &Transaction<'_>, namespace: &str, path: &str,
+        expected: Option<&Ledger>, ledger: &Ledger, append: bool) -> rusqlite::Result<i64> {
+        bind(tx, namespace);
+        super::begin_source(tx, path, expected, ledger, append)
+    }
+    fn write(tx: &Transaction<'_>, namespace: &str, path: &str,
+        ledger: &Ledger, index: &FileIndex) -> rusqlite::Result<()> {
+        bind(tx, namespace);
+        super::write(tx, path, ledger, index)
+    }
+    fn normalized(db: &Connection, namespace: &str, path: &str,
+        ledger: &Ledger) -> rusqlite::Result<bool> {
+        bind(db, namespace);
+        super::normalized(db, path, ledger)
+    }
+    fn seen(db: &Connection, namespace: &str, path: &str,
+        ledger: &Ledger, identity: &str) -> rusqlite::Result<Seen> {
+        bind(db, namespace);
+        super::seen(db, path, ledger, identity)
+    }
+    fn restore(db: &Connection, namespace: &str, path: &str,
+        ledger: &Ledger, encoded: Option<String>) -> rusqlite::Result<Option<CodexNativeUsage>> {
+        bind(db, namespace);
+        super::restore(db, path, ledger, encoded)
+    }
+
+
+    fn fixture_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "semon-native-usage-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn ledger(offset: u64) -> Ledger {
+        Ledger {
+            stat: Stat {
+                dev: 7,
+                ino: 9,
+                size: offset,
+                modified_ns: 11,
+                changed_ns: Some(13),
+            },
+            offset,
+            prefix: [17; 32],
+            tail: [19; 32],
+        }
+    }
+
+    fn record(turn: &str) -> Value {
+        serde_json::json!({
+            "type": "token_usage_record",
+            "payload": {
+                "thread_id": "thread-shared",
+                "session_id": "session-shared",
+                "turn_id": turn,
+                "response_id": format!("response-{turn}"),
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                    "total_tokens": 14,
+                    "cached_input_tokens": 1,
+                    "cache_write_input_tokens": 2,
+                    "reasoning_output_tokens": 0
+                }
+            }
+        })
+    }
+
+    fn usage_index(events: &[(u64, &str)]) -> FileIndex {
+        let mut index = FileIndex {
+            native_usage_observations: Some(Vec::new()),
+            ..Default::default()
+        };
+        for (offset, turn) in events {
+            let record = record(turn);
+            let bytes = serde_json::to_vec(&record).unwrap();
+            CodexNativeUsage::observe(
+                &mut index.codex_native_usage,
+                &record["payload"],
+                "model-shared".into(),
+                Some(1_800_000_000),
+            );
+            index
+                .native_usage_observations
+                .as_mut()
+                .unwrap()
+                .push(Observation::capture(&record, &bytes, *offset, Some("model-shared")).unwrap());
+        }
+        index
+    }
+
+    #[test]
+    fn two_namespaces_isolate_same_usage_ids_across_append_replay_restart_and_rollback() {
+        let path = fixture_path();
+        let namespace_a = "fixture-source-a";
+        let namespace_b = "fixture-source-b";
+        let source_path = "/same/session.jsonl";
+        let ledger_a = ledger(100);
+        let ledger_b = ledger(100);
+        let first = usage_index(&[(8, "same-turn")]);
+
+        let mut db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        for ddl in schema(true) { db.execute_batch(ddl).unwrap(); }
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let id_a = begin_source(&tx, namespace_a, source_path, None, &ledger_a, false).unwrap();
+        write(&tx, namespace_a, source_path, &ledger_a, &first).unwrap();
+        tx.commit().unwrap();
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let id_b = begin_source(&tx, namespace_b, source_path, None, &ledger_b, false).unwrap();
+        write(&tx, namespace_b, source_path, &ledger_b, &first).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(id_a, id_b);
+        assert_eq!(id_a, 1);
+        assert!(normalized(&db, namespace_a, source_path, &ledger_a).unwrap());
+        assert!(normalized(&db, namespace_b, source_path, &ledger_b).unwrap());
+        let first_identity = first.native_usage_observations.as_ref().unwrap()[0]
+            .identity()
+            .to_owned();
+        let seen_a = seen(&db, namespace_a, source_path, &ledger_a, &first_identity).unwrap();
+        let seen_b = seen(&db, namespace_b, source_path, &ledger_b, &first_identity).unwrap();
+        assert!(seen_a.tree && seen_a.model);
+        assert!(seen_b.tree && seen_b.model);
+
+        let mut ledger_appended = ledger_a.clone();
+        ledger_appended.offset = 200;
+        ledger_appended.stat.size = 200;
+        let appended = usage_index(&[(8, "same-turn"), (150, "second-turn")]);
+        let appended_encoded = encoded(&appended).unwrap().unwrap();
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let appended_id = begin_source(
+            &tx,
+            namespace_a,
+            source_path,
+            Some(&ledger_a),
+            &ledger_appended,
+            true,
+        )
+        .unwrap();
+        write(&tx, namespace_a, source_path, &ledger_appended, &appended).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(appended_id, id_a);
+
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        begin_source(
+            &tx,
+            namespace_a,
+            source_path,
+            Some(&ledger_appended),
+            &ledger_appended,
+            true,
+        )
+        .unwrap();
+        write(&tx, namespace_a, source_path, &ledger_appended, &appended).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace=?1", [namespace_a], |r| r.get::<_, i64>(0)).unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace=?1", [namespace_b], |r| r.get::<_, i64>(0)).unwrap(),
+            1
+        );
+        let restored = restore(
+            &db,
+            namespace_a,
+            source_path,
+            &ledger_appended,
+            Some(appended_encoded.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored.codex_usage().get("model-shared").unwrap().input, 20);
+        let second_identity = appended.native_usage_observations.as_ref().unwrap()[1]
+            .identity()
+            .to_owned();
+        let second_a = seen(&db, namespace_a, source_path, &ledger_appended, &second_identity)
+            .unwrap();
+        let second_b = seen(&db, namespace_b, source_path, &ledger_b, &second_identity).unwrap();
+        assert!(second_a.tree && second_a.model);
+        assert!(!second_b.tree && !second_b.model);
+
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        begin_source(
+            &tx,
+            namespace_a,
+            source_path,
+            Some(&ledger_appended),
+            &ledger_appended,
+            true,
+        )
+        .unwrap();
+        let mut failing = usage_index(&[(300, "third-turn")]);
+        let changed = record("second-turn");
+        let different_bytes = serde_json::to_vec_pretty(&changed).unwrap();
+        failing.native_usage_observations.as_mut().unwrap().push(
+            Observation::capture(&changed, &different_bytes, 150, Some("model-shared")).unwrap(),
+        );
+        assert!(write(&tx, namespace_a, source_path, &ledger_appended, &failing).is_err());
+        tx.rollback().unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace=?1", [namespace_a], |r| r.get::<_, i64>(0)).unwrap(),
+            2
+        );
+        drop(db);
+
+        let db = Connection::open(&path).unwrap();
+        let reopened = restore(
+            &db,
+            namespace_a,
+            source_path,
+            &ledger_appended,
+            Some(appended_encoded),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reopened.codex_usage().get("model-shared").unwrap().input, 20);
+        assert!(normalized(&db, namespace_b, source_path, &ledger_b).unwrap());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

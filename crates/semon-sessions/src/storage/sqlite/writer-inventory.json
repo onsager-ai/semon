@@ -3,7 +3,11 @@
   "writer_qualification": 0,
   "native_event_request_binding": 1,
   "native_event_namespace_composite_rows": false,
-  "native_event_composite_core_tables": ["files", "events", "signals"],
+  "native_event_composite_core_tables": [
+    "files",
+    "events",
+    "signals"
+  ],
   "native_event_metadata_composite": false,
   "native_event_metadata_scoped_helpers": [
     "native headers, parent markers, tree summaries/failures and archive markers",
@@ -16,12 +20,13 @@
   ],
   "native_tree_noop_witness": "transaction-local current header/generation/dimension digest plus parser/ledger/pricing/recipe interpretation; missing or stale witnesses repair",
   "native_usage_composite": false,
-  "native_usage_scoped_helpers": "five-table source/current/facts/identities/dimensions family; private composite DDL and collision/replay/rollback/retained-incarnation fixture only",
+  "native_usage_scoped_helpers": "bound-selector five-table family plus repair queue/claims/clock and Tree generations/headers/dimensions/work/snapshots; native repricing current-source/fact/dimension operations ported; private physical composite fixtures, production activation closed",
   "native_usage_activation_pending": [
-    "Tree joins, snapshots, repair queues and projection generations",
-    "reprice source/fact/dimension queries and pending owner row keys",
-    "remaining direct owners and retained-reader lifetime ports",
-    "production DDL registration, namespace guards and complete qualification"
+    "usage_identity/usage/codex_usage physical schemas and DML; native_tree_copy_insert/delete triggers and shared_usage token query; store.rs remove/clear copied-identity loops",
+    "reprice.rs pricing_recompute_pending physical owner keys, SCHEMA Catalog/core trigger owner joins and queue SELECT/DELETE/EXISTS; mixed family-layout conformance before activation",
+    "native_usage/repair.rs prepare opens a legacy read-only proof snapshot; explicit configured repair admission, bound snapshot and non-Options source authorization remain required before exposure",
+    "fresh configured DDL/guards/registration qualification for all usage/Tree/repair families; complete assembly and public two-source ingestion; current schema(false) selection remains singleton",
+    "semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification"
   ],
   "native_event_metadata_public_shape": "singleton; composite shape private-fixture only",
   "native_event_metadata_pending": [
@@ -76,5 +81,12 @@
     "test_hooks.rs",
     "transcript_range.rs",
     "viewer.rs"
+  ],
+  "native_tree_repair_readiness": "same bounded read_tree_summary validation as the consumer, including projection and interpretation witnesses; existing 256-iteration Catalog convergence oracle unchanged; CI pending",
+  "native_usage_composite_ddl": "native_usage::schema(bool) is the single usage+repair DDL selector used by storage_ddl(false) and both namespace fixtures; tree_state::schema(bool) selects authored Tree tables; copied-usage composite triggers pending, no public activation",
+  "native_usage_ci_filters": [
+    "native_usage_ includes file-backed component append/replay/reopen/conflict rollback, parent relocation/retained incarnation, Tree collision/rollback and native repricing collision/rollback",
+    "events::store::configured::tests:: includes stale-interpretation readiness regression",
+    "catalog::tests::native_usage_history_restart_converges_without_repair_revision_churn retains 256 iterations and same epoch/revision/phase checks"
   ]
 }
