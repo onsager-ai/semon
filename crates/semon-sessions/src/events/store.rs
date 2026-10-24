@@ -443,8 +443,6 @@ fn catalog_schema(composite: bool) -> &'static str {
     }
 }
 
-
-
 const LEGACY_EVENT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
     file_id INTEGER PRIMARY KEY,
@@ -690,7 +688,9 @@ fn copied_usage_sql<'a>(
     let version: i64 = c.pragma_query_value(None, "schema_version", |r| r.get(0))?;
     let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_copied_usage_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
     if cached {
-        let layout: Option<bool> = c.prepare_cached("SELECT semon_copied_usage_layout(?1)")?.query_row([version], |r| r.get(0))?;
+        let layout: Option<bool> = c
+            .prepare_cached("SELECT semon_copied_usage_layout(?1)")?
+            .query_row([version], |r| r.get(0))?;
         if let Some(composite) = layout {
             return Ok(if composite { scoped } else { legacy });
         }
@@ -712,7 +712,11 @@ fn copied_usage_sql<'a>(
             return Err(rusqlite::Error::InvalidQuery);
         };
         let namespace_valid: bool = c.prepare_cached("SELECT count(*)=?2 AND coalesce(min(pk=1 AND [notnull]=1 AND type='TEXT'),1) FROM pragma_table_info(?1) WHERE name='namespace'")?.query_row(params![table, i64::from(composite)], |r| r.get(0))?;
-        let physical: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)")?.query_row([table], |r| r.get(0))?;
+        let physical: bool = c
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
+            )?
+            .query_row([table], |r| r.get(0))?;
         if !namespace_valid || !physical || shape.is_some_and(|prior| prior != composite) {
             return Err(rusqlite::Error::InvalidQuery);
         }
