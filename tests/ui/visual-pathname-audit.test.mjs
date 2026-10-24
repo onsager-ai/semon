@@ -67,8 +67,7 @@ function fixture(t, { source = 'pixels/report.json', scope = 'main' } = {}) {
     const currentReport = structuredClone(report);
     currentReport.results[0].artifactPaths.candidateEvidence = candidatePath;
     currentReport.results[0].artifactDigests.candidate.evidence = recordedDigest;
-    if (writeEvidence)
-      fs.writeFileSync(path.join(captureRoot, candidatePath), bytes);
+    if (writeEvidence) fs.writeFileSync(path.join(captureRoot, candidatePath), bytes);
     fs.writeFileSync(reportPath, JSON.stringify(currentReport));
     return audit({ root, registry: { acceptances } });
   };
@@ -159,8 +158,8 @@ test('refuses nested transport evidence that escapes, is missing or has the wron
     /ENOENT/,
   );
   assert.match(
-    run({ bytes: Buffer.from('wrong evidence'), recordedDigest: hash(canonicalBytes) })
-      .refused[0].reason,
+    run({ bytes: Buffer.from('wrong evidence'), recordedDigest: hash(canonicalBytes) }).refused[0]
+      .reason,
     /bytes do not match recorded digest/,
   );
 });
