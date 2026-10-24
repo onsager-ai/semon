@@ -1,5 +1,7 @@
 # Native session navigation resolution
 
+Public addresses use [session identity and URLs](session-identity-and-urls.md).
+
 `session_catalog_resolve_native(options, source_key, harness, native_id, scope)`
 resolves native links against the selected configured source's persistent catalog.
 The host authorizes that source before calling it. No event cache, native body,
