@@ -78,6 +78,7 @@ mod native_page;
 mod native_record;
 mod native_sidecar;
 mod native_tree;
+pub mod session_route;
 pub use codex_lifecycle::{TurnLifecycle, TurnPhase};
 use native_tree::Summary;
 mod read_capabilities;

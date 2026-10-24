@@ -1,3 +1,4 @@
+import { sessionPath } from './sessionRoute';
 import { render } from 'preact';
 import { screenText } from './screens';
 export function renderCatalogSources(
@@ -8,7 +9,12 @@ export function renderCatalogSources(
     note: string;
     more: boolean;
     machinesHref: string;
-    bookmarks?: readonly { source_key: string; catalog_key: string; harness: string }[];
+    bookmarks?: readonly {
+      source_key: string;
+      catalog_key: string;
+      harness: string;
+      href?: string;
+    }[];
   },
   host: { select(key: string): void; more(): void; retry(): void },
 ) {
@@ -37,14 +43,7 @@ export function renderCatalogSources(
             <a
               class="nrow"
               key={JSON.stringify([item.source_key, item.catalog_key])}
-              href={
-                '/s/' +
-                encodeURIComponent(item.harness) +
-                '/' +
-                encodeURIComponent(item.catalog_key) +
-                '?' +
-                new URLSearchParams({ machine: item.source_key })
-              }
+              href={item.href ?? sessionPath(item.source_key, item.catalog_key)}
             >
               <span class="nm">{screenText(item.catalog_key)}</span>
               <span>

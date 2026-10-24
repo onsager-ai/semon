@@ -35,6 +35,22 @@ const TOP = {
   },
 };
 
+const sessionHref = (selection) => {
+  if (
+    typeof selection?.source_key !== 'string' ||
+    !selection.source_key ||
+    typeof selection.catalog_key !== 'string' ||
+    !selection.catalog_key
+  )
+    return null;
+  const segment = (value) =>
+    encodeURIComponent(value).replace(
+      /[!'()*]/g,
+      (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
+    );
+  return '/session/' + segment(selection.source_key) + '/' + segment(selection.catalog_key);
+};
+
 function fakeAnswer(A, D) {
   const pad = (i) => String(i + 1).padStart(2, '0');
   A.breakdown.repo = Array.from({ length: 24 }, (_, i) => ({
@@ -89,10 +105,11 @@ async function fake(page, D, state = { n: 0 }) {
         tag = (res.headers().etag ?? '"a"') + '-fake' + state.n;
       if (route.request().headers()['if-none-match'] === tag)
         return route.fulfill({ status: 304, headers: { etag: tag } });
+      state.answer = fakeAnswer(await res.json(), D);
       return route.fulfill({
         status: 200,
         headers: { 'content-type': 'application/json', etag: tag },
-        body: JSON.stringify(fakeAnswer(await res.json(), D)),
+        body: JSON.stringify(state.answer),
       });
     },
   );
@@ -479,7 +496,9 @@ export default async function breakdownCheck(browser) {
           spec.values.length,
       );
       list.rows.forEach((row, i) => {
-        const want = spec.values[i] / max;
+        const want = spec.values[i] / max,
+          answer = page.fakeState.answer,
+          wantHref = sessionHref(answer?.selections[answer.top[spec.key][i]?.sid]);
         r.expect(
           row.ratio != null && Math.abs(row.ratio - want) <= 0.02,
           mode +
@@ -517,14 +536,14 @@ export default async function breakdownCheck(browser) {
             'px wide, want at least 40',
         );
         r.expect(
-          row.tag === 'A' && /^\/s\/native\/./.test(row.href ?? ''),
+          row.tag === 'A' && wantHref !== null && row.href === wantHref,
           mode +
             ": '" +
             list.title +
             "' row " +
             (i + 1) +
             ' is not a link to its session: ' +
-            JSON.stringify({ tag: row.tag, href: row.href }),
+            JSON.stringify({ tag: row.tag, href: row.href, expected: wantHref }),
         );
         r.expect(
           row.harness && row.colour === row.expected,
@@ -587,7 +606,12 @@ export default async function breakdownCheck(browser) {
       );
     }
     // A tap on a row opens its session (the link is still handled in the page).
-    const first = page.locator('.analytics-split .analytics-session.ranked').first();
+    const first = page.locator('.analytics-split .analytics-session.ranked').first(),
+      firstSpec = TOP[lists[0]?.title],
+      answer = page.fakeState.answer,
+      firstHref = firstSpec
+        ? sessionHref(answer?.selections[answer.top[firstSpec.key][0]?.sid])
+        : null;
     if (await first.count()) {
       await first.click();
       await page
@@ -596,7 +620,7 @@ export default async function breakdownCheck(browser) {
     }
     res.opened = await page.evaluate(() => ({ path: location.pathname, state: history.state?.v }));
     r.expect(
-      /^\/s\//.test(res.opened.path) && res.opened.state === 'session',
+      firstHref !== null && res.opened.path === firstHref && res.opened.state === 'session',
       mode + ': a top-session row did not open its session: ' + JSON.stringify(res.opened),
     );
     errors.push(...page.errors);
