@@ -11,6 +11,37 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 21 repair: preserve the metadata physical contract
+
+Metadata conformance fixtures now use the same authored singleton metadata DDL
+as the factory, including `value TEXT NOT NULL`. The strict physical-shape
+guard remains unchanged. Configured Event preparation preserves that two-column
+singleton table rather than appending a non-key namespace column, which the
+strict guard correctly rejects. Its native metadata writes remain fenced by
+the sole enrolled Source, registered writer and per-table ownership checks;
+Catalog epochs and custody records remain outside that writer's key set.
+Composite metadata Event preparation explicitly refuses with
+`NamespaceUpgradePending`; this repair does not qualify public metadata.
+The existing stale-interpretation readiness regression now also checks durable
+replay after reopen and exact preservation of the factory's metadata DDL.
+CI and independent acceptance of this repair are still required.
+
+The prior usage CI failure was in `native_events()` before ingest, at line
+1880 of the formatter's actual output. Event preparation appended the malformed
+metadata column, then opening the configured IndexStore repeated SourceJournal
+preparation and failed its metadata contract check. This was not an observed
+post-ingest copied-layout-cache or unknown-key failure.
+
+The earlier cold-page performance failure remains unresolved. Layout probes
+are on that producer/read path: `write_file` and `Readers::new` select copied
+usage statements, while metadata reads select `metadata_sql`. Copied layout
+validation caches only autocommit decisions; initialization qualifies inside
+transactions, so a connection without a committed cache can repeat the full
+family validation during subsequent transactional writes/reads. This is a
+concrete #477 cost to measure, not proof that it caused the recorded 2.37-second
+failure. No timing limit was raised. The #380 visual binding gaps are separate;
+API/performance failures are not waived as visual overlap.
+
 ## Worker 20 increment: metadata admission and ownership
 
 Composite change-stream DDL now initializes only the store-global epoch. The

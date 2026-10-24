@@ -203,7 +203,10 @@ mod tests {
             ));
             std::fs::create_dir(&root).unwrap();
             let db = Connection::open(root.join("store.sqlite3")).unwrap();
-            db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
+            db.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+            db.execute_batch(crate::events::store::metadata_schema(false))
+                .unwrap();
+            db.execute_batch("CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE session_history_catalog(session_key TEXT PRIMARY KEY,metadata TEXT);").unwrap();
             db.execute_batch(changes::SCHEMA).unwrap();
             db.pragma_update(None, "user_version", crate::events::store::SCHEMA_VERSION)
                 .unwrap();
