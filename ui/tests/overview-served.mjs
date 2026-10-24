@@ -137,6 +137,7 @@ test(
                 status: response.status(),
                 machine: url.searchParams.get('machine'),
                 sid: url.searchParams.get('sid'),
+                turn: url.searchParams.get('turn'),
                 scope: url.searchParams.get('scope'),
                 response,
               });
@@ -504,7 +505,7 @@ test(
               await page.route(/\/api\/viewer\/home(?:\?.*)?$/, withoutHomeSelected);
               await page.route('**/api/sessions?**', withoutCatalogSelected);
               await page.route('**/api/session-transcript?**', unavailableTranscript);
-              await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2] + '&compat=1');
+              await page.goto(address[1] + '/s/claude/a-docs?t=' + address[2]);
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               await page
@@ -573,7 +574,7 @@ test(
               );
               // Drain active async routes before navigation so no handler races its response.
               await page.unrouteAll({ behavior: 'wait' });
-              await page.goto(address[1] + '/s/claude/a-review?t=' + address[2] + '&compat=1');
+              await page.goto(address[1] + '/s/claude/a-review?t=' + address[2]);
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               await page.locator(ingestSelector + '[aria-expanded="true"]').waitFor();
@@ -631,13 +632,10 @@ test(
                 'the selected session starts outside the filtered Home preview',
               );
 
-              await page.evaluate(
-                (path) => {
-                  history.pushState(history.state, '', path);
-                  window.dispatchEvent(new PopStateEvent('popstate'));
-                },
-                '/s/claude/a-docs?t=' + address[2] + '&compat=1',
-              );
+              await page.evaluate((path) => {
+                history.pushState(history.state, '', path);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }, '/s/claude/a-docs');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               assert.equal(
@@ -747,7 +745,11 @@ test(
             );
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
-            assert.match(new URL(page.url()).pathname, /^\/trace\//);
+            assert.equal(typeof waiting.event.turn, 'string');
+            assert.equal(
+              new URL(page.url()).pathname,
+              `/session/${encodeURIComponent(waiting.source_key)}/${encodeURIComponent(waiting.catalog_key)}/trace/${encodeURIComponent(waiting.event.turn)}`,
+            );
             assert.ok(
               (await page.locator('#page [data-agent-id]').count()) > 1,
               'causal agents are connected',
@@ -860,13 +862,29 @@ test(
             const parentSession = new URL(page.url()).pathname.split('/').at(-1);
             await runView.click();
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
-            assert.match(new URL(page.url()).pathname, /^\/trace\/native\//);
+            const traceUrl = new URL(page.url());
+            const traceSegments = traceUrl.pathname.split('/');
+            assert.equal(traceSegments[1], 'session');
+            assert.equal(traceSegments[2], 'local');
             assert.equal(
-              new URL(page.url()).pathname.split('/')[3],
+              traceSegments[3],
               parentSession,
-              'Run view retains the sending session as Trace root',
+              'Run view retains the exact sending session key as Trace root',
             );
+            assert.equal(traceSegments[4], 'trace');
+            assert.ok(traceSegments[5], 'Run view URL contains the exact turn identity');
+            const runTraceTurn = decodeURIComponent(traceSegments[5]);
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
+            assert.ok(
+              apiResponses.some(
+                (row) =>
+                  row.path === '/api/session-trace' &&
+                  row.machine === 'local' &&
+                  row.sid === parentSession &&
+                  row.turn === runTraceTurn,
+              ),
+              'trace request retains the canonical source, session key and turn',
+            );
             await page.goBack();
             await page.locator('[aria-label="Transcript"]').waitFor();
             await page.locator('#page .child-card').first().waitFor();

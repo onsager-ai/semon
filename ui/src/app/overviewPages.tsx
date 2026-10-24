@@ -1,3 +1,4 @@
+import { sessionPath } from '../lib/sessionRoute';
 import { render } from 'preact';
 import { orderRows, type OrderScope } from '../lib/ordering';
 import type { RecentItem, RecentSnapshot } from '../lib/recent';
@@ -976,10 +977,7 @@ export function createOverviewPages(host: OverviewHost) {
         },
         sessionHref: (id) =>
           selections[id]
-            ? '/s/native/' +
-              encodeURIComponent(selections[id].catalog_key) +
-              '?machine=' +
-              encodeURIComponent(selections[id].source_key)
+            ? sessionPath(selections[id].source_key, selections[id].catalog_key)
             : undefined,
       },
       {
