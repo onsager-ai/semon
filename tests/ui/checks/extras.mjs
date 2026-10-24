@@ -940,9 +940,7 @@ export default async function (browser) {
         JSON.stringify({ failed, previewInfo }),
     );
     r.expect(
-      ok.notes.length === 1 &&
-        ok.notes[0] === 'Complete recorded text loaded.' &&
-        ok.out > preview,
+      ok.notes.length === 1 && ok.notes[0] === 'Complete recorded text loaded.' && ok.out > preview,
       'a working fetch confirms complete text without a preview or failure notice: ' +
         JSON.stringify(ok),
     );
