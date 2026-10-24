@@ -123,7 +123,7 @@ impl Stage {
     }
 
     pub(crate) fn record(&mut self, batch: &Batch, prepared: &PreparedSources) -> Result<Outcome, StoreError> {
-        if batch.phase!=Phase::Indexing || batch.paths.len()>64 || !prepared.withdrawals.is_empty() || !prepared.rows.is_empty() || !prepared.relationships.endpoints.is_empty() || !prepared.indexed_native_parents.is_empty() || !prepared.lineage_dependencies.is_empty() {
+        if batch.phase!=Phase::Indexing || batch.paths.len()>64 || !prepared.withdrawals.is_empty() || !prepared.rows.is_empty() || !prepared.transcripts.is_empty() || !prepared.pids.is_empty() || !prepared.relationships.endpoints.is_empty() || !prepared.relationships.relations.is_empty() || !prepared.indexed_native_parents.is_empty() || !prepared.lineage_dependencies.is_empty() {
             return Err(StoreError::Configured(StorageError::NamespaceUpgradePending));
         }
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(error)?;
