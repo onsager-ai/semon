@@ -1743,6 +1743,8 @@ mod tests {
         stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = Vec::new();
         stream.read_to_end(&mut response).unwrap();
+        // Keep the producer busy through the response, then let close() drain it.
+        drop(_busy);
         worker.join().unwrap();
         String::from_utf8_lossy(&response).into_owned()
     }
