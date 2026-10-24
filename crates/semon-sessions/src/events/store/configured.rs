@@ -399,6 +399,7 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
     SourceJournal(config.clone()).validate(db)?;
     validate_core(db)?;
+    validate_event_metadata(db)?;
     let ready: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations' AND type='table')", [], |r| r.get(0)).map_err(failed)?;
     if !ready {
         return Err(StorageError::NamespaceUpgradePending);
@@ -443,17 +444,36 @@ fn validate_core(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn validate_event_metadata(db: &Connection) -> Result<(), StorageError> {
+    // Event preparation qualifies only the core. Metadata remains the authored
+    // singleton family until its complete writer/consumer boundary is qualified.
+    let composite_meta: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta','main') WHERE name='namespace')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(failed)?;
+    if composite_meta {
+        Err(StorageError::NamespaceUpgradePending)
+    } else {
+        Ok(())
+    }
+}
+
 /// Constant-size preparation of a fresh composite core. Existing singleton
 /// stores refuse before writes; supported-current bounded migration is pending.
 pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     let mut db = connection(config)?;
     SourceJournal(config.clone()).validate(&db)?;
     validate_core(&db)?;
+    validate_event_metadata(&db)?;
     SourceJournal(config.clone()).prepare()?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
     SourceJournal(config.clone()).validate(&tx)?;
+    validate_event_metadata(&tx)?;
     let exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')",
@@ -467,11 +487,6 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     tx.execute_batch("CREATE TABLE storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification IN(0,1)),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
 CREATE TABLE storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);").map_err(failed)?;
-    let ns = config.namespace.as_str().replace('\'', "''");
-    tx.execute_batch(&format!(
-        "ALTER TABLE meta ADD COLUMN namespace TEXT NOT NULL DEFAULT '{ns}';"
-    ))
-    .map_err(failed)?;
     for table in ["storage_event_tables", "storage_event_operations"] {
         for operation in ["INSERT", "UPDATE", "DELETE"] {
             let predicate = match operation {
@@ -508,8 +523,12 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
             let metadata = if *table == "meta" {
                 // Native helpers may change source/proof metadata only. Catalog
                 // epochs, publication markers and custody records stay fenced.
+                // The enclosing guard binds this singleton family to its sole
+                // enrolled Source via storage_event_tables and rejects every
+                // unbound/wrong-Source writer. Do not manufacture a namespace
+                // column without the composite metadata primary key.
                 format!(
-                    " OR {record}.namespace IS NOT semon_namespace() OR NOT ({record}.key GLOB 'native_*' OR {record}.key GLOB 'archive_event_index:*')"
+                    " OR NOT ({record}.key GLOB 'native_*' OR {record}.key GLOB 'archive_event_index:*')"
                 )
             } else if CORE_TABLES.contains(table) {
                 match operation {
@@ -1592,10 +1611,36 @@ mod tests {
         let mut old_write = old
             .prepare("UPDATE files SET title='old-writer' WHERE path=?1")
             .unwrap();
+        let mut old_metadata = old
+            .prepare("UPDATE meta SET value='old-writer' WHERE key GLOB 'native_tree_summary:*'")
+            .unwrap();
         let mut writer = f.config.native_events().unwrap();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let before = f.state();
+        let summaries: i64 = f
+            .db()
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key GLOB 'native_tree_summary:*'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(summaries > 0, "the metadata fence must protect real rows");
         assert!(old_write.execute([f.raw.to_str().unwrap()]).is_err());
+        assert!(old_metadata.execute([]).is_err());
+        let mut foreign = f.config.clone();
+        foreign.namespace = LogicalSourceNamespace::new("foreign").unwrap();
+        let refused = connection(&foreign)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value='foreign-writer' WHERE key GLOB 'native_tree_summary:*'",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            refused.sqlite_error_code(),
+            Some(ErrorCode::ConstraintViolation)
+        );
         assert_eq!(f.state(), before);
         assert_eq!(
             crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
@@ -1877,6 +1922,12 @@ mod tests {
     #[test]
     fn native_usage_repair_readiness_rejects_stale_interpretation() {
         let f = Fixture::new();
+        let authored: String = f
+            .db()
+            .query_row("SELECT sql FROM sqlite_schema WHERE name='meta'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         let mut writer = f.config.native_events().unwrap();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let path = f.raw.to_str().unwrap();
@@ -1904,6 +1955,24 @@ mod tests {
         assert!(tree_state::ready(&tx, path, &ledger).unwrap());
         tx.commit().unwrap();
         assert!(tree_state::ready(&db, path, &ledger).unwrap());
+        drop(db);
+        drop(writer);
+        let mut restarted = f.config.native_events().unwrap();
+        assert!(
+            restarted
+                .ingest(&"a".repeat(64), &f.raw, "codex")
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(
+            f.db()
+                .query_row("SELECT sql FROM sqlite_schema WHERE name='meta'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+            authored,
+            "ingest and reopen must preserve the authored metadata shape"
+        );
     }
 
     #[test]

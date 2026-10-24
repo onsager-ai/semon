@@ -5516,7 +5516,7 @@ const NATIVE_METADATA_MAX: usize = 1024 * 1024;
 
 /// The composite shape is exercised privately with the connected proof
 /// helpers. Public creation stays singleton until all global owners are ported.
-fn metadata_schema(composite: bool) -> &'static str {
+pub(crate) fn metadata_schema(composite: bool) -> &'static str {
     if composite {
         "CREATE TABLE IF NOT EXISTS meta(namespace TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(namespace,key)) STRICT, WITHOUT ROWID;"
     } else {
