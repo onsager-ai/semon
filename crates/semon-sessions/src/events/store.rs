@@ -723,9 +723,16 @@ fn copied_usage_sql<'a>(
         // Composite payload rows must reference the same physical core key.
         // Refuse a missing, partial or foreign parent constraint, not merely
         // a table with the expected primary-key spelling.
-        let foreign_keys = c.prepare_cached("SELECT [table],[from],[to] FROM pragma_foreign_key_list(?1) ORDER BY id,seq")?
+        let foreign_keys = c
+            .prepare_cached(
+                "SELECT [table],[from],[to] FROM pragma_foreign_key_list(?1) ORDER BY id,seq",
+            )?
             .query_map([table], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let expected: Vec<(String, String, String)> = if composite {
