@@ -1507,9 +1507,7 @@ export default async function (browser) {
       const key = decodeURIComponent(parts[3]);
       const match = Object.entries(D.KEYS).find(
         ([sid, catalogKey]) =>
-          catalogKey === key &&
-          D.SESS[sid] &&
-          D.SOURCES[D.SESS[sid].machine] === source,
+          catalogKey === key && D.SESS[sid] && D.SOURCES[D.SESS[sid].machine] === source,
       );
       if (!match) throw new Error('Canonical session path has no fixture owner');
       return match[0];
@@ -1545,7 +1543,8 @@ export default async function (browser) {
         source = realSession && D.SOURCES[realSession.machine],
         key = D.KEYS[XSS_KEY],
         unsent = 'unsent:' + XSS;
-      if (!source || !key) throw new Error('Payload fixture is missing its source or Catalog key mapping');
+      if (!source || !key)
+        throw new Error('Payload fixture is missing its source or Catalog key mapping');
       const unsentPage = await served(browser, {
         extras: true,
         size,

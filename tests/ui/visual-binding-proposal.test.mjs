@@ -9,11 +9,29 @@ const previousFingerprint = 'b'.repeat(64);
 const sourcePin = 'source-review-pin';
 const hubPin = 'hub-review-pin';
 
-function fixture({ coverageGap = false, errors = false, duplicate = false, missing = false,
-  changedDigest = null, auditRefusal = false } = {}) {
+function fixture({
+  coverageGap = false,
+  errors = false,
+  duplicate = false,
+  missing = false,
+  changedDigest = null,
+  auditRefusal = false,
+} = {}) {
   const specs = [
-    { source: 'preservation/report.json', comparator: 'preservation', scope: 'required', frames: 68, regions: 0 },
-    { source: 'pixels/report.json', comparator: 'pixels', scope: 'main', frames: 113, regions: 162 },
+    {
+      source: 'preservation/report.json',
+      comparator: 'preservation',
+      scope: 'required',
+      frames: 68,
+      regions: 0,
+    },
+    {
+      source: 'pixels/report.json',
+      comparator: 'pixels',
+      scope: 'main',
+      frames: 113,
+      regions: 162,
+    },
   ];
   const reports = {};
   const acceptances = [];
@@ -51,7 +69,9 @@ function fixture({ coverageGap = false, errors = false, duplicate = false, missi
       })),
     };
     if (coverageGap && reportIndex === 1) report.regions.pop();
-    reports[spec.source === 'pixels/report.json' ? 'pixels/report.json' : 'preservation/report.json'] = report;
+    reports[
+      spec.source === 'pixels/report.json' ? 'pixels/report.json' : 'preservation/report.json'
+    ] = report;
     auditReports.push({ source: spec.source, scope: spec.scope, errorCount: 0 });
 
     const accepted = {
@@ -88,7 +108,15 @@ function fixture({ coverageGap = false, errors = false, duplicate = false, missi
     reports: auditReports,
     qualified,
     refused: auditRefusal
-      ? [{ comparator: 'pixels', scope: 'main', kind: 'frame', key: 'main-failed-frame', reason: 'unmatched' }]
+      ? [
+          {
+            comparator: 'pixels',
+            scope: 'main',
+            kind: 'frame',
+            key: 'main-failed-frame',
+            reason: 'unmatched',
+          },
+        ]
       : [],
   };
   const registry = { version: 1, acceptances };
@@ -109,16 +137,26 @@ test('proposes only candidate fingerprint/evidence changes and preserves review 
   const original = structuredClone(input.registry);
   const result = proposeVisualBindings({ suite: 'visual', ...input });
   assert.equal(result.status, 'proposed');
-  assert.match(result.patch, /^diff --git a\/tests\/ui\/visual-acceptance\.json b\/tests\/ui\/visual-acceptance\.json/m);
+  assert.match(
+    result.patch,
+    /^diff --git a\/tests\/ui\/visual-acceptance\.json b\/tests\/ui\/visual-acceptance\.json/m,
+  );
   assert.deepEqual(input.registry, original);
   for (let index = 0; index < input.registry.acceptances.length; index++) {
     const before = input.registry.acceptances[index];
     const after = result.proposedRegistry.acceptances[index];
     assert.deepEqual(
-      { ...after, candidateFingerprint: before.candidateFingerprint,
-        artifactDigests: { ...after.artifactDigests,
-          candidate: { ...after.artifactDigests.candidate,
-            evidence: before.artifactDigests.candidate.evidence } } },
+      {
+        ...after,
+        candidateFingerprint: before.candidateFingerprint,
+        artifactDigests: {
+          ...after.artifactDigests,
+          candidate: {
+            ...after.artifactDigests.candidate,
+            evidence: before.artifactDigests.candidate.evidence,
+          },
+        },
+      },
       before,
     );
     assert.equal(after.decision, before.decision);

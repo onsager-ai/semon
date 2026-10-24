@@ -53,8 +53,12 @@ const identity = (row) => JSON.stringify([row.comparator, row.scope, row.kind, r
 
 function rows(report) {
   return [
-    ...(Array.isArray(report?.results) ? report.results.map((row) => ({ kind: 'frame', row })) : []),
-    ...(Array.isArray(report?.regions) ? report.regions.map((row) => ({ kind: 'region', row })) : []),
+    ...(Array.isArray(report?.results)
+      ? report.results.map((row) => ({ kind: 'frame', row }))
+      : []),
+    ...(Array.isArray(report?.regions)
+      ? report.regions.map((row) => ({ kind: 'region', row }))
+      : []),
   ];
 }
 
@@ -163,7 +167,8 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
   const refusals = [];
   const specs = SUITES[suite];
   if (!specs) refusals.push('unknown proposal suite');
-  if (!registry || !Array.isArray(registry.acceptances)) refusals.push('invalid acceptance registry');
+  if (!registry || !Array.isArray(registry.acceptances))
+    refusals.push('invalid acceptance registry');
   if (!audit || audit.diagnosticOnly !== true) refusals.push('missing diagnostic pathname audit');
   if (!Array.isArray(audit?.qualified) || !Array.isArray(audit?.refused))
     refusals.push('invalid pathname audit result');
@@ -171,9 +176,18 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
   if (refusals.length) return { suite, status: 'refused', refusals, patch: '', updates: [] };
 
   if (!reports || typeof reports !== 'object')
-    return { suite, status: 'refused', refusals: ['missing visual reports'], patch: '', updates: [] };
+    return {
+      suite,
+      status: 'refused',
+      refusals: ['missing visual reports'],
+      patch: '',
+      updates: [],
+    };
   const expectedSources = new Set(specs.map((spec) => spec.auditSource));
-  if (audit.reports.length !== specs.length || audit.reports.some((item) => !expectedSources.has(item.source)))
+  if (
+    audit.reports.length !== specs.length ||
+    audit.reports.some((item) => !expectedSources.has(item.source))
+  )
     refusals.push('pathname audit report set does not match this suite');
 
   const registryCopy = structuredClone(registry);
@@ -198,7 +212,9 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
       const state = { comparator: spec.comparator, scope: spec.scope, kind, key: row.key };
       const stateId = identity(state);
       if (expectedStates.has(stateId)) {
-        refusals.push(`${spec.reportPath}: duplicate failing state ${String(row.key).slice(0, 100)}`);
+        refusals.push(
+          `${spec.reportPath}: duplicate failing state ${String(row.key).slice(0, 100)}`,
+        );
         continue;
       }
       expectedStates.add(stateId);
@@ -206,14 +222,18 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
         .map((entry, index) => ({ entry, index }))
         .filter(({ entry }) => identity(entry ?? {}) === stateId);
       if (acceptedMatches.length !== 1) {
-        refusals.push(`${spec.reportPath}: expected one accepted record for ${String(row.key).slice(0, 100)}`);
+        refusals.push(
+          `${spec.reportPath}: expected one accepted record for ${String(row.key).slice(0, 100)}`,
+        );
         continue;
       }
       const { entry: accepted, index } = acceptedMatches[0];
       const qualifiedMatches = audit.qualified.filter((item) => identity(item) === stateId);
       const refusedMatches = audit.refused.filter((item) => identity(item) === stateId);
       if (qualifiedMatches.length !== 1 || refusedMatches.length !== 0) {
-        refusals.push(`${spec.reportPath}: audit did not uniquely qualify ${String(row.key).slice(0, 100)}`);
+        refusals.push(
+          `${spec.reportPath}: audit did not uniquely qualify ${String(row.key).slice(0, 100)}`,
+        );
         continue;
       }
       const qualification = qualifiedMatches[0];
@@ -222,7 +242,9 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
         continue;
       }
       if (!sameReferences(report, accepted)) {
-        refusals.push(`${spec.reportPath}: reference pins changed for ${String(row.key).slice(0, 100)}`);
+        refusals.push(
+          `${spec.reportPath}: reference pins changed for ${String(row.key).slice(0, 100)}`,
+        );
         continue;
       }
       const currentDigests = row.artifactDigests;
@@ -242,11 +264,15 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
         (qualification.reason === 'fingerprint-only' && currentEvidence !== acceptedEvidence) ||
         (qualification.reason === 'canonical-pathname-only' && currentEvidence === acceptedEvidence)
       ) {
-        refusals.push(`${spec.reportPath}: audit hashes do not match ${String(row.key).slice(0, 100)}`);
+        refusals.push(
+          `${spec.reportPath}: audit hashes do not match ${String(row.key).slice(0, 100)}`,
+        );
         continue;
       }
       if (!isSha256(accepted.candidateFingerprint) || !accepted.artifactDigests?.candidate) {
-        refusals.push(`${spec.reportPath}: accepted binding is incomplete for ${String(row.key).slice(0, 100)}`);
+        refusals.push(
+          `${spec.reportPath}: accepted binding is incomplete for ${String(row.key).slice(0, 100)}`,
+        );
         continue;
       }
 
@@ -277,8 +303,7 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
       updates: [],
     };
 
-  if (!updates.length)
-    return { suite, status: 'no-changes', refusals: [], patch: '', updates: [] };
+  if (!updates.length) return { suite, status: 'no-changes', refusals: [], patch: '', updates: [] };
   const canonicalRegistryText = JSON.stringify(registry, null, 2) + '\n';
   if (registryText !== canonicalRegistryText)
     return {
@@ -303,7 +328,14 @@ export function proposeVisualBindings({ suite, reports, audit, registry, registr
     };
   }
   const patch = patchForRegistry(registryText, proposedText);
-  return { suite, status: 'proposed', refusals: [], patch, updates, proposedRegistry: registryCopy };
+  return {
+    suite,
+    status: 'proposed',
+    refusals: [],
+    patch,
+    updates,
+    proposedRegistry: registryCopy,
+  };
 }
 
 function boundedJson(file) {
