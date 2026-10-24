@@ -1,5 +1,6 @@
 //! Single-source SQLite adapter for the metadata contract.
 pub(crate) mod catalog;
+pub(crate) mod catalog_namespace;
 pub(crate) mod changes;
 pub(crate) mod namespace;
 pub(crate) mod query;
@@ -128,6 +129,10 @@ impl SessionMetadataStore for SqliteMetadataStore {
         let db = self.admit(namespace, false)?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         self.check_epoch(&db)?;
+        if !self.1 {
+            catalog_namespace::register(&db, namespace)?;
+            catalog_namespace::scope_readers(&db)?;
+        }
         Ok(Box::new(Snapshot {
             db,
             namespace: namespace.clone(),

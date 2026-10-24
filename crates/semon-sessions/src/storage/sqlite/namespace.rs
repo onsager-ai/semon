@@ -139,6 +139,9 @@ pub(crate) fn unenroll(config: &StoreConfig, expected: &NamespaceAdmission) -> R
     db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
     let actual = require_admitted(&tx, &config.namespace)?;
+    if super::catalog_namespace::started(&tx).map_err(failed)? {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
     if actual != *expected { return Err(StorageError::ScopeChanged); }
     let actual_epoch: String = tx.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).map_err(failed)?;
     if epoch != actual_epoch { return Err(StorageError::ScopeChanged); }

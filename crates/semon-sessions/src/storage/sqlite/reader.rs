@@ -19,6 +19,7 @@ impl NativeReaderBinding {
         }
         let db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(failed)?;
         db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
+        super::catalog_namespace::register(&db, &config.namespace)?;
         Ok(db)
     }
 
@@ -35,6 +36,9 @@ impl NativeReaderBinding {
         let actual: String = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |row| row.get(0)).map_err(failed)?;
         if config.expected_stream_epoch.as_ref().is_some_and(|epoch| epoch != &actual) {
             return Err(StorageError::ScopeChanged);
+        }
+        if matches!(self, Self::Admitted(_)) {
+            super::catalog_namespace::scope_readers(db)?;
         }
         Ok(())
     }

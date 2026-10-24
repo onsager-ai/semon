@@ -6,6 +6,12 @@ use crate::{
 use serde_json::Value;
 use std::io;
 
+pub(crate) struct SourceProofObservation {
+    pub(crate) key: String,
+    pub(crate) source: CatalogSource,
+    pub(crate) generation: String,
+}
+
 pub(crate) trait CatalogSnapshot {
     fn require_current(&self) -> io::Result<()>;
     fn publication_value(&self, key: &str) -> io::Result<Option<String>>;

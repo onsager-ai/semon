@@ -6,6 +6,7 @@ pub(crate) mod catalog;
 mod conformance;
 pub(crate) mod query;
 pub(crate) mod sqlite;
+pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
 pub(crate) fn read_local_catalog_page(
     options: &crate::Options,
@@ -21,10 +22,7 @@ pub(crate) fn source_proof_observation(
     options: &crate::Options,
     root: &str,
     absolute: &str,
-) -> Result<
-    Option<(String, crate::model::summary::CatalogSource, String)>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<Option<catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
     let namespace = LogicalSourceNamespace::new("source-proof")?;
     let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(options, namespace));
     sqlite::catalog::source_proof_observation(&binding, options, root, absolute)
@@ -128,6 +126,12 @@ impl StoreConfig {
     /// it is not a finished row migration or permission to admit another source.
     pub fn admit_namespace(&self) -> Result<NamespaceAdmission, StorageError> {
         sqlite::namespace::admit(self)
+    }
+
+    /// One bounded, resumable supported-current Catalog assignment step. The
+    /// native Event/ledger gate stays closed, and originals remain preserved.
+    pub fn assign_catalog_namespace(&self, max_rows: usize) -> Result<CatalogAssignmentProgress, StorageError> {
+        sqlite::catalog_namespace::assign(self, max_rows)
     }
 
     /// Undo the read-only admission stage for its exact first-source witness.
