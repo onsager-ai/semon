@@ -4008,6 +4008,10 @@ impl SqliteStore {
             Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
             Init::Fresh | Init::Obsolete => unreachable!("init initializes fresh storage"),
         }
+        // Validate/cache the committed layout before the first writer
+        // transaction. A transaction may reuse this cookie but must not cache
+        // transient DDL whose schema cookie can be reused after rollback.
+        copied_usage_sql(&connection, "", "").map_err(classify)?;
         semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
         let store = Self {
             connection,
@@ -4091,6 +4095,7 @@ impl SqliteStore {
         )
         .map_err(classify)?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+        copied_usage_sql(&connection, "", "").map_err(classify)?;
         semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
         let store = Self {
             connection,
@@ -7232,6 +7237,29 @@ mod tests {
             2
         );
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copied_usage_layout_is_warmed_by_actual_producer_and_selected_factories() {
+        let root = scratch("copied-layout-factories");
+        let path = root.join("index.sqlite3");
+        for selected in [false, true] {
+            let mut store = if selected {
+                SqliteStore::attempt_selected(&path).unwrap()
+            } else {
+                SqliteStore::attempt_scoped(&path, true).unwrap().0
+            };
+            let cookie: i64 = store.connection.pragma_query_value(None, "schema_version", |r| r.get(0)).unwrap();
+            assert_eq!(store.connection.query_row("SELECT semon_copied_usage_layout(?1)", [cookie], |r| r.get::<_,Option<bool>>(0)).unwrap(), Some(false));
+            let tx = store.connection.transaction().unwrap();
+            assert_eq!(copied_usage_sql(&tx, "singleton", "scoped").unwrap(), "singleton");
+            tx.execute_batch("DROP INDEX usage_identity_peers;").unwrap();
+            assert!(copied_usage_sql(&tx, "singleton", "scoped").is_err());
+            tx.rollback().unwrap();
+            assert_eq!(store.connection.query_row("SELECT semon_copied_usage_layout(?1)", [cookie], |r| r.get::<_,Option<bool>>(0)).unwrap(), Some(false));
+            assert_eq!(copied_usage_sql(&store.connection, "singleton", "scoped").unwrap(), "singleton");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

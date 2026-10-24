@@ -1763,7 +1763,14 @@ mod tests {
                 .iter()
                 .copied()
                 .chain(["storage_source_journal", "session_catalog_invalidations"])
-                .map(|table| {
+                .filter_map(|table| {
+                    let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)", [table], |r| r.get(0)).unwrap();
+                    // Early production refusal may precede journal preparation.
+                    // Absence is represented by a missing map key, distinct
+                    // from a present empty table, so creation is still a write.
+                    if !present {
+                        return None;
+                    }
                     let mut statement = db
                         .prepare(&format!("SELECT * FROM {table} ORDER BY 1,2"))
                         .unwrap();
@@ -1773,7 +1780,7 @@ mod tests {
                         .unwrap()
                         .collect::<rusqlite::Result<_>>()
                         .unwrap();
-                    (table.to_owned(), rows)
+                    Some((table.to_owned(), rows))
                 })
                 .collect()
         }
@@ -1881,11 +1888,13 @@ mod tests {
             },
         );
         let before = f.state();
+        assert!(!before.contains_key("storage_source_journal"));
         assert!(matches!(
             f.config.native_events(),
             Err(StorageError::Unavailable)
         ));
         assert_eq!(f.state(), before);
+        assert!(!f.state().contains_key("storage_source_journal"));
         assert!(!f.db().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')", [], |r| r.get::<_,bool>(0)).unwrap());
     }
 
