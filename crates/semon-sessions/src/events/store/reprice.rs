@@ -23,11 +23,6 @@ fn decode_json<T: serde::de::DeserializeOwned>(column: usize, value: &str) -> ru
 }
 
 pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
-    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('source','session','family')),
-    owner_key TEXT NOT NULL,
-    PRIMARY KEY(owner_kind,owner_key)
-) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
     ON session_catalog(session_key,pricing_fingerprint);
 CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
@@ -78,6 +73,207 @@ BEGIN
       AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
 END;
 ";
+
+const QUEUE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('source','session','family')),
+    owner_key TEXT NOT NULL,
+    PRIMARY KEY(owner_kind,owner_key)
+) STRICT, WITHOUT ROWID;
+";
+const COMPOSITE_QUEUE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
+    namespace TEXT NOT NULL,
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('source','session','family')),
+    owner_key TEXT NOT NULL,
+    PRIMARY KEY(namespace,owner_kind,owner_key)
+) STRICT, WITHOUT ROWID;
+";
+
+pub(super) fn queue_schema(composite: bool) -> &'static str {
+    if composite {
+        COMPOSITE_QUEUE_SCHEMA
+    } else {
+        QUEUE_SCHEMA
+    }
+}
+
+fn queue_sql<'a>(
+    c: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
+    let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('pricing_recompute_pending') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    Ok(if composite { scoped } else { legacy })
+}
+
+const CATALOG_QUEUE_00: &str = "
+CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
+    ON session_catalog(session_key,pricing_fingerprint);
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+AFTER INSERT ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+AFTER UPDATE OF metadata ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+";
+const CATALOG_QUEUE_01: &str = "
+CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
+    ON session_catalog(session_key,pricing_fingerprint);
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+AFTER INSERT ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+AFTER UPDATE OF metadata ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT semon_namespace(),'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+";
+const CATALOG_QUEUE_10: &str = "
+CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
+    ON session_catalog(namespace,session_key,pricing_fingerprint);
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+AFTER INSERT ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'session',NEW.session_key FROM session_catalog c,meta m WHERE c.namespace=NEW.namespace AND c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+AFTER UPDATE OF metadata ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'session',NEW.session_key FROM session_catalog c,meta m WHERE c.namespace=NEW.namespace AND c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+";
+const CATALOG_QUEUE_11: &str = "
+CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
+    ON session_catalog(namespace,session_key,pricing_fingerprint);
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+AFTER INSERT ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'session',NEW.session_key FROM session_catalog c,meta m WHERE c.namespace=NEW.namespace AND c.session_key=NEW.session_key AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+AFTER UPDATE OF metadata ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'session',NEW.session_key FROM session_catalog c,meta m WHERE c.namespace=NEW.namespace AND c.session_key=NEW.session_key AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+";
+
+pub(super) fn catalog_schema(
+    queue_composite: bool,
+    catalog_composite: bool,
+    meta_composite: bool,
+) -> &'static str {
+    if !queue_composite {
+        return SCHEMA;
+    }
+    match (catalog_composite, meta_composite) {
+        (false, false) => CATALOG_QUEUE_00,
+        (false, true) => CATALOG_QUEUE_01,
+        (true, false) => CATALOG_QUEUE_10,
+        (true, true) => CATALOG_QUEUE_11,
+    }
+}
+
+const COMPOSITE_FILE_QUEUE_0: &str = "
+CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
+    ON files(namespace,file_id,codex_pricing_fingerprint)
+    WHERE codex_native_usage IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
+AFTER INSERT ON files
+WHEN NEW.codex_native_usage IS NOT NULL
+BEGIN
+    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
+      AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_file_update
+AFTER UPDATE OF codex_native_usage ON files
+BEGIN
+    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
+      AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_native_usage_ready
+AFTER UPDATE OF usage_ready ON native_usage_sources
+WHEN NEW.usage_ready=1
+BEGIN
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'source',NEW.source_path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.path=NEW.source_path AND m.key='pricing_recompute_target'
+      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+";
+const COMPOSITE_FILE_QUEUE_1: &str = "
+CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
+    ON files(namespace,file_id,codex_pricing_fingerprint)
+    WHERE codex_native_usage IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
+AFTER INSERT ON files
+WHEN NEW.codex_native_usage IS NOT NULL
+BEGIN
+    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_file_update
+AFTER UPDATE OF codex_native_usage ON files
+BEGIN
+    UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_native_usage_ready
+AFTER UPDATE OF usage_ready ON native_usage_sources
+WHEN NEW.usage_ready=1
+BEGIN
+    INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key)
+    SELECT NEW.namespace,'source',NEW.source_path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.path=NEW.source_path AND m.namespace='' AND m.key='pricing_recompute_target'
+      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+";
+
+pub(super) fn file_schema(composite: bool, meta_composite: bool) -> &'static str {
+    if !composite {
+        FILE_SCHEMA
+    } else if meta_composite {
+        COMPOSITE_FILE_QUEUE_1
+    } else {
+        COMPOSITE_FILE_QUEUE_0
+    }
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -134,10 +330,13 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
 }
 
 fn progress_sql(c: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(
-        c,
-        "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+    queue_sql(c,
+        configured::metadata_sql(c,
+            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)")?,
+        configured::metadata_sql(c,
+            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())",
+            "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace())")?,
     )
 }
 
@@ -251,7 +450,7 @@ fn step_inner(
             made_progress = true;
             if let Some(owner) = work.pending_owner.take() {
                 tx.execute(
-                    "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2",
+                    queue_sql(&tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2")?,
                     params![owner.kind, owner.key],
                 )?;
             }
@@ -279,7 +478,7 @@ fn step_inner(
         work.job = None;
         if let Some(owner) = work.pending_owner.take() {
             tx.execute(
-                "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2",
+                queue_sql(&tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2")?,
                 params![owner.kind, owner.key],
             )?;
         }
@@ -482,9 +681,9 @@ fn retained_cost(
             return Ok(None);
         }
         if row.harness == "claude" {
-            let mut statement=tx.prepare(&format!("SELECT {USAGE_COLUMNS} FROM usage WHERE file_id=?1 AND octet_length(record_ids)<=65536 AND length(COALESCE(model,''))<=512 LIMIT ?2"))?;
+            let mut statement=tx.prepare(&format!("SELECT {USAGE_COLUMNS} FROM usage WHERE {}file_id=?1 AND octet_length(record_ids)<=65536 AND length(COALESCE(model,''))<=512 LIMIT ?2", copied_usage_sql(tx, "", "namespace=semon_namespace() AND ")?))?;
             let total: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE file_id=?1 LIMIT ?2)",
+                copied_usage_sql(tx, "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE file_id=?1 LIMIT ?2)", "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE namespace=semon_namespace() AND file_id=?1 LIMIT ?2)")?,
                 params![file_id, (MAX_FACTS + 1) as i64],
                 |r| r.get(0),
             )?;
@@ -528,7 +727,7 @@ fn retained_cost(
                 }
                 build.merge(&cost);
             } else {
-                let mut statement=tx.prepare("SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE file_id=?1 ORDER BY seq LIMIT ?2")?;
+                let mut statement=tx.prepare(copied_usage_sql(tx, "SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE file_id=?1 ORDER BY seq LIMIT ?2", "SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 ORDER BY seq LIMIT ?2")?)?;
                 let mut rows = statement.query(params![file_id, (MAX_FACTS + 1) as i64])?;
                 while let Some(r) = rows.next()? {
                     facts += 1;
@@ -768,7 +967,7 @@ fn pending_step(
 ) -> rusqlite::Result<bool> {
     if let Some(owner) = work.pending_owner.as_ref() {
         let still_pending: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2)",
+            queue_sql(tx, "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind=?1 AND owner_key=?2)", "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind=?1 AND owner_key=?2)")?,
             params![owner.kind, owner.key],
             |row| row.get(0),
         )?;
@@ -780,7 +979,7 @@ fn pending_step(
     if work.pending_owner.is_none() {
         work.pending_owner = tx
             .query_row(
-                "SELECT owner_kind,owner_key FROM pricing_recompute_pending ORDER BY owner_kind,owner_key LIMIT 1",
+                queue_sql(tx, "SELECT owner_kind,owner_key FROM pricing_recompute_pending ORDER BY owner_kind,owner_key LIMIT 1", "SELECT owner_kind,owner_key FROM pricing_recompute_pending WHERE namespace=semon_namespace() ORDER BY owner_kind,owner_key LIMIT 1")?,
                 [],
                 |row| Ok(PendingOwner { kind: row.get(0)?, key: row.get(1)? }),
             )
@@ -809,7 +1008,7 @@ fn pending_step(
             };
             if done {
                 tx.execute(
-                    "DELETE FROM pricing_recompute_pending WHERE owner_kind='source' AND owner_key=?1",
+                    queue_sql(tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind='source' AND owner_key=?1", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source' AND owner_key=?1")?,
                     [&key],
                 )?;
                 work.pending_owner = None;
@@ -822,12 +1021,12 @@ fn pending_step(
             let changed = catalog_step(tx, work, table, Some(&key))?;
             if changed {
                 tx.execute(
-                    "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1",
+                    queue_sql(tx, "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1", "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1")?,
                     [&key],
                 )?;
             }
             tx.execute(
-                "DELETE FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1",
+                queue_sql(tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session' AND owner_key=?1")?,
                 [&key],
             )?;
             work.pending_owner = None;
@@ -845,12 +1044,12 @@ fn pending_step(
                 .flatten();
             if let Some(parent) = parent {
                 tx.execute(
-                    "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1 WHERE EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1)",
+                    queue_sql(tx, "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1 WHERE EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1)", "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1 WHERE EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1)")?,
                     [&parent],
                 )?;
             }
             tx.execute(
-                "DELETE FROM pricing_recompute_pending WHERE owner_kind='family' AND owner_key=?1",
+                queue_sql(tx, "DELETE FROM pricing_recompute_pending WHERE owner_kind='family' AND owner_key=?1", "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='family' AND owner_key=?1")?,
                 [&key],
             )?;
             work.pending_owner = None;
@@ -1113,6 +1312,223 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    fn bind_fixture(db: &Connection, namespace: &str) {
+        configured::bind_metadata_scope(db, namespace).unwrap();
+        let namespace = namespace.to_owned();
+        db.create_scalar_function(
+            "semon_namespace",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |_| Ok(namespace.clone()),
+        )
+        .unwrap();
+    }
+
+    fn usage_family_state(db: &Connection, namespace: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut state = Vec::new();
+        for table in [
+            "files", "events", "signals", "usage_identity", "usage", "codex_usage",
+            "native_usage_sources", "native_usage_current", "native_usage_facts",
+            "native_usage_identities", "native_usage_dimensions", "native_tree_repairs",
+            "native_tree_generations", "native_tree_usage_work", "native_tree_codex_work",
+            "native_tree_headers", "native_tree_models", "native_tree_labels",
+            "native_tree_tools", "native_tree_usage_models", "native_tree_copied_identities",
+            "pricing_recompute_pending",
+        ] {
+            let mut statement = db.prepare(&format!(
+                "SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3"
+            )).unwrap();
+            let columns = statement.column_count();
+            state.extend(statement.query_map([namespace], |r| {
+                (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<Vec<_>>>()
+            }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap());
+        }
+        state
+    }
+
+    #[test]
+    fn native_usage_copied_layout_is_independent_of_core_and_native_layout() {
+        for copied_composite in [false, true] {
+            let mut db = Connection::open_in_memory().unwrap();
+            db.execute_batch(configured::CORE_SCHEMA).unwrap();
+            db.execute_batch(metadata_schema(false)).unwrap();
+            for ddl in native_usage::schema(true) {
+                db.execute_batch(ddl).unwrap();
+            }
+            db.execute_batch(copied_usage_schema(copied_composite)).unwrap();
+            db.execute_batch(tree_state::schema(copied_composite)).unwrap();
+            bind_fixture(&db, "a");
+            let mut index = FileIndex::default();
+            index.usage_by_id.insert("message".into(), MessageUsage {
+                tokens: Tokens { input: 31, total: 31, ..Default::default() },
+                record_ids: ["record".to_owned()].into_iter().collect(),
+                ..Default::default()
+            });
+            index.codex_usage_events.push(CodexUsageEvent {
+                model: "fixture".into(), tokens: ModelTokens { input: 41, ..Default::default() }, timestamp: None,
+            });
+            let tx = db.transaction().unwrap();
+            let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
+            write_file(&tx, "source", &ledger(), &changes, &index, &mut crate::native_timing::Measurements::default()).unwrap();
+            tx.commit().unwrap();
+            let mut readers = Readers::new(&db).unwrap();
+            assert_eq!(readers.usage.query([1]).unwrap().next().unwrap().unwrap().get::<_, i64>(2).unwrap(), 31);
+            assert_eq!(readers.codex_usage.query([1]).unwrap().next().unwrap().unwrap().get::<_, i64>(2).unwrap(), 41);
+            drop(readers);
+            let tx = db.transaction().unwrap();
+            clear(&tx, 1).unwrap();
+            tx.commit().unwrap();
+            for table in ["usage", "codex_usage", "usage_identity", "native_tree_copied_identities"] {
+                assert_eq!(db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn native_usage_copied_tree_pricing_collision_restart_and_rollback() {
+        // Assemble the complete authored usage/Tree/repair families, with
+        // Catalog and metadata layouts selected independently of the core.
+        for meta_composite in [false, true] {
+            for catalog_composite in [false, true] {
+                let root = root();
+                let database = root.join("families.sqlite3");
+                let mut db = Connection::open(&database).unwrap();
+                db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;").unwrap();
+                db.execute_batch(configured::CORE_SCHEMA).unwrap();
+                db.execute_batch(metadata_schema(meta_composite)).unwrap();
+                db.execute_batch(copied_usage_schema(true)).unwrap();
+                for ddl in native_usage::schema(true) {
+                    db.execute_batch(ddl).unwrap();
+                }
+                db.execute_batch(tree_state::schema(true)).unwrap();
+                db.execute_batch(queue_schema(true)).unwrap();
+                db.execute_batch(if catalog_composite {
+                    "CREATE TABLE session_catalog(namespace TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,pricing_fingerprint TEXT,PRIMARY KEY(namespace,session_key)) STRICT, WITHOUT ROWID;"
+                } else {
+                    "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY,metadata TEXT NOT NULL,pricing_fingerprint TEXT) STRICT;"
+                }).unwrap();
+                db.execute_batch(catalog_schema(true, catalog_composite, meta_composite)).unwrap();
+                db.execute_batch(file_schema(true, meta_composite)).unwrap();
+                bind_fixture(&db, "a");
+                db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"]).unwrap();
+                if meta_composite {
+                    // A source-owned poison target must not replace the store target.
+                    db.execute("INSERT INTO meta VALUES('a',?1,'stale')", [TARGET]).unwrap();
+                }
+                let ledger = ledger();
+                for (namespace, amount) in [("a", 11), ("b", 23)] {
+                    bind_fixture(&db, namespace);
+                    let tx = db.transaction().unwrap();
+                    for (ordinal, path) in ["same/source.jsonl", "same/peer.jsonl"].into_iter().enumerate() {
+                        let mut index = if ordinal == 0 {
+                            codex_index("gpt-6.1-sol", 3)
+                        } else {
+                            FileIndex { native_usage_observations: Some(Vec::new()), ..Default::default() }
+                        };
+                        index.usage_by_id.insert("same-message".into(), MessageUsage {
+                            model: Some(namespace.into()),
+                            tokens: Tokens { input: amount, total: amount, ..Default::default() },
+                            record_ids: ["same-record".to_owned()].into_iter().collect(),
+                            ..Default::default()
+                        });
+                        index.codex_usage_events.push(CodexUsageEvent {
+                            model: namespace.into(), tokens: ModelTokens { input: amount, ..Default::default() }, timestamp: None,
+                        });
+                        index.tree_summary = Some(crate::native_tree::Summary::default());
+                        assert_eq!(native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(), ordinal as i64 + 1);
+                        let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
+                        write_file(&tx, path, &ledger, &changes, &index, &mut crate::native_timing::Measurements::default()).unwrap();
+                        native_usage::write(&tx, path, &ledger, &index).unwrap();
+                    }
+                    tx.execute(native_usage::repair_sql(&tx,
+                        "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2)",
+                        "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2)").unwrap(), params!["same/source.jsonl", header_ledger(&ledger)]).unwrap();
+                    let (records, tokens, _) = tree_state::shared_usage(&tx, 1, 1).unwrap();
+                    assert_eq!(records["same-message"].len(), 1);
+                    assert_eq!(tokens["same-message"].input, amount);
+                    assert_eq!(tx.query_row(queue_sql(&tx,
+                        "SELECT count(*) FROM pricing_recompute_pending WHERE owner_kind='source'",
+                        "SELECT count(*) FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='source'").unwrap(), [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                    let key = if catalog_composite { "same-session".to_owned() } else { format!("session-{namespace}") };
+                    if catalog_composite {
+                        tx.execute("INSERT INTO session_catalog(namespace,session_key,metadata) VALUES(semon_namespace(),?1,?2)", params![key, r#"{"cost":{"pricing_fingerprint":"stale"}}"#]).unwrap();
+                    } else {
+                        tx.execute("INSERT INTO session_catalog(session_key,metadata) VALUES(?1,?2)", params![key, r#"{"cost":{"pricing_fingerprint":"stale"}}"#]).unwrap();
+                    }
+                    assert!(tx.query_row(queue_sql(&tx,
+                        "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE owner_kind='session' AND owner_key=?1)",
+                        "SELECT EXISTS(SELECT 1 FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session' AND owner_key=?1)").unwrap(), [key], |r| r.get::<_, bool>(0)).unwrap());
+                    tx.commit().unwrap();
+                }
+                bind_fixture(&db, "a");
+                if meta_composite {
+                    let stamp: String = db.query_row("SELECT codex_pricing_fingerprint FROM files WHERE namespace='a' AND file_id=1", [], |r| r.get(0)).unwrap();
+                    db.execute(native_metadata_put(&db).unwrap(), params![TARGET, stamp]).unwrap();
+                    db.execute("DELETE FROM pricing_recompute_pending WHERE owner_kind='source'", []).unwrap();
+                    db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='a' AND file_id=1", []).unwrap();
+                    assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "a source-owned poison target must not enqueue a currently priced file");
+                    db.execute(native_metadata_put(&db).unwrap(), params![TARGET, "target"]).unwrap();
+                }
+                // Trigger ownership comes from the changed row, not the current
+                // connection binding. These are private DDL fixtures, without
+                // public writer guards or multi-source admission.
+                db.execute("DELETE FROM pricing_recompute_pending WHERE owner_kind='source'", []).unwrap();
+                db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='b' AND file_id=1", []).unwrap();
+                assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='a' AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='b' AND owner_kind='source'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                db.execute("UPDATE files SET codex_native_usage=codex_native_usage WHERE namespace='a' AND file_id=1", []).unwrap();
+                if catalog_composite {
+                    db.execute("DELETE FROM pricing_recompute_pending WHERE owner_kind='session'", []).unwrap();
+                    db.execute("UPDATE session_catalog SET metadata=metadata WHERE namespace='b'", []).unwrap();
+                    assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='a' AND owner_kind='session'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                    assert_eq!(db.query_row("SELECT count(*) FROM pricing_recompute_pending WHERE namespace='b' AND owner_kind='session'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                }
+                let b = usage_family_state(&db, "b");
+                let a = usage_family_state(&db, "a");
+                bind_fixture(&db, "a");
+                {
+                    let tx = db.transaction().unwrap();
+                    let target = table("openai", "gpt-6.1-sol", 7.0, 1);
+                    assert!(source_step(&tx, &mut Work::default(), &target, Some(1)).unwrap());
+                    clear(&tx, 1).unwrap();
+                    assert_eq!(tree_state::shared_usage(&tx, 2, 2).unwrap().0.len(), 0);
+                    assert_eq!(usage_family_state(&tx, "b"), b);
+                    tx.rollback().unwrap();
+                }
+                assert_eq!(usage_family_state(&db, "a"), a);
+                assert_eq!(usage_family_state(&db, "b"), b);
+                drop(db);
+                let mut db = Connection::open(&database).unwrap();
+                db.pragma_update(None, "foreign_keys", true).unwrap();
+                bind_fixture(&db, "a");
+                assert!(native_usage::repair_pending(&db).unwrap());
+                let tx = db.transaction().unwrap();
+                let target = table("openai", "gpt-6.1-sol", 7.0, 1);
+                let mut work = Work::default();
+                // Keep only the source owner to exercise actual pending selection
+                // and deletion without invoking the unqualified Catalog producer.
+                tx.execute(queue_sql(&tx,
+                    "DELETE FROM pricing_recompute_pending WHERE owner_kind='session'",
+                    "DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session'").unwrap(), []).unwrap();
+                assert!(pending_step(&tx, &mut work, &target).unwrap());
+                assert!(!pending_step(&tx, &mut work, &target).unwrap());
+                clear(&tx, 1).unwrap();
+                assert!(tree_state::shared_usage(&tx, 2, 2).unwrap().0.is_empty());
+                assert_eq!(usage_family_state(&tx, "b"), b);
+                tx.commit().unwrap();
+                assert_eq!(usage_family_state(&db, "b"), b);
+                bind_fixture(&db, "b");
+                assert_eq!(tree_state::shared_usage(&db, 1, 1).unwrap().1["same-message"].input, 23);
+                let mut readers = Readers::new(&db).unwrap();
+                assert!(readers.usage.query([1]).unwrap().next().unwrap().is_some());
+                assert!(readers.codex_usage.query([1]).unwrap().next().unwrap().is_some());
+                drop(readers);
+                drop(db);
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

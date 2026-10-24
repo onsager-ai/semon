@@ -22,9 +22,9 @@
   "native_usage_composite": false,
   "native_usage_scoped_helpers": "bound-selector five-table family plus repair queue/claims/clock and Tree generations/headers/dimensions/work/snapshots; native repricing current-source/fact/dimension operations ported; private physical composite fixtures, production activation closed",
   "native_usage_activation_pending": [
-    "usage_identity/usage/codex_usage physical schemas and DML; native_tree_copy_insert/delete triggers and shared_usage token query; store.rs remove/clear copied-identity loops",
-    "reprice.rs pricing_recompute_pending physical owner keys, SCHEMA Catalog/core trigger owner joins and queue SELECT/DELETE/EXISTS; mixed family-layout conformance before activation",
-    "native_usage/repair.rs prepare opens a legacy read-only proof snapshot; explicit configured repair admission, bound snapshot and non-Options source authorization remain required before exposure",
+    "copied usage physical schema/DML, Tree peer triggers/token reads and remove/clear helpers now authored/scoped; exact-pin CI and full key review pending before activation",
+    "pricing queue namespace owner keys and all runtime queue SELECT/DELETE/EXISTS now scoped independently of metadata; authored composite Catalog/core triggers; mixed-layout collision/restart/rollback fixture awaits exact-pin CI",
+    "repair prepare receives an explicit opened Raw carrier and NativeReaderBinding proof snapshot; Options advance refuses enrolled stores before Raw; configured repair semantic entrypoint/claims/producer admission remain unexposed and unqualified",
     "fresh configured DDL/guards/registration qualification for all usage/Tree/repair families; complete assembly and public two-source ingestion; current schema(false) selection remains singleton",
     "semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification"
   ],
@@ -33,7 +33,7 @@
     "complete key classification beyond the explicit STORE/SOURCE keys and proof prefixes",
     "store.rs Catalog observation/recovery/backfill/publication/slot/search metadata; qualify_contract/qualify/qualify_producer/init and archive membership/GLOB operations",
     "semantic stage/dependency physical row keys and namespace joins (metadata statements are scoped)",
-    "reprice.rs SCHEMA Catalog pricing trigger meta joins; pricing pending owner and native source/fact/dimension row keys (core pricing meta trigger alternative is authored)",
+    "composite pricing Catalog/core trigger joins and pending owner keys are authored; public production DDL/guard activation and full Catalog producer scoping remain pending",
     "changes.rs initial epoch/floors DDL and Catalog trigger publication; SourceJournal legacy unbound-only invalidate/discover statements remain fenced",
     "fresh configured meta activation, DEFAULT removal and complete qualification"
   ],
@@ -82,11 +82,12 @@
     "transcript_range.rs",
     "viewer.rs"
   ],
-  "native_tree_repair_readiness": "same bounded read_tree_summary validation as the consumer, including projection and interpretation witnesses; existing 256-iteration Catalog convergence oracle unchanged; CI pending",
-  "native_usage_composite_ddl": "native_usage::schema(bool) is the single usage+repair DDL selector used by storage_ddl(false) and both namespace fixtures; tree_state::schema(bool) selects authored Tree tables; copied-usage composite triggers pending, no public activation",
+  "native_tree_repair_readiness": "same bounded read_tree_summary validation as the consumer, including projection and interpretation witnesses; original 256-iteration Catalog convergence oracle unchanged; revalidation required on this revision",
+  "native_usage_composite_ddl": "native_usage::schema(bool), copied_usage_schema(bool), tree_state::schema(bool) and reprice queue/catalog/file selectors assemble authored families; singleton production selection remains unchanged; composite copied triggers and full family private fixture await CI, no public activation",
   "native_usage_ci_filters": [
-    "events::store::native_usage::namespace_tests:: explicitly runs file-backed component append/replay/reopen/conflict rollback and parent relocation/retained incarnation; native_usage_ separately covers Tree and native repricing collision/rollback",
-    "events::store::configured::tests:: includes stale-interpretation readiness regression",
+    "events::store::native_usage::namespace_tests:: covers private usage/repair collisions; file_namespace_tests:: now explicitly selects file-backed append/replay/reopen/conflict rollback (distinct module); native_usage_ separately covers Tree and native repricing",
+    "events::store::reprice::tests::native_usage_copied_layout_is_independent_of_core_and_native_layout and native_usage_copied_tree_pricing_collision_restart_and_rollback are explicitly registered exact CI tests",
+    "events::store::configured::tests:: includes stale-interpretation readiness and exact configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback",
     "catalog::tests::native_usage_history_restart_converges_without_repair_revision_churn retains 256 iterations and same epoch/revision/phase checks"
   ]
 }

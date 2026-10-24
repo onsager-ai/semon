@@ -58,7 +58,21 @@ struct Batch {
     bytes: u64,
 }
 
-fn prepare(store: &SqliteStore, path: &str, ledger: &Ledger, resume: Resume) -> io::Result<Batch> {
+// The caller authorizes and opens this exact Raw carrier before preparation.
+// A configured host must supply its admitted reader binding; this function
+// never infers coordinates, authority or another carrier from Options.
+struct Input<'a> {
+    binding: &'a crate::storage::NativeReaderBinding,
+    file: crate::sealed::LogFile,
+}
+
+fn prepare(
+    store: &SqliteStore,
+    input: Input<'_>,
+    path: &str,
+    ledger: &Ledger,
+    resume: Resume,
+) -> io::Result<Batch> {
     let Resume {
         cursor,
         model,
@@ -102,14 +116,16 @@ fn prepare(store: &SqliteStore, path: &str, ledger: &Ledger, resume: Resume) -> 
             .expect("tree initialized")
             .usage_total = Some(Tokens::default());
     }
-    let file = crate::sealed::LogFile::open(Path::new(path))?;
+    let file = input.file;
     if Stat::from_metadata(&file.metadata()?)? != ledger.stat {
         return Err(io::ErrorKind::WouldBlock.into());
     }
-    let db = Connection::open_with_flags(&store.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(sql_error)?;
-    let proof =
-        chunk_proofs::Focused::with_db(chunk_proofs::Snapshot::new(db), &store.path, path, ledger)?;
+    let snapshot = input.binding.proof_snapshot().map_err(sql_error)?;
+    let crate::storage::StoreBackend::Sqlite { database } = &input.binding.config().backend;
+    if database != &store.path {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let proof = chunk_proofs::Focused::with_db(snapshot, database, path, ledger)?;
     let mut reader = BufReader::new(Verified {
         file,
         proof,
@@ -253,6 +269,21 @@ pub(in crate::events::store) fn advance(
     options: &crate::Options,
 ) -> io::Result<(bool, Option<String>)> {
     let sql_error = io::Error::other;
+    if crate::storage::sqlite::namespace::is_bound(&store.connection).map_err(sql_error)? {
+        return Err(io::Error::other(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ));
+    }
+    let binding = crate::storage::NativeReaderBinding::TransitionalUnboundLocal(
+        crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: store.path.clone(),
+            },
+            namespace: crate::storage::LogicalSourceNamespace::new("native-repair-local")
+                .map_err(sql_error)?,
+            expected_stream_epoch: None,
+        },
+    );
     let selected: Option<PendingSource> = store.connection.query_row(sql(&store.connection, "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1", "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE namespace=semon_namespace() AND state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1").map_err(sql_error)?,[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
     let Some((path, receipt, id, cursor, model, tree, projection_id)) = selected else {
         return Ok((pending(&store.connection).map_err(sql_error)?, None));
@@ -373,18 +404,25 @@ pub(in crate::events::store) fn advance(
         tx.commit().map_err(sql_error)?;
         (id, projection_id)
     };
-    let batch = match prepare(
-        store,
-        &path,
-        &ledger,
-        Resume {
-            cursor,
-            model,
-            tree,
-            projection_id,
-            harness: input.expect("input checked").root.as_str().into(),
-        },
-    ) {
+    let prepared = crate::sealed::LogFile::open(Path::new(&path)).and_then(|file| {
+        prepare(
+            store,
+            Input {
+                binding: &binding,
+                file,
+            },
+            &path,
+            &ledger,
+            Resume {
+                cursor,
+                model,
+                tree,
+                projection_id,
+                harness: input.expect("input checked").root.as_str().into(),
+            },
+        )
+    });
+    let batch = match prepared {
         Ok(batch) => batch,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
         Err(error) => {

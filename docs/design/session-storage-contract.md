@@ -11,6 +11,76 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 17 checkpoint: copied usage and pricing owner keys
+
+This is a WIP implementation increment; exact-pin CI and independent key review
+are pending. It is not public multi-source activation or completion of #478.
+`storage_ddl()` still selects the singleton usage, Tree, metadata and pricing
+families. Writer/current/publisher/global and second-source qualification stay 0.
+No user store is migrated or reset.
+
+The copied-usage family now has separately authored singleton and composite DDL
+for `usage_identity`, `usage` and `codex_usage`, including namespace-leading
+keys, peer indexes and foreign keys. Its statement selector inspects that family,
+independently of core/native usage or metadata layout. Actual child readers,
+message/record and Codex writes/deletes, Tree shared-token reads and remove/clear
+loops use the selected physical owner. Composite Tree copy insert/delete triggers
+join peers only inside the changed row's namespace. The existing singleton
+core-collision fixture now explicitly assembles its copied-usage dependency.
+
+Pricing pending owners have `(namespace,owner_kind,owner_key)` keys. Every runtime
+queue read, delete and existence check selects its queue's own layout. Progress
+reads select metadata and queue layouts independently. Authored Catalog/core
+triggers scope file/session updates and pending owners to `NEW.namespace`, while
+a composite metadata join binds the pricing target to the reserved empty store
+namespace. Catalog layout and metadata layout are separately selected in the
+private complete usage/Tree/repair fixture. Catalog semantic producers and their
+physical activation remain unqualified; these trigger definitions do not enable
+publication. Native source joins still require the qualified composite core/native
+pair; arbitrary mixed native/core activation is not claimed.
+
+Repair preparation receives an explicitly opened Raw carrier and a
+`NativeReaderBinding` proof snapshot, rather than opening an unbound database.
+The snapshot validates admission, source namespace, current contract and stream
+epoch inside its read transaction and transfers its lifetime to the proof reader.
+There is no Options or alternate-backend retry in preparation. The existing
+Options repair entry refuses enrolled stores before Raw access and retains its
+local source lock/allowlist and receipt/CAS checks. A configured host repair
+semantic entrypoint, bound writer/claim admission and complete producer guards
+are still unexposed and unqualified; the private input is not a public authority
+or a claim that configured repair is delivered.
+
+New exact CI test registrations:
+
+- `events::store::reprice::tests::native_usage_copied_layout_is_independent_of_core_and_native_layout`
+- `events::store::reprice::tests::native_usage_copied_tree_pricing_collision_restart_and_rollback`
+- `events::store::configured::tests::configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback`
+
+The full-family file-backed fixture exercises actual file/child writers, copied
+peer insert/delete, token reads, native facts, Tree generations, repair rows,
+pricing triggers and source pending selection/completion. It collides IDs and
+paths across sources, poisons a source-owned pricing target, changes rows under a
+different connection binding, compares the other namespace's full family rows,
+rolls back a repricing+clear transaction and reopens before committed work.
+Catalog/metadata shapes cover four combinations; a second fixture varies copied
+usage independently of composite core/native usage. These are private fixtures,
+not admitted public two-source ingestion or full repair recovery qualification.
+
+Coverage correction: `native_usage::namespace_tests` and
+`native_usage::file_namespace_tests` are distinct modules. The workflow now
+explicitly selects both; the latter owns the existing file-backed append,
+replay/restart/conflicting-replay regression. No prior execution is inferred
+from the other filter. The original Catalog convergence test retains all 256
+iterations and epoch/revision/phase assertions unchanged.
+
+No local cargo/build/test/clippy/fmt, Node/typecheck, browser or corpus analysis
+ran: thermal readings are unavailable. CI owns compilation, formatting, storage
+and full Rust/Viewer/security/performance gates. Remaining work includes the
+configured repair entry, production family assembly/guards, full semantic and
+Catalog publication boundary, retained reader lease/GC, supported-current bounded
+migration/catch-up/cutover/rollback, PostgreSQL #479 and Hub #313. The #380 merge
+hold remains unchanged.
+
 ## Worker 16 checkpoint: usage history reconciliation and repair readiness
 
 This is a bounded WIP increment, requiring exact-pin CI and fresh acceptance.

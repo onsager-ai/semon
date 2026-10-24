@@ -55,8 +55,8 @@ CREATE TRIGGER IF NOT EXISTS native_tree_copy_delete AFTER DELETE ON usage_ident
 END;
 ";
 
-// Candidate physical family. Copied-usage triggers remain an activation
-// dependency on the usage_identity owner; public creation selects SCHEMA.
+// Composite Tree and copied-usage families share physical namespace ownership.
+// Public creation still selects the singleton family until full qualification.
 const COMPOSITE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS native_tree_generations (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,source_id INTEGER NOT NULL,
@@ -107,6 +107,19 @@ CREATE TABLE IF NOT EXISTS native_tree_copied_identities (
  PRIMARY KEY(namespace,file_id,message_id,record_uuid),
  FOREIGN KEY(namespace,file_id) REFERENCES files(namespace,file_id)
 ) STRICT, WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS native_tree_copy_insert AFTER INSERT ON usage_identity BEGIN
+ INSERT INTO native_tree_copied_identities
+ SELECT namespace,file_id,message_id,record_uuid FROM usage_identity
+ WHERE namespace=NEW.namespace AND message_id=NEW.message_id AND record_uuid=NEW.record_uuid
+ AND EXISTS(SELECT 1 FROM usage_identity p WHERE p.namespace=NEW.namespace AND p.message_id=NEW.message_id AND p.record_uuid=NEW.record_uuid AND p.file_id<>NEW.file_id)
+ ON CONFLICT DO NOTHING;
+END;
+CREATE TRIGGER IF NOT EXISTS native_tree_copy_delete AFTER DELETE ON usage_identity BEGIN
+ DELETE FROM native_tree_copied_identities WHERE namespace=OLD.namespace AND file_id=OLD.file_id AND message_id=OLD.message_id AND record_uuid=OLD.record_uuid;
+ DELETE FROM native_tree_copied_identities WHERE (namespace,file_id,message_id,record_uuid) IN
+ (SELECT i.namespace,i.file_id,i.message_id,i.record_uuid FROM usage_identity i WHERE i.namespace=OLD.namespace AND i.message_id=OLD.message_id AND i.record_uuid=OLD.record_uuid
+ AND NOT EXISTS(SELECT 1 FROM usage_identity p WHERE p.namespace=i.namespace AND p.message_id=i.message_id AND p.record_uuid=i.record_uuid AND p.file_id<>i.file_id));
+END;
 ";
 
 pub(super) fn schema(composite: bool) -> &'static str {
@@ -201,22 +214,33 @@ impl Snapshot {
         })
     }
     pub(crate) fn shared_usage(&self) -> io::Result<SharedUsage> {
-        self.with(|c,id,projection_id|{
-            let sql = sql(c, "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid", "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.namespace=semon_namespace() AND i.file_id=?1 ORDER BY i.message_id,i.record_uuid")?;
-            let mut statement = c.prepare(sql)?;
-            let mut rows = statement.query([id])?;
-            let mut records = crate::claude_usage::Records::new();
-            while let Some(row)=rows.next()? { crate::selected_read::row(row,64)?; records.entry(row.get(0)?).or_default().insert(row.get(1)?); }
-            let mut tokens = BTreeMap::new();
-            let mut models = BTreeMap::new();
-            for message in records.keys() {
-                let used = c.query_row("SELECT input,cached_input,output,reasoning_output,total FROM usage WHERE file_id=?1 AND message_id=?2",params![id,message],|r|Ok(Tokens {input:uint(r.get(0)?),cached_input:uint(r.get(1)?),output:uint(r.get(2)?),reasoning_output:uint(r.get(3)?),total:uint(r.get(4)?)}))?;
-                tokens.insert(message.clone(),used);
-                if let Some(model) = c.query_row(self::sql(c, "SELECT model FROM native_tree_usage_models WHERE projection_id=?1 AND message_id=?2", "SELECT model FROM native_tree_usage_models WHERE namespace=semon_namespace() AND projection_id=?1 AND message_id=?2")?,params![projection_id,message],|r|r.get::<_,String>(0)).optional()? { models.insert(message.clone(),model); }
-            }
-            Ok((records,tokens,models))
-        })
+        self.with(shared_usage)
     }
+}
+
+pub(super) fn shared_usage(
+    c: &Connection,
+    id: i64,
+    projection_id: i64,
+) -> rusqlite::Result<SharedUsage> {
+    let query = sql(c, "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.file_id=?1 ORDER BY i.message_id,i.record_uuid", "SELECT i.message_id,i.record_uuid FROM native_tree_copied_identities i WHERE i.namespace=semon_namespace() AND i.file_id=?1 ORDER BY i.message_id,i.record_uuid")?;
+    let mut statement = c.prepare(query)?;
+    let mut rows = statement.query([id])?;
+    let mut records = crate::claude_usage::Records::new();
+    while let Some(row) = rows.next()? {
+        crate::selected_read::row(row, 64)?;
+        records.entry(row.get(0)?).or_default().insert(row.get(1)?);
+    }
+    let mut tokens = BTreeMap::new();
+    let mut models = BTreeMap::new();
+    for message in records.keys() {
+        let used = c.query_row(copied_usage_sql(c, "SELECT input,cached_input,output,reasoning_output,total FROM usage WHERE file_id=?1 AND message_id=?2", "SELECT input,cached_input,output,reasoning_output,total FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2")?,params![id,message],|r|Ok(Tokens {input:uint(r.get(0)?),cached_input:uint(r.get(1)?),output:uint(r.get(2)?),reasoning_output:uint(r.get(3)?),total:uint(r.get(4)?)}))?;
+        tokens.insert(message.clone(), used);
+        if let Some(model) = c.query_row(sql(c, "SELECT model FROM native_tree_usage_models WHERE projection_id=?1 AND message_id=?2", "SELECT model FROM native_tree_usage_models WHERE namespace=semon_namespace() AND projection_id=?1 AND message_id=?2")?,params![projection_id,message],|r|r.get::<_,String>(0)).optional()? {
+            models.insert(message.clone(), model);
+        }
+    }
+    Ok((records, tokens, models))
 }
 
 pub(super) fn write(
@@ -537,6 +561,7 @@ mod namespace_tests {
         for ddl in native_usage::schema(true) {
             db.execute_batch(ddl).unwrap();
         }
+        db.execute_batch(copied_usage_schema(true)).unwrap();
         db.execute_batch(schema(true)).unwrap();
         let ledger = Ledger {
             stat: Stat {
