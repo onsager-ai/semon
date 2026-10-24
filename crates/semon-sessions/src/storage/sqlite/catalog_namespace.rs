@@ -725,6 +725,20 @@ mod tests {
         );
         f.config.admit_namespace().unwrap();
         f.finish();
+        let options = crate::Options {
+            cache: f.root.join("index.json"),
+            ..crate::Options::default()
+        };
+        let bookmark = f.config.session_bookmark(&options, "sid=same");
+        assert_eq!(
+            bookmark.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&bookmark.body)
+        );
+        let bookmark: serde_json::Value = serde_json::from_slice(&bookmark.body).unwrap();
+        assert_eq!(bookmark["matches"][0]["catalog_key"], "same");
+        assert_eq!(bookmark["unavailable"], 0);
         let db = f.db();
         let before: (i64, Option<String>, i64) = db.query_row(
             "SELECT (SELECT count(*) FROM storage_original_session_catalog),(SELECT value FROM meta WHERE key='catalog_generation'),(SELECT count(*) FROM session_catalog_changes)",
@@ -784,6 +798,14 @@ mod tests {
                 [],
             )
             .unwrap();
+        for key in ["a", "b", "c", "d"] {
+            f.db()
+                .execute(
+                    "INSERT INTO session_trace_bookmarks VALUES('bounded-target',?1,'edge')",
+                    [key],
+                )
+                .unwrap();
+        }
         assert_eq!(
             SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()))
                 .bookmarked_target_keys("target"),
@@ -802,6 +824,16 @@ mod tests {
         db.execute("INSERT INTO session_catalog_sources VALUES('B','foreign','current','codex','native-same','relative/same.jsonl')", []).unwrap();
         let store = SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()));
         assert_eq!(f.config.bookmarked_target_keys("target").unwrap(), ["same"]);
+        assert_eq!(
+            f.config
+                .bookmarked_target_keys("bounded-target")
+                .unwrap(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            f.config.bookmarked_target_keys(&"x".repeat(4097)),
+            Err(StorageError::InvalidArguments)
+        );
         let observation = store
             .native_resolution(
                 "codex",
@@ -831,17 +863,17 @@ mod tests {
         );
         let mut foreign = f.config.clone();
         foreign.namespace = LogicalSourceNamespace::new("B").unwrap();
-        assert!(
+        assert_eq!(
             SqliteNavigation(NativeReaderBinding::Admitted(foreign))
-                .bookmarked_target_keys("target")
-                .is_err()
+                .bookmarked_target_keys("target"),
+            Err(StorageError::NamespaceMismatch)
         );
-        assert!(
+        assert_eq!(
             SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
                 f.config.clone()
             ))
-            .bookmarked_target_keys("target")
-            .is_err()
+            .bookmarked_target_keys("target"),
+            Err(StorageError::NamespaceUpgradePending)
         );
         assert_eq!(
             db.query_row(
@@ -852,6 +884,125 @@ mod tests {
             .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn qualified_navigation_uses_retained_metadata_fallback_bounds_and_indexes() {
+        use super::super::navigation::SqliteNavigation;
+        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
+        let f = Fixture::new();
+        let generation = "a".repeat(64);
+        let db = f.db();
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES('catalog_version',?1)",
+            [crate::model::summary::CATALOG_VERSION.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES('catalog_generation',?1)",
+            [&generation],
+        )
+        .unwrap();
+        drop(db);
+        f.config.admit_namespace().unwrap();
+        f.finish();
+
+        let db = f.db();
+        register(&db, &f.config.namespace).unwrap();
+        db.execute(
+            "INSERT INTO session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','same','retained','codex','retained-history','retained/same')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_history_catalog(namespace,session_key,metadata) VALUES('A','same','{\"owner\":\"history\"}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','tail','retained','codex','retained-fallback','retained/tail')",
+            [],
+        )
+        .unwrap();
+        let store = SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()));
+        let retained = store
+            .native_resolution(
+                "codex",
+                "retained-history",
+                crate::CatalogReadScope::RetainedHistory,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(retained.keys, ["same"]);
+        assert_eq!(retained.metadata.as_deref(), Some("{\"owner\":\"history\"}"));
+        let fallback = store
+            .native_resolution(
+                "codex",
+                "retained-fallback",
+                crate::CatalogReadScope::RetainedHistory,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(fallback.keys, ["tail"]);
+        assert_eq!(fallback.metadata.as_deref(), Some("{\"owner\":\"A\"}"));
+
+        let oversized = format!("\"{}\"", "x".repeat(1_048_577));
+        db.execute(
+            "UPDATE session_catalog SET metadata=?1 WHERE namespace='A' AND session_key='tail'",
+            [&oversized],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A','tail','current','codex','bounded-metadata','current/tail')",
+            [],
+        )
+        .unwrap();
+        let bounded = store
+            .native_resolution(
+                "codex",
+                "bounded-metadata",
+                crate::CatalogReadScope::Current,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(bounded.keys, ["tail"]);
+        assert_eq!(bounded.metadata, None);
+
+        for (key, path) in [
+            ("same", "ambiguous/same"),
+            ("tail", "ambiguous/tail"),
+            ("third", "ambiguous/third"),
+        ] {
+            db.execute(
+                "INSERT INTO session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('A',?1,'current','codex','ambiguous',?2)",
+                (key, path),
+            )
+            .unwrap();
+        }
+        let ambiguous = store
+            .native_resolution(
+                "codex",
+                "ambiguous",
+                crate::CatalogReadScope::Current,
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(ambiguous.keys, ["same", "tail"]);
+
+        for (index, sql) in [
+            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness='codex' AND native_id='ambiguous' ORDER BY session_key LIMIT 2",
+            "EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_native WHERE namespace=semon_namespace() AND harness='codex' AND native_id='retained-history' ORDER BY session_key LIMIT 2",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let plan: String = db.query_row(sql, [], |row| row.get(3)).unwrap();
+            let expected = [
+                "COVERING INDEX storage_ns_session_catalog_current_native",
+                "COVERING INDEX storage_ns_session_catalog_native",
+            ][index];
+            assert!(plan.contains(expected), "{plan}");
+        }
     }
 
     #[test]
