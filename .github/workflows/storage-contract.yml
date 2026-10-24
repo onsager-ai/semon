@@ -29,4 +29,5 @@ jobs:
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
       - name: SQLite adapter and reusable metadata conformance
-        run: cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
+        run: |
+          cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
