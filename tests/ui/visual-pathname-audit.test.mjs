@@ -27,7 +27,10 @@ function fixture(t) {
   };
   const digests = {
     candidate: { image: hash(Buffer.from('candidate image')), evidence: hash(previousBytes) },
-    reference: { image: hash(Buffer.from('reference image')), evidence: hash(Buffer.from('reference evidence')) },
+    reference: {
+      image: hash(Buffer.from('reference image')),
+      evidence: hash(Buffer.from('reference evidence')),
+    },
     diff: { image: hash(Buffer.from('diff image')), evidence: hash(Buffer.from('diff evidence')) },
   };
   const accepted = {
@@ -86,11 +89,12 @@ test('refuses wrong namespace, wrong identity, extra evidence changes and change
     canonicalBytes.toString('utf8').replace('/session/local/', '/session/remote/'),
   );
   const wrongId = Buffer.from(canonicalBytes.toString('utf8').replace('/harbor', '/other'));
-  const extraChange = Buffer.from(
-    canonicalBytes.toString('utf8').replace('"same"', '"changed"'),
-  );
+  const extraChange = Buffer.from(canonicalBytes.toString('utf8').replace('"same"', '"changed"'));
   const changedEscaping = Buffer.from(
-    JSON.stringify({ pathname: '/session/local/harbor%2fchild', selectors: { text: 'same', box: [0, 1] } }),
+    JSON.stringify({
+      pathname: '/session/local/harbor%2fchild',
+      selectors: { text: 'same', box: [0, 1] },
+    }),
   );
   for (const bytes of [wrongNamespace, wrongId, extraChange, changedEscaping])
     assert.equal(run({ bytes }).refused.length, 1);
