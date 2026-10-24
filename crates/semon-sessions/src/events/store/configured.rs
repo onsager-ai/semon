@@ -696,11 +696,15 @@ mod tests {
         lock.execute_batch("ROLLBACK").unwrap();
         let receipt = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(!receipt.replayed);
-        let error = cache.retain(&BTreeSet::new(), &mut false).unwrap_err();
+        let error = cache.retain(&std::collections::BTreeSet::new(), &mut false).unwrap_err();
         assert_eq!(error.get_ref().and_then(|error| error.downcast_ref::<StorageError>()), Some(&StorageError::NamespaceUpgradePending));
         let replay = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
+        let stamp = ReportedFileStamp { dev: 0, ino: 0, size: 0, modified_ns: 0 };
+        let error = cache.save_runs(&[], &stamp).unwrap_err();
+        assert_eq!(error.get_ref().and_then(|error| error.downcast_ref::<StorageError>()), Some(&StorageError::NamespaceUpgradePending));
+        assert!(cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap().replayed);
     }
 
     #[test]

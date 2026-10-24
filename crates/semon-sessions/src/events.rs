@@ -2434,7 +2434,8 @@ impl EventCache {
         let key = path.to_string_lossy();
         let stat = Stat::of(path)?;
         if !self.unpersisted.contains(key.as_ref()) {
-            if let Some(file) = self.files.get(key.as_ref())
+            if !self.explicit_store
+                && let Some(file) = self.files.get(key.as_ref())
                 && file.ledger.stat == stat
                 && let Some(index) = &file.index
                 && let Some(metadata) = crate::native_tree::Metadata::from_index(index)
@@ -2449,7 +2450,9 @@ impl EventCache {
                 Some(Ok(Some((ledger, metadata)))) if ledger.stat == stat => {
                     return Ok((ledger.source(path, native_id), metadata));
                 }
-                Some(Err(error)) if self.explicit_store => return Err(store_io_error(error)),
+                Some(Err(error)) if self.explicit_store => {
+                    return Err(io::Error::other(configured_error(error)));
+                }
                 Some(Err(StoreError::Data(_))) | Some(Ok(_)) | None => {}
                 Some(Err(error)) => self.store_failed(&error)?,
             }
@@ -3330,7 +3333,7 @@ pub(crate) fn scan_file(
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &ledger.stat)
-                    .map_err(|error| io::Error::other(error.to_string()))?
+                    .map_err(store_io_error)?
                 && stored == ledger
             {
                 Arc::make_mut(&mut index).tree_summary = Some(metadata.summary);
