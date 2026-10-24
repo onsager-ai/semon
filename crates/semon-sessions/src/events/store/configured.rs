@@ -702,6 +702,7 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
+        db.execute_batch(tree_state::SCHEMA).unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);").unwrap();
         let bind = |db: &Connection, namespace: &str| {
             let namespace = namespace.to_owned();
@@ -742,8 +743,7 @@ mod tests {
         assert_eq!(state(&db,"b"),b);
         {
             let tx = db.transaction().unwrap();
-            tx.execute("DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
-            tx.execute("DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+            clear(&tx,1).unwrap();
             tx.execute("DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
             assert!(ledger_row(&tx,"same/relative.jsonl").unwrap().is_none());
             assert_eq!(state(&tx,"b"),b);
@@ -751,8 +751,7 @@ mod tests {
         }
         assert!(ledger_row(&db,"same/relative.jsonl").unwrap().is_some());
         let tx = db.transaction().unwrap();
-        tx.execute("DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
-        tx.execute("DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+        clear(&tx,1).unwrap();
         tx.execute("DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
         tx.commit().unwrap();
         assert_eq!(state(&db,"b"),b);
@@ -980,6 +979,28 @@ mod tests {
             writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap(),
             replay
         );
+    }
+
+    #[test]
+    fn fresh_operation_on_unchanged_core_has_its_own_durable_completion() {
+        let f = Fixture::new();
+        let mut writer = f.config.native_events().unwrap();
+        let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        let before = f.state();
+        let second = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert_eq!(second.operation_id,"b".repeat(64));
+        assert!(!second.replayed);
+        assert_eq!(second.consumed_bytes,first.consumed_bytes);
+        let revision: Option<i64> = f.db().query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace=?1 AND source_path=?2",params![f.config.namespace.as_str(),f.raw.to_str().unwrap()],|r| r.get(0)).optional().unwrap();
+        assert_eq!(second.observed_revision,revision);
+        assert_eq!(f.state(),before,"unchanged core must not advance source effects");
+        drop(writer);
+        fs::remove_file(&f.raw).unwrap();
+        let mut restarted = f.config.native_events().unwrap();
+        let replay = restarted.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.operation_id,second.operation_id);
+        assert_eq!(replay.consumed_bytes,second.consumed_bytes);
     }
 
     #[test]
