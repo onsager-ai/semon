@@ -1182,8 +1182,11 @@ impl ViewerCore {
                             ("scope", "retained_history"),
                         ]),
                     );
+                    if anchor.status == 404 {
+                        return anchor;
+                    }
                     if anchor.status != 200 {
-                        if anchor.status >= 500 {
+                        if anchor.status >= 500 || matches!(anchor.status, 409 | 423 | 429) {
                             if native_requested {
                                 return crate::native_page::reply(path, query, |endpoint, args| {
                                     self.respond_with(extras, "GET", endpoint, args, None)
@@ -1192,6 +1195,56 @@ impl ViewerCore {
                             return shell();
                         }
                         return anchor;
+                    }
+                    let anchor_body = serde_json::from_slice::<Value>(&anchor.body).ok();
+                    let exact_anchor =
+                        anchor_body
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .is_some_and(|object| {
+                                object.get("api").and_then(Value::as_u64) == Some(1)
+                                    && object.get("source_key").and_then(Value::as_str)
+                                        == Some(candidate.source_key.as_str())
+                                    && object.get("catalog_key").and_then(Value::as_str)
+                                        == Some(candidate.catalog_key.as_str())
+                                    && object.get("turn").and_then(Value::as_str)
+                                        == Some(turn.as_str())
+                                    && object
+                                        .get("generation")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|value| !value.is_empty())
+                                    && object.contains_key("slot")
+                                    && object
+                                        .get("unavailable")
+                                        .is_none_or(|value| value.as_u64() == Some(0))
+                                    && object.get("busy").and_then(Value::as_bool) != Some(true)
+                                    && object.get("incomplete").and_then(Value::as_bool)
+                                        != Some(true)
+                                    && object
+                                        .get("freshness")
+                                        .and_then(|value| value.get("state"))
+                                        .and_then(Value::as_str)
+                                        != Some("incomplete")
+                            });
+                    if !exact_anchor {
+                        if native_requested {
+                            return crate::native_page::reply(path, query, |endpoint, args| {
+                                self.respond_with(extras, "GET", endpoint, args, None)
+                            });
+                        }
+                        return shell();
+                    }
+                    match anchor_body.as_ref().and_then(|value| value.get("slot")) {
+                        Some(slot) if slot.is_null() => return text(404, "Not found"),
+                        Some(slot) if slot.as_u64().is_some() => {}
+                        _ => {
+                            if native_requested {
+                                return crate::native_page::reply(path, query, |endpoint, args| {
+                                    self.respond_with(extras, "GET", endpoint, args, None)
+                                });
+                            }
+                            return shell();
+                        }
                     }
                 }
                 if route.legacy_harness.is_some() {
