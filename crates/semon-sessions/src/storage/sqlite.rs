@@ -73,9 +73,12 @@ impl SqliteMetadataStore {
         // This read establishes the snapshot even when discovery has no expected epoch.
         let epoch: String = db
             .query_row(
-                crate::events::store::configured::metadata_sql(db,
+                crate::events::store::configured::metadata_sql(
+                    db,
                     "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                    "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'").map_err(failed)?,
+                    "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                )
+                .map_err(failed)?,
                 [],
                 |r| r.get(0),
             )

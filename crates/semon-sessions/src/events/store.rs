@@ -4769,9 +4769,11 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
     Ok(connection
-        .prepare_cached(configured::metadata_sql(connection,
+        .prepare_cached(configured::metadata_sql(
+            connection,
             "SELECT value FROM meta WHERE key = 'cache_version'",
-            "SELECT value FROM meta WHERE namespace='' AND key = 'cache_version'")?)?
+            "SELECT value FROM meta WHERE namespace='' AND key = 'cache_version'",
+        )?)?
         .query_row([], |row| row.get::<_, String>(0))
         .optional()?
         .and_then(|value| value.parse().ok()))
@@ -5207,10 +5209,12 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
     let mut statement = connection.prepare(native_metadata_value(connection)?)?;
     let mut values = Vec::<Option<String>>::new();
     for key in ["pricing_recompute_target", "catalog_semantic_recipe"] {
-        let value: Option<Option<String>> = statement.query_row([key], |r| {
-            crate::selected_read::row(r, 64)?;
-            r.get(0)
-        }).optional()?;
+        let value: Option<Option<String>> = statement
+            .query_row([key], |r| {
+                crate::selected_read::row(r, 64)?;
+                r.get(0)
+            })
+            .optional()?;
         if value == Some(None) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -5240,9 +5244,10 @@ fn tree_reusable(
             r.get(0)
         })
         .optional()?;
-    let Some(record) = encoded.flatten().and_then(|value| {
-        serde_json::from_str::<TreeSummaryRecord>(&value).ok()
-    }) else {
+    let Some(record) = encoded
+        .flatten()
+        .and_then(|value| serde_json::from_str::<TreeSummaryRecord>(&value).ok())
+    else {
         return Ok(false);
     };
     let Some(summary) = index.tree_summary.as_ref() else {
@@ -5253,8 +5258,10 @@ fn tree_reusable(
         || record.ledger != header_ledger(ledger)
         || record.projection_witness.is_none()
         || tree_state::witness(connection, path, ledger)? != record.projection_witness
-        || record.interpretation_witness.as_deref() != Some(tree_interpretation(connection, path)?.as_str())
-        || json(&record.summary)? != json(&summary.compact(index.native_usage_observations.is_some()))?
+        || record.interpretation_witness.as_deref()
+            != Some(tree_interpretation(connection, path)?.as_str())
+        || json(&record.summary)?
+            != json(&summary.compact(index.native_usage_observations.is_some()))?
     {
         return Ok(false);
     }
@@ -5266,8 +5273,7 @@ fn tree_reusable(
     {
         return Ok(false);
     }
-    Ok(json(&read_codex_header(&mut statement, path, ledger)?)?
-        == json(&index.codex_header)?)
+    Ok(json(&read_codex_header(&mut statement, path, ledger)?)? == json(&index.codex_header)?)
 }
 
 fn read_tree_summary(
