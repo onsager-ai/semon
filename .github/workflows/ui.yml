@@ -466,20 +466,8 @@ jobs:
       - name: Retain bounded per-case visual binding provenance
         if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         run: node tests/ui/visual-provenance.mjs
-      # Exact prior owner-reviewed captures. No permissions, reference or registry changes.
-      - name: Download prior exact visual evidence for candidate audit
-        if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          artifact-ids: ${{ matrix.suite == 'visual' && '12500060720' || '12499047700' }}
-          run-id: 39948275965
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/visual-previous
-          merge-multiple: true
       - name: Audit exact pathname-only and fingerprint-only visual bindings
         if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
-        env:
-          SEMON_VISUAL_PREVIOUS: ${{ runner.temp }}/visual-previous
         run: node tests/ui/visual-pathname-audit.mjs
       - name: Server logs
         if: ${{ always() }}
