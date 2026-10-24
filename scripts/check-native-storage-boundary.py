@@ -28,6 +28,10 @@ stale = listed - found
 if not args.discover and (unexpected or stale):
     raise SystemExit(f"Storage inventory mismatch; unlisted={sorted(unexpected)}, stale={sorted(stale)}")
 if not args.discover:
+    for name in ["catalog.rs", "query.rs"]:
+        source = (root / "storage/sqlite" / name).read_text()
+        if "EventCache::path" in source or "options.cache" in source:
+            raise SystemExit(f"Native reader bypasses configured admission: {name}")
     inventory = json.loads((root / "storage/sqlite/writer-inventory.json").read_text())
     if set(inventory["unqualified_paths"]) != listed or inventory["writer_qualification"] != 0:
         raise SystemExit("Namespace writer qualification must match the unported path inventory")

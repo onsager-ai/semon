@@ -5,17 +5,14 @@ use crate::storage::{
     LogicalSourceNamespace,
     query::{Part, QueryCatalogStore},
 };
-use crate::{Options, QueryError, events::EventCache};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use crate::{Options, QueryError};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct SqliteQueryCatalog {
     pub(crate) options: Options,
-    pub(crate) namespace: LogicalSourceNamespace,
+    pub(crate) binding: crate::storage::NativeReaderBinding,
 }
 impl QueryCatalogStore for SqliteQueryCatalog {
     fn read_cohort(
@@ -24,8 +21,8 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         now: i64,
         bytes_left: &mut usize,
     ) -> Result<Part, QueryError> {
-        self.require_namespace(namespace)?;
-        read(&self.options, now, bytes_left)
+        let db = self.binding.snapshot(namespace).map_err(storage_error)?;
+        read(&db, &self.options, now, bytes_left)
     }
     fn has_search_slots(
         &self,
@@ -33,13 +30,12 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         key: &str,
         since: Option<i64>,
     ) -> Result<bool, QueryError> {
-        self.require_namespace(namespace)?;
-        has_search_slots(&self.options, key, since)
+        let db = self.binding.snapshot(namespace).map_err(storage_error)?;
+        has_search_slots(&db, key, since)
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
-        self.require_namespace(namespace)?;
+        let db = self.binding.snapshot(namespace).map_err(storage_error)?;
         let options = &self.options;
-        let db = open(options)?;
         if generation(&db)? != part.generation
             || crate::native_evidence::query_runtime_generation(options)
                 .map_err(|error| QueryError::io(&error))?
@@ -57,13 +53,17 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         Ok(())
     }
 }
-impl SqliteQueryCatalog {
-    fn require_namespace(&self, namespace: &LogicalSourceNamespace) -> Result<(), QueryError> {
-        if namespace != &self.namespace {
-            return Err(unavailable("Logical source namespace changed"));
-        }
-        Ok(())
-    }
+fn storage_error(error: crate::storage::StorageError) -> QueryError {
+    use crate::storage::StorageError;
+    let code = match error {
+        StorageError::NamespaceUnadmitted => "namespace_unadmitted",
+        StorageError::NamespaceMismatch => "namespace_mismatch",
+        StorageError::ScopeChanged => "storage_epoch_changed",
+        StorageError::NamespaceUpgradePending => "namespace_upgrade_pending",
+        StorageError::InvalidArguments => "invalid_arguments",
+        _ => "unavailable",
+    };
+    QueryError::new(code, error.to_string())
 }
 
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
@@ -77,22 +77,8 @@ fn generation(db: &Connection) -> Result<String, QueryError> {
     )
     .map_err(unavailable)
 }
-fn open(options: &Options) -> Result<Connection, QueryError> {
-    let db = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(unavailable)?;
-    crate::events::store::require_current(&db).map_err(unavailable)?;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(unavailable)?;
-    Ok(db)
-}
-fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
-    let db = open(options)?;
-    db.execute_batch("BEGIN").map_err(unavailable)?;
-    crate::events::store::require_current(&db).map_err(unavailable)?;
-    let generation = generation(&db)?;
+fn read(db: &Connection, options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
+    let generation = generation(db)?;
     let ready: bool = db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)",rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(),generation],|row|row.get(0)).map_err(unavailable)?;
     if !ready {
         return Err(unavailable("Native Catalog publication is incomplete"));
@@ -317,7 +303,6 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
     if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
         return Err(unavailable("Catalog relationship context is unavailable"));
     }
-    db.execute_batch("COMMIT").map_err(unavailable)?;
     Ok(Part {
         generation,
         runtime,
@@ -336,8 +321,7 @@ fn spend(left: &mut usize, bytes: usize) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn has_search_slots(options: &Options, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
-    let db = open(options)?;
+fn has_search_slots(db: &Connection, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
     let history: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1)",

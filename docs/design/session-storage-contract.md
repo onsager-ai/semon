@@ -261,3 +261,46 @@ contracts in CI, along with admission/fencing tests. This does not establish
 same-database two-source parity or complete backend-parameterized native parity.
 The #380 closure lane is Source #486 / Hub #322; its inherited UI fixes are not
 part of this storage work. The existing merge hold and all final gates remain.
+
+## Slice 1a WIP: configured native admission and reversible staging
+
+D1: Catalog page and Query metadata reads now resolve database coordinates from
+`StoreConfig` through one adapter-owned reader admission path. Namespace and
+pinned epoch are checked in the same read transaction, before Catalog/Query
+payload SQL. The registry and epoch checks themselves necessarily read SQL
+metadata. Mismatched, unadmitted and stale bindings have closed typed refusals.
+Public `StoreConfig::catalog_page` and bounded `query_metadata` exercise this
+configured path. Query metadata does not fetch question text or replace the
+complete Query tools. Options supplies source/runtime authority only.
+
+The only Options-to-database bridge is explicitly named
+`NativeReaderBinding::TransitionalUnboundLocal`, constructed in `storage.rs`.
+Its validation refuses every enrolled store inside the read snapshot. Native
+Catalog/Query adapter files no longer derive paths from Options.cache, and CI
+checks that prohibition. Existing unbound native tests retain their oracles.
+This resolves the admission/epoch bypass while the gate remains closed; it does
+NOT qualify row-level namespace isolation. Catalog SQL still has no namespace
+columns or predicates, and only the one admitted frozen source may be read.
+
+D3: `StoreConfig::unenroll_namespace` reverts only the read-only first-source
+preparation stage. It checks the full admission witness, epoch, zero table/writer
+qualification and the exact bounded fence inventory under one writer lock before
+removing anything. Native tables and rows are untouched. Missing/tampered fences,
+new tables or qualified state refuse without partial release. A small durable
+sequence record remains so re-enrollment advances the admission generation and
+an older witness cannot un-enroll the newer stage. The primitive restores legacy
+writability; it is not migration rollback after qualified/new-backend writes.
+
+New shared conformance probes cover configured Catalog/Query refusal before
+payload access, and SQLite tests cover the unreachable enrolled Options bypass,
+explicit database selection despite a decoy Options path, un-enroll row retention,
+warm-writer restoration, re-enrollment generation fencing and tampered-fence
+refusal. These checks run in CI only. Exact-final results are left to Gateway.
+
+Still missing from slice 1a: namespace columns/composite keys/keyset indexes and
+qualified Catalog/recipe/change writers, namespace SQL predicates, bounded
+resumable row assignment, and adapter-level equal-ID/path isolation tests.
+The direct-file allowlist remains 45; no file was cosmetically removed to claim
+additional backend coverage. The multi-source qualification remains zero and the
+second-source gate stays closed. The full #478/#477 criteria and #380 merge hold
+remain unchanged; all #479 and Hub #313 implementation is still outstanding.

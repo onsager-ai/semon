@@ -2,6 +2,25 @@
 //! native fixture/claim/proof parity is a separate, still-required #478 suite.
 use super::*;
 
+/// Reusable configured-native boundary probes; future adapters use the same
+/// cases with their own admitted fixtures and the same public semantic APIs.
+pub(crate) fn configured_native_read_refusals(
+    options: &crate::Options,
+    unadmitted: StoreConfig,
+    mismatched: StoreConfig,
+    stale: StoreConfig,
+) {
+    for (config, error, code) in [
+        (unadmitted, StorageError::NamespaceUnadmitted, "namespace_unadmitted"),
+        (mismatched, StorageError::NamespaceMismatch, "namespace_mismatch"),
+        (stale, StorageError::ScopeChanged, "storage_epoch_changed"),
+    ] {
+        assert_eq!(config.catalog_page(options, "limit=1").err(), Some(error));
+        let refused = config.query_metadata(options, 1, 1024).unwrap_err();
+        assert_eq!(refused.code, code);
+    }
+}
+
 pub(super) trait MetadataFixture {
     fn store(&self) -> Box<dyn SessionMetadataStore>;
     fn namespace(&self) -> LogicalSourceNamespace;

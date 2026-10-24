@@ -3,6 +3,7 @@ pub(crate) mod catalog;
 pub(crate) mod changes;
 pub(crate) mod namespace;
 pub(crate) mod query;
+mod reader;
 
 use super::{
     CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,
