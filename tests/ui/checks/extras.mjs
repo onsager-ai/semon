@@ -940,8 +940,11 @@ export default async function (browser) {
         JSON.stringify({ failed, previewInfo }),
     );
     r.expect(
-      ok.notes.length === 0 && ok.out > preview,
-      'a working fetch shows the whole text, longer than the preview: ' + JSON.stringify(ok),
+      ok.notes.length === 1 &&
+        ok.notes[0] === 'Complete recorded text loaded.' &&
+        ok.out > preview,
+      'a working fetch confirms complete text without a preview or failure notice: ' +
+        JSON.stringify(ok),
     );
     // The recorded tool has no outer text-loading control. Closing and reopening
     // View all while its qualified field read is in flight must join completion.
@@ -975,11 +978,15 @@ export default async function (browser) {
         preview,
       preview,
     );
-    await page.locator('dialog.panel.full .vnote').waitFor({ state: 'detached' });
+    await page
+      .locator('dialog.panel.full .vnote')
+      .getByText('Complete recorded text loaded.', { exact: true })
+      .waitFor();
     r.expect(fieldReads === 1, 'View all joins the in-flight native field read: ' + fieldReads);
     r.expect(
-      (await page.locator('dialog.panel.full .vnote').count()) === 0,
-      'View all redraws when the shared field request completes',
+      (await page.locator('dialog.panel.full .vnote').allTextContents()).join('') ===
+        'Complete recorded text loaded.',
+      'View all replaces the loading state with completion after the shared field read',
     );
     await page.click('dialog.panel.full .panel-h .ibtn');
     await page.unroute('**/api/session-entry?**');
