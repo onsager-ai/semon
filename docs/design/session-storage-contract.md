@@ -1,9 +1,10 @@
 # Native session storage contract (#478, implementation checkpoints)
 
-Status: partial implementation. #477 is not complete. This revision moves only
-change delivery behind `storage::SessionMetadataStore`, with an implemented
-SQLite adapter, explicit `StoreConfig`, and `LogicalSourceNamespace`. The
-existing parser, identity and semantic projection algorithms are unchanged.
+Status: partial implementation. #477 is not complete. Change delivery,
+Catalog/Query metadata, bounded native navigation and source observations now
+have semantic storage interfaces, with SQLite adapters, explicit `StoreConfig`
+and `LogicalSourceNamespace`. The existing parser, identity and semantic
+projection algorithms are unchanged. The full native commit unit remains pending.
 PostgreSQL (#479) and Hub adoption/migration (#313) are not implemented.
 
 MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
@@ -16,7 +17,7 @@ Paths below are relative to `crates/semon-sessions/src`. The CI guard scans
 each Rust file for driver references and physical index-path derivation, including
 test-only uses. Every remaining direct file must appear in this table. Removing
 an entry requires porting its SQL/path ownership; moving files alone is not a port.
-The adapter lives in `storage/sqlite.rs` and `storage/sqlite/changes.rs`.
+The adapters live in `storage/sqlite.rs` and `storage/sqlite/`.
 The file inventory below was discovered by CI run 40101653609 at Source
 `1d953b2e`; the rejecting guard checks additions and stale entries on every PR.
 
@@ -451,8 +452,9 @@ metadata limit, the two-key native ambiguity limit, the three-key bookmark
 limit, and the 4096-byte bookmark target bound. Query-plan assertions verify
 the current and retained namespace-composite covering indexes. Foreign namespace
 and enrolled unbound reads assert their specific typed refusals. The configured
-`StoreConfig::session_bookmark` path is exercised end to end against a real native
-Catalog publication.
+`StoreConfig::session_bookmark` path is exercised against a real native Catalog
+publication. It still returns the explicit `503 catalog_unavailable` refusal
+from an unported composed Catalog helper; it does not fall back to unbound SQL.
 
 Workspace cursor generation now goes through
 `NativeNavigationStore::catalog_generation`. The Options bridge and explicit
@@ -477,12 +479,10 @@ leases/GC, export/checkpoint/catch-up/fenced cutover/qualified rollback,
 no-SQLite instrumentation, all of #479 PostgreSQL and Hub #313 RLS/snapshot/
 migration. The multi-source gate remains 0, and the #380 merge hold is unchanged.
 
-## Configured source-observation writer checkpoint (attempt 9)
+## Configured source-observation writer checkpoint
 
 This is a functional source discovery/invalidation and revision-CAS family,
-not the requested Event/ledger commit family or a finished #478 backend. Worker
-attempt 9 follows the explicit Manager escalation from cumulative count 8;
-max_auto_rework remains 2. The one-dispatch Sol usage-unknown exception applies.
+not the requested Event/ledger commit family or a finished #478 backend.
 The #380 merge hold and global `WRITER_QUALIFICATION_VERSION = 0` remain.
 
 Inspection corrected the proposed Event/ledger isolation premise.

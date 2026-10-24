@@ -735,14 +735,18 @@ mod tests {
             ..crate::Options::default()
         };
         let bookmark = f.config.session_bookmark(&options, "sid=same");
+        // The composed bookmark still reaches an unported Catalog helper.
+        // Its configured path must refuse rather than fall back to unbound SQL.
         assert_eq!(
             bookmark.status,
-            200,
+            503,
             "{}",
             String::from_utf8_lossy(&bookmark.body)
         );
         let bookmark: serde_json::Value = serde_json::from_slice(&bookmark.body).unwrap();
-        assert_eq!(bookmark["matches"][0]["catalog_key"], "same");
+        assert_eq!(bookmark["error"]["code"], "catalog_unavailable");
+        assert_eq!(bookmark["error"]["retryable"], true);
+        assert!(bookmark.get("matches").is_none());
         let db = f.db();
         let before: (i64, Option<String>, i64) = db.query_row(
             "SELECT (SELECT count(*) FROM storage_original_session_catalog),(SELECT value FROM meta WHERE key='catalog_generation'),(SELECT count(*) FROM session_catalog_changes)",
@@ -834,9 +838,7 @@ mod tests {
         let store = SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()));
         assert_eq!(f.config.bookmarked_target_keys("target").unwrap(), ["same"]);
         assert_eq!(
-            f.config
-                .bookmarked_target_keys("bounded-target")
-                .unwrap(),
+            f.config.bookmarked_target_keys("bounded-target").unwrap(),
             ["a", "b", "c"]
         );
         assert_eq!(
@@ -951,7 +953,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retained.keys, ["same"]);
-        assert_eq!(retained.metadata.as_deref(), Some("{\"owner\":\"history\"}"));
+        assert_eq!(
+            retained.metadata.as_deref(),
+            Some("{\"owner\":\"history\"}")
+        );
         let fallback = store
             .native_resolution(
                 "codex",

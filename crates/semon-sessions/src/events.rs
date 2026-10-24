@@ -1097,8 +1097,13 @@ pub(crate) trait IndexStore: Send {
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
-    fn invalidate_catalog_sources(&mut self, _expected: &[(String, Option<i64>)]) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(crate::storage::StorageError::NamespaceUpgradePending))
+    fn invalidate_catalog_sources(
+        &mut self,
+        _expected: &[(String, Option<i64>)],
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Configured(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ))
     }
     fn catalog_component_paths(
         &self,
@@ -1252,25 +1257,51 @@ pub(crate) trait IndexStore: Send {
 }
 
 impl crate::storage::source_observations::SourceObservationStore for EventCache {
-    fn discover(&mut self, paths: &[String], complete: bool) -> Result<(), crate::storage::StorageError> {
-        self.store.as_mut().ok_or(crate::storage::StorageError::Unavailable)?
-            .discover_catalog_sources(paths, complete).map_err(configured_error)
+    fn discover(
+        &mut self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.store
+            .as_mut()
+            .ok_or(crate::storage::StorageError::Unavailable)?
+            .discover_catalog_sources(paths, complete)
+            .map_err(configured_error)
     }
-    fn invalidate(&mut self, expected: &[(String, Option<i64>)]) -> Result<bool, crate::storage::StorageError> {
-        self.store.as_mut().ok_or(crate::storage::StorageError::Unavailable)?
-            .invalidate_catalog_sources(expected).map_err(configured_error)
+    fn invalidate(
+        &mut self,
+        expected: &[(String, Option<i64>)],
+    ) -> Result<bool, crate::storage::StorageError> {
+        self.store
+            .as_mut()
+            .ok_or(crate::storage::StorageError::Unavailable)?
+            .invalidate_catalog_sources(expected)
+            .map_err(configured_error)
     }
-    fn claims(&self, paths: &[String]) -> Result<crate::storage::source_observations::SourceClaims, crate::storage::StorageError> {
-        self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
-            .catalog_claims(paths).map_err(configured_error)
+    fn claims(
+        &self,
+        paths: &[String],
+    ) -> Result<crate::storage::source_observations::SourceClaims, crate::storage::StorageError>
+    {
+        self.store
+            .as_ref()
+            .ok_or(crate::storage::StorageError::Unavailable)?
+            .catalog_claims(paths)
+            .map_err(configured_error)
     }
     fn pending(&self, limit: usize) -> Result<Vec<String>, crate::storage::StorageError> {
-        self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
-            .pending_catalog_sources(limit).map_err(configured_error)
+        self.store
+            .as_ref()
+            .ok_or(crate::storage::StorageError::Unavailable)?
+            .pending_catalog_sources(limit)
+            .map_err(configured_error)
     }
     fn backfill_state(&self) -> Result<Option<String>, crate::storage::StorageError> {
-        self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
-            .backfill_state().map_err(configured_error)
+        self.store
+            .as_ref()
+            .ok_or(crate::storage::StorageError::Unavailable)?
+            .backfill_state()
+            .map_err(configured_error)
     }
 }
 
