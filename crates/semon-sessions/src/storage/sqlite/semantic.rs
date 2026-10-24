@@ -18,6 +18,7 @@ pub(crate) struct AdmittedSource {
 impl AdmittedSource {
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         NativeReaderBinding::Admitted(self.config.clone()).validate(db, &self.config.namespace)?;
+        crate::events::store::configured::validate_staging_owner(db, &self.config)?;
         if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission {
             return Err(StorageError::ScopeChanged);
         }
@@ -46,6 +47,7 @@ impl Stage {
         let mut db = SourceJournal(config.clone()).connection()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
         NativeReaderBinding::Admitted(config.clone()).validate(&tx, &config.namespace)?;
+        crate::events::store::configured::validate_staging_owner(&tx, config)?;
         let admission = namespace::require_admitted(&tx, &config.namespace)?.generation;
         // The private profile must already have authored composite stage keys.
         // Opening never converts an existing singleton stage or native family.
