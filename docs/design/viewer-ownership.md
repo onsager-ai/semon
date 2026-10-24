@@ -367,3 +367,11 @@ A host may supply `initialHome.title` with that optional content. The canonical
 reader uses the heading only while the same content element occupies its root;
 Sessions and other retained routes keep their shared titles. Domain wording stays
 with the host and introduces no additional routing or observation owner.
+
+Annotation navigation owns the selected marker's placement across paged/group
+layout commits. Group expansion measures retained turn heights before centring;
+cached redraws use the same post-commit placement as complete redraws. The
+reader's existing resize owner reapplies annotation placement when transcript,
+bar or viewport geometry changes. Manual scrolling alone creates no new layout
+owner or recentering timer. The Errors mode fixture retains the strict 2px bound
+and checks height changes and restoration at both widths/themes.
