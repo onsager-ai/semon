@@ -546,6 +546,15 @@ mod tests {
         ));
         assert!(matches!(
             index.commit_initial_files(&[]),
+            Err(StoreError::Configured(StorageError::InvalidArguments))
+        ));
+        // A real initial batch still requires explicit Event-family preparation.
+        assert!(matches!(
+            index.commit_initial_files(&[(
+                raw.to_string_lossy().into_owned(),
+                ledger.clone(),
+                std::sync::Arc::new(FileIndex::default()),
+            )]),
             Err(StoreError::Configured(
                 StorageError::NamespaceUpgradePending
             ))

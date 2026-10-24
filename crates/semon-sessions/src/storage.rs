@@ -4,10 +4,10 @@
 pub(crate) mod catalog;
 #[cfg(test)]
 mod conformance;
+pub mod native_events;
 pub(crate) mod navigation;
 pub(crate) mod query;
 pub mod source_observations;
-pub mod native_events;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
@@ -164,9 +164,7 @@ pub struct StoreConfig {
 impl StoreConfig {
     /// Explicit single-source Event/ledger ingestion. Hosts authorize the Raw
     /// path independently; this does not publish Catalog or enable multi-source.
-    pub fn native_events(
-        &self,
-    ) -> Result<Box<dyn native_events::NativeEventStore>, StorageError> {
+    pub fn native_events(&self) -> Result<Box<dyn native_events::NativeEventStore>, StorageError> {
         crate::events::store::configured::prepare(self)?;
         Ok(Box::new(crate::events::EventCache::open_configured(self)?))
     }

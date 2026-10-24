@@ -20,12 +20,12 @@
 //! ```
 
 pub(crate) mod chunk_proofs;
+pub(crate) mod configured;
 mod launch_calls;
 pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
 mod semantic_stage;
-pub(crate) mod configured;
 pub(crate) mod tree_state;
 
 use std::{
@@ -5438,7 +5438,10 @@ fn gap(what: &str) -> rusqlite::Error {
 
 // ---- Reading -------------------------------------------------------------------------------
 
-pub(crate) fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
+pub(crate) fn ledger_row(
+    connection: &Connection,
+    path: &str,
+) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .prepare_cached(
             "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns \
@@ -5946,10 +5949,15 @@ fn write_index_changes_measured(
     configured::effect("archive_metadata")?;
     let started = measurements.start();
     if semantic_change {
-        crate::storage::sqlite::source_journal::invalidate(transaction, namespace, path, "changed")?;
+        crate::storage::sqlite::source_journal::invalidate(
+            transaction,
+            namespace,
+            path,
+            "changed",
+        )?;
         measurements.record("invalidation", started, 1);
-    #[cfg(test)]
-    configured::effect("invalidation")?;
+        #[cfg(test)]
+        configured::effect("invalidation")?;
     } else {
         measurements.record("representation_repair", started, 1);
     }
@@ -6115,8 +6123,8 @@ fn write_file(
         let started = measurements.start();
         let file_id = statement.query_row(parameters, |row| row.get(0))?;
         measurements.record("file_upsert", started, 1);
-    #[cfg(test)]
-    configured::effect("file_upsert")?;
+        #[cfg(test)]
+        configured::effect("file_upsert")?;
         file_id
     };
 

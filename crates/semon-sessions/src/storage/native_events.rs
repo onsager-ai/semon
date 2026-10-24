@@ -15,5 +15,10 @@ pub trait NativeEventStore: Send {
     /// Reusing that ID reconciles its durable completion before any Raw I/O.
     /// Reuses the native parser and identity/projection algorithm. A successful
     /// return requires a durable, reconciled Event/ledger completion.
-    fn ingest(&mut self, operation_id: &str, path: &Path, harness: &str) -> Result<EventReceipt, StorageError>;
+    fn ingest(
+        &mut self,
+        operation_id: &str,
+        path: &Path,
+        harness: &str,
+    ) -> Result<EventReceipt, StorageError>;
 }
