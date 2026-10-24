@@ -52,3 +52,18 @@ Its required checks and their exact-head results are tracked on
 Historical focused-test counts and the two matched pairs do not certify a new
 head. Final acceptance binds green CI and reviewed visual artifacts to the
 delivered revision. No baseline thresholds or paused capabilities change.
+
+## WIP annotation-layout qualification (October 24)
+
+The annotation-layout candidate built at `919c335` measures expanded turns before
+centring and restores annotation placement after cached/resize layout commits.
+Its first Viewer run [40072955602](https://github.com/onsager-ai/semon/actions/runs/40072955602)
+fixes the original fourth-error placement in all four cases (about -0.2px), but
+still fails the new strict 2px phone viewport-restoration regression (+22.8px);
+this candidate is not accepted. Exact runtime visual bindings also need fresh
+review after the binary change. Preserve the original failure and all existing
+thresholds/gates; the paired Hub remains a reviewable WIP pending qualification.
+
+The remaining candidate gap is phone viewport-height restoration: the tall
+content boxes need not resize, so their ResizeObserver does not observe this
+viewport change. Explicit viewport resize notification still needs qualification.
