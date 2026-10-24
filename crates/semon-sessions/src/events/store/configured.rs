@@ -472,7 +472,8 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     let mut db = connection(config)?;
     SourceJournal(config.clone()).validate(&db)?;
     validate_core(&db)?;
-    let composite_support = semantic_stage::support_sql(&db, "", "namespace").map_err(failed)? == "namespace";
+    let composite_support =
+        semantic_stage::support_sql(&db, "", "namespace").map_err(failed)? == "namespace";
     validate_event_metadata(&db)?;
     SourceJournal(config.clone()).prepare()?;
     let tx = db
@@ -537,7 +538,13 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
                     " OR NOT ({record}.key GLOB 'native_*' OR {record}.key GLOB 'archive_event_index:*')"
                 )
             } else if CORE_TABLES.contains(table)
-                || (composite_support && ["catalog_relocation_candidates", "catalog_native_dependencies", "session_source_mutations"].contains(table))
+                || (composite_support
+                    && [
+                        "catalog_relocation_candidates",
+                        "catalog_native_dependencies",
+                        "session_source_mutations",
+                    ]
+                    .contains(table))
             {
                 match operation {
                     "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
@@ -1779,17 +1786,24 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback() {
-        let f = Fixture::with_setup(PhysicalLayout {
-            semantic_support: true,
-            ..PhysicalLayout::CONFIGURED
-        }, |db, raw| {
-            let path = raw.to_string_lossy();
-            db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
-            db.execute("INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')", [path.as_ref()]).unwrap();
-            db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
-            db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
-            db.execute("INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')", []).unwrap();
-        });
+        let f = Fixture::with_setup(
+            PhysicalLayout {
+                semantic_support: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+            |db, raw| {
+                let path = raw.to_string_lossy();
+                db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
+                db.execute(
+                    "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
+                    [path.as_ref()],
+                )
+                .unwrap();
+                db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
+                db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
+                db.execute("INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')", []).unwrap();
+            },
+        );
         let foreign = |db: &Connection| -> Vec<(String, String)> {
             db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
@@ -1800,40 +1814,77 @@ mod tests {
         let db = f.db();
         assert_eq!(foreign(&db), before);
         assert_eq!(db.query_row("SELECT count(*) FROM catalog_native_dependencies WHERE namespace='configured-events' AND harness='semantic-native:codex' AND native_id='native-session'", [], |r| r.get::<_,i64>(0)).unwrap(), 1);
-        assert_eq!(db.query_row("SELECT count(*) FROM session_source_mutations WHERE namespace='configured-events'", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM session_source_mutations WHERE namespace='configured-events'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
         drop(db);
         use std::io::Write;
         fs::OpenOptions::new().append(true).open(&f.raw).unwrap().write_all(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"append\"}]}}\n").unwrap();
         let committed = f.state();
         FAIL_EFFECT.with(|failure| failure.set(Some("mutation_retirement")));
-        assert_eq!(writer.ingest(&"b".repeat(64), &f.raw, "codex"), Err(StorageError::Unavailable));
+        assert_eq!(
+            writer.ingest(&"b".repeat(64), &f.raw, "codex"),
+            Err(StorageError::Unavailable)
+        );
         assert_eq!(FAIL_EFFECT.with(|failure| failure.get()), None);
         assert_eq!(f.state(), committed);
         assert_eq!(foreign(&f.db()), before);
         drop(writer);
         let mut reopened = f.config.native_events().unwrap();
-        assert!(!reopened.ingest(&"b".repeat(64), &f.raw, "codex").unwrap().replayed);
+        assert!(
+            !reopened
+                .ingest(&"b".repeat(64), &f.raw, "codex")
+                .unwrap()
+                .replayed
+        );
         assert_eq!(foreign(&f.db()), before);
         let committed = f.state();
-        assert!(reopened.ingest(&"b".repeat(64), &f.raw, "codex").unwrap().replayed);
+        assert!(
+            reopened
+                .ingest(&"b".repeat(64), &f.raw, "codex")
+                .unwrap()
+                .replayed
+        );
         assert_eq!(f.state(), committed);
         let wrong = connection(&f.config).unwrap();
-        assert!(wrong.execute("DELETE FROM catalog_native_dependencies WHERE namespace='foreign'", []).is_err());
+        assert!(
+            wrong
+                .execute(
+                    "DELETE FROM catalog_native_dependencies WHERE namespace='foreign'",
+                    []
+                )
+                .is_err()
+        );
         assert!(wrong.execute("UPDATE session_source_mutations SET evidence='wrong' WHERE namespace='foreign'", []).is_err());
         assert_eq!(foreign(&f.db()), before);
-        assert_eq!(crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION, 0);
+        assert_eq!(
+            crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
+            0
+        );
     }
 
     #[test]
     fn configured_semantic_support_mixed_family_refuses_before_ingest() {
-        let f = Fixture::with_setup(PhysicalLayout {
-            semantic_support: true,
-            ..PhysicalLayout::CONFIGURED
-        }, |db, _| {
-            db.execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
-        });
+        let f = Fixture::with_setup(
+            PhysicalLayout {
+                semantic_support: true,
+                ..PhysicalLayout::CONFIGURED
+            },
+            |db, _| {
+                db.execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
+            },
+        );
         let before = f.state();
-        assert!(matches!(f.config.native_events(), Err(StorageError::Unavailable)));
+        assert!(matches!(
+            f.config.native_events(),
+            Err(StorageError::Unavailable)
+        ));
         assert_eq!(f.state(), before);
         assert!(!f.db().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')", [], |r| r.get::<_,bool>(0)).unwrap());
     }
@@ -1842,7 +1893,10 @@ mod tests {
     fn configured_semantic_stage_authored_keys_preserve_collisions_and_refuse_unported_consumers() {
         let mut db = Connection::open_in_memory().unwrap();
         bind_metadata_scope(&db, "a").unwrap();
-        db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8, |_| Ok("a".to_owned())).unwrap();
+        db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8, |_| {
+            Ok("a".to_owned())
+        })
+        .unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
         for ddl in authored_storage_ddl(PhysicalLayout {
             core: true,
@@ -1853,10 +1907,25 @@ mod tests {
             semantic_support: true,
             semantic_stage: true,
             ..PhysicalLayout::default()
-        }).unwrap() {
+        })
+        .unwrap()
+        {
             db.execute_batch(ddl).unwrap();
         }
-        for table in ["catalog_semantic_stage", "catalog_semantic_frontier", "catalog_semantic_sources", "catalog_semantic_inputs", "catalog_semantic_keys", "catalog_semantic_endpoints", "catalog_semantic_native", "catalog_semantic_owner_sources", "catalog_semantic_paths", "catalog_semantic_names", "catalog_semantic_events", "catalog_semantic_relations"] {
+        for table in [
+            "catalog_semantic_stage",
+            "catalog_semantic_frontier",
+            "catalog_semantic_sources",
+            "catalog_semantic_inputs",
+            "catalog_semantic_keys",
+            "catalog_semantic_endpoints",
+            "catalog_semantic_native",
+            "catalog_semantic_owner_sources",
+            "catalog_semantic_paths",
+            "catalog_semantic_names",
+            "catalog_semantic_events",
+            "catalog_semantic_relations",
+        ] {
             assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND type='TEXT' AND [notnull]=1 AND pk=1)", [table], |r| r.get::<_,bool>(0)).unwrap(), "{table}");
             assert_eq!(db.query_row("SELECT count(*) FROM pragma_index_list(?1,'main') i WHERE NOT EXISTS(SELECT 1 FROM pragma_index_info(i.name,'main') WHERE seqno=0 AND name='namespace')", [table], |r| r.get::<_,i64>(0)).unwrap(), 0, "{table}");
         }
@@ -1865,19 +1934,54 @@ mod tests {
             db.execute("INSERT INTO catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,'/same/native.jsonl',1)", [namespace]).unwrap();
             db.execute("INSERT INTO catalog_semantic_events(namespace,source_path,event_key,owner,kind,metadata,native_seq) VALUES(?1,'/same/native.jsonl','same-event','same-session','message','{}',1)", [namespace]).unwrap();
         }
-        let before: i64 = db.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
+        let before: i64 = db
+            .query_row("SELECT total_changes()", [], |r| r.get(0))
+            .unwrap();
         assert!(semantic_stage::active(&db).is_err());
-        assert_eq!(db.query_row("SELECT total_changes()", [], |r| r.get::<_,i64>(0)).unwrap(), before);
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-        tx.execute("DELETE FROM catalog_semantic_events WHERE namespace='a'", []).unwrap();
-        assert_eq!(tx.query_row("SELECT count(*) FROM catalog_semantic_events WHERE namespace='b'", [], |r| r.get::<_,i64>(0)).unwrap(), 1);
+        assert_eq!(
+            db.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "DELETE FROM catalog_semantic_events WHERE namespace='a'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            tx.query_row(
+                "SELECT count(*) FROM catalog_semantic_events WHERE namespace='b'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
         tx.rollback().unwrap();
-        assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_events", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
-        assert_eq!(db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
-        assert!(matches!(authored_storage_ddl(PhysicalLayout {
-            semantic_stage: true,
-            ..PhysicalLayout::CONFIGURED
-        }), Err(DdlProfileError::UnsupportedFamilyCombination)));
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM catalog_semantic_events", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert!(matches!(
+            authored_storage_ddl(PhysicalLayout {
+                semantic_stage: true,
+                ..PhysicalLayout::CONFIGURED
+            }),
+            Err(DdlProfileError::UnsupportedFamilyCombination)
+        ));
     }
 
     #[test]
@@ -1886,17 +1990,26 @@ mod tests {
         for ddl in authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap() {
             db.execute_batch(ddl).unwrap();
         }
-        assert_eq!(semantic_stage::support_sql(&db, "single", "scoped").unwrap(), "single");
+        assert_eq!(
+            semantic_stage::support_sql(&db, "single", "scoped").unwrap(),
+            "single"
+        );
         let tx = db.transaction().unwrap();
         tx.execute_batch("DROP TABLE session_source_mutations; CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;").unwrap();
         assert!(semantic_stage::support_sql(&tx, "single", "scoped").is_err());
         tx.rollback().unwrap();
-        assert_eq!(semantic_stage::support_sql(&db, "single", "scoped").unwrap(), "single");
+        assert_eq!(
+            semantic_stage::support_sql(&db, "single", "scoped").unwrap(),
+            "single"
+        );
         let tx = db.transaction().unwrap();
         tx.execute_batch("DROP INDEX catalog_native_dependency; CREATE INDEX catalog_native_dependency ON catalog_native_dependencies(native_id,source_path);").unwrap();
         assert!(semantic_stage::support_sql(&tx, "single", "scoped").is_err());
         tx.rollback().unwrap();
-        assert_eq!(semantic_stage::support_sql(&db, "single", "scoped").unwrap(), "single");
+        assert_eq!(
+            semantic_stage::support_sql(&db, "single", "scoped").unwrap(),
+            "single"
+        );
     }
 
     #[test]
