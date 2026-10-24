@@ -3,6 +3,8 @@
   "writer_qualification": 0,
   "native_event_request_binding": 1,
   "native_event_namespace_composite_rows": false,
+  "native_event_composite_core_tables": ["files", "events", "signals"],
+  "native_event_metadata_composite": false,
   "unqualified_paths": [
     "catalog_observer.rs",
     "catalog_search.rs",

@@ -28,11 +28,30 @@ CREATE TABLE IF NOT EXISTS pricing_recompute_pending (
     owner_key TEXT NOT NULL,
     PRIMARY KEY(owner_kind,owner_key)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
+    ON session_catalog(session_key,pricing_fingerprint);
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+AFTER INSERT ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+AFTER UPDATE OF metadata ON session_catalog
+BEGIN
+    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
+    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
+      AND c.pricing_fingerprint IS NOT m.value;
+END;
+";
+
+pub(super) const FILE_SCHEMA: &str = "
 CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
     ON files(file_id,codex_pricing_fingerprint)
     WHERE codex_native_usage IS NOT NULL;
-CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
-    ON session_catalog(session_key,pricing_fingerprint);
 CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
 AFTER INSERT ON files
 WHEN NEW.codex_native_usage IS NOT NULL
@@ -57,22 +76,6 @@ BEGIN
     INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
     SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.path=NEW.source_path AND m.key='pricing_recompute_target'
       AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
-AFTER INSERT ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
-END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
-AFTER UPDATE OF metadata ON session_catalog
-BEGIN
-    UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
-    SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
 END;
 ";
 

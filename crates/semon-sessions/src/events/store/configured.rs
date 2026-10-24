@@ -1,12 +1,141 @@
-//! Configured singleton-native transaction. The global/multi-source and
+//! Configured native transaction with a composite core Event family. The global/multi-source and
 //! Catalog publisher gates remain closed. Parser/identity logic stays in events.
 use super::*;
 use crate::storage::sqlite::source_journal::SourceJournal;
 use crate::storage::{StorageError, StoreConfig, native_events::EventReceipt};
 use rusqlite::functions::FunctionFlags;
 
-// These tables are owned by the sole admitted namespace, not independently
-// multiplexed. A second namespace must still be refused before any operation.
+const CORE_TABLES: &[&str] = &["files", "events", "signals"];
+
+// Authored separately from the transitional Options schema. There are no
+// namespace defaults, views, SQL rewriting, or implicit namespace row adoption.
+const CORE_SCHEMA: &str = "
+CREATE TABLE files (
+ namespace TEXT NOT NULL, file_id INTEGER NOT NULL, path TEXT NOT NULL,
+ dev INTEGER NOT NULL, ino INTEGER NOT NULL, size INTEGER NOT NULL,
+ mtime_ns BLOB NOT NULL, ctime_ns BLOB, resume_at INTEGER NOT NULL,
+ head_sha256 BLOB NOT NULL, tail_sha256 BLOB NOT NULL,
+ entrypoint TEXT, title TEXT, agent_name TEXT, last_model TEXT,
+ failed INTEGER NOT NULL, first_ms INTEGER, last_ms INTEGER, cwd TEXT, branch TEXT,
+ pending TEXT NOT NULL, tool_ids TEXT NOT NULL, yields TEXT NOT NULL,
+ busy TEXT NOT NULL, links TEXT NOT NULL, codex_tokens TEXT NOT NULL,
+ codex_tokens_by_model TEXT NOT NULL, rate_limits TEXT, codex_native_usage TEXT,
+ codex_pricing_fingerprint TEXT, copilot TEXT,
+ PRIMARY KEY(namespace,file_id), UNIQUE(namespace,path)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX files_cwd ON files(namespace,cwd,path);
+CREATE TABLE events (
+ namespace TEXT NOT NULL, file_id INTEGER NOT NULL, extra INTEGER NOT NULL,
+ seq INTEGER NOT NULL, k TEXT NOT NULL, o INTEGER NOT NULL, b INTEGER NOT NULL,
+ t INTEGER, id TEXT, n TEXT, code_mode INTEGER NOT NULL,
+ code_mode_open INTEGER NOT NULL, parent INTEGER, script INTEGER NOT NULL,
+ y TEXT, poll INTEGER, reply INTEGER NOT NULL, reply_o INTEGER, reply_b INTEGER,
+ reply_t INTEGER, reply_e INTEGER, reply_f INTEGER, reply_m TEXT, item INTEGER,
+ peer INTEGER NOT NULL, peer_sock TEXT, peer_pid INTEGER, peer_start TEXT, u TEXT,
+ PRIMARY KEY(namespace,file_id,extra,seq),
+ FOREIGN KEY(namespace,file_id) REFERENCES files(namespace,file_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE signals (
+ namespace TEXT NOT NULL, file_id INTEGER NOT NULL, seq INTEGER NOT NULL,
+ k TEXT NOT NULL, o INTEGER NOT NULL, t INTEGER, at INTEGER NOT NULL, n TEXT, v INTEGER,
+ PRIMARY KEY(namespace,file_id,seq),
+ FOREIGN KEY(namespace,file_id) REFERENCES files(namespace,file_id)
+) STRICT, WITHOUT ROWID;
+";
+
+pub(super) const PUT_FILE: &str = "INSERT INTO files
+ (namespace,file_id,path,dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,
+ entrypoint,title,agent_name,last_model,failed,first_ms,last_ms,cwd,branch,pending,
+ tool_ids,yields,busy,links,codex_tokens,codex_tokens_by_model,rate_limits,
+ codex_native_usage,copilot,ctime_ns)
+ VALUES(semon_namespace(),coalesce(
+ (SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1),
+ (SELECT coalesce(max(file_id),0)+1 FROM files WHERE namespace=semon_namespace())),
+ ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
+ ?21,?22,?23,?24,?25,?26,?27,?28)
+ ON CONFLICT(namespace,path) DO UPDATE SET dev=excluded.dev,ino=excluded.ino,
+ size=excluded.size,mtime_ns=excluded.mtime_ns,resume_at=excluded.resume_at,
+ head_sha256=excluded.head_sha256,tail_sha256=excluded.tail_sha256,
+ entrypoint=excluded.entrypoint,title=excluded.title,agent_name=excluded.agent_name,
+ last_model=excluded.last_model,failed=excluded.failed,first_ms=excluded.first_ms,
+ last_ms=excluded.last_ms,cwd=excluded.cwd,branch=excluded.branch,pending=excluded.pending,
+ tool_ids=excluded.tool_ids,yields=excluded.yields,busy=excluded.busy,links=excluded.links,
+ codex_tokens=excluded.codex_tokens,codex_tokens_by_model=excluded.codex_tokens_by_model,
+ rate_limits=excluded.rate_limits,codex_native_usage=excluded.codex_native_usage,
+ copilot=excluded.copilot,ctime_ns=excluded.ctime_ns RETURNING file_id";
+
+pub(super) const PUT_EVENT: &str = "INSERT OR REPLACE INTO events
+ (namespace,file_id,extra,seq,k,o,b,t,id,n,code_mode,code_mode_open,parent,script,y,poll,
+ reply,reply_o,reply_b,reply_t,reply_e,reply_f,reply_m,item,peer,peer_sock,peer_pid,peer_start,u)
+ VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+ ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)";
+
+pub(super) const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals
+ (namespace,file_id,seq,k,o,t,at,n,v) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8)";
+
+const PRICING_FILE_SCHEMA: &str = "
+CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint)
+ WHERE codex_native_usage IS NOT NULL;
+CREATE TRIGGER pricing_pending_file_insert AFTER INSERT ON files
+ WHEN NEW.codex_native_usage IS NOT NULL BEGIN
+ UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
+ WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+ INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+ SELECT 'source',NEW.path FROM files f,meta m WHERE f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER pricing_pending_file_update AFTER UPDATE OF codex_native_usage ON files BEGIN
+ UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END
+ WHERE namespace=NEW.namespace AND file_id=NEW.file_id;
+ INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+ SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.namespace=NEW.namespace AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target' AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+CREATE TRIGGER pricing_pending_native_usage_ready AFTER UPDATE OF usage_ready ON native_usage_sources WHEN NEW.usage_ready=1 BEGIN
+ INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+ SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.namespace=semon_namespace() AND f.path=NEW.source_path AND m.key='pricing_recompute_target' AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
+END;
+";
+
+/// Select an authored statement for the physical family shape, never rewrite
+/// SQL or retry errors against another schema. Singleton stores still support
+/// read-only admission/assignment; configured writes require validate_core.
+pub(super) fn sql<'a>(db: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    Ok(if composite { scoped } else { legacy })
+}
+
+pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
+    sql(db, "", "namespace=semon_namespace() AND ")
+}
+
+/// Create a new physical store only. Existing files, even empty ones, refuse.
+/// Enrollment and bounded Catalog assignment remain separate explicit steps.
+pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
+    let epoch = config.expected_stream_epoch.as_deref().filter(|s| s.len()==64 && s.bytes().all(|b| b.is_ascii_hexdigit())).ok_or(StorageError::InvalidArguments)?;
+    let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+    if database.as_os_str().is_empty() || database == Path::new(":memory:") {
+        return Err(StorageError::InvalidArguments);
+    }
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(database).map_err(|_| StorageError::Unavailable)?;
+    let mut db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW).map_err(failed)?;
+    db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+    for ddl in storage_ddl() {
+        let ddl = if ddl == LEGACY_EVENT_SCHEMA { CORE_SCHEMA } else if ddl == reprice::FILE_SCHEMA { PRICING_FILE_SCHEMA } else { ddl };
+        tx.execute_batch(ddl).map_err(failed)?;
+    }
+    tx.execute("INSERT INTO meta(key,value) VALUES('cache_version',?1)", [CACHE_VERSION.to_string()]).map_err(failed)?;
+    tx.execute("UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'", [epoch]).map_err(failed)?;
+    tx.pragma_update(None,"user_version",SCHEMA_VERSION).map_err(failed)?;
+    tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+    let mode: String = db.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).map_err(failed)?;
+    if !mode.eq_ignore_ascii_case("wal") { return Err(StorageError::Unavailable); }
+    file.sync_all().map_err(|_| StorageError::CommitUncertain)?;
+    Ok(())
+}
+
+// The connected transaction still owns one admitted namespace. Only CORE_TABLES
+// have composite row keys; the other 22 families remain singleton and fenced.
+// A public second namespace must still be refused before any operation.
 const TABLES: &[&str] = &[
     "files",
     "events",
@@ -71,6 +200,7 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
+    db.pragma_update(None, "foreign_keys", true).map_err(failed)?;
     db.create_scalar_function(
         "semon_event_writer",
         0,
@@ -83,6 +213,7 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
 
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
     SourceJournal(config.clone()).validate(db)?;
+    validate_core(db)?;
     let ready: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations' AND type='table')", [], |r| r.get(0)).map_err(failed)?;
     if !ready {
         return Err(StorageError::NamespaceUpgradePending);
@@ -95,7 +226,7 @@ pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), Stor
     }
     let count: i64 = db
         .query_row(
-            "SELECT count(*) FROM storage_event_tables WHERE namespace=?1 AND qualification=1",
+            "SELECT count(*) FROM storage_event_tables WHERE namespace=?1 AND qualification=CASE WHEN table_name IN('files','events','signals') THEN 1 ELSE 0 END",
             [config.namespace.as_str()],
             |r| r.get(0),
         )
@@ -106,12 +237,31 @@ pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), Stor
     Ok(())
 }
 
-/// Constant-size schema preparation, no Raw access or native row copy/reset.
-/// ALTER's constant default binds existing metadata keys to the admitted source.
-/// Native table ownership is deliberately singleton until full row-key porting.
+fn validate_core(db: &Connection) -> Result<(), StorageError> {
+    for table in CORE_TABLES {
+        let ready: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND type='TEXT' AND \"notnull\"=1 AND pk=1)", [table], |r| r.get(0)).map_err(failed)?;
+        if !ready { return Err(StorageError::NamespaceUpgradePending); }
+        let pk: String = db.query_row("SELECT group_concat(name,',') FROM (SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk)", [table], |r| r.get(0)).map_err(failed)?;
+        let expected = match *table {
+            "files" => "namespace,file_id",
+            "events" => "namespace,file_id,extra,seq",
+            _ => "namespace,file_id,seq",
+        };
+        let bad_indexes: i64 = db.query_row("SELECT count(*) FROM pragma_index_list(?1) i WHERE NOT EXISTS(SELECT 1 FROM pragma_index_info(i.name) WHERE seqno=0 AND name='namespace')", [table], |r| r.get(0)).map_err(failed)?;
+        let foreign_keys: i64 = db.query_row("SELECT count(*) FROM pragma_foreign_key_list(?1) WHERE seq=0 AND \"from\"='namespace' AND \"to\"='namespace' AND \"table\"='files'", [table], |r| r.get(0)).map_err(failed)?;
+        if pk!=expected || bad_indexes!=0 || foreign_keys!=i64::from(*table!="files") {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+    }
+    Ok(())
+}
+
+/// Constant-size preparation of a fresh composite core. Existing singleton
+/// stores refuse before writes; supported-current bounded migration is pending.
 pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
-    SourceJournal(config.clone()).prepare()?;
     let mut db = connection(config)?;
+    validate_core(&db)?;
+    SourceJournal(config.clone()).prepare()?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed)?;
@@ -126,7 +276,7 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     if exists {
         return validate(&tx, config);
     }
-    tx.execute_batch("CREATE TABLE storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification=1),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
+    tx.execute_batch("CREATE TABLE storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification IN(0,1)),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
 CREATE TABLE storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);").map_err(failed)?;
     let ns = config.namespace.as_str().replace('\'', "''");
@@ -157,8 +307,8 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
                 .map_err(failed)?;
         }
         tx.execute(
-            "INSERT INTO storage_event_tables VALUES(?1,?2,1)",
-            params![config.namespace.as_str(), table],
+            "INSERT INTO storage_event_tables VALUES(?1,?2,?3)",
+            params![config.namespace.as_str(), table, i64::from(CORE_TABLES.contains(table))],
         )
         .map_err(failed)?;
         for operation in ["INSERT", "UPDATE", "DELETE"] {
@@ -169,10 +319,16 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
                 format!(
                     " OR {record}.namespace IS NOT semon_namespace() OR NOT ({record}.key GLOB 'native_*' OR {record}.key GLOB 'archive_event_index:*')"
                 )
+            } else if CORE_TABLES.contains(table) {
+                match operation {
+                    "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
+                    "DELETE" => " OR OLD.namespace IS NOT semon_namespace()".to_owned(),
+                    _ => " OR NEW.namespace IS NOT semon_namespace()".to_owned(),
+                }
             } else {
                 String::new()
             };
-            tx.execute_batch(&format!("CREATE TRIGGER storage_event_guard_{table}_{operation} BEFORE {operation} ON \"{table}\" WHEN semon_event_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=semon_namespace() AND table_name='{table}' AND qualification=1){metadata} BEGIN SELECT RAISE(ABORT,'configured event writer refused'); END;")).map_err(failed)?;
+            tx.execute_batch(&format!("CREATE TRIGGER storage_event_guard_{table}_{operation} BEFORE {operation} ON \"{table}\" WHEN semon_event_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=semon_namespace() AND table_name='{table}' AND qualification IN(0,1)){metadata} BEGIN SELECT RAISE(ABORT,'configured event writer refused'); END;")).map_err(failed)?;
         }
     }
     tx.commit().map_err(|_| StorageError::CommitUncertain)
@@ -235,7 +391,7 @@ impl Writer {
         let db = self.snapshot()?;
         let mut readers = Readers::new(&db).map_err(failed)?;
         let mut statement = db
-            .prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE path=?1"))
+            .prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE namespace=semon_namespace() AND path=?1"))
             .map_err(failed)?;
         let mut rows = statement.query([path]).map_err(failed)?;
         let mut found = rows
@@ -507,6 +663,123 @@ mod tests {
     use crate::storage::{LogicalSourceNamespace, StoreBackend};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn composite_core_schema_and_qualification_are_physical() {
+        let f = Fixture::new();
+        drop(f.config.native_events().unwrap());
+        let db = f.db();
+        for table in CORE_TABLES.iter().copied().chain(["storage_event_tables", "storage_event_operations"]) {
+            let columns: Vec<(String, i64, Option<String>, i64)> = db.prepare("SELECT name,\"notnull\",dflt_value,pk FROM pragma_table_info(?1)").unwrap()
+                .query_map([table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            assert!(columns.iter().any(|(name,not_null,default,pk)| name=="namespace" && *not_null==1 && default.is_none() && *pk==1), "{table}");
+            let indexes: Vec<String> = db.prepare("SELECT name FROM pragma_index_list(?1)").unwrap().query_map([table], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            assert!(!indexes.is_empty(), "{table}");
+            for index in indexes {
+                let first: String = db.query_row("SELECT name FROM pragma_index_info(?1) WHERE seqno=0", [&index], |r| r.get(0)).unwrap();
+                assert_eq!(first,"namespace","{table}/{index}");
+            }
+            let fks: Vec<(i64,String,String)> = db.prepare("SELECT seq,\"from\",\"to\" FROM pragma_foreign_key_list(?1)").unwrap().query_map([table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            for (_,from,to) in fks.iter().filter(|(seq,_,_)| *seq==0) {
+                assert_eq!((from.as_str(),to.as_str()),("namespace","namespace"),"{table}");
+            }
+            if table=="events" || table=="signals" { assert_eq!(fks.len(),2); }
+        }
+        for table in TABLES {
+            let qualification: i64 = db.query_row("SELECT qualification FROM storage_event_tables WHERE namespace=?1 AND table_name=?2", params![f.config.namespace.as_str(),table], |r| r.get(0)).unwrap();
+            assert_eq!(qualification,i64::from(CORE_TABLES.contains(table)),"{table}");
+            if !CORE_TABLES.contains(table) {
+                let namespace_pk: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND pk=1)", [table], |r| r.get(0)).unwrap();
+                assert!(!namespace_pk,"unported family claimed composite keys: {table}");
+            }
+        }
+    }
+
+    #[test]
+    fn private_composite_core_collisions_reads_deletes_and_rollback() {
+        // Deliberately bypass public enrollment in this private family fixture.
+        // The rest of the native writer is still unqualified for two sources.
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(CORE_SCHEMA).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);").unwrap();
+        let bind = |db: &Connection, namespace: &str| {
+            let namespace = namespace.to_owned();
+            db.create_scalar_function("semon_namespace",0,FunctionFlags::SQLITE_UTF8,move |_| Ok(namespace.clone())).unwrap();
+        };
+        let put = |db: &Connection, path: &str, size: i64| -> i64 {
+            db.query_row(PUT_FILE, params![path,1,2,size,0_u128.to_be_bytes(),size,[0_u8;32],[0_u8;32],Option::<String>::None,Option::<String>::None,Option::<String>::None,Option::<String>::None,false,Option::<i64>::None,Option::<i64>::None,Option::<String>::None,Option::<String>::None,"{}","{}","{}","{}","{}","{}","{}",Option::<String>::None,Option::<String>::None,Option::<String>::None,Option::<Vec<u8>>::None], |r| r.get(0)).unwrap()
+        };
+        let state = |db: &Connection, namespace: &str| -> Vec<Vec<rusqlite::types::Value>> {
+            let mut all = Vec::new();
+            for table in CORE_TABLES {
+                let mut statement = db.prepare(&format!("SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3")).unwrap();
+                let columns = statement.column_count();
+                let rows = statement.query_map([namespace], |r| (0..columns).map(|i| r.get(i)).collect()).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                all.extend(rows);
+            }
+            all
+        };
+        for (namespace,size) in [("a",10),("b",20)] {
+            bind(&db,namespace);
+            assert_eq!(put(&db,"same/relative.jsonl",size),1,"IDs must collide across namespaces");
+            let mut statement = db.prepare(PUT_EVENT).unwrap();
+            let event = Event { n: Some(namespace.to_owned()), ..Event::default() };
+            put_event(&mut statement,1,false,0,&event).unwrap();
+            db.execute(PUT_SIGNAL,params![1,0,"fixture",0,Option::<i64>::None,0,namespace,Option::<i64>::None]).unwrap();
+            let mut readers = Readers::new(&db).unwrap();
+            assert_eq!(readers.events.query_row([1],|r| r.get::<_,String>(7)).unwrap(),namespace);
+            assert_eq!(readers.signals.query_row([1],|r| r.get::<_,String>(5)).unwrap(),namespace);
+            assert_eq!(ledger_row(&db,"same/relative.jsonl").unwrap().unwrap().1.offset,size as u64);
+        }
+        assert_eq!(put(&db,"only-b.jsonl",21),2);
+        let b = state(&db,"b");
+        bind(&db,"a");
+        assert!(put_event(&mut db.prepare(PUT_EVENT).unwrap(),2,false,0,&Event::default()).is_err(),"a child cannot use b's parent");
+        assert_eq!(put(&db,"same/relative.jsonl",30),1);
+        put_event(&mut db.prepare(PUT_EVENT).unwrap(),1,false,1,&Event::default()).unwrap();
+        assert_eq!(ledger_row(&db,"same/relative.jsonl").unwrap().unwrap().1.offset,30);
+        assert_eq!(state(&db,"b"),b);
+        {
+            let tx = db.transaction().unwrap();
+            tx.execute("DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+            tx.execute("DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+            tx.execute("DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+            assert!(ledger_row(&tx,"same/relative.jsonl").unwrap().is_none());
+            assert_eq!(state(&tx,"b"),b);
+            // Dropping the transaction restores all three families.
+        }
+        assert!(ledger_row(&db,"same/relative.jsonl").unwrap().is_some());
+        let tx = db.transaction().unwrap();
+        tx.execute("DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+        tx.execute("DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+        tx.execute("DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(state(&db,"b"),b);
+        bind(&db,"b");
+        assert_eq!(ledger_row(&db,"same/relative.jsonl").unwrap().unwrap().1.offset,20);
+    }
+
+    #[test]
+    fn existing_singleton_store_refuses_without_native_changes() {
+        let f = Fixture::new();
+        // The create-new contract refuses even an already initialized file.
+        assert_eq!(f.config.create_native_store(),Err(StorageError::Unavailable));
+        let legacy = f.root.join("legacy.json");
+        drop(EventCache::open_scoped(&legacy).unwrap());
+        let mut config = f.config.clone();
+        config.backend = StoreBackend::Sqlite { database: EventCache::path(&legacy) };
+        let StoreBackend::Sqlite { database } = &config.backend;
+        let db = Connection::open(database).unwrap();
+        config.expected_stream_epoch = Some(db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'",[],|r| r.get(0)).unwrap());
+        db.execute("INSERT INTO meta VALUES('original-custody','keep')",[]).unwrap();
+        config.admit_namespace().unwrap();
+        for _ in 0..128 { if config.assign_catalog_namespace(64).unwrap().complete { break; } }
+        assert!(matches!(config.native_events(),Err(StorageError::NamespaceUpgradePending)));
+        assert_eq!(db.query_row("SELECT value FROM meta WHERE key='original-custody'",[],|r| r.get::<_,String>(0)).unwrap(),"keep");
+        assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')",[],|r| r.get::<_,bool>(0)).unwrap());
+        assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace')",[],|r| r.get::<_,bool>(0)).unwrap());
+    }
+
     struct Fixture {
         root: PathBuf,
         config: StoreConfig,
@@ -522,26 +795,17 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let cache = root.join("index.json");
-            drop(EventCache::open_scoped(&cache).unwrap());
             let database = EventCache::path(&cache);
-            let db = Connection::open(&database).unwrap();
-            db.execute(
-                "INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')",
-                [],
-            )
-            .unwrap();
-            let epoch = db
-                .query_row(
-                    "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
             let config = StoreConfig {
                 backend: StoreBackend::Sqlite { database },
                 namespace: LogicalSourceNamespace::new("configured-events").unwrap(),
-                expected_stream_epoch: Some(epoch),
+                expected_stream_epoch: Some("a".repeat(64)),
             };
+            config.create_native_store().unwrap();
+            let StoreBackend::Sqlite { database } = &config.backend;
+            let db = Connection::open(database).unwrap();
+            db.execute("INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')", []).unwrap();
+            drop(db);
             config.admit_namespace().unwrap();
             for _ in 0..128 {
                 if config.assign_catalog_namespace(64).unwrap().complete {
@@ -714,9 +978,11 @@ mod tests {
             cache.ingest(&"a".repeat(64), &f.raw, "codex"),
             Err(StorageError::Busy)
         );
+        assert!(cache.event_operation.is_none());
         lock.execute_batch("ROLLBACK").unwrap();
         let receipt = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(!receipt.replayed);
+        assert!(cache.event_operation.is_none());
         let error = cache
             .retain(&std::collections::BTreeSet::new(), &mut false)
             .unwrap_err();

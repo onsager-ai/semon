@@ -162,6 +162,13 @@ pub struct StoreConfig {
 }
 
 impl StoreConfig {
+    /// Explicitly create a fresh native store at a previously absent path.
+    /// Requires a host-chosen epoch. Existing stores are never reset or copied;
+    /// admission and Catalog namespace assignment are separate operations.
+    pub fn create_native_store(&self) -> Result<(), StorageError> {
+        crate::events::store::configured::create(self)
+    }
+
     /// Explicit single-source Event/ledger ingestion. Hosts authorize the Raw
     /// path independently; this does not publish Catalog or enable multi-source.
     pub fn native_events(&self) -> Result<Box<dyn native_events::NativeEventStore>, StorageError> {
