@@ -215,3 +215,49 @@ outside the adapter, and green exact-revision repository CI with fresh acceptanc
 native conformance suite. Hub #313 still requires hosted adoption, restricted-role
 RLS, bounded supported-current-store migration/catch-up, fenced cutover, qualified
 rollback and all existing browser/performance/security/visual gates.
+
+## Increment 2 checkpoint: native reads and closed writer admission
+
+The Catalog page/selection/source-ledger SQL now lives in
+`storage/sqlite/catalog.rs`, behind the semantic `CatalogSnapshot` contract.
+Catalog identity, source-root validation, status rendering, ordering and cursor
+rules remain in the one shared `catalog.rs` implementation. Existing Catalog
+SQL fixture mechanics moved to the adapter tree while retaining their original
+Rust test module names and assertions. Query cohort, search-slot and final
+publication/witness reads use `storage::query::QueryCatalogStore`; SQL lives in
+`storage/sqlite/query.rs`. This removes two direct entries: 47 -> 45. Other
+Query/selected-body helpers and SQL called by the adapter remain unported.
+
+`StoreConfig::admit_namespace` explicitly binds an existing supported-current
+store to one opaque namespace and a pinned change-stream epoch. It atomically
+persists the namespace, admission generation, admitted_at, format version and
+an exhaustive bounded table inventory. Missing epoch/binding, changed epoch,
+unadmitted reads and mismatched namespaces refuse. Public `open` requires the
+pinned epoch and operations require durable admission. Existing local APIs use
+a crate-private unbound-local bridge; they cannot access an enrolled store.
+
+Writer qualification is deliberately zero. There are NO namespace columns or
+qualified native row writers yet. Enrollment installs durable INSERT/UPDATE/
+DELETE refusal triggers for every existing non-internal table (including meta),
+so even already-open native writers cannot mutate the admitted source. Native
+producer/reader qualification refuses the enrolled store before reset/rebuild.
+This preserves existing rows and non-rebuildable facts but pauses native writes;
+this API is staging infrastructure, not an operational backend/cutover.
+
+Second-namespace admission always refuses `MultiSourceUnqualified`; changing a
+mutable database qualification flag cannot enable it. The adapter-owned JSON
+unqualified-path inventory is cross-checked against the exact CI allowlist.
+The stored per-table inventory remains version zero. No reader-only multi-source
+admission or combined access-set list is enabled over unqualified writers.
+Metadata reads of the admitted first source retain snapshots; metadata writes
+also refuse until the namespace row/writer upgrade exists.
+
+The supported-current-store row assignment, bounded resumable row migration,
+namespace-qualified Event/ledger/Catalog/recipe keys and writers, admitted access
+sets and same-store native collision/concurrency tests are STILL UNIMPLEMENTED.
+The atomic admission stage is not a substitute for those requirements. Existing
+unbound native fixtures are exercised through the ported Catalog/Query read
+contracts in CI, along with admission/fencing tests. This does not establish
+same-database two-source parity or complete backend-parameterized native parity.
+The #380 closure lane is Source #486 / Hub #322; its inherited UI fixes are not
+part of this storage work. The existing merge hold and all final gates remain.
