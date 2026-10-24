@@ -142,7 +142,9 @@ impl SourceJournal {
         self.validate(&tx)?;
         let old: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                crate::events::store::configured::metadata_sql(&tx,
+                    "SELECT value FROM meta WHERE key='catalog_source_revision'",
+                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_source_revision'").map_err(failed)?,
                 [],
                 |r| r.get(0),
             )
@@ -162,7 +164,9 @@ impl SourceJournal {
         }
         let state: Option<String> = tx
             .query_row(
-                "SELECT value FROM meta WHERE key='catalog_backfill_state'",
+                crate::events::store::configured::metadata_sql(&tx,
+                    "SELECT value FROM meta WHERE key='catalog_backfill_state'",
+                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state'").map_err(failed)?,
                 [],
                 |r| r.get(0),
             )

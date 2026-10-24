@@ -66,7 +66,9 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         .map_err(failed)?;
     let epoch: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+            crate::events::store::configured::metadata_sql(&tx,
+                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'").map_err(failed)?,
             [],
             |row| row.get(0),
         )
@@ -177,7 +179,9 @@ pub(crate) fn unenroll(
     }
     let actual_epoch: String = tx
         .query_row(
-            "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+            crate::events::store::configured::metadata_sql(&tx,
+                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'").map_err(failed)?,
             [],
             |r| r.get(0),
         )

@@ -117,15 +117,26 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    // This Options producer has no configured namespace authority. Keep the
+    // admission fence ahead of even its optional metadata-only fast path.
+    if crate::storage::sqlite::namespace::is_bound(&connection)? {
+        return Ok(false);
+    }
     let (target, completed, pending): (Option<String>, Option<String>, bool) = connection
         .query_row(
-            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+            progress_sql(&connection)?,
             params![TARGET, COMPLETED],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
     Ok(target.as_deref() == Some(fingerprint)
         && completed.as_deref() == Some(fingerprint)
         && !pending)
+}
+
+fn progress_sql(c: &Connection) -> rusqlite::Result<&'static str> {
+    configured::metadata_sql(c,
+        "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)")
 }
 
 fn step_inner(
@@ -152,7 +163,7 @@ fn step_inner(
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (current_target, current_completed, has_pending): (Option<String>, Option<String>, bool) =
         tx.query_row(
-            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+            progress_sql(&tx)?,
             params![TARGET, COMPLETED],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
@@ -162,7 +173,7 @@ fn step_inner(
     {
         return Ok(false);
     }
-    let encoded: Option<String>=tx.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1",[WORK],|r|r.get(0)).optional()?;
+    let encoded: Option<String>=tx.query_row(native_metadata_value(&tx)?,[WORK],|r|r.get(0)).optional()?;
     let mut work: Work = encoded
         .as_deref()
         .map(|s| decode_json(0, s))
@@ -191,7 +202,7 @@ fn step_inner(
     }
     if current_target.as_deref() != Some(table.fingerprint.as_str()) {
         tx.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            native_metadata_put(&tx)?,
             params![TARGET, table.fingerprint],
         )?;
     }
@@ -200,7 +211,7 @@ fn step_inner(
         && current_completed.as_deref() != Some(table.fingerprint.as_str())
     {
         tx.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            native_metadata_put(&tx)?,
             params![COMPLETED, table.fingerprint],
         )?;
     }
@@ -255,7 +266,7 @@ fn step_inner(
     if full_pass && work.phase == 3 {
         work.completed_fingerprint = table.fingerprint.clone();
         tx.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            native_metadata_put(&tx)?,
             params![COMPLETED, table.fingerprint],
         )?;
     }
@@ -272,7 +283,7 @@ fn step_inner(
         }
         value = json(&work)?;
     }
-    tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![WORK,value])?;
+    tx.execute(native_metadata_put(&tx)?,params![WORK,value])?;
     tx.commit()?;
     Ok(true)
 }
@@ -676,7 +687,7 @@ fn catalog_step(
                 "UPDATE session_overview SET summary=?2 WHERE session_key=?1",
                 params![key, json(&value)?],
             )?;
-            tx.execute("INSERT INTO meta(key,value) VALUES('overview_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[])?;
+            tx.execute(metadata_increment(tx)?, ["overview_generation"])?;
         }
     }
     let trace:Option<(String,String)>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2",params![key,crate::retention::source_generation(&row.sources).map_err(|_|rusqlite::Error::InvalidQuery)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
