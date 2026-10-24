@@ -337,7 +337,7 @@ impl NativeEvidence {
         // left to save.
         let mut dirty = false;
         if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty)?;
         }
         Ok(())
     }
