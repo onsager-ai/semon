@@ -1114,6 +1114,7 @@ impl ViewerCore {
         };
         let mut candidates = Vec::<Candidate>::new();
         let mut unavailable = false;
+        let mut unavailable_views = Vec::new();
         let mut work_guards = Vec::new();
         for (index, (internal, view)) in views.iter().enumerate() {
             let source = if internal.is_empty() {
@@ -1136,6 +1137,7 @@ impl ViewerCore {
                 Ok(guard) => guard,
                 Err(_) => {
                     unavailable = true;
+                    unavailable_views.push(view);
                     continue;
                 }
             };
@@ -1146,8 +1148,10 @@ impl ViewerCore {
                 &format!("sid={}", percent_encode(&route.key)),
             );
             let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-            unavailable |=
-                reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0);
+            if reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0) {
+                unavailable = true;
+                unavailable_views.push(view);
+            }
             for candidate in value["matches"].as_array().into_iter().flatten() {
                 if let Ok(candidate) = serde_json::from_value(candidate.clone()) {
                     candidates.push(candidate);
@@ -1157,6 +1161,12 @@ impl ViewerCore {
         if unavailable {
             drop(work_guards);
             if native_requested {
+                // No selected API follows a no-JavaScript retry. Request the
+                // ordinary coalesced source producer after releasing all work
+                // guards; note_catalog_read never waits for that producer.
+                for view in unavailable_views {
+                    let _ = view.note_catalog_read();
+                }
                 // Keep the unavailable observation: rereading the old Catalog
                 // without the producer lock could infer absence from stale rows.
                 let mut arguments = route.controls.clone();
