@@ -12,6 +12,14 @@ pub(crate) struct SourceProofObservation {
     pub(crate) generation: String,
 }
 
+/// Publication head operations share the native publisher's surrounding write
+/// transaction. Row derivation, source/claim checks and ACK ordering stay in
+/// that publisher until their whole dependency set is namespace-qualified.
+pub(crate) trait CatalogPublicationHead {
+    fn base_generation(&self) -> Result<Option<String>, super::StorageError>;
+    fn publish_generation(&self, generation: &str, version: &str) -> Result<(), super::StorageError>;
+}
+
 pub(crate) trait CatalogSnapshot {
     fn require_current(&self) -> io::Result<()>;
     fn publication_value(&self, key: &str) -> io::Result<Option<String>>;

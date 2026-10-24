@@ -3,6 +3,7 @@ pub(crate) mod catalog;
 pub(crate) mod catalog_namespace;
 pub(crate) mod changes;
 pub(crate) mod namespace;
+pub(crate) mod publication;
 pub(crate) mod query;
 mod reader;
 

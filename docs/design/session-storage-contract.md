@@ -349,3 +349,56 @@ native two-source ingest tests. No fixtures, thresholds or visual approvals
 changed. The exact-path allowlist remains 45. SourceProofObservation replaces the
 complex source-proof tuple at both reviewed lint sites, without a lint allow.
 Exact-final CI and fresh independent inspection remain required.
+
+### Slice 1c: production head port and explicit blocked publication unit
+
+The real `SqliteStore::publish_catalog_with_writer` now obtains its base
+Catalog generation and records its committed generation/version through the
+semantic `CatalogPublicationHead` port. The SQLite implementation borrows the
+publisher's existing IMMEDIATE transaction; it neither commits independently nor
+copies parsing, identity, projection, CAS or ACK derivation. Current-contract
+validation still precedes the port. The explicit `transitional_head` implementation
+rejects enrolled stores before reading a publication base or running publication
+DML; native `current()` also continues to refuse enrolled stores elsewhere.
+
+This is a production **head** port, not an operational namespace-qualified
+publication writer. Inspection of the real publisher shows why Catalog-only
+unfencing cannot implement that writer: the same transaction reads source ledger
+and invalidation claims, verifies source bytes, preserves history, publishes
+search/overview/trace/slot rows, updates global meta generations/completeness,
+clears invalidations, acknowledges relocation, and completes semantic stage
+receipts. `catalog_native_dependencies`, `session_catalog_invalidations`, the
+semantic-stage/frontier/source/input/key tables, relocation ACK dependencies,
+ledger and meta are still unqualified/fenced. Their connected extraction remains
+required before this transaction may run for an admitted namespace. The public
+multi-source gate remains version 0. No additional fences have been lifted.
+
+A real warm-native-publisher regression test first publishes through the normal
+unbound production pipeline, then enrolls/assigns that same DB and proves that
+publication is explicitly refused with the original rows, generation and change
+hints preserved. This is a refusal/coherence test, not successful admitted
+publication or two-source native-ingest conformance. The 45-file remaining direct
+SQL/path inventory is unchanged: two generation SQL operations moved, but the
+native writer file still owns other SQL and is not falsely removed.
+
+Scoped TEMP views now name native columns explicitly, excluding namespace.
+Catalog range qualification is carried from the one snapshot validation instead
+of rechecking assignment readiness for every keyset range. The indexed
+source-proof lookup uses main tables, a namespace-composite join and the scoped
+index. Unported search/history qualification/selected trace/transcript helpers
+return a typed NamespaceUpgradePending error before legacy indexed SQL; admitted
+change compaction remains refused. These helpers still require ports.
+
+The assignment regression now proves the existing epoch row before testing its
+meta fence, verifies INSERT/UPDATE/DELETE refusal and all three original-table
+fences after renames, checks the supported schema has no child foreign keys, and
+checks scoped positional column order. Production schema inspection found no
+REFERENCES declarations (the existing FK occurrence is a test-only boundary
+fixture); no generic FK compatibility mechanism was introduced.
+
+Remaining full scope is unchanged: operational connected publication and
+Event/ledger qualification; same-store native multi-source ingest; claims/Raw
+intents and operation reconciliation; immutable proof/reader leases and GC;
+export/checkpoint/catch-up/fenced cutover/qualified rollback; EventCache fallback
+and no-SQLite instrumentation; #479 PostgreSQL; Hub #313 RLS and migration.
+Exact-head CI and independent review remain required. #380 remains a merge hold.

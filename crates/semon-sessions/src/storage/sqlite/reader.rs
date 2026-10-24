@@ -34,7 +34,7 @@ impl NativeReaderBinding {
         &self,
         db: &Connection,
         requested: &LogicalSourceNamespace,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         let config = self.config();
         if requested != &config.namespace {
             return Err(StorageError::NamespaceMismatch);
@@ -67,9 +67,9 @@ impl NativeReaderBinding {
             return Err(StorageError::ScopeChanged);
         }
         if matches!(self, Self::Admitted(_)) {
-            super::catalog_namespace::scope_readers(db)?;
+            return super::catalog_namespace::scope_readers(db);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub(super) fn snapshot(
