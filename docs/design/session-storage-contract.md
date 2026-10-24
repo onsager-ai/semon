@@ -27,7 +27,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `catalog.rs` | ported | Semantic snapshot reads; SQL and SQL fixtures in storage/sqlite/catalog*.rs. |
 | `catalog_observer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `catalog_search.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `catalog_union.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `catalog_union.rs` | ported | Workspace cursor generation uses a backend-neutral semantic snapshot; cross-source PG querying remains future work. |
 | `causal_trace.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `codex_lifecycle.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/chunk_proofs/published.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -438,3 +438,41 @@ operation IDs, immutable proofs/reader leases/GC, export/checkpoint/catch-up/
 fenced cutover/qualified rollback, EventCache fallback and no-SQLite
 instrumentation remain. #479 PostgreSQL and Hub #313 remain wholly outstanding.
 The gate stays version 0; #478/#477 completion and the #380 merge hold are unchanged.
+
+### Read-hardening increment: qualified navigation and workspace cursor generation
+
+Implementation commit: `4a29569b705147612e522246de2ca99822b2a841` on
+`task/477-raw-sql-backends-20261024`.
+
+The qualified navigation tests now cover RetainedHistory resolution through
+`storage_ns_session_catalog_native`, metadata preference for
+`session_history_catalog` with fallback to `session_catalog`, the 1 MiB selected
+metadata limit, the two-key native ambiguity limit, the three-key bookmark
+limit, and the 4096-byte bookmark target bound. Query-plan assertions verify
+the current and retained namespace-composite covering indexes. Foreign namespace
+and enrolled unbound reads assert their specific typed refusals. The configured
+`StoreConfig::session_bookmark` path is exercised end to end against a real native
+Catalog publication.
+
+Workspace cursor generation now goes through
+`NativeNavigationStore::catalog_generation`. The Options bridge and explicit
+`StoreConfig::catalog_generation` API share this adapter operation. Each lookup
+validates namespace admission and stream epoch in the same SQLite read snapshot
+as the Catalog generation. `catalog_union.rs` no longer opens SQLite or derives
+the physical path. Its existing merge, keyset, filter, authorization and JSON
+logic is unchanged; this is not the backend-native PostgreSQL cross-source
+query required by #479.
+
+The direct-SQL inventory shrinks from 43 to 42 by removing only
+`catalog_union.rs`. Tests cover a matching cursor generation, changed Catalog
+generation refusal, missing-store refusal during cursor generation lookup, and
+retain the existing source-set-change and union fixture checks. CI remains the
+only build/test/format path; this increment has not been locally built or tested.
+
+The connected Event/ledger/meta/claims/stage/invalidation/relocation publication
+unit remains the next bounded production boundary. Also outstanding are the
+remaining 42 paths and indirect owners, `catalog_observer` invalidation helpers,
+retained bookmark helpers, claims/Raw intents, operation IDs, proofs/reader
+leases/GC, export/checkpoint/catch-up/fenced cutover/qualified rollback,
+no-SQLite instrumentation, all of #479 PostgreSQL and Hub #313 RLS/snapshot/
+migration. The multi-source gate remains 0, and the #380 merge hold is unchanged.
