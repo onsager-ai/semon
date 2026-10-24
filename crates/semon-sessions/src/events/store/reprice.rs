@@ -1527,6 +1527,7 @@ mod tests {
                             metadata,
                             catalog,
                             trace,
+                            ..PhysicalLayout::default()
                         })
                         .unwrap()
                         {
@@ -1629,6 +1630,7 @@ mod tests {
             native_usage: true,
             tree: true,
             pricing_queue: true,
+            ..PhysicalLayout::default()
         })
         .unwrap()
         {
@@ -2267,6 +2269,7 @@ mod tests {
                         native_usage: true,
                         tree: true,
                         pricing_queue: true,
+                        ..PhysicalLayout::default()
                     })
                     .unwrap()
                     {
