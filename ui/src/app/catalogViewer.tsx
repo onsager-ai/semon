@@ -494,6 +494,12 @@ export function createCatalogViewer(
     jumpSlot = document.createElement('span'),
     jumpTarget = document.createElement('div');
   const readerResize = new ResizeObserver(() => {
+    // Annotation navigation owns its target across paged/group layout commits,
+    // just as opening-end navigation owns the tail across those same commits.
+    if (active?.errorMode) {
+      highlightAnnotation(active);
+      return;
+    }
     if (
       active &&
       active === pinView &&
@@ -1774,6 +1780,9 @@ export function createCatalogViewer(
       .closest('.tgroup')
       ?.querySelector<HTMLButtonElement>('.tgroup > button[aria-expanded="false"]')
       ?.click();
+    // Opening a group changes retained content-visibility turn heights. Commit
+    // those heights before computing the target's viewport-relative position.
+    measureSessionScreen(view.root);
     const phone = matchMedia('(max-width: 760px)').matches,
       main = document.querySelector<HTMLElement>('#main')!;
     const row = (node.querySelector(':scope > button') ?? node).getBoundingClientRect();
@@ -2783,6 +2792,9 @@ export function createCatalogViewer(
           disabled: view.loading,
           busy: view.loading,
         });
+      // A cached redraw can still change clamp/pager geometry. Keep the same
+      // post-commit annotation placement as a full transcript redraw.
+      if (view.errorMode) scope.frame(() => highlightAnnotation(view));
       return;
     }
     view.renderedRevision = view.store.revision;
