@@ -2023,7 +2023,8 @@ mod tests {
             assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
             for table in semantic_stage::STAGE_TABLES {
                 let tx = db.transaction().unwrap();
-                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;")).unwrap();
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;"))
+                    .unwrap();
                 let before = tx.total_changes();
                 assert!(semantic_stage::stage_layout(&tx).is_err(), "{table}");
                 assert_eq!(tx.total_changes(), before);
@@ -2031,7 +2032,8 @@ mod tests {
                 assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
             }
             let tx = db.transaction().unwrap();
-            tx.execute_batch("DROP INDEX catalog_semantic_message;").unwrap();
+            tx.execute_batch("DROP INDEX catalog_semantic_message;")
+                .unwrap();
             assert!(semantic_stage::stage_layout(&tx).is_err());
             tx.rollback().unwrap();
             assert_eq!(semantic_stage::stage_layout(&db).unwrap(), composite);
@@ -2041,29 +2043,51 @@ mod tests {
     #[test]
     fn configured_semantic_factory_refuses_malformed_stage_before_journal_and_keeps_fences() {
         let f = Fixture::new();
-        f.db().execute_batch("ALTER TABLE catalog_semantic_events ADD COLUMN unexpected TEXT;").unwrap();
+        f.db()
+            .execute_batch("ALTER TABLE catalog_semantic_events ADD COLUMN unexpected TEXT;")
+            .unwrap();
         let before = f.state();
         assert!(f.config.native_events().is_err());
         assert_eq!(f.state(), before);
         assert!(!f.state().contains_key("storage_source_journal"));
         let db = f.db();
-        assert!(db.execute("INSERT INTO catalog_semantic_sources(source_path) VALUES('unbound')", []).is_err());
+        assert!(
+            db.execute(
+                "INSERT INTO catalog_semantic_sources(source_path) VALUES('unbound')",
+                []
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn configured_semantic_input_shapes_and_support_guards_are_required() {
-        for table in ["session_catalog_invalidations", "catalog_backfill_sources"] {
+        for table in [
+            "session_catalog_invalidations",
+            "catalog_backfill_sources",
+            "catalog_relocation_candidates",
+            "catalog_native_dependencies",
+            "session_source_mutations",
+        ] {
             let f = Fixture::new();
-            f.db().execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;")).unwrap();
+            f.db()
+                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;"))
+                .unwrap();
             let before = f.state();
             assert!(f.config.native_events().is_err(), "{table}");
             assert_eq!(f.state(), before);
             assert!(!f.state().contains_key("storage_source_journal"));
         }
-        for table in ["catalog_relocation_candidates", "catalog_native_dependencies", "session_source_mutations"] {
+        for table in [
+            "catalog_relocation_candidates",
+            "catalog_native_dependencies",
+            "session_source_mutations",
+        ] {
             let f = Fixture::new();
             drop(f.config.native_events().unwrap());
-            f.db().execute_batch(&format!("DROP TRIGGER storage_event_guard_{table}_UPDATE;")).unwrap();
+            f.db()
+                .execute_batch(&format!("DROP TRIGGER storage_event_guard_{table}_UPDATE;"))
+                .unwrap();
             let before = f.state();
             assert!(f.config.native_events().is_err(), "{table}");
             assert_eq!(f.state(), before);
