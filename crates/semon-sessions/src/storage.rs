@@ -74,6 +74,13 @@ pub(crate) fn local_navigation_binding(
     ))
 }
 
+pub(crate) fn local_catalog_generation(
+    options: &crate::Options,
+    source: &str,
+) -> Result<String, StorageError> {
+    navigation_store(local_navigation_binding(options, source)?).catalog_generation()
+}
+
 pub(crate) fn navigation_store(
     binding: NativeReaderBinding,
 ) -> Box<dyn navigation::NativeNavigationStore> {
@@ -235,6 +242,12 @@ impl StoreConfig {
             expected_generation,
             store.as_ref(),
         )
+    }
+
+    /// Read the published Catalog generation under this admitted namespace and
+    /// stream epoch snapshot.
+    pub fn catalog_generation(&self) -> Result<String, StorageError> {
+        navigation_store(NativeReaderBinding::Admitted(self.clone())).catalog_generation()
     }
 
     /// Bounded metadata-only permalink target lookup in this admitted source.

@@ -682,6 +682,50 @@ fn workspace_union_pages_duplicate_ids_and_timestamps_without_native_reads() {
     assert_eq!(session_catalog_union(&many, "workspace-a", "").status, 503);
 }
 
+#[test]
+fn workspace_union_cursor_generation_snapshot_fails_closed_on_change_or_missing_store() {
+    let a = Fixture::new();
+    a.publish(8);
+    let sources = [crate::OverviewSource {
+        key: "a".into(),
+        label: "Alpha".into(),
+        options: a.options.clone(),
+        up: false,
+    }];
+    let first = session_catalog_union(&sources, "workspace", "limit=3");
+    assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
+    let first: Value = serde_json::from_slice(&first.body).unwrap();
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    let query = format!(
+        "limit=3&cursor={}",
+        crate::viewer::percent_encode(&cursor)
+    );
+
+    let matching = session_catalog_union(&sources, "workspace", &query);
+    assert_eq!(
+        matching.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&matching.body)
+    );
+
+    a.source("new-after-cursor");
+    a.publish_existing();
+    assert_eq!(
+        session_catalog_union(&sources, "workspace", &query).status,
+        409,
+        "a changed Catalog generation must refuse the old cursor"
+    );
+
+    let mut missing = sources[0].clone();
+    missing.options.cache = a.root.join("missing-index.json");
+    assert_eq!(
+        session_catalog_union(&[missing], "workspace", &query).status,
+        503,
+        "a missing configured store must fail closed during generation lookup"
+    );
+}
+
 fn cursor_query(cursor: &Value) -> String {
     format!(
         "cursor={}",
