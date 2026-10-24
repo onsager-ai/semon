@@ -14,14 +14,17 @@ const canonicalBytes = Buffer.from(
   JSON.stringify({ pathname: '/session/local/harbor', selectors: { text: 'same', box: [0, 1] } }),
 );
 
-function fixture(t) {
+function fixture(t, { source = 'pixels/report.json', scope = 'main' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visual-audit-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const root = path.join(dir, 'current');
-  fs.mkdirSync(path.join(root, 'pixels'), { recursive: true });
+  const reportPath = path.join(root, source);
+  const captureRoot = path.dirname(path.dirname(reportPath));
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.mkdirSync(path.join(captureRoot, 'pixels'), { recursive: true });
   const state = {
     comparator: 'pixels',
-    scope: 'main',
+    scope,
     kind: 'frame',
     key: 'phone-light|session-harbor',
   };
@@ -41,7 +44,7 @@ function fixture(t) {
     reviewedCandidate: 'reviewed-head',
   };
   const baseReport = {
-    scope: 'main',
+    scope,
     reference: 'source-pin',
     referenceHub: 'hub-pin',
     results: [
@@ -53,11 +56,20 @@ function fixture(t) {
       },
     ],
   };
-  const run = ({ bytes = canonicalBytes, report = baseReport, acceptances = [accepted] } = {}) => {
+  const run = ({
+    bytes = canonicalBytes,
+    report = baseReport,
+    acceptances = [accepted],
+    candidatePath = 'pixels/candidate.json',
+    writeEvidence = true,
+    recordedDigest = hash(bytes),
+  } = {}) => {
     const currentReport = structuredClone(report);
-    currentReport.results[0].artifactDigests.candidate.evidence = hash(bytes);
-    fs.writeFileSync(path.join(root, 'pixels/candidate.json'), bytes);
-    fs.writeFileSync(path.join(root, 'pixels/report.json'), JSON.stringify(currentReport));
+    currentReport.results[0].artifactPaths.candidateEvidence = candidatePath;
+    currentReport.results[0].artifactDigests.candidate.evidence = recordedDigest;
+    if (writeEvidence)
+      fs.writeFileSync(path.join(captureRoot, candidatePath), bytes);
+    fs.writeFileSync(reportPath, JSON.stringify(currentReport));
     return audit({ root, registry: { acceptances } });
   };
   return { run, accepted, baseReport };
@@ -119,6 +131,38 @@ test('refuses changed PNG digests and reference pins', (t) => {
   const changedReference = structuredClone(baseReport);
   changedReference.reference = 'different-source-pin';
   assert.match(run({ report: changedReference }).refused[0].reason, /Reference pins changed/);
+});
+
+test('resolves nested transport evidence from each report capture root', (t) => {
+  for (const [source, scope] of [
+    ['two-machines/pixels/report.json', 'two-machines'],
+    ['pushed/pixels/report.json', 'pushed'],
+  ]) {
+    const { run } = fixture(t, { source, scope });
+    const result = run();
+    assert.equal(result.qualified[0].reason, 'canonical-pathname-only');
+    assert.equal(result.refused.length, 0);
+  }
+});
+
+test('refuses nested transport evidence that escapes, is missing or has the wrong digest', (t) => {
+  const { run } = fixture(t, {
+    source: 'two-machines/pixels/report.json',
+    scope: 'two-machines',
+  });
+  assert.match(
+    run({ candidatePath: '../outside.json', writeEvidence: false }).refused[0].reason,
+    /escapes root/,
+  );
+  assert.match(
+    run({ candidatePath: 'pixels/missing.json', writeEvidence: false }).refused[0].reason,
+    /ENOENT/,
+  );
+  assert.match(
+    run({ bytes: Buffer.from('wrong evidence'), recordedDigest: hash(canonicalBytes) })
+      .refused[0].reason,
+    /bytes do not match recorded digest/,
+  );
 });
 
 test('restores only canonical trace paths using the historical fixture encoding', () => {

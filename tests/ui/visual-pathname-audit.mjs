@@ -223,7 +223,10 @@ export function audit({ root, registry }) {
           }
         }
 
-        const candidateBytes = readBytes(evidenceFile(root, row.artifactPaths?.candidateEvidence));
+        const captureRoot = path.dirname(path.dirname(reportPath));
+        const candidateBytes = readBytes(
+          evidenceFile(captureRoot, row.artifactPaths?.candidateEvidence),
+        );
         const candidateDigest = digest(candidateBytes);
         if (row.artifactDigests?.candidate?.evidence !== candidateDigest)
           throw new Error('Current candidate evidence bytes do not match recorded digest');
