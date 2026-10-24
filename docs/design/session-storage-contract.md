@@ -40,6 +40,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/reprice.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/semantic_stage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/configured.rs` | direct | Configured singleton Event transaction; native row keys remain single-source and global qualification stays zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -561,3 +562,45 @@ Functional code pin for this checkpoint:
 `0dedac22a7a1ba15ac0a3f9fd74f833fb40fefc8`). The final delivery/report commit
 may follow with documentation only. No exact-head CI result or independent
 acceptance is claimed for either pin.
+
+## Configured singleton Event/ledger WIP
+
+`StoreConfig::native_events()` now explicitly prepares and opens a singleton
+native ingest family. `ingest(operation_id, path, harness)` uses the existing
+EventCache/parser, ledger identity and projection writer. The caller authorizes
+Raw separately and retains its 64-character hex operation ID across retries.
+An intent with the observed source revision and expected ledger commits before
+Raw is opened. The observation revision is not a worker lease. Source reads,
+parsing and physical qualification run outside the DB writer transaction.
+
+One Immediate transaction validates namespace, current contract, epoch, expected
+ledger and observed revision; commits all native row/proof/header/tree/launch,
+usage, relocation-advance, dependency, invalidation and mutation-retirement
+effects; and records the operation completion and target ledger. Retry of a
+completed operation reconciles its receipt without Raw I/O or applying effects
+again, including after restart. Conflict, busy, scope/refusal and uncertain
+commit are typed errors. Configured errors no longer become legacy busy/memory
+success. Missing configured stores fail before Raw is opened. Legacy Options
+fallback behavior is retained.
+
+This increment deliberately binds native table ownership to the sole admitted
+namespace. Metadata has an explicit namespace column and composite unique index,
+with a constant default qualifying existing rows without copying/resetting them.
+Its old key uniqueness remains, so shared-database multi-source keys are still
+undelivered. All family mutation guards require the admitted writer connection;
+metadata guards also protect Catalog publication and epoch markers. The global
+writer qualification remains zero and `current()` still refuses enrolled stores.
+Catalog publication/staging, cross-path relocation admission, Raw mutation ACK,
+retained-run writers, complete row-key multiplexing and migration remain pending.
+Configured ingestion uses conservative native prefix verification instead of the
+unported append-trust/relocation optimizations. Original proof retention still
+runs in the same native writer transaction; tree snapshots carry explicit
+configured admission rather than reopening an unbound reader.
+
+CI-only tests were added for actual configured ingestion, persisted intent and
+completion, uncertain-reply reconciliation after restart without Raw, every
+native effect rollback, ledger versus observation CAS, busy, namespace/epoch
+refusal, old-writer fences and the configured error-mapping regression. No local
+checks ran: thermal readings are unavailable. Exact-head CI and independent
+acceptance are pending. This WIP does not deliver full #478/#477; PostgreSQL
+#479 and Hub #313 remain undelivered. #380 still gates merging.

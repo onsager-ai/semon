@@ -35,6 +35,8 @@ jobs:
       - name: SQLite adapter and reusable metadata conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::tests::configured_ -- --nocapture
       - name: Native Catalog and Query fixture contracts through adapter
         run: |
           cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture

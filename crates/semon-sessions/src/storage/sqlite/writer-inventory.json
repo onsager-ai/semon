@@ -10,6 +10,7 @@
     "events/store.rs",
     "events/store/chunk_proofs.rs",
     "events/store/chunk_proofs/published.rs",
+    "events/store/configured.rs",
     "events/store/launch_calls.rs",
     "events/store/native_usage.rs",
     "events/store/native_usage/repair.rs",

@@ -25,6 +25,7 @@ pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
 mod semantic_stage;
+pub(crate) mod configured;
 pub(crate) mod tree_state;
 
 use std::{
@@ -2477,6 +2478,7 @@ impl IndexStore for SqliteStore {
                 None,
                 None,
                 &mut row_measurements,
+                None,
             )
             .map_err(failure)?;
         }
@@ -5175,7 +5177,7 @@ fn write_tree_summary(
         if encoded.len() > NATIVE_METADATA_MAX {
             // Retain the source and current rows, but stop retrying a scalar
             // that cannot fit the compact projection budget.
-            transaction.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("native_tree_failure:{path}"),header_ledger(ledger)])?;
+            transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("native_tree_failure:{path}"),header_ledger(ledger)])?;
             transaction.execute(
                 "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
                 [path],
@@ -5436,7 +5438,7 @@ fn gap(what: &str) -> rusqlite::Error {
 
 // ---- Reading -------------------------------------------------------------------------------
 
-fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
+pub(crate) fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .prepare_cached(
             "SELECT file_id, dev, ino, size, mtime_ns, resume_at, head_sha256, tail_sha256, ctime_ns \
@@ -5845,9 +5847,11 @@ fn write_index_changes(
         changes,
         expected,
         &mut crate::native_timing::Measurements::default(),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_index_changes_measured(
     transaction: &Transaction<'_>,
     path: &str,
@@ -5856,6 +5860,7 @@ fn write_index_changes_measured(
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
+    namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
@@ -5871,6 +5876,8 @@ fn write_index_changes_measured(
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
     native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
+    #[cfg(test)]
+    configured::effect("relocation")?;
     let started = measurements.start();
     let full = super::DirtyRows {
         usage: if changes.is_none() {
@@ -5890,6 +5897,8 @@ fn write_index_changes_measured(
         measurements,
     )?;
     native_usage::write(transaction, path, ledger, index)?;
+    #[cfg(test)]
+    configured::effect("native_usage")?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
     for id in index
@@ -5910,6 +5919,8 @@ fn write_index_changes_measured(
         )?;
     }
     measurements.record("dependencies", started, 1);
+    #[cfg(test)]
+    configured::effect("dependencies")?;
 
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
@@ -5926,13 +5937,19 @@ fn write_index_changes_measured(
         }
     }
     measurements.record("semantic_dependencies", started, 1);
+    #[cfg(test)]
+    configured::effect("semantic_dependencies")?;
     let started = measurements.start();
     transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
     measurements.record("archive_metadata", started, 1);
+    #[cfg(test)]
+    configured::effect("archive_metadata")?;
     let started = measurements.start();
     if semantic_change {
-        invalidate_catalog_source(transaction, path, "changed")?;
+        crate::storage::sqlite::source_journal::invalidate(transaction, namespace, path, "changed")?;
         measurements.record("invalidation", started, 1);
+    #[cfg(test)]
+    configured::effect("invalidation")?;
     } else {
         measurements.record("representation_repair", started, 1);
     }
@@ -5942,6 +5959,8 @@ fn write_index_changes_measured(
         [path],
     )?;
     measurements.record("mutation_retirement", started, 1);
+    #[cfg(test)]
+    configured::effect("mutation_retirement")?;
     #[cfg(test)]
     {
         let written_after: i64 =
@@ -6012,9 +6031,13 @@ fn write_file(
     let started = measurements.start();
     write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
     measurements.record("proof_header", started, 1);
+    #[cfg(test)]
+    configured::effect("proof_header")?;
     let started = measurements.start();
     write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
     measurements.record("proof_sidecar", started, 1);
+    #[cfg(test)]
+    configured::effect("proof_sidecar")?;
     let started = measurements.start();
     if started.is_some() {
         chunk_proofs::write_measured(
@@ -6028,9 +6051,13 @@ fn write_file(
         chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
     }
     measurements.record("proof_chunks", started, 1);
+    #[cfg(test)]
+    configured::effect("proof_chunks")?;
     let started = measurements.start();
     write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
     measurements.record("proof_parent", started, 1);
+    #[cfg(test)]
+    configured::effect("proof_parent")?;
     let started = measurements.start();
     if started.is_some() {
         launch_calls::write_measured(
@@ -6044,6 +6071,8 @@ fn write_file(
         launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
     }
     measurements.record("proof_launch", started, 1);
+    #[cfg(test)]
+    configured::effect("proof_launch")?;
     let started = measurements.start();
     let rate_limits = rate_limits.as_ref().map(json).transpose()?;
     measurements.record("rate_limit_serialization", started, 1);
@@ -6086,6 +6115,8 @@ fn write_file(
         let started = measurements.start();
         let file_id = statement.query_row(parameters, |row| row.get(0))?;
         measurements.record("file_upsert", started, 1);
+    #[cfg(test)]
+    configured::effect("file_upsert")?;
         file_id
     };
 
@@ -6098,6 +6129,8 @@ fn write_file(
         index.native_usage_observations.is_some(),
     )?;
     measurements.record("proof_tree", started, 1);
+    #[cfg(test)]
+    configured::effect("proof_tree")?;
     let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_EVENT)?;
     let mut cut = transaction
@@ -6118,6 +6151,8 @@ fn write_file(
         )?;
     }
     measurements.record("events", started, 1);
+    #[cfg(test)]
+    configured::effect("events")?;
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
@@ -6150,6 +6185,8 @@ fn write_file(
         },
     )?;
     measurements.record("signals", started, 1);
+    #[cfg(test)]
+    configured::effect("signals")?;
     measurements.count("signal_records", signals.len());
 
     let started = measurements.start();
@@ -6175,6 +6212,8 @@ fn write_file(
         }
     }
     measurements.record("usage", started, changes.usage.len());
+    #[cfg(test)]
+    configured::effect("usage")?;
 
     let started = measurements.start();
     let mut put = transaction.prepare_cached(PUT_CODEX_USAGE)?;
@@ -6216,6 +6255,8 @@ fn write_file(
         },
     )?;
     measurements.record("codex_usage", started, 1);
+    #[cfg(test)]
+    configured::effect("codex_usage")?;
     measurements.count("codex_usage_records", codex_usage_events.len());
     Ok(())
 }

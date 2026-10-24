@@ -98,10 +98,10 @@ pub(crate) fn claims(
         .collect()
 }
 
-pub(super) struct SourceJournal(pub(super) StoreConfig);
+pub(crate) struct SourceJournal(pub(crate) StoreConfig);
 
 impl SourceJournal {
-    fn connection(&self) -> Result<Connection, StorageError> {
+    pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         if self
             .0
             .expected_stream_epoch
@@ -125,7 +125,7 @@ impl SourceJournal {
         Ok(db)
     }
 
-    fn validate(&self, db: &Connection) -> Result<(), StorageError> {
+    pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if !NativeReaderBinding::Admitted(self.0.clone()).validate(db, &self.0.namespace)? {
             return Err(StorageError::NamespaceUpgradePending);
         }
@@ -134,7 +134,7 @@ impl SourceJournal {
 
     /// Explicit bounded preparation after row assignment. Counter seeding keeps
     /// the old high watermark even when an earlier claim was acknowledged.
-    pub(super) fn prepare(&self) -> Result<(), StorageError> {
+    pub(crate) fn prepare(&self) -> Result<(), StorageError> {
         let mut db = self.connection()?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
