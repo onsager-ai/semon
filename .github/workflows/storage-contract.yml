@@ -59,6 +59,7 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::native_usage::namespace_tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::tests::configured_ -- --nocapture
       - name: Native Catalog and Query fixture contracts through adapter
         run: |

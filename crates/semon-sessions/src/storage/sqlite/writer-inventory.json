@@ -85,7 +85,7 @@
   "native_tree_repair_readiness": "same bounded read_tree_summary validation as the consumer, including projection and interpretation witnesses; existing 256-iteration Catalog convergence oracle unchanged; CI pending",
   "native_usage_composite_ddl": "native_usage::schema(bool) is the single usage+repair DDL selector used by storage_ddl(false) and both namespace fixtures; tree_state::schema(bool) selects authored Tree tables; copied-usage composite triggers pending, no public activation",
   "native_usage_ci_filters": [
-    "native_usage_ includes file-backed component append/replay/reopen/conflict rollback, parent relocation/retained incarnation, Tree collision/rollback and native repricing collision/rollback",
+    "events::store::native_usage::namespace_tests:: explicitly runs file-backed component append/replay/reopen/conflict rollback and parent relocation/retained incarnation; native_usage_ separately covers Tree and native repricing collision/rollback",
     "events::store::configured::tests:: includes stale-interpretation readiness regression",
     "catalog::tests::native_usage_history_restart_converges_without_repair_revision_churn retains 256 iterations and same epoch/revision/phase checks"
   ]
