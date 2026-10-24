@@ -17,10 +17,12 @@ use std::io;
 pub(crate) fn rows(
     connection: &Connection,
     request: &Request,
+    qualified: bool,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
     if let Some(sid) = &request.sid {
         return read_range(
             connection,
+            qualified,
             "sqlite_autoindex_session_catalog_1",
             if request.require_complete && request.scope == CatalogReadScope::Current {
                 "lifecycle='current' AND "
@@ -76,6 +78,7 @@ pub(crate) fn rows(
         args.push(SqlValue::Text(cursor.key.clone()));
         let mut found = read_range(
             connection,
+            qualified,
             &index,
             &filters,
             if cursor.inclusive {
@@ -92,6 +95,7 @@ pub(crate) fn rows(
             args.push(SqlValue::Integer(cursor.last));
             found.extend(read_range(
                 connection,
+                qualified,
                 &index,
                 &filters,
                 "last_ms < ?",
@@ -101,7 +105,7 @@ pub(crate) fn rows(
         }
         found
     } else {
-        read_range(connection, &index, &filters, "1", base, limit)?
+        read_range(connection, qualified, &index, &filters, "1", base, limit)?
     };
     // Capacity returned by SQLite is bounded by the requested page plus one.
     found.shrink_to_fit();
@@ -115,14 +119,13 @@ thread_local! {
 
 fn read_range(
     connection: &Connection,
+    qualified: bool,
     index: &str,
     filters: &str,
     range: &str,
     mut args: Vec<SqlValue>,
     limit: usize,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
-    let qualified =
-        super::catalog_namespace::ready(connection).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let (table, index, namespace_filter) = if qualified {
         (
             "main.session_catalog",
@@ -178,12 +181,12 @@ pub(crate) fn read_page(
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    binding.validate(&transaction, &binding.config().namespace)?;
+    let qualified = binding.validate(&transaction, &binding.config().namespace)?;
     let reply = crate::catalog::read_page_snapshot(
         options,
         machine,
         request,
-        &AdmittedSnapshot(&transaction),
+        &AdmittedSnapshot(&transaction, qualified),
     )?;
     transaction.commit()?;
     Ok(reply)
@@ -197,9 +200,14 @@ pub(crate) fn source_proof_observation(
 ) -> Result<Option<crate::storage::catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    binding.validate(&transaction, &binding.config().namespace)?;
+    let qualified = binding.validate(&transaction, &binding.config().namespace)?;
+    let sql = if qualified {
+        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s INDEXED BY storage_ns_session_catalog_current_source_path JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
+    } else {
+        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
+    };
     let encoded: Option<(String, Option<String>)> = transaction.query_row(
-        "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
+        sql,
         [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?;
     let Some((key, encoded)) = encoded else {
@@ -272,7 +280,7 @@ impl CatalogSnapshot for Transaction<'_> {
         .map_err(io::Error::other)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
-        rows(self, request).map_err(io::Error::other)
+        rows(self, request, false).map_err(io::Error::other)
     }
     fn search(
         &self,
@@ -314,7 +322,14 @@ impl CatalogSnapshot for Transaction<'_> {
     }
 }
 
-struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>);
+struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
+
+fn require_ported_helper(qualified: bool) -> io::Result<()> {
+    if qualified {
+        return Err(io::Error::other(crate::storage::StorageError::NamespaceUpgradePending));
+    }
+    Ok(())
+}
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     fn require_current(&self) -> io::Result<()> {
         Ok(())
@@ -323,12 +338,13 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         self.0.publication_value(key)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
-        self.0.rows(request)
+        rows(self.0, request, self.1).map_err(io::Error::other)
     }
     fn search(
         &self,
         query: crate::catalog_search::Query<'_>,
     ) -> io::Result<crate::catalog_search::Selection> {
+        require_ported_helper(self.1)?;
         self.0.search(query)
     }
     fn has_history(&self, key: &str) -> io::Result<bool> {
@@ -338,6 +354,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         self.0.history_catalog(key)
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
+        require_ported_helper(self.1)?;
         self.0.history_qualified(row)
     }
     fn selected_details(
@@ -346,6 +363,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         sources: &[CatalogSource],
         status: &mut dyn FnMut(&CatalogRow) -> Value,
     ) -> io::Result<Option<Value>> {
+        require_ported_helper(self.1)?;
         self.0.selected_details(key, sources, status)
     }
     fn transcript_observation(
@@ -354,6 +372,27 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         generation: &str,
         history: bool,
     ) -> io::Result<Option<Value>> {
+        require_ported_helper(self.1)?;
         self.0.transcript_observation(key, generation, history)
+    }
+}
+
+#[cfg(test)]
+mod namespace_reader_tests {
+    use super::*;
+
+    #[test]
+    fn unported_indexed_reader_refuses_with_typed_storage_error_before_sql() {
+        // No native tables exist: reaching a legacy helper would be an SQL
+        // error, rather than the required typed namespace refusal.
+        let mut db = Connection::open_in_memory().unwrap();
+        let tx = db.transaction().unwrap();
+        let snapshot = AdmittedSnapshot(&tx, true);
+        let error = snapshot.transcript_observation("same", "generation", true).unwrap_err();
+        assert_eq!(
+            error.get_ref().unwrap().downcast_ref::<crate::storage::StorageError>(),
+            Some(&crate::storage::StorageError::NamespaceUpgradePending)
+        );
+        assert!(require_ported_helper(false).is_ok());
     }
 }

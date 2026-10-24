@@ -1803,6 +1803,13 @@ fn warn_source_read(path: &Path, error: &dyn fmt::Display) {
     }
 }
 
+fn publication_storage_failure(error: crate::storage::StorageError) -> StoreError {
+    match error {
+        crate::storage::StorageError::Busy => StoreError::Busy(error.to_string()),
+        _ => StoreError::Failed(error.to_string()),
+    }
+}
+
 /// A rusqlite error, as the cache handles it.
 fn failure(error: rusqlite::Error) -> StoreError {
     if is_busy(&error) {
@@ -3007,17 +3014,13 @@ impl SqliteStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(failure)?;
-            if !current(&transaction).map_err(failure)? {
+            if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
             }
-            let previous: Option<String> = transaction
-                .query_row(
-                    "SELECT value FROM meta WHERE key = 'catalog_generation'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(failure)?;
+            use crate::storage::catalog::CatalogPublicationHead;
+            let publication_head = crate::storage::sqlite::publication::transitional_head(&transaction)
+                .map_err(publication_storage_failure)?;
+            let previous = publication_head.base_generation().map_err(publication_storage_failure)?;
             if previous.as_deref() != expected_generation {
                 self.semantic_rejection = Some("publication_generation");
                 return Ok(Outcome::Conflict);
@@ -3518,7 +3521,7 @@ impl SqliteStore {
             if previous.as_deref() != Some(&generation)
                 || previous_version.as_deref() != Some(&version)
             {
-                transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('catalog_generation',?1),('catalog_version',?2)",params![generation,version]).map_err(failure)?;
+                publication_head.publish_generation(&generation, &version).map_err(publication_storage_failure)?;
             }
             // Closed component publication is coherent for its claimed closure.
             // Its owner advances the cohort observation clock only after all
