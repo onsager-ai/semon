@@ -1066,7 +1066,7 @@ mod tests {
             .unwrap();
         // A valid selector reaches the actual DELETE prepare. Deny that same
         // operation for both callers, while allowing metadata introspection.
-        connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+        let authorizer = |context: rusqlite::hooks::AuthContext<'_>| {
             if matches!(
                 context.action,
                 rusqlite::hooks::AuthAction::Delete { table_name: "meta" }
@@ -1075,7 +1075,8 @@ mod tests {
             } else {
                 rusqlite::hooks::Authorization::Allow
             }
-        }));
+        };
+        connection.authorizer(Some(authorizer)).unwrap();
         let _recording = cleanup_tests::recording();
         let transaction = connection.transaction().unwrap();
         let ordinary = transaction.execute("DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')", rusqlite::params!["p:", "p:~", "p:header", "p:0000000000", 12i64, 3i64]).unwrap_err();
