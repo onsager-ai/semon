@@ -22,11 +22,12 @@
   "native_usage_composite": false,
   "native_usage_scoped_helpers": "bound-selector five-table family plus repair queue/claims/clock and Tree generations/headers/dimensions/work/snapshots; native repricing current-source/fact/dimension operations ported; private physical composite fixtures, production activation closed",
   "native_usage_activation_pending": [
-    "copied usage atomic three-table physical keys validated before payload DML, with committed-schema-cookie connection cache; mixed/missing-family refusal and rollback cache tests authored; Tree peer triggers/token reads and remove/clear helpers scoped; exact-pin CI and fresh review pending",
-    "pricing queue namespace owner keys and runtime queue SELECT/DELETE/EXISTS scoped independently of metadata; family parent/recursive Catalog reads and independently selected trace witnesses/updates scoped; real authored Catalog/source/header DDL fixture spans metadata/Catalog/trace layouts, copied append rollback, equal family IDs, restart and foreign-family no-write; exact-pin CI pending",
+    "copied usage atomic three-table physical keys, complete files FKs and peer-index columns validated before payload DML, with committed-schema-cookie connection cache; mixed/missing-family, corrupt index/parent and rollback cache rejection tests authored; exact-pin CI and fresh review pending; performance not qualified",
+    "one authored_storage_ddl PhysicalLayout composition now serves default initialization/rebuild, configured creation and both copied/repricing fixtures; all 21 real dependency chunks retained, factory byte equality and complete table/index/trigger/FK assembly regression authored; partial family profiles refused before execution; exact-pin CI pending",
+    "pricing queue namespace owner keys and runtime queue SELECT/DELETE/EXISTS scoped independently of metadata; family parent/recursive Catalog reads and independently selected trace witnesses/updates scoped; complete private authored assembly spans metadata/Catalog/header layouts, copied append rollback, equal family IDs, restart and foreign-family no-write; exact-pin CI pending",
     "repair prepare receives an explicit opened Raw carrier and NativeReaderBinding proof snapshot; Options advance refuses enrolled stores before Raw; configured repair semantic entrypoint/claims/producer admission remain unexposed and unqualified",
     "fresh configured DDL/guards/registration qualification for all usage/Tree/repair families; complete assembly and public two-source ingestion; current schema(false) selection remains singleton",
-    "full Catalog repricing refuses composite Catalog before payload reads or DML while history/description/overview owners remain singleton; semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification remain pending"
+    "full Catalog repricing refuses composite Catalog before payload reads or DML while history/description/overview owners remain singleton; chunk_proofs/published.rs::preserve current/history reference UNION is still unscoped and unqualified (real empty fixture dependencies do not qualify it); semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification remain pending"
   ],
   "native_event_metadata_public_shape": "singleton; composite shape private-fixture only",
   "native_event_metadata_pending": [
@@ -34,7 +35,7 @@
     "store.rs Catalog observation/recovery/backfill/publication/slot/search metadata; qualify_contract/qualify/qualify_producer/init and archive membership/GLOB operations",
     "semantic stage/dependency physical row keys and namespace joins (metadata statements are scoped)",
     "composite pricing Catalog/core trigger joins and pending owner keys are authored; public production DDL/guard activation and full Catalog producer scoping remain pending",
-    "changes.rs initial epoch/floors DDL and Catalog trigger publication; SourceJournal legacy unbound-only invalidate/discover statements remain fenced",
+    "changes.rs private assembly now authors namespace-aware stream keys/index and current Catalog triggers, global epoch/source-floor initialization; change delivery consumers and singleton history publisher remain unported/fenced; SourceJournal legacy unbound-only invalidate/discover statements remain fenced",
     "fresh configured meta activation, DEFAULT removal and complete qualification"
   ],
   "unqualified_paths": [
@@ -83,10 +84,11 @@
     "viewer.rs"
   ],
   "native_tree_repair_readiness": "same bounded read_tree_summary validation as the consumer, including projection and interpretation witnesses; original 256-iteration Catalog convergence oracle unchanged; revalidation required on this revision",
-  "native_usage_composite_ddl": "native_usage::schema(bool), copied_usage_schema(bool), tree_state::schema(bool) and reprice queue/catalog/file selectors assemble authored families; singleton production selection remains unchanged; composite copied triggers and full family private fixture await CI, no public activation",
+  "native_usage_composite_ddl": "authored_storage_ddl(PhysicalLayout) selects all 21 authored chunks, including changes::schema metadata/Catalog variants, with explicit cross-family refusal; default singleton and configured-core factory DDL preserved; private composite assembly awaits CI and review, no public activation",
   "native_usage_ci_filters": [
     "events::store::native_usage::namespace_tests:: covers private usage/repair collisions; file_namespace_tests:: now explicitly selects file-backed append/replay/reopen/conflict rollback (distinct module); native_usage_ separately covers Tree and native repricing",
     "events::store::reprice::tests::native_usage_copied_layout_is_independent_of_core_and_native_layout and native_usage_copied_tree_pricing_collision_restart_and_rollback are explicitly registered exact CI tests",
+    "events::store::reprice::tests::native_usage_authored_assembly_preserves_factories_and_complete_dependencies and native_usage_copied_family_rejects_corrupt_constraints_before_payload_dml are exact CI tests; results pending",
     "events::store::configured::tests:: includes stale-interpretation readiness and exact configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback",
     "catalog::tests::native_usage_history_restart_converges_without_repair_revision_churn retains 256 iterations and same epoch/revision/phase checks"
   ]

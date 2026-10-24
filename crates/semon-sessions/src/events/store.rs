@@ -720,9 +720,40 @@ fn copied_usage_sql<'a>(
         if !namespace_valid || !physical || shape.is_some_and(|prior| prior != composite) {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        // Composite payload rows must reference the same physical core key.
+        // Refuse a missing, partial or foreign parent constraint, not merely
+        // a table with the expected primary-key spelling.
+        let foreign_keys = c.prepare_cached("SELECT [table],[from],[to] FROM pragma_foreign_key_list(?1) ORDER BY id,seq")?
+            .query_map([table], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let expected: Vec<(String, String, String)> = if composite {
+            vec![
+                ("files".into(), "namespace".into(), "namespace".into()),
+                ("files".into(), "file_id".into(), "file_id".into()),
+            ]
+        } else {
+            Vec::new()
+        };
+        if foreign_keys != expected {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         shape = Some(composite);
     }
     let composite = shape.ok_or(rusqlite::Error::InvalidQuery)?;
+    let peer_index: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_index_info('usage_identity_peers') ORDER BY seqno)")?
+        .query_row([], |r| r.get(0))?;
+    let peer_table: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name='usage_identity_peers' AND tbl_name='usage_identity') AND EXISTS(SELECT 1 FROM pragma_index_list('usage_identity') WHERE name='usage_identity_peers' AND [unique]=0 AND partial=0 AND origin='c')")?
+        .query_row([], |r| r.get(0))?;
+    let expected_index = if composite {
+        "namespace,message_id,record_uuid,file_id"
+    } else {
+        "message_id,record_uuid,file_id"
+    };
+    if !peer_table || peer_index != expected_index {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     // Do not cache an uncommitted schema cookie: rollback can reuse it for
     // a different DDL transaction. Existing committed decisions remain usable.
     if !c.is_autocommit() {
@@ -4732,32 +4763,96 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     Ok(Init::Ready)
 }
 
-/// One authored DDL set, shared by cold initialization and whole-index rebuilds.
-fn storage_ddl() -> [&'static str; 21] {
-    let [usage, repair] = native_usage::schema(false);
-    [
+/// Physical families, not API qualification or permission to publish. The
+/// unported support/history/stage owners remain singleton and fenced even in
+/// private composite fixtures. No individual member table can be selected.
+#[derive(Clone, Copy, Debug, Default)]
+struct PhysicalLayout {
+    core: bool,
+    metadata: bool,
+    catalog: bool,
+    // Only the authored header family; turns/edges remain unported.
+    trace: bool,
+    copied_usage: bool,
+    native_usage: bool,
+    tree: bool,
+    pricing_queue: bool,
+}
+
+impl PhysicalLayout {
+    const CONFIGURED: Self = Self {
+        core: true,
+        metadata: false,
+        catalog: false,
+        trace: false,
+        copied_usage: false,
+        native_usage: false,
+        tree: false,
+        pricing_queue: false,
+    };
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DdlProfileError {
+    UnsupportedFamilyCombination,
+}
+
+/// Select complete authored chunks before executing any DDL or payload DML.
+/// Composite copied peers require the same Tree shape; composite Tree FKs
+/// require composite core/native usage. Queue triggers have two supported
+/// physical producer shapes: singleton native usage or composite native usage.
+fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProfileError> {
+    if p.tree != p.copied_usage
+        || (p.tree && (!p.core || !p.native_usage))
+        || (p.pricing_queue && (!p.core || !p.native_usage))
+        || (!p.pricing_queue && (p.metadata || p.catalog || p.native_usage))
+    {
+        return Err(DdlProfileError::UnsupportedFamilyCombination);
+    }
+    let [usage, repair] = native_usage::schema(p.native_usage);
+    let file_pricing = if p.pricing_queue {
+        reprice::file_schema(true, p.metadata)
+    } else if p.core {
+        configured::pricing_file_schema(p.metadata)
+    } else {
+        reprice::file_schema(false, false)
+    };
+    Ok([
         SLOT_SCHEMA,
-        catalog_schema(false),
+        catalog_schema(p.catalog),
         CATALOG_SUPPORT_SCHEMA,
-        metadata_schema(false),
-        LEGACY_EVENT_SCHEMA,
-        copied_usage_schema(false),
+        metadata_schema(p.metadata),
+        if p.core {
+            configured::CORE_SCHEMA
+        } else {
+            LEGACY_EVENT_SCHEMA
+        },
+        copied_usage_schema(p.copied_usage),
         usage,
         repair,
-        tree_state::schema(false),
+        tree_state::schema(p.tree),
         semantic_stage::SCHEMA,
-        semantic_stage::SEMANTIC_CORE_INDEXES,
-        semantic_stage::metadata_indexes(false),
+        if p.core {
+            semantic_stage::SEMANTIC_CORE_INDEXES_NS
+        } else {
+            semantic_stage::SEMANTIC_CORE_INDEXES
+        },
+        semantic_stage::metadata_indexes(p.metadata),
         crate::overview::SCHEMA,
-        crate::causal_trace::header_schema(false),
+        crate::causal_trace::header_schema(p.trace),
         crate::causal_trace::SCHEMA,
         crate::history_projection::SCHEMA,
         crate::catalog_search::SCHEMA,
-        crate::storage::sqlite::changes::SCHEMA,
-        reprice::queue_schema(false),
-        reprice::catalog_schema(false, false, false),
-        reprice::file_schema(false, false),
-    ]
+        crate::storage::sqlite::changes::schema(p.metadata, p.catalog),
+        reprice::queue_schema(p.pricing_queue),
+        reprice::catalog_schema(p.pricing_queue, p.catalog, p.metadata),
+        file_pricing,
+    ])
+}
+
+/// Cold initialization and whole-index rebuilds retain their exact default DDL.
+fn storage_ddl() -> [&'static str; 21] {
+    authored_storage_ddl(PhysicalLayout::default()).expect("authored singleton profile")
 }
 
 /// Recognize ownership without reading old event/proof/recipe payloads. Refuse

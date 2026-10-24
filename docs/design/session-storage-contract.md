@@ -11,6 +11,44 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 19 increment: complete authored DDL composition
+
+`authored_storage_ddl(PhysicalLayout)` now selects all 21 authored dependency
+chunks for default initialization/rebuild, configured creation and both copied
+usage/repricing fixtures. Physical flags select whole families; incompatible
+Tree/copied/core/native/queue combinations return `DdlProfileError` before any
+execution. The existing public default and configured-core chunk selections are
+preserved. Composite profiles remain private fixtures, with qualification 0.
+
+The complete assembly includes real history, overview, search, slots, support
+and semantic-stage dependencies. A profile selects current Catalog/source rows
+and trace headers only; it does not port the singleton history, trace edges,
+support or semantic-stage owners. Authored change-stream variants scope current
+Catalog trigger effects to the changed row, keep the epoch in store namespace
+`''`, and initialize composite source floors using the explicit binding. Change
+delivery consumers and the historical publisher remain unqualified.
+
+The copied-usage guard additionally validates its files foreign keys and the
+complete non-partial peer index before payload DML. CI now explicitly registers
+`native_usage_authored_assembly_preserves_factories_and_complete_dependencies`
+and `native_usage_copied_family_rejects_corrupt_constraints_before_payload_dml`
+under `events::store::reprice::tests`. They cover unchanged factory DDL bytes,
+every authored table/index/trigger, foreign-key consistency, incompatible
+profiles, corrupt/missing indexes and foreign parents, and zero-write refusal.
+The two existing copied fixtures retain their append, equal-ID collision,
+restart, rollback and foreign-source oracles; foreign change rows and the
+composite Catalog refusal's zero payload decodes are now checked too.
+
+All results, formatting and performance qualification are pending exact-pin CI
+and independent review. No local CPU checks ran because temperature readings
+are unavailable. The bounded code read also confirmed that
+`chunk_proofs/published.rs::preserve` still has an unscoped current/history
+Catalog reference UNION. Its semantic owner remains unported; empty real
+history/source-map dependencies in a private fixture do not qualify that path.
+Public multi-source/current/publisher gates, configured host repair, immutable
+proof/reader lifetime work, supported-current migration, PostgreSQL and Hub
+adoption remain pending. The #380 merge hold is unchanged.
+
 ## Worker 17 checkpoint: copied usage and pricing owner keys
 
 This is a WIP implementation increment; exact-pin CI and independent key review

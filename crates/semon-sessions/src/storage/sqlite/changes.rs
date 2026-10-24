@@ -35,6 +35,98 @@ CREATE TRIGGER IF NOT EXISTS catalog_history_changes_delete AFTER DELETE ON sess
 END;
 "#;
 
+// Authored physical variants for private family assembly. This does not expose
+// composite change delivery: compact/page and the singleton history publisher
+// still need their semantic owner ports before public qualification.
+macro_rules! scoped_stream_ddl {
+    () => {
+        "
+CREATE TABLE IF NOT EXISTS session_catalog_changes (
+ revision INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL,
+ session_key TEXT NOT NULL,
+ read_scope TEXT NOT NULL CHECK(read_scope IN ('current','retained_history'))
+) STRICT;
+CREATE INDEX IF NOT EXISTS session_catalog_change_order ON session_catalog_changes(namespace,read_scope,revision);
+CREATE TRIGGER IF NOT EXISTS catalog_history_changes_insert AFTER INSERT ON session_history_catalog BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(semon_namespace(),NEW.session_key,'retained_history');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_history_changes_update AFTER UPDATE OF metadata ON session_history_catalog WHEN OLD.metadata IS NOT NEW.metadata BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(semon_namespace(),NEW.session_key,'retained_history');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_history_changes_delete AFTER DELETE ON session_history_catalog BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(semon_namespace(),OLD.session_key,'retained_history');
+END;
+"
+    };
+}
+macro_rules! bound_catalog_changes_ddl {
+    () => {
+        "
+CREATE TRIGGER IF NOT EXISTS catalog_changes_insert AFTER INSERT ON session_catalog BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(semon_namespace(),NEW.session_key,'current'),(semon_namespace(),NEW.session_key,'retained_history');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_changes_update AFTER UPDATE OF metadata ON session_catalog WHEN OLD.metadata IS NOT NEW.metadata BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(semon_namespace(),NEW.session_key,'current'),(semon_namespace(),NEW.session_key,'retained_history');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_changes_delete AFTER DELETE ON session_catalog BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(semon_namespace(),OLD.session_key,'current'),(semon_namespace(),OLD.session_key,'retained_history');
+END;
+"
+    };
+}
+macro_rules! composite_catalog_changes_ddl {
+    () => {
+        "
+CREATE TRIGGER IF NOT EXISTS catalog_changes_insert AFTER INSERT ON session_catalog BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(NEW.namespace,NEW.session_key,'current'),(NEW.namespace,NEW.session_key,'retained_history');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_changes_update AFTER UPDATE OF metadata ON session_catalog WHEN OLD.metadata IS NOT NEW.metadata BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(NEW.namespace,NEW.session_key,'current'),(NEW.namespace,NEW.session_key,'retained_history');
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_changes_delete AFTER DELETE ON session_catalog BEGIN
+ INSERT INTO session_catalog_changes(namespace,session_key,read_scope) VALUES(OLD.namespace,OLD.session_key,'current'),(OLD.namespace,OLD.session_key,'retained_history');
+END;
+"
+    };
+}
+macro_rules! legacy_stream_metadata_ddl {
+    () => {
+        "
+INSERT OR IGNORE INTO meta(key,value) VALUES('catalog_changes_epoch',lower(hex(randomblob(32))));
+INSERT OR IGNORE INTO meta(key,value) VALUES('catalog_changes_floor_current','0'),('catalog_changes_floor_retained_history','0');
+"
+    };
+}
+macro_rules! composite_stream_metadata_ddl {
+    () => {
+        "
+INSERT OR IGNORE INTO meta(namespace,key,value) VALUES('','catalog_changes_epoch',lower(hex(randomblob(32))));
+INSERT OR IGNORE INTO meta(namespace,key,value) VALUES(semon_namespace(),'catalog_changes_floor_current','0'),(semon_namespace(),'catalog_changes_floor_retained_history','0');
+"
+    };
+}
+
+pub(crate) fn schema(meta_composite: bool, catalog_composite: bool) -> &'static str {
+    match (meta_composite, catalog_composite) {
+        (false, false) => SCHEMA,
+        (false, true) => concat!(
+            scoped_stream_ddl!(),
+            composite_catalog_changes_ddl!(),
+            legacy_stream_metadata_ddl!()
+        ),
+        (true, false) => concat!(
+            scoped_stream_ddl!(),
+            bound_catalog_changes_ddl!(),
+            composite_stream_metadata_ddl!()
+        ),
+        (true, true) => concat!(
+            scoped_stream_ddl!(),
+            composite_catalog_changes_ddl!(),
+            composite_stream_metadata_ddl!()
+        ),
+    }
+}
+
 fn scope_key(scope: CatalogReadScope) -> &'static str {
     match scope {
         CatalogReadScope::Current => "current",
