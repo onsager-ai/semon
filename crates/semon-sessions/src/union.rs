@@ -1157,9 +1157,18 @@ impl ViewerCore {
         if unavailable {
             drop(work_guards);
             if native_requested {
-                return crate::native_page::reply(path, query, |endpoint, args| {
-                    self.respond_with(extras, "GET", endpoint, args, None)
-                });
+                // Keep the unavailable observation: rereading the old Catalog
+                // without the producer lock could infer absence from stale rows.
+                let mut arguments = route.controls.clone();
+                if route.legacy_harness.is_some() {
+                    if let Some(source) = &route.source {
+                        arguments.insert("machine".into(), source.clone());
+                    }
+                    if let Some(anchor) = &route.anchor {
+                        arguments.insert("turn".into(), anchor.clone());
+                    }
+                }
+                return crate::native_page::retry_unavailable(path, &arguments);
             }
             // A valid address can load before its bounded source observation
             // finishes. Keep the shell available so the selected APIs own the
@@ -1167,14 +1176,18 @@ impl ViewerCore {
             return shell();
         }
         let resolution = resolve_bookmark(&route, &candidates);
-        drop(work_guards);
         match resolution {
             Resolution::Valid(index) => {
                 let candidate = &candidates[index];
                 if let Some(turn) = &route.turn {
-                    let anchor = self.catalog(
-                        &views,
-                        "/api/session-anchor",
+                    let Some(source_index) = inventory.index(&candidate.source_key) else {
+                        return text(404, "Not found");
+                    };
+                    // Page validation reads the indexed anchor under the same
+                    // producer guards; only focused APIs schedule observation.
+                    let anchor = crate::session_turn_anchor(
+                        views[source_index].1.options(),
+                        &candidate.source_key,
                         &crate::native_html::query(&[
                             ("machine", &candidate.source_key),
                             ("sid", &candidate.catalog_key),
@@ -1247,6 +1260,7 @@ impl ViewerCore {
                         }
                     }
                 }
+                drop(work_guards);
                 if route.legacy_harness.is_some() {
                     return ViewerReply::redirect(
                         route.canonical(&candidate.source_key, &candidate.catalog_key),

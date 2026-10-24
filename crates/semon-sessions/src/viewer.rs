@@ -2638,9 +2638,8 @@ mod tests {
             "/sessions".into(),
             "/machines".into(),
             "/machines/testbox".into(),
-            "/s/claude/lane".into(),
-            format!("/s/claude/lane?turn={turn}"),
-            format!("/trace/claude/lane/{turn}"),
+            "/session/local/lane".into(),
+            format!("/session/local/lane/trace/{turn}"),
         ] {
             let wire = get(&fixture, &path);
             assert!(wire.starts_with("HTTP/1.1 200"), "{path}");
@@ -2653,11 +2652,33 @@ mod tests {
                 assert!(wire.contains(header), "{path}: missing {header}");
             }
         }
+        for (legacy, canonical) in [
+            (
+                "/s/claude/lane".to_owned(),
+                "/session/local/lane".to_owned(),
+            ),
+            (
+                format!("/s/claude/lane?turn={turn}"),
+                format!("/session/local/lane#{turn}"),
+            ),
+            (
+                format!("/trace/claude/lane/{turn}"),
+                format!("/session/local/lane/trace/{turn}"),
+            ),
+        ] {
+            let wire = get(&fixture, &legacy);
+            assert!(wire.starts_with("HTTP/1.1 308"), "{legacy}: {wire}");
+            assert!(
+                wire.contains(&format!("Location: {canonical}\r\n")),
+                "{wire}"
+            );
+        }
+        let wire = get(&fixture, "/s/claude/lane/more");
+        assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
         for path in [
             "/machines/elsewhere",
             "/s/claude/nobody",
             "/s/codex/lane",
-            "/s/claude/lane/more",
             "/trace/claude/lane/no-such-turn",
             "/trace/claude/nobody/x",
             "/fonts/nope.woff2",
@@ -4549,12 +4570,7 @@ mod tests {
                 single["identity"]["native_ids"]
             );
         }
-        for path in [
-            "/api/tree",
-            "/s/claude/lane",
-            "/machines/laptop",
-            "/viewer.js",
-        ] {
+        for path in ["/api/tree", "/machines/laptop", "/viewer.js"] {
             let a = standalone.respond("GET", path, "", None);
             for core in [&embedded, &background] {
                 let b = core.respond("GET", path, "", None);
@@ -4565,6 +4581,20 @@ mod tests {
                     assert_eq!(a.body, b.body);
                 }
             }
+        }
+        // Source namespace belongs to each host: standalone uses local, while
+        // an embedder retains its supplied key even with only one source.
+        for (core, source) in [
+            (&standalone, "local"),
+            (&embedded, "some-key"),
+            (&background, "some-key"),
+        ] {
+            let legacy = core.respond("GET", "/s/claude/lane", "", None);
+            assert_eq!(legacy.status, 308);
+            let canonical = format!("/session/{source}/lane");
+            assert_eq!(legacy.redirect_location(), Some(canonical.as_str()));
+            let page = core.respond("GET", &canonical, "", None);
+            assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
         }
         assert!(
             body_of(&embedded.respond("GET", "/api/viewer/chrome", "", None))["admin"].is_null()
@@ -5419,9 +5449,24 @@ mod tests {
         );
         assert_eq!(transcript.status, 200);
         assert!(String::from_utf8_lossy(&transcript.body).contains("done on alpha"));
-        for path in ["/s/claude/lane-alpha", "/machines/bravo", "/machines/delta"] {
-            assert_eq!(core.respond("GET", path, "", None).status, 200, "{path}");
+        for path in [
+            "/session/alpha/lane-alpha",
+            "/machines/bravo",
+            "/machines/delta",
+        ] {
+            let reply = core.respond("GET", path, "", None);
+            assert_eq!(
+                (reply.status, reply.body.as_slice()),
+                (200, PAGE.as_bytes()),
+                "{path}"
+            );
         }
+        let legacy = core.respond("GET", "/s/claude/lane-alpha", "", None);
+        assert_eq!(legacy.status, 308);
+        assert_eq!(
+            legacy.redirect_location(),
+            Some("/session/alpha/lane-alpha")
+        );
         assert_eq!(core.respond("GET", "/machines/stray", "", None).status, 404);
         // DIR is only read.
         assert_eq!(contents(&dir), before);
@@ -7661,7 +7706,15 @@ mod tests {
                 core.respond("GET", "/session/a/brand-new", "", None)
             })
         };
-        assert_eq!(during.status, 503);
+        assert_eq!(
+            (during.status, during.body.as_slice()),
+            (200, PAGE.as_bytes())
+        );
+        let retry = core.respond("GET", "/session/a/brand-new", "native=1", None);
+        assert_eq!(retry.status, 503);
+        let html = String::from_utf8(retry.body).unwrap();
+        assert!(html.contains("The recorded session index is updating."));
+        assert!(html.contains("href=\"/session/a/brand-new?native=1\""));
         drop(observing);
         core.close();
     }
@@ -7692,10 +7745,14 @@ mod tests {
         for path in ["/", "/timeline", "/machines/testbox"] {
             page(path);
         }
-        assert_eq!(
-            core.respond("GET", "/session/local/lane", "", None).status,
-            503
-        );
+        page("/session/local/lane");
+        let retry = core.respond("GET", "/session/local/lane", "native=1", None);
+        assert_eq!(retry.status, 503);
+        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
+        let api =
+            crate::session_transcript_range(&fixture.options, "local", "sid=lane&limit=100", None);
+        assert_eq!(api.status, 503);
+        assert_eq!(body_of(&api)["error"]["retryable"], true);
         assert_eq!(core.respond("GET", "/viewer.js", "", None).status, 200);
         assert_eq!(refresh_counts(&view), (0, 0, 0), "a page read the logs");
 
@@ -7779,10 +7836,14 @@ mod tests {
             );
         };
         shell("/machines/alpha");
-        assert_eq!(
-            core.respond("GET", "/session/b/lane-b", "", None).status,
-            503
-        );
+        shell("/session/b/lane-b");
+        let retry = core.respond("GET", "/session/b/lane-b", "native=1", None);
+        assert_eq!(retry.status, 503);
+        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
+        let api =
+            crate::session_transcript_range(&bravo.options, "b", "sid=lane-b&limit=100", None);
+        assert_eq!(api.status, 503);
+        assert_eq!(body_of(&api)["error"]["retryable"], true);
         for view in &views {
             assert_eq!(refresh_counts(view), (0, 0, 0), "a page read the logs");
         }
@@ -7849,14 +7910,20 @@ mod tests {
 
         let page = {
             let core = core.clone();
-            thread::spawn(move || core.respond("GET", "/s/claude/brand-new", "", None).status)
+            thread::spawn(move || core.respond("GET", "/s/claude/brand-new", "", None))
         };
         thread::sleep(Duration::from_millis(300));
         assert!(
             page.is_finished(),
             "native shell waited for a workspace model"
         );
-        assert_eq!(page.join().expect("the page request panicked"), 503);
+        let page = page.join().expect("the page request panicked");
+        assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
+        let retry = core.respond("GET", "/s/claude/brand-new", "native=1", None);
+        assert_eq!(retry.status, 503);
+        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
+        // The last complete publication cannot prove a newly written key absent
+        // while its producer is held. Native reads must retain that retry state.
         drop(release);
         let published = warming.join().expect("native publication panicked");
         assert!(

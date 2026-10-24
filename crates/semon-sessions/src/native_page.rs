@@ -401,7 +401,7 @@ fn selected_reply(
     )
 }
 
-fn retry_unavailable(path: &str, arguments: &BTreeMap<String, String>) -> ViewerReply {
+pub(crate) fn retry_unavailable(path: &str, arguments: &BTreeMap<String, String>) -> ViewerReply {
     let pairs: Vec<_> = arguments
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
