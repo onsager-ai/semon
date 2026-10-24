@@ -173,8 +173,8 @@ export default async function embedSidebar(browser) {
         await page.waitForFunction(() => document.body.classList.contains('drawer-open'));
       }
       await page.locator('#lanes .srow').first().click();
-      await page.waitForURL((url) => url.pathname.startsWith('/s/'));
-      assert.equal(new URL(page.url()).searchParams.get('machine'), source);
+      await page.waitForURL((url) => url.pathname.startsWith('/session/'));
+      assert.equal(decodeURIComponent(new URL(page.url()).pathname.split('/')[2]), source);
       assert.deepEqual(errors, []);
       assert.deepEqual(retired, []);
       results.push({

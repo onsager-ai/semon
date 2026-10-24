@@ -1,0 +1,1098 @@
+[
+  {
+    "name": "source alpha",
+    "path": "/session/alpha/same",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same"
+  },
+  {
+    "name": "source beta duplicate key",
+    "path": "/session/beta/same",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/beta/same"
+  },
+  {
+    "name": "missing source",
+    "path": "/session/missing/same",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "wrong key",
+    "path": "/session/alpha/absent",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "revoked excluded by host",
+    "path": "/session/alpha/same",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": []
+  },
+  {
+    "name": "cross workspace excluded by host",
+    "path": "/session/alpha/same",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": []
+  },
+  {
+    "name": "opaque source&key",
+    "path": "/session/source%26key/session%2Fkey/trace/turn%2Bone",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "source&key",
+        "catalog_key": "session/key",
+        "harness": "claude"
+      }
+    ],
+    "canonical": "/session/source%26key/session%2Fkey/trace/turn%2Bone"
+  },
+  {
+    "name": "opaque a/b",
+    "path": "/session/a%2Fb/%252F/trace/%2F",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "a/b",
+        "catalog_key": "%2F",
+        "harness": "claude"
+      }
+    ],
+    "canonical": "/session/a%2Fb/%252F/trace/%2F"
+  },
+  {
+    "name": "opaque \u673a\u5668",
+    "path": "/session/%E6%9C%BA%E5%99%A8/%E4%BC%9A%E8%AF%9D%F0%9F%98%80/trace/%E8%BD%AC%E8%BA%AB",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "\u673a\u5668",
+        "catalog_key": "\u4f1a\u8bdd\ud83d\ude00",
+        "harness": "claude"
+      }
+    ],
+    "canonical": "/session/%E6%9C%BA%E5%99%A8/%E4%BC%9A%E8%AF%9D%F0%9F%98%80/trace/%E8%BD%AC%E8%BA%AB"
+  },
+  {
+    "name": "literal plus",
+    "path": "/session/a+b/key",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "a+b",
+        "catalog_key": "key",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/a%2Bb/key"
+  },
+  {
+    "name": "noncanonical encoding",
+    "path": "/session/%61lpha/same",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same"
+  },
+  {
+    "name": "malformed /session/alpha/same/",
+    "path": "/session/alpha/same/",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/same/trace",
+    "path": "/session/alpha/same/trace",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/same/trace/",
+    "path": "/session/alpha/same/trace/",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/same/extra",
+    "path": "/session/alpha/same/extra",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session//same",
+    "path": "/session//same",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/./same",
+    "path": "/session/./same",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/%2E%2E/same",
+    "path": "/session/%2E%2E/same",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/%FF",
+    "path": "/session/alpha/%FF",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/%",
+    "path": "/session/alpha/%",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/%2X",
+    "path": "/session/alpha/%2X",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/%00",
+    "path": "/session/alpha/%00",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed /session/alpha/%C2%85",
+    "path": "/session/alpha/%C2%85",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "malformed //session/alpha/same",
+    "path": "//session/alpha/same",
+    "query": "",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query machine=alpha",
+    "path": "/session/alpha/same",
+    "query": "machine=alpha",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query source=alpha",
+    "path": "/session/alpha/same",
+    "query": "source=alpha",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query sid=same",
+    "path": "/session/alpha/same",
+    "query": "sid=same",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query catalog_key=same",
+    "path": "/session/alpha/same",
+    "query": "catalog_key=same",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query unknown=1",
+    "path": "/session/alpha/same",
+    "query": "unknown=1",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query q=a&q=b",
+    "path": "/session/alpha/same",
+    "query": "q=a&q=b",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query native=0",
+    "path": "/session/alpha/same",
+    "query": "native=0",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query all_machines=0",
+    "path": "/session/alpha/same",
+    "query": "all_machines=0",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query after=-1",
+    "path": "/session/alpha/same",
+    "query": "after=-1",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query after=9007199254740992",
+    "path": "/session/alpha/same",
+    "query": "after=9007199254740992",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query field_chunk=x",
+    "path": "/session/alpha/same",
+    "query": "field_chunk=x",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query repo=a&no_repo=1",
+    "path": "/session/alpha/same",
+    "query": "repo=a&no_repo=1",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query part=bad",
+    "path": "/session/alpha/same",
+    "query": "part=bad",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query part=text&field_chunk=1",
+    "path": "/session/alpha/same",
+    "query": "part=text&field_chunk=1",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query q=%FF",
+    "path": "/session/alpha/same",
+    "query": "q=%FF",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query q=%",
+    "path": "/session/alpha/same",
+    "query": "q=%",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "invalid query generation=",
+    "path": "/session/alpha/same",
+    "query": "generation=",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "browsing context",
+    "path": "/session/alpha/same",
+    "query": "harness=codex&repo=a%2Fb&model=m&q=a%2Bb&all_machines=1",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same?all_machines=1&harness=codex&model=m&q=a%2Bb&repo=a%2Fb"
+  },
+  {
+    "name": "native paging",
+    "path": "/session/alpha/same",
+    "query": "native=1&after=60&generation=g&field_chunk=2",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same?after=60&field_chunk=2&generation=g&native=1"
+  },
+  {
+    "name": "native expansion",
+    "path": "/session/alpha/same",
+    "query": "native=1&after=0&generation=g&part=output",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same?after=0&generation=g&native=1&part=output"
+  },
+  {
+    "name": "legacy native",
+    "path": "/s/native/same",
+    "query": "machine=alpha",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same"
+  },
+  {
+    "name": "legacy claude",
+    "path": "/s/claude/same",
+    "query": "machine=alpha",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same"
+  },
+  {
+    "name": "legacy codex",
+    "path": "/s/codex/same",
+    "query": "machine=alpha",
+    "outcome": "mismatch",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "legacy ambiguous",
+    "path": "/s/native/same",
+    "query": "",
+    "outcome": "ambiguous",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "legacy unique",
+    "path": "/s/claude/same",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      }
+    ],
+    "canonical": "/session/alpha/same"
+  },
+  {
+    "name": "legacy missing",
+    "path": "/s/native/absent",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "legacy trace",
+    "path": "/trace/native/same/turn%2Bone",
+    "query": "machine=alpha&native=1",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ],
+    "canonical": "/session/alpha/same/trace/turn%2Bone?native=1"
+  },
+  {
+    "name": "missing harness slot",
+    "path": "/s//same",
+    "query": "machine=alpha",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "duplicate source",
+    "path": "/s/native/same",
+    "query": "machine=alpha&machine=beta",
+    "outcome": "malformed",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "same",
+        "harness": "codex"
+      }
+    ]
+  },
+  {
+    "name": "legacy query turn anchor",
+    "path": "/s/native/same",
+    "query": "machine=alpha&turn=turn%2Bone",
+    "outcome": "valid",
+    "canonical": "/session/alpha/same#turn%2Bone",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      }
+    ]
+  },
+  {
+    "name": "/s/copilot/real%2Fkey valid indexed=False",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": false,
+    "canonical": "/session/alpha/real%2Fkey"
+  },
+  {
+    "name": "/trace/copilot/real%2Fkey/turn valid indexed=False",
+    "path": "/trace/copilot/real%2Fkey/turn",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": false,
+    "canonical": "/session/alpha/real%2Fkey/trace/turn"
+  },
+  {
+    "name": "/s/copilot/real%2Fkey mismatch indexed=False",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "",
+    "outcome": "mismatch",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "claude"
+      }
+    ],
+    "indexed_bookmark": false
+  },
+  {
+    "name": "/s/copilot/real%2Fkey ambiguous indexed=False",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "",
+    "outcome": "ambiguous",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      },
+      {
+        "source_key": "beta",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": false
+  },
+  {
+    "name": "/s/native/unsent%3Atarget valid indexed=True",
+    "path": "/s/native/unsent%3Atarget",
+    "query": "",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true,
+    "canonical": "/session/alpha/real%2Fkey"
+  },
+  {
+    "name": "/s/native/unsent%3Atarget ambiguous indexed=True",
+    "path": "/s/native/unsent%3Atarget",
+    "query": "",
+    "outcome": "ambiguous",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      },
+      {
+        "source_key": "alpha",
+        "catalog_key": "another",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/s/native/unsent%3Atarget not_found indexed=True",
+    "path": "/s/native/unsent%3Atarget",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/s/claude/unsent%3Atarget mismatch indexed=True",
+    "path": "/s/claude/unsent%3Atarget",
+    "query": "",
+    "outcome": "mismatch",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/session/alpha/unsent%3Atarget not_found indexed=True",
+    "path": "/session/alpha/unsent%3Atarget",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "/s/native/arbitrary-native-id not_found indexed=True",
+    "path": "/s/native/arbitrary-native-id",
+    "query": "",
+    "outcome": "not_found",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "real/key",
+        "harness": "copilot"
+      }
+    ],
+    "indexed_bookmark": true
+  },
+  {
+    "name": "transport credential rejected /session/alpha/real%2Fkey",
+    "path": "/session/alpha/real%2Fkey",
+    "query": "t=secret",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
+    "name": "transport credential rejected /s/copilot/real%2Fkey",
+    "path": "/s/copilot/real%2Fkey",
+    "query": "t=secret",
+    "outcome": "malformed",
+    "candidates": []
+  }
+]

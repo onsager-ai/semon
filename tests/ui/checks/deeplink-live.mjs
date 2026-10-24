@@ -26,9 +26,10 @@ export default async function deepLinkLive(browser) {
         await goto(page, { v: 'session', id: 'backlog', turn: turn.id }, D);
         const anchor = page.locator('.turn[data-turn="' + turn.id + '"]');
         await anchor.waitFor();
-        assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('turn'), turn.id);
+        assert.equal(decodeURIComponent(new URL(page.url()).hash.slice(1)), turn.id);
         assert.equal(new URL(page.url()).searchParams.has('turn'), false);
-        const source = new URL(page.url()).searchParams.get('machine');
+        assert.equal(new URL(page.url()).pathname.split('/')[1], 'session');
+        const source = decodeURIComponent(new URL(page.url()).pathname.split('/')[2]);
         assert.ok(source);
         assert.ok(
           reads.some(

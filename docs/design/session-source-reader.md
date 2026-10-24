@@ -2,6 +2,7 @@
 
 See the [native storage contract and partial port inventory](session-storage-contract.md)
 for the #478 backend boundary and explicit remaining work.
+Public addresses use [session identity and URLs](session-identity-and-urls.md).
 
 `SessionSourceReader` is a provider-neutral per-request callback for native
 source ranges. It supplements the logical `SessionSourceRef` identities emitted
