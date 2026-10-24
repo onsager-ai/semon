@@ -366,7 +366,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn effect(name: &'static str) -> rusqlite::Result<()> {
+pub(crate) fn effect(name: &'static str) -> rusqlite::Result<()> {
     FAIL_EFFECT.with(|failure| {
         if failure.get() == Some(name) {
             failure.set(None);
@@ -406,9 +406,16 @@ pub(crate) fn validate_semantic_schema(config: &StoreConfig) -> Result<(), Stora
 }
 
 #[cfg(test)]
-pub(crate) fn semantic_tables() -> &'static [&'static str] { semantic_stage::STAGE_TABLES }
-pub(crate) fn semantic_recipe() -> &'static str { semantic_stage::RECIPE }
-pub(crate) fn validate_staging_owner(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
+pub(crate) fn semantic_tables() -> &'static [&'static str] {
+    semantic_stage::STAGE_TABLES
+}
+pub(crate) fn semantic_recipe() -> &'static str {
+    semantic_stage::RECIPE
+}
+pub(crate) fn validate_staging_owner(
+    db: &Connection,
+    config: &StoreConfig,
+) -> Result<(), StorageError> {
     validate(db, config)
 }
 
@@ -1732,7 +1739,11 @@ mod tests {
         fn with_setup(layout: PhysicalLayout, setup: impl FnOnce(&Connection, &Path)) -> Self {
             Self::with_named_setup("configured-events", layout, setup)
         }
-        fn with_named_setup(namespace: &str, layout: PhysicalLayout, setup: impl FnOnce(&Connection, &Path)) -> Self {
+        fn with_named_setup(
+            namespace: &str,
+            layout: PhysicalLayout,
+            setup: impl FnOnce(&Connection, &Path),
+        ) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "semon-configured-event-{}-{}",
@@ -2024,23 +2035,52 @@ mod tests {
         let claims = store.catalog_claims(&paths).unwrap();
         assert!(claims[0].1.is_some());
         let base = store.session_catalog_generation().unwrap();
-        assert_eq!(store.begin_semantic_stage(&paths, "runtime-a", true).unwrap(), Outcome::Written);
+        assert_eq!(
+            store
+                .begin_semantic_stage(&paths, "runtime-a", true)
+                .unwrap(),
+            Outcome::Written
+        );
         let batch = store.semantic_batch(64).unwrap().unwrap();
         assert_eq!(batch.paths, paths);
         assert_eq!(batch.base_generation, base);
         let prepared = semantic_prepared(&mut *store, &f, &batch);
         assert_eq!(prepared.claims, claims);
-        assert_eq!(store.record_semantic_batch(&batch, &prepared).unwrap(), Outcome::Written);
-        assert_eq!(store.catalog_claims(&paths).unwrap(), claims, "index staging must not ACK publication claims");
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(
+            store.catalog_claims(&paths).unwrap(),
+            claims,
+            "index staging must not ACK publication claims"
+        );
         let db = f.db();
-        let staged: (String,i64,Option<i64>,Option<String>) = db.query_row("SELECT namespace,index_done,claim,ledger FROM catalog_semantic_sources", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        let staged: (String, i64, Option<i64>, Option<String>) = db
+            .query_row(
+                "SELECT namespace,index_done,claim,ledger FROM catalog_semantic_sources",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
         assert_eq!(staged.0, "source-a");
         assert_eq!(staged.1, 1);
         assert_eq!(staged.2, claims[0].1);
         assert!(staged.3.is_some());
         assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_inputs WHERE namespace='source-a' AND native_id='native-session'", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
-        assert!(db.query_row("SELECT count(*) FROM catalog_semantic_frontier WHERE namespace='source-a'", [], |r|r.get::<_,i64>(0)).unwrap()>0);
-        assert!(store.semantic_batch(64).is_err(), "unported frontier reduction must not certify identity");
+        assert!(
+            db.query_row(
+                "SELECT count(*) FROM catalog_semantic_frontier WHERE namespace='source-a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap()
+                > 0
+        );
+        assert!(
+            store.semantic_batch(64).is_err(),
+            "unported frontier reduction must not certify identity"
+        );
     }
 
     #[test]
@@ -2050,20 +2090,31 @@ mod tests {
         let mut a_store = crate::storage::sqlite::open_private_semantic(&a.config).unwrap();
         let mut b_store = crate::storage::sqlite::open_private_semantic(&b.config).unwrap();
         for (store, f) in [(&mut a_store, &a), (&mut b_store, &b)] {
-            assert_eq!(store.begin_semantic_stage(&[f.raw.to_string_lossy().into_owned()], "runtime", true).unwrap(), Outcome::Written);
+            assert_eq!(
+                store
+                    .begin_semantic_stage(&[f.raw.to_string_lossy().into_owned()], "runtime", true)
+                    .unwrap(),
+                Outcome::Written
+            );
         }
         let batch = a_store.semantic_batch(64).unwrap().unwrap();
         let prepared = semantic_prepared(&mut *a_store, &a, &batch);
         let before_a = a.state();
         let before_b = b.state();
-        FAIL_EFFECT.with(|failure|failure.set(Some("semantic_record")));
+        FAIL_EFFECT.with(|failure| failure.set(Some("semantic_record")));
         assert!(a_store.record_semantic_batch(&batch, &prepared).is_err());
         assert_eq!(a.state(), before_a);
         assert_eq!(b.state(), before_b);
         drop(a_store);
         let mut reopened = crate::storage::sqlite::open_private_semantic(&a.config).unwrap();
-        assert_eq!(reopened.semantic_batch(64).unwrap().unwrap().epoch, batch.epoch);
-        assert_eq!(reopened.record_semantic_batch(&batch, &prepared).unwrap(), Outcome::Written);
+        assert_eq!(
+            reopened.semantic_batch(64).unwrap().unwrap().epoch,
+            batch.epoch
+        );
+        assert_eq!(
+            reopened.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written
+        );
         assert_eq!(b.state(), before_b);
         let mut wrong = a.config.clone();
         wrong.namespace = b.config.namespace.clone();
@@ -2080,31 +2131,56 @@ mod tests {
         store.begin_semantic_stage(&paths, "runtime", true).unwrap();
         let batch = store.semantic_batch(64).unwrap().unwrap();
         let mut prepared = semantic_prepared(&mut *store, &f, &batch);
-        prepared.base_generation=Some("stale".into());
+        prepared.base_generation = Some("stale".into());
         let before = f.state();
-        assert_eq!(store.record_semantic_batch(&batch, &prepared).unwrap(), Outcome::Conflict);
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Conflict
+        );
         assert_eq!(f.state(), before);
         let mut stale = batch.clone();
-        stale.base_generation=Some("stale".into());
-        assert_eq!(store.record_semantic_batch(&stale, &prepared).unwrap(), Outcome::Conflict);
+        stale.base_generation = Some("stale".into());
+        assert_eq!(
+            store.record_semantic_batch(&stale, &prepared).unwrap(),
+            Outcome::Conflict
+        );
         assert_eq!(f.state(), before);
-        f.db().execute("UPDATE storage_namespaces SET admission_generation=admission_generation+1", []).unwrap();
+        f.db()
+            .execute(
+                "UPDATE storage_namespaces SET admission_generation=admission_generation+1",
+                [],
+            )
+            .unwrap();
         let before = f.state();
         assert!(store.begin_semantic_stage(&paths, "runtime", true).is_err());
         assert_eq!(f.state(), before);
     }
 
     fn semantic_fixture(namespace: &str) -> Fixture {
-        let f = Fixture::with_named_setup(namespace, PhysicalLayout::CONFIGURED, |_,_|{});
-        f.config.native_events().unwrap().ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        let f = Fixture::with_named_setup(namespace, PhysicalLayout::CONFIGURED, |_, _| {});
+        f.config
+            .native_events()
+            .unwrap()
+            .ingest(&"a".repeat(64), &f.raw, "codex")
+            .unwrap();
         let db = f.db();
         // Schema-only private fixture preparation; native rows came from the
         // real configured parser. No staged/source/claim payload is fabricated.
         for table in semantic_stage::STAGE_TABLES {
-            assert_eq!(db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
             db.execute_batch(&format!("DROP TABLE {table};")).unwrap();
         }
-        for index in ["semantic_catalog_parent_key","semantic_catalog_native_paths","semantic_copilot_pending_id","semantic_pending_filename"] {
+        for index in [
+            "semantic_catalog_parent_key",
+            "semantic_catalog_native_paths",
+            "semantic_copilot_pending_id",
+            "semantic_pending_filename",
+        ] {
             db.execute_batch(&format!("DROP INDEX {index};")).unwrap();
         }
         db.execute_batch(semantic_stage::schema(true)).unwrap();
@@ -2112,20 +2188,29 @@ mod tests {
         f
     }
 
-    fn semantic_prepared(store: &mut dyn IndexStore, f: &Fixture, batch: &crate::model::relation_stage::Batch) -> crate::model::PreparedSources {
-        let (ledger,index) = store.load_file(f.raw.to_str().unwrap()).unwrap().unwrap();
+    fn semantic_prepared(
+        store: &mut dyn IndexStore,
+        f: &Fixture,
+        batch: &crate::model::relation_stage::Batch,
+    ) -> crate::model::PreparedSources {
+        let (ledger, index) = store.load_file(f.raw.to_str().unwrap()).unwrap().unwrap();
         let header = index.codex_header.unwrap();
         let id = header.native_id(&f.raw).unwrap();
         assert_eq!(id, "native-session");
-        let mut source=ledger.source(&f.raw, &id);
-        source.native_role=Some(serde_json::json!({"Codex":header.metadata}));
+        let mut source = ledger.source(&f.raw, &id);
+        source.native_role = Some(serde_json::json!({"Codex":header.metadata}));
         crate::model::PreparedSources {
             base_generation: batch.base_generation.clone(),
             claims: store.catalog_claims(&batch.paths).unwrap(),
-            rows: Vec::new(), transcripts: Vec::new(), pids: Default::default(),
-            lineage_dependencies: Vec::new(), message_dependencies: Some(Vec::new()),
-            relationships: Default::default(), indexed_sources: vec![("codex".into(),source)],
-            indexed_native_parents: Vec::new(), withdrawals: Vec::new(),
+            rows: Vec::new(),
+            transcripts: Vec::new(),
+            pids: Default::default(),
+            lineage_dependencies: Vec::new(),
+            message_dependencies: Some(Vec::new()),
+            relationships: Default::default(),
+            indexed_sources: vec![("codex".into(), source)],
+            indexed_native_parents: Vec::new(),
+            withdrawals: Vec::new(),
         }
     }
 

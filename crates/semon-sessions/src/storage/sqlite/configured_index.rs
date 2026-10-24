@@ -26,7 +26,9 @@ pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageE
 
 /// Crate-private capability only; the public configured factory stays closed.
 #[cfg(test)]
-pub(crate) fn open_private_semantic(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
+pub(crate) fn open_private_semantic(
+    config: &StoreConfig,
+) -> Result<Box<dyn IndexStore>, StorageError> {
     crate::events::store::configured::validate_semantic_schema(config)?;
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
@@ -96,7 +98,9 @@ impl IndexStore for ConfiguredIndex {
         ))
     }
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
-        if let Some(stage) = &self.semantic { return stage.generation(); }
+        if let Some(stage) = &self.semantic {
+            return stage.generation();
+        }
         Err(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
         ))
@@ -219,7 +223,9 @@ impl IndexStore for ConfiguredIndex {
         runtime: &str,
         _journaled_runtime: bool,
     ) -> Result<Outcome, StoreError> {
-        if let Some(stage) = &mut self.semantic { return stage.begin(paths, runtime); }
+        if let Some(stage) = &mut self.semantic {
+            return stage.begin(paths, runtime);
+        }
         Err(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
         ))
@@ -228,7 +234,9 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         limit: usize,
     ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
-        if let Some(stage) = &mut self.semantic { return stage.batch(limit); }
+        if let Some(stage) = &mut self.semantic {
+            return stage.batch(limit);
+        }
         Err(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
         ))
@@ -238,13 +246,19 @@ impl IndexStore for ConfiguredIndex {
         batch: &crate::model::relation_stage::Batch,
         prepared: &crate::model::PreparedSources,
     ) -> Result<Outcome, StoreError> {
-        if let Some(stage) = &mut self.semantic { return stage.record(batch, prepared); }
+        if let Some(stage) = &mut self.semantic {
+            return stage.record(batch, prepared);
+        }
         Err(StoreError::Configured(
             StorageError::NamespaceUpgradePending,
         ))
     }
     fn semantic_rejection(&self) -> Option<&'static str> {
-        if self.semantic.is_some() { None } else { Some("namespace_upgrade_pending") }
+        if self.semantic.is_some() {
+            None
+        } else {
+            Some("namespace_upgrade_pending")
+        }
     }
     fn publish_semantic_catalog(
         &mut self,

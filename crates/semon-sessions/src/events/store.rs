@@ -1975,7 +1975,9 @@ pub(crate) fn admitted_roles_current(
     sources: &[crate::model::summary::CatalogSource],
     owner: &crate::storage::sqlite::semantic::AdmittedSource,
 ) -> rusqlite::Result<bool> {
-    owner.validate(connection).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    owner
+        .validate(connection)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     selected_role_values(connection, sources)
 }
 
