@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import re
+import json
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--discover", action="store_true")
@@ -27,4 +28,7 @@ stale = listed - found
 if not args.discover and (unexpected or stale):
     raise SystemExit(f"Storage inventory mismatch; unlisted={sorted(unexpected)}, stale={sorted(stale)}")
 if not args.discover:
+    inventory = json.loads((root / "storage/sqlite/writer-inventory.json").read_text())
+    if set(inventory["unqualified_paths"]) != listed or inventory["writer_qualification"] != 0:
+        raise SystemExit("Namespace writer qualification must match the unported path inventory")
     print("Native storage boundary matches the explicit remaining-path inventory.")

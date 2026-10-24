@@ -2,7 +2,7 @@
 //! Enrollment is opt-in, content-free and atomic. Native rows are never reset.
 use super::failed;
 use crate::storage::{LogicalSourceNamespace, NamespaceAdmission, StorageError, StoreBackend, StoreConfig};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Zero deliberately means no native writer qualification. Never infer readiness
@@ -13,18 +13,18 @@ const FORMAT_VERSION: u32 = 1;
 const TABLE_LIMIT: usize = 128;
 
 pub(crate) fn is_bound(db: &Connection) -> rusqlite::Result<bool> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='storage_namespaces')", [], |row| row.get(0))
+    db.prepare_cached("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='storage_namespaces')")?.query_row([], |row| row.get(0))
 }
 
 pub(super) fn require_admitted(db: &Connection, namespace: &LogicalSourceNamespace) -> Result<NamespaceAdmission, StorageError> {
     if !is_bound(db).map_err(failed)? { return Err(StorageError::NamespaceUnadmitted); }
-    let rows: Vec<(String, u64, i64, u32)> = db.prepare("SELECT namespace,admission_generation,admitted_at,format_version FROM storage_namespaces ORDER BY namespace LIMIT 2").map_err(failed)?
+    let rows: Vec<(String, i64, i64, u32)> = db.prepare("SELECT namespace,admission_generation,admitted_at,format_version FROM storage_namespaces ORDER BY namespace LIMIT 2").map_err(failed)?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).map_err(failed)?
         .collect::<rusqlite::Result<_>>().map_err(failed)?;
     let [(name, generation, admitted_at, version)] = rows.as_slice() else { return Err(StorageError::MultiSourceUnqualified); };
-    if *version != FORMAT_VERSION || *generation == 0 { return Err(StorageError::NamespaceUpgradePending); }
+    if *version != FORMAT_VERSION || *generation <= 0 { return Err(StorageError::NamespaceUpgradePending); }
     if name != namespace.as_str() { return Err(StorageError::NamespaceMismatch); }
-    Ok(NamespaceAdmission { namespace: namespace.clone(), generation: *generation, admitted_at: *admitted_at })
+    Ok(NamespaceAdmission { namespace: namespace.clone(), generation: *generation as u64, admitted_at: *admitted_at })
 }
 
 pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageError> {
@@ -68,7 +68,7 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Options, events::EventCache, storage::SessionMetadataStore};
+    use crate::{Options, events::EventCache};
     use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
 
     struct Fixture { root: PathBuf, config: StoreConfig }
@@ -129,5 +129,21 @@ mod tests {
         config.expected_stream_epoch = Some("0".repeat(64));
         assert_eq!(config.admit_namespace(), Err(StorageError::ScopeChanged));
         assert!(!is_bound(&f.db()).unwrap());
+    }
+
+    #[test]
+    fn qualification_inventory_covers_every_table_and_remains_closed() {
+        let f = Fixture::new();
+        f.config.admit_namespace().unwrap();
+        let db = f.db();
+        let missing: i64 = db.query_row("SELECT count(*) FROM sqlite_schema s WHERE s.type='table' AND s.name NOT LIKE 'sqlite_%' AND s.name NOT IN ('storage_namespaces','storage_writer_inventory') AND NOT EXISTS(SELECT 1 FROM storage_writer_inventory i WHERE i.table_name=s.name AND i.qualified_version=0)", [], |r| r.get(0)).unwrap();
+        assert_eq!(missing, 0);
+        let inventory: serde_json::Value = serde_json::from_str(include_str!("writer-inventory.json")).unwrap();
+        assert_eq!(inventory["writer_qualification"], WRITER_QUALIFICATION_VERSION);
+        assert!(!inventory["unqualified_paths"].as_array().unwrap().is_empty());
+        // Mutable qualification metadata can never enable multi-source mode.
+        db.execute("UPDATE storage_namespaces SET writer_qualification=999", []).unwrap();
+        let mut other = f.config.clone(); other.namespace = LogicalSourceNamespace::new("source-B").unwrap();
+        assert_eq!(other.admit_namespace(), Err(StorageError::MultiSourceUnqualified));
     }
 }
