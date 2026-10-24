@@ -121,8 +121,12 @@ fn read_range(
     mut args: Vec<SqlValue>,
     limit: usize,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
+    let qualified = super::catalog_namespace::ready(connection).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let (table, index, namespace_filter) = if qualified {
+        ("main.session_catalog", if index == "sqlite_autoindex_session_catalog_1" { "storage_ns_catalog_identity".to_owned() } else { format!("storage_ns_{index}") }, "namespace=semon_namespace() AND ")
+    } else { ("session_catalog", index.to_owned(), "") };
     let sql = format!(
-        "SELECT metadata,session_key,last_ms,harness,repo FROM session_catalog INDEXED BY {index} WHERE {filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
+        "SELECT metadata,session_key,last_ms,harness,repo FROM {table} INDEXED BY {index} WHERE {namespace_filter}{filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
     );
     args.push(SqlValue::Integer(limit as i64));
     let mut statement = connection.prepare(&sql)?;
@@ -174,7 +178,7 @@ pub(crate) fn source_proof_observation(
     _options: &Options,
     root: &str,
     absolute: &str,
-) -> Result<Option<(String, CatalogSource, String)>, Box<dyn std::error::Error>> {
+) -> Result<Option<crate::storage::catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
     binding.validate(&transaction, &binding.config().namespace)?;
@@ -233,7 +237,7 @@ pub(crate) fn source_proof_observation(
         |row| row.get(0),
     )?;
     transaction.commit()?;
-    Ok(Some((key, source.clone(), generation)))
+    Ok(Some(crate::storage::catalog::SourceProofObservation { key, source: source.clone(), generation }))
 }
 
 impl CatalogSnapshot for Transaction<'_> {

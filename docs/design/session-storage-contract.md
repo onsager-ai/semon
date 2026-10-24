@@ -304,3 +304,48 @@ The direct-file allowlist remains 45; no file was cosmetically removed to claim
 additional backend coverage. The multi-source qualification remains zero and the
 second-source gate stays closed. The full #478/#477 criteria and #380 merge hold
 remain unchanged; all #479 and Hub #313 implementation is still outstanding.
+
+## Slice 1b WIP: Catalog namespace assignment
+
+`assign_catalog_namespace(max_rows)` implements the second, explicit admission
+phase for the 18 names in the adapter's `QUALIFIED_CATALOG_TABLES` constant.
+Each call copies at most 64 rows / 8 MiB, with a 2 MiB individual-row admission
+limit and a durable primary-key checkpoint. Row inserts and checkpoint updates
+commit together. No OFFSET or Raw replay is used. Missing/ambiguous bindings and
+changed epochs refuse before checkpoint creation. Oversized/unsupported rows
+refuse without reset. The first-source store stays frozen during assignment.
+
+Each destination preserves authored columns/checks and expression/partial
+indexes while adding namespace to the primary key and index prefix. At table
+completion the source is renamed to a fenced `storage_original_*` backup; no
+native table/row is dropped. New canonical tables require the adapter's scoped
+`semon_namespace()` connection function on every mutation. Existing unqualified
+connections cannot write them. The adapter-private row writer supplies namespace
+independently of row images and is used by assignment and private table tests.
+Event/ledger/Raw/claim writer families are still unqualified and fenced; the
+store-level multi-source qualification remains zero. Native producer publication
+integration and its claims/operation identities are not completed by this writer.
+
+Configured read snapshots refuse partial assignment. Once all tables complete,
+connection-local views add explicit namespace predicates to native Query/helper
+SELECTs; indexed Catalog keyset ranges address main with a namespace predicate
+and namespace-leading indexes. Authored source identities and stored metadata
+remain unchanged. Helpers that insist on INDEXED BY against a scoped view still
+need qualification; their availability is not claimed here. Catalog change
+triggers preserve scope semantics with namespace-local revision allocation.
+Metadata compaction and full native selected-read/proof integration remain open.
+
+Un-enroll now refuses as soon as Catalog assignment starts. Safe reverse row /
+schema assignment is not implemented; the preserved originals and checkpoints
+are custody, not permission to select stale state after later writes. This is
+not qualified operational migration rollback or cutover.
+
+CI tests add interrupted/restarted assignment with counts/metadata/originals
+preserved, absent/ambiguous binding refusal without checkpoints, and table-level
+same-ID/same-relative-path get/list/keyset isolation through the guarded adapter.
+The second namespace is created only in a privileged private test fixture;
+production admission of that namespace still refuses. These are NOT same-DB
+native two-source ingest tests. No fixtures, thresholds or visual approvals
+changed. The exact-path allowlist remains 45. SourceProofObservation replaces the
+complex source-proof tuple at both reviewed lint sites, without a lint allow.
+Exact-final CI and fresh independent inspection remain required.

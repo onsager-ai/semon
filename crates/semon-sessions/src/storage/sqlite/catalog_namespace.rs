@@ -1,0 +1,299 @@
+//! Supported-current Catalog row assignment. Originals remain fenced backups;
+//! Event/ledger qualification and the store-level multi-source gate stay closed.
+use super::{failed, namespace};
+use crate::storage::{LogicalSourceNamespace, StorageError, StoreBackend, StoreConfig};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, functions::FunctionFlags, types::{Value, ValueRef}};
+use std::time::Duration;
+
+pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
+    "session_catalog", "session_catalog_sources", "session_slot_projections", "session_slots",
+    "session_history_catalog", "session_history_projections", "session_history_slots", "session_history_slot_parts",
+    "session_trace_headers", "session_trace_turns", "session_trace_edges", "session_trace_bookmarks",
+    "session_overview", "session_search_coverage", "session_search_documents", "session_search_memberships",
+    "session_search_counts", "session_catalog_changes",
+];
+const BYTE_LIMIT: usize = 8 * 1024 * 1024;
+const ROW_LIMIT: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogAssignmentProgress {
+    pub table: String,
+    pub copied: usize,
+    pub complete: bool,
+}
+
+fn quote(value: &str) -> String { format!("\"{}\"", value.replace('"', "\"\"")) }
+
+pub(super) fn register(db: &Connection, source: &LogicalSourceNamespace) -> Result<(), StorageError> {
+    let source = source.as_str().to_owned();
+    db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC | FunctionFlags::SQLITE_INNOCUOUS, move |_| Ok(source.clone())).map_err(failed)
+}
+
+pub(super) fn started(db: &Connection) -> rusqlite::Result<bool> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_catalog_assignment' AND type='table')", [], |r| r.get(0))
+}
+
+pub(super) fn ready(db: &Connection) -> Result<bool, StorageError> {
+    if !started(db).map_err(failed)? { return Ok(false); }
+    let count: i64 = db.query_row("SELECT count(*) FROM storage_catalog_assignment WHERE complete=1", [], |r| r.get(0)).map_err(failed)?;
+    Ok(count == QUALIFIED_CATALOG_TABLES.len() as i64)
+}
+
+/// Every unqualified native SELECT resolves a connection-local view with an
+/// explicit namespace predicate. Indexed Catalog ranges use main plus the same
+/// predicate, retaining namespace-leading covering indexes.
+pub(super) fn scope_readers(db: &Connection) -> Result<(), StorageError> {
+    if !started(db).map_err(failed)? { return Ok(()); }
+    if !ready(db)? { return Err(StorageError::NamespaceUpgradePending); }
+    for table in QUALIFIED_CATALOG_TABLES {
+        db.execute_batch(&format!("CREATE TEMP VIEW IF NOT EXISTS {} AS SELECT * FROM main.{} WHERE namespace=semon_namespace();", quote(table), quote(table))).map_err(failed)?;
+    }
+    Ok(())
+}
+
+fn columns(db: &Connection, table: &str) -> Result<(Vec<String>, Vec<String>), StorageError> {
+    let mut statement = db.prepare(&format!("PRAGMA main.table_info({})", quote(table))).map_err(failed)?;
+    let rows = statement.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?))).map_err(failed)?;
+    let mut names = Vec::new();
+    let mut keys = Vec::new();
+    for row in rows {
+        let (name, ordinal) = row.map_err(failed)?;
+        if name.len()>256 || names.len()>=64 { return Err(StorageError::NamespaceUpgradePending); }
+        names.push(name.clone());
+        if ordinal>0 { keys.push((ordinal, name)); }
+    }
+    keys.sort();
+    if names.is_empty() || keys.is_empty() || names.iter().any(|n| n=="namespace") { return Err(StorageError::NamespaceUpgradePending); }
+    Ok((names, keys.into_iter().map(|(_, name)| name).collect()))
+}
+
+fn create_destination(db: &Connection, table: &str, keys: &[String]) -> Result<(), StorageError> {
+    let sql: String = db.query_row("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1 AND octet_length(sql)<=65536", [table], |r| r.get(0)).map_err(failed)?;
+    let open = sql.find('(').ok_or(StorageError::NamespaceUpgradePending)?;
+    let close = sql.rfind(')').ok_or(StorageError::NamespaceUpgradePending)?;
+    let mut body = sql[open+1..close].to_owned();
+    let primary = body.find("PRIMARY KEY").ok_or(StorageError::NamespaceUpgradePending)?;
+    let after = primary+"PRIMARY KEY".len();
+    if body[after..].trim_start().starts_with('(') {
+        let end = after+body[after..].find(')').ok_or(StorageError::NamespaceUpgradePending)?+1;
+        let left = body[..primary].trim_end().trim_end_matches(',');
+        let right = body[end..].trim_start().trim_start_matches(',');
+        body = if right.is_empty() { left.to_owned() } else { format!("{left},{right}") };
+    } else {
+        body = body.replace("PRIMARY KEY AUTOINCREMENT", "").replace("PRIMARY KEY", "");
+    }
+    let key = keys.iter().map(|key| quote(key)).collect::<Vec<_>>().join(",");
+    db.execute_batch(&format!("CREATE TABLE {} (namespace TEXT NOT NULL,{body},PRIMARY KEY(namespace,{key})){};", quote(&format!("storage_copy_{table}")), &sql[close+1..])).map_err(failed)?;
+    // Preserve authored expression/partial indexes, adding namespace first.
+    let indexes: Vec<(String, String)> = db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL ORDER BY name LIMIT 65").map_err(failed)?
+        .query_map([table], |r| Ok((r.get(0)?, r.get(1)?))).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)?;
+    if indexes.len()>64 { return Err(StorageError::NamespaceUpgradePending); }
+    for (name, definition) in indexes {
+        let at = definition.find('(').ok_or(StorageError::NamespaceUpgradePending)?;
+        let unique = if definition.starts_with("CREATE UNIQUE INDEX") { "UNIQUE " } else { "" };
+        db.execute_batch(&format!("CREATE {unique}INDEX {} ON {}(namespace,{};", quote(&format!("storage_ns_{name}")), quote(&format!("storage_copy_{table}")), &definition[at+1..])).map_err(failed)?;
+    }
+    Ok(())
+}
+
+fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
+    for (operation, predicate) in [
+        ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
+        ("UPDATE", "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"),
+        ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
+    ] {
+        db.execute_batch(&format!("CREATE TRIGGER {} BEFORE {operation} ON {} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'namespace writer refused'); END;", quote(&format!("storage_catalog_guard_{table}_{operation}")), quote(table))).map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// Adapter-private row writer. Namespace is supplied by the admitted writer,
+/// never by the row image. Callers cannot select arbitrary tables or SQL.
+fn write_row(db: &Connection, namespace: &str, table: &str, values: Vec<Value>) -> Result<(), StorageError> {
+    let canonical = table.strip_prefix("storage_copy_").unwrap_or(table);
+    if !QUALIFIED_CATALOG_TABLES.contains(&canonical) { return Err(StorageError::InvalidArguments); }
+    let mut bound = vec![Value::Text(namespace.to_owned())]; bound.extend(values);
+    db.execute(&format!("INSERT INTO {} VALUES({})", quote(table), vec!["?";bound.len()].join(",")), rusqlite::params_from_iter(bound)).map_err(failed)?;
+    Ok(())
+}
+
+fn install_change_delivery(db: &Connection) -> Result<(), StorageError> {
+    for (table, history) in [("session_catalog", false), ("session_history_catalog", true)] {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            let record = if operation=="DELETE" { "OLD" } else { "NEW" };
+            let scopes: &[&str] = if history { &["retained_history"] } else { &["current", "retained_history"] };
+            let mut body = String::new();
+            for scope in scopes {
+                body.push_str(&format!("INSERT INTO session_catalog_changes(namespace,revision,session_key,read_scope) SELECT {record}.namespace,coalesce(max(revision),0)+1,{record}.session_key,'{scope}' FROM session_catalog_changes WHERE namespace={record}.namespace;"));
+            }
+            let when = if operation=="UPDATE" { "WHEN OLD.metadata IS NOT NEW.metadata" } else { "" };
+            db.execute_batch(&format!("CREATE TRIGGER {} AFTER {operation} ON {} {when} BEGIN {body} END;", quote(&format!("storage_ns_changes_{table}_{operation}")), quote(table))).map_err(failed)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn assign(config: &StoreConfig, limit: usize) -> Result<CatalogAssignmentProgress, StorageError> {
+    if limit==0 || limit>64 { return Err(StorageError::InvalidArguments); }
+    let epoch = config.expected_stream_epoch.as_deref().ok_or(StorageError::InvalidArguments)?;
+    let StoreBackend::Sqlite { database } = &config.backend;
+    let mut db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(failed)?;
+    db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
+    register(&db, &config.namespace)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+    namespace::require_admitted(&tx, &config.namespace)?;
+    let actual: String = tx.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).map_err(failed)?;
+    if actual != epoch { return Err(StorageError::ScopeChanged); }
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_catalog_assignment(table_name TEXT PRIMARY KEY,cursor TEXT,complete INTEGER NOT NULL CHECK(complete IN(0,1))) STRICT;").map_err(failed)?;
+    let mut selected = None;
+    for table in QUALIFIED_CATALOG_TABLES {
+        if tx.query_row("SELECT complete FROM storage_catalog_assignment WHERE table_name=?1", [*table], |r| r.get::<_, bool>(0)).optional().map_err(failed)? != Some(true) {
+            selected = Some(*table); break;
+        }
+    }
+    let Some(table) = selected else { return Ok(CatalogAssignmentProgress { table: String::new(), copied:0, complete:true }); };
+    let (names, keys) = columns(&tx, table)?;
+    let cursor: Option<Option<String>> = tx.query_row("SELECT cursor FROM storage_catalog_assignment WHERE table_name=?1", [table], |r| r.get(0)).optional().map_err(failed)?;
+    if cursor.is_none() {
+        create_destination(&tx, table, &keys)?;
+        tx.execute("INSERT INTO storage_catalog_assignment VALUES(?1,NULL,0)", [table]).map_err(failed)?;
+    }
+    let last: Vec<serde_json::Value> = cursor.flatten().map(|s| serde_json::from_str(&s)).transpose().map_err(|_| StorageError::Unavailable)?.unwrap_or_default();
+    let mut params = Vec::new();
+    for value in last { params.push(match value { serde_json::Value::String(s)=>Value::Text(s), serde_json::Value::Number(n)=>Value::Integer(n.as_i64().ok_or(StorageError::Unavailable)?), _=>return Err(StorageError::Unavailable) }); }
+    let key_sql = keys.iter().map(|key| quote(key)).collect::<Vec<_>>().join(",");
+    let predicate = if params.is_empty() { String::new() } else { format!("WHERE ({key_sql})>({})", vec!["?";params.len()].join(",")) };
+    params.push(Value::Integer(limit as i64));
+    let mut select = tx.prepare(&format!("SELECT * FROM {} {predicate} ORDER BY {key_sql} LIMIT ?", quote(table))).map_err(failed)?;
+    let mut rows = select.query(rusqlite::params_from_iter(params)).map_err(failed)?;
+    let mut copied = 0;
+    let mut bytes = 0;
+    let mut next = None;
+    let mut exhausted = true;
+    while let Some(row) = rows.next().map_err(failed)? {
+        let cost = (0..names.len()).map(|i| row.get_ref(i).map(|v| match v { ValueRef::Text(s)|ValueRef::Blob(s)=>s.len(), _=>16 })).collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?.into_iter().sum::<usize>();
+        if cost>ROW_LIMIT { return Err(StorageError::NamespaceUpgradePending); }
+        if bytes+cost>BYTE_LIMIT { exhausted=false; break; }
+        let values = (0..names.len()).map(|i| row.get::<_, Value>(i)).collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+        let checkpoint = keys.iter().map(|key| {
+            match &values[names.iter().position(|name| name==key).unwrap()] { Value::Text(s)=>Ok(serde_json::Value::String(s.clone())), Value::Integer(n)=>Ok(serde_json::json!(n)), _=>Err(StorageError::Unavailable) }
+        }).collect::<Result<Vec<_>, _>>()?;
+        write_row(&tx, config.namespace.as_str(), &format!("storage_copy_{table}"), values)?;
+        next = Some(serde_json::to_string(&checkpoint).map_err(|_| StorageError::Unavailable)?);
+        copied+=1; bytes+=cost;
+    }
+    drop(rows); drop(select);
+    // A full page is conservatively resumed; the next bounded probe finalizes.
+    if copied==limit { exhausted=false; }
+    if exhausted {
+        tx.execute_batch(&format!("ALTER TABLE {} RENAME TO {}; ALTER TABLE {} RENAME TO {};", quote(table), quote(&format!("storage_original_{table}")), quote(&format!("storage_copy_{table}")), quote(table))).map_err(failed)?;
+        guard(&tx, table)?;
+        if table=="session_catalog" {
+            tx.execute_batch("CREATE INDEX storage_ns_catalog_identity ON session_catalog(namespace,session_key);").map_err(failed)?;
+        }
+        tx.execute("UPDATE storage_catalog_assignment SET complete=1 WHERE table_name=?1", [table]).map_err(failed)?;
+        tx.execute("UPDATE storage_writer_inventory SET qualified_version=1 WHERE table_name=?1", [table]).map_err(failed)?;
+    } else if let Some(cursor) = next {
+        tx.execute("UPDATE storage_catalog_assignment SET cursor=?2 WHERE table_name=?1", (table, cursor)).map_err(failed)?;
+    }
+    let complete = ready(&tx)?;
+    if complete { install_change_delivery(&tx)?; }
+    tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+    Ok(CatalogAssignmentProgress { table: table.to_owned(), copied, complete })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::EventCache;
+    use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+
+    struct Fixture { root: PathBuf, config: StoreConfig }
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!("semon-catalog-ns-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            fs::create_dir(&root).unwrap();
+            let cache = root.join("index.json");
+            drop(EventCache::open_scoped(&cache).unwrap());
+            let database = EventCache::path(&cache);
+            let db = Connection::open(&database).unwrap();
+            for key in ["same", "tail"] {
+                db.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES(?1,10,'codex','{\"owner\":\"A\"}')", [key]).unwrap();
+            }
+            db.execute("INSERT INTO session_catalog_sources VALUES('same','current','codex','native-same','relative/same.jsonl')", []).unwrap();
+            let epoch = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap();
+            let config = StoreConfig { backend: StoreBackend::Sqlite { database }, namespace: LogicalSourceNamespace::new("A").unwrap(), expected_stream_epoch: Some(epoch) };
+            Self { root, config }
+        }
+        fn db(&self) -> Connection { let StoreBackend::Sqlite { database } = &self.config.backend; Connection::open(database).unwrap() }
+        fn finish(&self) {
+            for _ in 0..128 { if assign(&self.config, 1).unwrap().complete { return; } }
+            panic!("bounded assignment did not finish");
+        }
+    }
+    impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); } }
+
+    #[test]
+    fn catalog_assignment_resumes_without_losing_rows_and_preserves_originals() {
+        let f = Fixture::new();
+        let admission = f.config.admit_namespace().unwrap();
+        let first = assign(&f.config, 1).unwrap();
+        assert_eq!(first.copied, 1);
+        assert!(!first.complete);
+        assert_eq!(f.config.unenroll_namespace(&admission), Err(StorageError::NamespaceUpgradePending));
+        // Every step reopens the database: committed cursors survive restart.
+        assert_eq!(f.db().query_row("SELECT count(*) FROM storage_copy_session_catalog", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        f.finish();
+        let db = f.db();
+        assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace='A'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(db.query_row("SELECT count(*) FROM storage_original_session_catalog", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(db.query_row("SELECT metadata FROM session_catalog WHERE namespace='A' AND session_key='same'", [], |r| r.get::<_, String>(0)).unwrap(), "{\"owner\":\"A\"}");
+        assert!(db.execute("UPDATE meta SET value='bad' WHERE key='catalog_generation'", []).is_err());
+        assert!(db.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('A','escape',1,'codex','{}')", []).is_err());
+        let pending: i64 = db.query_row("SELECT count(*) FROM storage_writer_inventory WHERE qualified_version=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(pending, QUALIFIED_CATALOG_TABLES.len() as i64);
+    }
+
+    #[test]
+    fn catalog_table_level_isolation_is_not_native_multi_source_admission() {
+        let f = Fixture::new();
+        f.config.admit_namespace().unwrap(); f.finish();
+        let mut db = f.db();
+        let b = LogicalSourceNamespace::new("B").unwrap();
+        register(&db, &b).unwrap();
+        {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            for key in ["same", "tail"] {
+                let mut values: Vec<Value> = tx.query_row("SELECT * FROM storage_original_session_catalog WHERE session_key=?1", [key], |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect()).unwrap();
+                values[6] = Value::Text("{\"owner\":\"B\"}".into());
+                write_row(&tx, "B", "session_catalog", values).unwrap();
+            }
+            write_row(&tx, "B", "session_catalog_sources", vec![Value::Text("same".into()),Value::Text("current".into()),Value::Text("codex".into()),Value::Text("native-same".into()),Value::Text("relative/same.jsonl".into())]).unwrap();
+            tx.commit().unwrap();
+        }
+        for source in ["A", "B"] {
+            let db = f.db(); register(&db, &LogicalSourceNamespace::new(source).unwrap()).unwrap(); scope_readers(&db).unwrap();
+            let metadata: String = db.query_row("SELECT metadata FROM session_catalog WHERE session_key='same'", [], |r| r.get(0)).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["owner"], source);
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+            let next: String = db.query_row("SELECT session_key FROM main.session_catalog INDEXED BY storage_ns_session_catalog_order WHERE namespace=semon_namespace() AND last_ms=10 AND session_key>'same' ORDER BY last_ms DESC,session_key LIMIT 1", [], |r| r.get(0)).unwrap();
+            assert_eq!(next, "tail");
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_sources WHERE native_id='native-same' AND source_path='relative/same.jsonl'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        }
+        let mut foreign = f.config.clone(); foreign.namespace = b;
+        assert_eq!(foreign.admit_namespace(), Err(StorageError::MultiSourceUnqualified));
+        assert_eq!(super::super::namespace::WRITER_QUALIFICATION_VERSION, 0);
+    }
+
+    #[test]
+    fn absent_or_ambiguous_assignment_binding_does_not_create_checkpoints() {
+        let f = Fixture::new();
+        assert_eq!(assign(&f.config, 1), Err(StorageError::NamespaceUnadmitted));
+        assert!(!started(&f.db()).unwrap());
+        f.config.admit_namespace().unwrap();
+        f.db().execute("INSERT INTO storage_namespaces SELECT 'B',admission_generation,admitted_at,format_version,writer_qualification FROM storage_namespaces", []).unwrap();
+        assert_eq!(assign(&f.config, 1), Err(StorageError::MultiSourceUnqualified));
+        assert!(!started(&f.db()).unwrap());
+    }
+}
