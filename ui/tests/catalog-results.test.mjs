@@ -378,3 +378,72 @@ test('tool previews keep qualified expansion without repeating availability warn
       );
   }
 });
+
+test('clipped tool notices stay with tool details while message loading actions and signals remain', () => {
+  const rows = [
+    {
+      ...entry(0, 'turn', {
+        k: 'tool',
+        name: 'Read',
+        arg: 'first.txt',
+        out: 'First preview',
+        ok: true,
+      }),
+      clipped: true,
+    },
+    entry(1, 'turn', { k: 'signal', signal: { kind: 'effort', tag: 'high' } }),
+    {
+      ...entry(2, 'turn', {
+        k: 'tool',
+        name: 'Read',
+        arg: 'second.txt',
+        out: 'Second preview',
+        ok: true,
+      }),
+      clipped: true,
+    },
+    {
+      ...entry(3, 'turn', {
+        k: 'tool',
+        name: 'Read',
+        arg: 'unsupported.txt',
+        out: 'Unsupported preview',
+        ok: true,
+      }),
+      clipped: true,
+    },
+    { ...entry(4, 'turn', { k: 'u', text: 'Long user message preview' }), clipped: true },
+    { ...entry(5, 'turn', { k: 'a', text: 'Long assistant message preview' }), clipped: true },
+  ];
+  const fieldView = (item) => {
+    if (!item.clipped || (item.entry.k === 'tool' && item.slot === 3)) return null;
+    return {
+      note:
+        item.entry.k === 'tool'
+          ? `tool field ${item.slot} preview`
+          : `${item.entry.k} field preview`,
+      action: { label: 'Load recorded text', busy: false, run() {} },
+    };
+  };
+  const shown = values(catalogTranscriptBlocks(rows, fieldView)),
+    groups = shown.filter((row) => row.kind === 'group'),
+    notices = shown.filter((row) => row.kind === 'label' && row.className === 'vnote');
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].entries.length, 3);
+  assert.equal(groups[0].entries[2].step.data.expandable, true);
+  assert.equal(
+    notices.some((row) => /tool field|complete source text is not loaded/i.test(row.text)),
+    false,
+  );
+  assert.deepEqual(
+    notices.map((row) => [row.text, row.action?.label]),
+    [
+      ['u field preview', 'Load recorded text'],
+      ['a field preview', 'Load recorded text'],
+    ],
+  );
+  assert.equal(
+    shown.filter((row) => row.kind === 'label' && row.className === 'signal-marker').length,
+    1,
+  );
+});

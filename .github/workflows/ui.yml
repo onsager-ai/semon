@@ -63,7 +63,7 @@ jobs:
       - name: Browser-check infrastructure regression tests
         run: |
           npm --prefix tests/ui ci --no-audit --no-fund
-          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs
+          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs tests/ui/visual-pathname-audit.test.mjs tests/ui/visual-binding-proposal.test.mjs
 
       - name: Prepare UI assets for thermal-restricted review
         if: failure()
@@ -466,6 +466,15 @@ jobs:
       - name: Retain bounded per-case visual binding provenance
         if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         run: node tests/ui/visual-provenance.mjs
+      - name: Audit exact pathname-only and fingerprint-only visual bindings
+        if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        run: node tests/ui/visual-pathname-audit.mjs
+      - name: Propose exact visual binding updates for review
+        if: ${{ always() && github.head_ref == 'task/380-predecessor-closure-20261024' && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        continue-on-error: true
+        env:
+          SEMON_VISUAL_PROPOSAL_SUITE: ${{ matrix.suite }}
+        run: node tests/ui/visual-binding-proposal.mjs
       - name: Server logs
         if: ${{ always() }}
         run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/two-machines-reference.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
