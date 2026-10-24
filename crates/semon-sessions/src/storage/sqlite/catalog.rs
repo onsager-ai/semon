@@ -4,13 +4,12 @@ use crate::storage::catalog::CatalogSnapshot;
 use crate::{
     Options,
     catalog::Request,
-    events::EventCache,
     model::summary::{CatalogRow, CatalogSource},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, types::Value as SqlValue};
+use rusqlite::{Connection, OptionalExtension, Transaction, types::Value as SqlValue};
 use serde_json::Value;
-use std::{io, time::Duration};
+use std::io;
 
 /// Two direct keyset ranges avoid scanning earlier keys when many sessions
 /// share the same timestamp. OFFSET and mixed-order tuple comparisons do not
@@ -157,33 +156,28 @@ fn read_range(
 }
 
 pub(crate) fn read_page(
+    binding: &crate::storage::NativeReaderBinding,
     options: &Options,
     machine: &str,
     request: &Request,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(100))?;
+    let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    let reply = crate::catalog::read_page_snapshot(options, machine, request, &transaction)?;
+    binding.validate(&transaction, &binding.config().namespace)?;
+    let reply = crate::catalog::read_page_snapshot(options, machine, request, &AdmittedSnapshot(&transaction))?;
     transaction.commit()?;
     Ok(reply)
 }
 
 pub(crate) fn source_proof_observation(
-    options: &Options,
+    binding: &crate::storage::NativeReaderBinding,
+    _options: &Options,
     root: &str,
     absolute: &str,
 ) -> Result<Option<(String, CatalogSource, String)>, Box<dyn std::error::Error>> {
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(100))?;
+    let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
-    crate::events::store::require_current(&transaction)?;
+    binding.validate(&transaction, &binding.config().namespace)?;
     let encoded: Option<(String, Option<String>)> = transaction.query_row(
         "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
         [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -294,4 +288,17 @@ impl CatalogSnapshot for Transaction<'_> {
         crate::transcript_range::observation(self, key, generation, history)
             .map_err(io::Error::other)
     }
+}
+
+struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>);
+impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
+    fn require_current(&self) -> io::Result<()> { Ok(()) }
+    fn publication_value(&self, key: &str) -> io::Result<Option<String>> { self.0.publication_value(key) }
+    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> { self.0.rows(request) }
+    fn search(&self, query: crate::catalog_search::Query<'_>) -> io::Result<crate::catalog_search::Selection> { self.0.search(query) }
+    fn has_history(&self, key: &str) -> io::Result<bool> { self.0.has_history(key) }
+    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> { self.0.history_catalog(key) }
+    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> { self.0.history_qualified(row) }
+    fn selected_details(&self, key: &str, sources: &[CatalogSource], status: &mut dyn FnMut(&CatalogRow) -> Value) -> io::Result<Option<Value>> { self.0.selected_details(key, sources, status) }
+    fn transcript_observation(&self, key: &str, generation: &str, history: bool) -> io::Result<Option<Value>> { self.0.transcript_observation(key, generation, history) }
 }
