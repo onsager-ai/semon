@@ -59,6 +59,9 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_ingest_begin_batch_record_uses_real_claim_and_generation -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_namespace_factories_keep_rollback_and_restart_isolated -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_stale_record_and_admission_refuse_without_writes -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::copied_usage_layout_is_warmed_by_actual_producer_and_selected_factories -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib native_timing::tests::cleanup_prepare_failure_preserves_error_without_zero_vm_work_or_record -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback -- --exact --nocapture

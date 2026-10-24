@@ -9,7 +9,10 @@ pub(crate) mod publication;
 pub(crate) mod query;
 pub(crate) mod source_journal;
 pub(crate) use configured_index::open as open_configured_index;
+#[cfg(test)]
+pub(crate) use configured_index::open_private_semantic;
 mod reader;
+pub(crate) mod semantic;
 
 use super::{
     CatalogChangesRequest, LogicalSourceNamespace, MetadataReadSnapshot, SessionMetadataStore,

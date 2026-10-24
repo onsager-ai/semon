@@ -1967,6 +1967,22 @@ pub(super) fn selected_roles_current(
     if !current(connection)? {
         return Ok(false);
     }
+    selected_role_values(connection, sources)
+}
+
+pub(crate) fn admitted_roles_current(
+    connection: &Connection,
+    sources: &[crate::model::summary::CatalogSource],
+    owner: &crate::storage::sqlite::semantic::AdmittedSource,
+) -> rusqlite::Result<bool> {
+    owner.validate(connection).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    selected_role_values(connection, sources)
+}
+
+fn selected_role_values(
+    connection: &Connection,
+    sources: &[crate::model::summary::CatalogSource],
+) -> rusqlite::Result<bool> {
     let mut metadata = connection.prepare(native_metadata_value(connection)?)?;
     for source in sources {
         let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
