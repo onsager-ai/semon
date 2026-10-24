@@ -162,11 +162,10 @@ test('refuses trace paths with wrong identity, namespace, extra bytes, duplicate
   for (const bytes of refused) assert.throws(() => qualifyCandidateEvidence(bytes, approvedDigest));
 
   const unsupportedNamespaceDigest = hash(current(`/trace/native/atlas/${turn}`));
-  assert.throws(
-    () =>
-      qualifyCandidateEvidence(
-        current(`/session/local/atlas/trace/${turn}`),
-        unsupportedNamespaceDigest,
-      ),
+  assert.throws(() =>
+    qualifyCandidateEvidence(
+      current(`/session/local/atlas/trace/${turn}`),
+      unsupportedNamespaceDigest,
+    ),
   );
 });
