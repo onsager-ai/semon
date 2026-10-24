@@ -631,7 +631,7 @@ test(
               await page.evaluate((path) => {
                 history.pushState(history.state, '', path);
                 window.dispatchEvent(new PopStateEvent('popstate'));
-              }, '/s/claude/a-docs?t=' + address[2]);
+              }, '/s/claude/a-docs');
               await page.locator('#page [aria-label="Transcript"]').waitFor();
               await page.locator('#page [data-entry-key]').first().waitFor({ state: 'attached' });
               assert.equal(
