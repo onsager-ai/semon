@@ -21,7 +21,11 @@ fn namespaces(prefix: &str) -> [String; 2] {
 // a composite current Catalog and must refuse before payload reads or GC.
 fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> {
     let mut shapes = Vec::new();
-    for table in ["session_catalog", "session_catalog_sources", "session_history_catalog"] {
+    for table in [
+        "session_catalog",
+        "session_catalog_sources",
+        "session_history_catalog",
+    ] {
         let (namespaces, namespace_key, session_key): (i64, i64, i64) = db.query_row(
             "SELECT coalesce(sum(name='namespace'),0),coalesce(max(CASE WHEN name='namespace' THEN pk END),0),coalesce(max(CASE WHEN name='session_key' THEN pk END),0) FROM pragma_table_info(?1,'main')",
             [table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
@@ -38,7 +42,14 @@ fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> 
     if catalog != sources {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    if *catalog && !*history && db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog)", [], |r| r.get::<_, bool>(0))? {
+    if *catalog
+        && !*history
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let current = if *catalog {
@@ -47,10 +58,18 @@ fn reference_statements(db: &Connection) -> rusqlite::Result<[&'static str; 2]> 
         "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_catalog c USING(session_key) WHERE s.source_path=?1"
     };
     let retained = match (*sources, *history) {
-        (false, false) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE s.source_path=?1",
-        (false, true) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE c.namespace=semon_namespace() AND s.source_path=?1",
-        (true, false) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE s.namespace=semon_namespace() AND s.source_path=?1",
-        (true, true) => "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1",
+        (false, false) => {
+            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE s.source_path=?1"
+        }
+        (false, true) => {
+            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE c.namespace=semon_namespace() AND s.source_path=?1"
+        }
+        (true, false) => {
+            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c USING(session_key) WHERE s.namespace=semon_namespace() AND s.source_path=?1"
+        }
+        (true, true) => {
+            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM main.session_catalog_sources s JOIN main.session_history_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1"
+        }
     };
     Ok([current, retained])
 }
