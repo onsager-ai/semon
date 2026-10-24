@@ -6,6 +6,7 @@ pub(crate) mod catalog;
 mod conformance;
 pub(crate) mod navigation;
 pub(crate) mod query;
+pub mod source_observations;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
@@ -160,6 +161,14 @@ pub struct StoreConfig {
 }
 
 impl StoreConfig {
+    /// Open the configured source-observation writer. This does not enable
+    /// Event commits or Catalog publication; those families remain fenced.
+    pub fn source_observations(
+        &self,
+    ) -> Result<Box<dyn source_observations::SourceObservationStore>, StorageError> {
+        Ok(Box::new(crate::events::EventCache::open_configured(self)?))
+    }
+
     /// Resolve configuration without creating, resetting or repairing storage.
     /// Every operation opens the configured backend or returns an explicit error.
     pub fn open(self) -> Result<Box<dyn SessionMetadataStore>, StorageError> {
