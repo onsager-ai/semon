@@ -260,6 +260,7 @@ fn validate_core(db: &Connection) -> Result<(), StorageError> {
 /// stores refuse before writes; supported-current bounded migration is pending.
 pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     let mut db = connection(config)?;
+    SourceJournal(config.clone()).validate(&db)?;
     validate_core(&db)?;
     SourceJournal(config.clone()).prepare()?;
     let tx = db
