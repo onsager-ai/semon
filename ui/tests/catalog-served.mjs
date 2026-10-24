@@ -389,12 +389,13 @@ test(
         nativePage.on('request', (request) => nativeRequests.push(new URL(request.url()).pathname));
         const listing = await nativePage.goto(url[1] + '/sessions?native=1&t=' + url[2]);
         assert.equal(listing.status(), 200);
-        await nativePage.locator('a[href^="/s/claude/backlog?"]').click();
+        await nativePage.locator('a[href^="/session/local/backlog?"]').click();
         await nativePage.getByRole('region', { name: 'Session transcript' }).waitFor();
         const earlier = nativePage.getByRole('link', { name: 'Earlier records', exact: true });
         const anchor = new URL(await earlier.getAttribute('href'), url[1]);
         assert.ok(anchor.searchParams.get('generation'), 'HTML paging binds its native generation');
-        assert.equal(anchor.searchParams.get('machine'), 'local');
+        assert.equal(anchor.pathname, '/session/local/backlog');
+        assert.equal(anchor.searchParams.has('machine'), false);
         await earlier.click();
         assert.equal(
           new URL(nativePage.url()).searchParams.get('generation'),
