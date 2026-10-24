@@ -2580,8 +2580,9 @@ fn selected_output_expansion_keeps_native_blocks_under_source_generation() {
     const FIXTURE: &str = include_str!(
         "../../../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
     );
-    const MANIFEST: &str =
-        include_str!("../../../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json");
+    const MANIFEST: &str = include_str!(
+        "../../../../../tests/fixtures/compatibility/codex-native-a9b0815/manifest.json"
+    );
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
     let expected = manifest["expected_calls"]
         .as_array()
