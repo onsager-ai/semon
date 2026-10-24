@@ -51,7 +51,11 @@ pub(super) fn digest(connection: &Connection, path: &str) -> rusqlite::Result<Op
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let prefix = prefix(path);
     transaction.execute(
-        configured::metadata_sql(transaction, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+        configured::metadata_sql(
+            transaction,
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        )?,
         params![&prefix, format!("{prefix}~")],
     )?;
     Ok(())
@@ -64,10 +68,14 @@ pub(super) fn read(
 ) -> rusqlite::Result<Option<Index>> {
     let prefix = prefix(path);
     let text: Option<Option<String>> = connection
-        .query_row(native_metadata_value(connection)?, [format!("{prefix}header")], |row| {
-            crate::selected_read::row(row, 512)?;
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [format!("{prefix}header")],
+            |row| {
+                crate::selected_read::row(row, 512)?;
+                row.get(0)
+            },
+        )
         .optional()?;
     let Some(header) = text
         .flatten()

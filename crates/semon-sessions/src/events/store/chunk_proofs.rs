@@ -264,10 +264,14 @@ pub(super) fn read(
 ) -> rusqlite::Result<Option<Arc<Chunks>>> {
     let prefix = prefix(path);
     let header: Option<Option<String>> = connection
-        .query_row(native_metadata_value(connection)?, [format!("{prefix}header")], |row| {
-            crate::selected_read::row(row, 512)?;
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [format!("{prefix}header")],
+            |row| {
+                crate::selected_read::row(row, 512)?;
+                row.get(0)
+            },
+        )
         .optional()?;
     let Some(header) = header
         .flatten()
@@ -466,7 +470,8 @@ impl Focused {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
             diagnostic.index_offset = Some(index.offset);
         }
-        let metadata_value = native_metadata_value(&connection).map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?;
+        let metadata_value = native_metadata_value(&connection)
+            .map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?;
         let mut prefix = prefix(path);
         let live: Option<String> = connection
             .query_row(metadata_value, [format!("{prefix}header")], |row| {
@@ -487,11 +492,9 @@ impl Focused {
         });
         let retained = published::prefix(path, &crate::source_carrier::ledger_digest(ledger));
         let retained_header: Option<String> = connection
-            .query_row(
-                metadata_value,
-                [format!("{retained}header")],
-                |row| row.get(0),
-            )
+            .query_row(metadata_value, [format!("{retained}header")], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?
             .flatten();
@@ -574,13 +577,12 @@ impl Focused {
             FailureStage::ProofOpenDb.wrap(io::Error::other("Native proof reader unavailable"))
         })?;
         let tx = &*db;
-        let metadata_value = native_metadata_value(tx).map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?;
+        let metadata_value = native_metadata_value(tx)
+            .map_err(|error| proof_db_error(FailureStage::ProofOpenDb, error))?;
         let header: String = tx
-            .query_row(
-                metadata_value,
-                [format!("{}header", self.prefix)],
-                |row| row.get(0),
-            )
+            .query_row(metadata_value, [format!("{}header", self.prefix)], |row| {
+                row.get(0)
+            })
             .map_err(|error| proof_db_error(FailureStage::HeaderMissing, error))?;
         if header != self.header {
             return Err(FailureStage::ProofChanged
@@ -758,12 +760,20 @@ pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Resu
     published::preserve(transaction, path)?;
     let prefix = prefix(path);
     transaction.execute(
-        configured::metadata_sql(transaction, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+        configured::metadata_sql(
+            transaction,
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        )?,
         params![&prefix, format!("{prefix}~")],
     )?;
     let namespace = format!("native_proof_tree:{prefix}:");
     transaction.execute(
-        configured::metadata_sql(transaction, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+        configured::metadata_sql(
+            transaction,
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        )?,
         params![&namespace, format!("{namespace}~")],
     )?;
     Ok(())
@@ -839,7 +849,11 @@ pub(super) fn write_measured(
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
         transaction.execute(
-            configured::metadata_sql(transaction, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+            configured::metadata_sql(
+                transaction,
+                "DELETE FROM meta WHERE key>=?1 AND key<?2",
+                "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+            )?,
             params![
                 format!("{namespace}{:010}", nodes.len()),
                 format!("{namespace}~")
@@ -858,7 +872,11 @@ pub(super) fn write_measured(
         level += 1;
     };
     transaction.execute(
-        configured::metadata_sql(transaction, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+        configured::metadata_sql(
+            transaction,
+            "DELETE FROM meta WHERE key>=?1 AND key<?2",
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        )?,
         params![
             format!("native_proof_tree:{prefix}:{:03}:", level + 1),
             format!("native_proof_tree:{prefix}:~")

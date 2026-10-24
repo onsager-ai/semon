@@ -789,11 +789,18 @@ mod tests {
         db.execute_batch(metadata_schema(true)).unwrap();
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
-        db.execute_batch(semantic_stage::metadata_indexes(true)).unwrap();
+        db.execute_batch(semantic_stage::metadata_indexes(true))
+            .unwrap();
         let bind = |db: &Connection, namespace: &str| {
             bind_metadata_scope(db, namespace).unwrap();
             let namespace = namespace.to_owned();
-            db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8, move |_| Ok(namespace.clone())).unwrap();
+            db.create_scalar_function(
+                "semon_namespace",
+                0,
+                FunctionFlags::SQLITE_UTF8,
+                move |_| Ok(namespace.clone()),
+            )
+            .unwrap();
         };
         let state = |db: &Connection, namespace: &str| -> Vec<(String, String)> {
             db.prepare("SELECT key,value FROM meta WHERE namespace=?1 ORDER BY key")
@@ -803,12 +810,25 @@ mod tests {
                 .collect::<rusqlite::Result<_>>()
                 .unwrap()
         };
-        for index in ["sqlite_autoindex_meta_1", "semantic_codex_header_native", "semantic_codex_header_parent"] {
-            let first: String = db.query_row("SELECT name FROM pragma_index_xinfo(?1) WHERE seqno=0", [index], |r| r.get(0)).unwrap();
+        for index in [
+            "sqlite_autoindex_meta_1",
+            "semantic_codex_header_native",
+            "semantic_codex_header_parent",
+        ] {
+            let first: String = db
+                .query_row(
+                    "SELECT name FROM pragma_index_xinfo(?1) WHERE seqno=0",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(first, "namespace", "{index}");
         }
         assert!(crate::storage::LogicalSourceNamespace::new(STORE_METADATA_NAMESPACE).is_err());
-        assert_eq!(metadata_namespace("a", "native_unclassified:original"), Err(StorageError::InvalidArguments));
+        assert_eq!(
+            metadata_namespace("a", "native_unclassified:original"),
+            Err(StorageError::InvalidArguments)
+        );
         for prefix in SOURCE_METADATA_PREFIXES {
             assert_eq!(metadata_namespace("a", &format!("{prefix}same")), Ok("a"));
             assert_eq!(metadata_namespace("b", &format!("{prefix}same")), Ok("b"));
@@ -820,12 +840,24 @@ mod tests {
         let path = "same/relative.jsonl";
         let offset = crate::source_chunks::SIZE as u64 * 1024 + 19;
         let ledger = Ledger {
-            stat: Stat { dev: 1, ino: 2, size: offset, modified_ns: 3, changed_ns: Some(4) },
-            offset, prefix: [5; 32], tail: [6; 32],
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: offset,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset,
+            prefix: [5; 32],
+            tail: [6; 32],
         };
         for (namespace, marker) in [("a", 11), ("b", 22)] {
             bind(&db, namespace);
-            let chunks = crate::source_chunks::Chunks { offset, hashes: vec![[marker; 32]; 1025], resume: None };
+            let chunks = crate::source_chunks::Chunks {
+                offset,
+                hashes: vec![[marker; 32]; 1025],
+                resume: None,
+            };
             let mut calls = crate::native_handoff::Index::default();
             let value = serde_json::json!({"message":{"content":[{"type":"tool_use","id":namespace,"name":"Bash","input":{"command":"codex exec"}}]}});
             let bytes = format!("{value}\n");
@@ -833,12 +865,26 @@ mod tests {
             let tx = db.transaction().unwrap();
             chunk_proofs::write(&tx, path, &ledger, Some(&chunks)).unwrap();
             launch_calls::write(&tx, path, &ledger, Some(&calls)).unwrap();
-            tx.execute(native_metadata_put(&tx).unwrap(), params![format!("native_tree_failure:{path}"), namespace]).unwrap();
+            tx.execute(
+                native_metadata_put(&tx).unwrap(),
+                params![format!("native_tree_failure:{path}"), namespace],
+            )
+            .unwrap();
             // The reserved store scope is bound by the classified key, never
             // supplied by DEFAULT or adopted from the first source.
-            tx.execute(native_metadata_put(&tx).unwrap(), params!["catalog_semantic_recipe", "one-store-recipe"]).unwrap();
+            tx.execute(
+                native_metadata_put(&tx).unwrap(),
+                params!["catalog_semantic_recipe", "one-store-recipe"],
+            )
+            .unwrap();
             tx.commit().unwrap();
-            assert_eq!(chunk_proofs::read(&db, path, &ledger).unwrap().unwrap().as_ref(), &chunks);
+            assert_eq!(
+                chunk_proofs::read(&db, path, &ledger)
+                    .unwrap()
+                    .unwrap()
+                    .as_ref(),
+                &chunks
+            );
             assert_eq!(launch_calls::read(&db, path, &ledger).unwrap(), Some(calls));
             assert!(chunk_proofs::header_ready(&db, path, &ledger).unwrap());
         }
@@ -854,32 +900,51 @@ mod tests {
                 "ino":ledger.stat.ino,"size":ledger.stat.size,"modified_ns":ledger.stat.modified_ns,
                 "changed_ns":ledger.stat.changed_ns,"offset":ledger.offset,
                 "prefix_sha256":ledger.prefix,"tail_sha256":ledger.tail}]
-        }).to_string();
+        })
+        .to_string();
         db.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,metadata) VALUES('owner','current',0,'codex',?1)", [published]).unwrap();
-        db.execute("INSERT INTO session_catalog_sources VALUES('owner','current','codex','owner',?1)", [path]).unwrap();
+        db.execute(
+            "INSERT INTO session_catalog_sources VALUES('owner','current','codex','owner',?1)",
+            [path],
+        )
+        .unwrap();
         bind(&db, "a");
         {
             let tx = db.transaction().unwrap();
             chunk_proofs::clear(&tx, path).unwrap();
             let retained: i64 = tx.query_row("SELECT count(*) FROM meta WHERE namespace=?1 AND key GLOB 'native_published_chunks:*'", ["a"], |r| r.get(0)).unwrap();
-            assert!(retained >= 3, "header and both proof pages must be retained");
+            assert!(
+                retained >= 3,
+                "header and both proof pages must be retained"
+            );
             assert_eq!(state(&tx, "b"), b);
             // Rollback must restore the live proofs and remove retention copies.
         }
         assert_eq!(state(&db, "b"), b);
-        db.execute("DELETE FROM session_catalog_sources", []).unwrap();
+        db.execute("DELETE FROM session_catalog_sources", [])
+            .unwrap();
         db.execute("DELETE FROM session_catalog", []).unwrap();
         let global = state(&db, STORE_METADATA_NAMESPACE);
         assert_eq!(global.len(), 1);
         bind(&db, "a");
         let a = state(&db, "a");
-        assert!(db.execute(native_metadata_put(&db).unwrap(), params!["native_unclassified:original", "refuse"]).is_err());
+        assert!(
+            db.execute(
+                native_metadata_put(&db).unwrap(),
+                params!["native_unclassified:original", "refuse"]
+            )
+            .is_err()
+        );
         assert_eq!(state(&db, "a"), a);
         {
             let tx = db.transaction().unwrap();
             chunk_proofs::clear(&tx, path).unwrap();
             launch_calls::clear(&tx, path).unwrap();
-            tx.execute(native_metadata_delete(&tx).unwrap(), [format!("native_tree_failure:{path}")]).unwrap();
+            tx.execute(
+                native_metadata_delete(&tx).unwrap(),
+                [format!("native_tree_failure:{path}")],
+            )
+            .unwrap();
             assert!(state(&tx, "a").is_empty());
             assert_eq!(state(&tx, "b"), b);
             assert_eq!(state(&tx, STORE_METADATA_NAMESPACE), global);
@@ -889,14 +954,24 @@ mod tests {
         let tx = db.transaction().unwrap();
         chunk_proofs::clear(&tx, path).unwrap();
         launch_calls::clear(&tx, path).unwrap();
-        tx.execute(native_metadata_delete(&tx).unwrap(), [format!("native_tree_failure:{path}")]).unwrap();
+        tx.execute(
+            native_metadata_delete(&tx).unwrap(),
+            [format!("native_tree_failure:{path}")],
+        )
+        .unwrap();
         tx.commit().unwrap();
         assert!(chunk_proofs::read(&db, path, &ledger).unwrap().is_none());
         assert!(launch_calls::read(&db, path, &ledger).unwrap().is_none());
         assert_eq!(state(&db, "b"), b);
         assert_eq!(state(&db, STORE_METADATA_NAMESPACE), global);
         bind(&db, "b");
-        assert_eq!(chunk_proofs::read(&db, path, &ledger).unwrap().unwrap().hashes, vec![[22; 32]; 1025]);
+        assert_eq!(
+            chunk_proofs::read(&db, path, &ledger)
+                .unwrap()
+                .unwrap()
+                .hashes,
+            vec![[22; 32]; 1025]
+        );
         assert!(launch_calls::read(&db, path, &ledger).unwrap().is_some());
     }
 
@@ -917,14 +992,21 @@ mod tests {
         for (kind, name, definition) in objects {
             if kind == "index" {
                 let first: Option<String> = db
-                    .query_row("SELECT name FROM pragma_index_xinfo(?1) WHERE seqno=0 AND key=1", [&name], |r| r.get(0))
+                    .query_row(
+                        "SELECT name FROM pragma_index_xinfo(?1) WHERE seqno=0 AND key=1",
+                        [&name],
+                        |r| r.get(0),
+                    )
                     .unwrap();
                 assert_eq!(first.as_deref(), Some("namespace"), "{name}: {definition}");
                 semantic_indexes += usize::from(name.starts_with("semantic_"));
             } else if name.starts_with("pricing_pending_file_") {
                 assert!(definition.contains("namespace=NEW.namespace"), "{name}");
             } else {
-                assert!(name.starts_with("storage_namespace_fence_"), "unexpected core trigger {name}");
+                assert!(
+                    name.starts_with("storage_namespace_fence_"),
+                    "unexpected core trigger {name}"
+                );
             }
         }
         assert_eq!(semantic_indexes, 5);
