@@ -97,7 +97,10 @@ fn handle(core: &mut ViewerCore, mut request: Request, address: SocketAddr) {
         .count()
         == 1
         && request_header(&request, "Host") == Some(expected_host.as_str());
-    let query_token = query_value(query, "t") == Some(TOKEN);
+    let credentials = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "t")
+        .count();
+    let query_token = credentials == 1 && query_value(query, "t") == Some(TOKEN);
     let cookie_token = request_header(&request, "Cookie").is_some_and(|cookies| {
         cookies
             .split(';')
@@ -127,6 +130,7 @@ fn handle(core: &mut ViewerCore, mut request: Request, address: SocketAddr) {
         );
     }
     if !valid_host
+        || (credentials > 0 && !query_token)
         || !(query_token || cookie_token)
         || (!is_get && !(is_post && post_action && valid_origin))
     {
@@ -151,6 +155,13 @@ fn handle(core: &mut ViewerCore, mut request: Request, address: SocketAddr) {
         redirect_to_root(request);
         return;
     }
+    // The authenticated bootstrap is transport-only, including on direct links.
+    let routing_query = query
+        .split('&')
+        .filter(|part| !part.starts_with("t="))
+        .collect::<Vec<_>>()
+        .join("&");
+    let query = routing_query.as_str();
     let home_query;
     let query = if is_post {
         let mut bytes = Vec::new();
