@@ -114,10 +114,10 @@ export default async function orderCheck(browser) {
       assert.ok(still(before, held), 'row coordinates and scroll stay fixed');
       assert.equal(await page.locator('.order-pill, .order-chip, #order-status').count(), 0);
       if (width === 390) await page.locator('#topbar .lead').click();
-      await page.locator('.nav-item[data-go="home"]').click();
+      await page.locator('.nav-item[data-go="analytics"]').click();
       await page
         .locator('h1')
-        .filter({ hasText: /^Home$/ })
+        .filter({ hasText: /^Analytics$/ })
         .waitFor();
       if (width === 390) await page.locator('#topbar .lead').click();
       await page.locator('.nav-item[data-go="sessions"]').click();

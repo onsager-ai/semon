@@ -123,6 +123,13 @@ occlusion and composer expansion; the existing galleries remain required.
 
 ## Unified hosted application
 
+Sessions is the default destination at `/`, preserving supported query, fragment
+and history behavior. Core navigation contains Sessions, Analytics and Machines.
+The removed Home inbox, Needs you and Working sections do not move into Sessions.
+Recent, source scope, native/no-JavaScript forms and Machines onboarding retain
+their existing owners and behavior. Historical Home visual references require
+classification against this decision; unchanged regions keep their comparators.
+
 Hub Sessions, Analytics and Machines use the same mounted Preact application,
 shared frame, navigation/history owner, account controls and Recent metadata
 publication. Administrative content uses the typed authorized host-page port;

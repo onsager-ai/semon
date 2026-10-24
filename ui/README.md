@@ -65,18 +65,18 @@ The optional `ViewerHost.navigation` supplies generic path overrides and leading
 or trailing destinations; `subscribeNavigation` reports changes without requiring
 a content model. Its unsubscribe belongs to the reader's document lifetime.
 Hosts validate unknown policy JSON with `parseShellNavigation` before rendering.
-The canonical reader keeps source selection in Sessions context and labels scoped
-Recent rows with their machine. Home, Analytics and host administration pages
-share that reader's shell, routing and metadata lifecycle. `ViewerHost.pages`
-provides matching/title/navigation metadata and abortable authorized content,
-including the initial server page. The router inserts it in the existing content
-slot, mounts its enhancements, and destroys them on departure. Source capability
-responses and host responses are fenced against later destinations. Host reads
-share the bounded compact Recent publication without selected reads or repair.
-Account/workspace changes and redirects require a fresh authorized document;
-native POST forms retain server handling. A legacy static `nativePage` embedding
-port remains supported, but Hub does not use that mode. Compatibility markers
-are normalized away without selecting another application.
+Recent rows with their machine. Sessions is the default landing page at `/`;
+Analytics shares that reader. Host administration pages share the reader's shell,
+routing and metadata lifecycle. `ViewerHost.pages` provides matching/title/
+navigation metadata and abortable authorized content, including the initial
+server page. The router inserts it in the existing content slot, mounts its
+enhancements, and destroys them on departure. Source capability responses and
+host responses are fenced against later destinations. Host reads share the
+bounded compact Recent publication without selected reads or repair. Account or
+workspace changes and redirects require a fresh authorized document; native POST
+forms retain server handling. A legacy static `nativePage` embedding port remains
+supported, but Hub does not use that mode. Compatibility markers are normalized
+away without selecting another application.
 
 `topbar(ShellBar)` commits host-owned `titleSlot` and `actions` nodes, or `mode`
 nodes for Find/error navigation. Supply `lead`, `session`, optional validated
@@ -100,7 +100,7 @@ stale triggers, slot preservation, native link semantics and listener removal.
 Hub administration mounts the canonical application with `ViewerHost.pages`.
 `mountNativeShell({ chrome: false })` supplies only page-local form enhancements;
 its lifetime belongs to the content page, while chrome and routing stay mounted.
-Home, Analytics, Sessions and host links share ordinary same-document navigation.
+Sessions, Analytics and host links share ordinary same-document navigation.
 Server fallbacks, identity changes and form submissions retain browser navigation.
 Standalone navigation fragments may use pure `renderShellNavigation` under an
 explicit host owner, with no reader or poller. The former sidebar-only model

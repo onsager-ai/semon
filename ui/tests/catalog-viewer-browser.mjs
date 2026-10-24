@@ -84,6 +84,12 @@ const capabilities = (selected) => ({
   full_text_search: false,
   global_union: false,
 });
+// Source discovery is part of standalone Sessions boot, including recovery.
+const singleSourceInventory = {
+  api: 1,
+  items: [{ source_key: 'source', label: 'Fixture source' }],
+  next_cursor: null,
+};
 const list = (items) => ({
   api: 1,
   machine: 'source',
@@ -105,6 +111,390 @@ const list = (items) => ({
   next_cursor: null,
 });
 
+for (const sourceCount of [1, 2])
+  test(`cold root discovers ${sourceCount} sources before scoped capabilities`, async () => {
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    const capabilityScopes = [],
+      catalogScopes = [],
+      errors = [];
+    page.on('pageerror', (error) => errors.push(String(error)));
+    try {
+      await page.route('http://catalog.test/**', (route) => {
+        const url = new URL(route.request().url()),
+          machine = url.searchParams.get('machine');
+        if (url.pathname === '/api/session-sources')
+          return route.fulfill({
+            json: {
+              ...singleSourceInventory,
+              items:
+                sourceCount === 1
+                  ? singleSourceInventory.items
+                  : [
+                      ...singleSourceInventory.items,
+                      { source_key: 'second', label: 'Fixture source' },
+                    ],
+            },
+          });
+        if (url.pathname === '/api/session-capabilities') {
+          capabilityScopes.push(machine);
+          return machine
+            ? route.fulfill({ json: { ...capabilities(false), source_key: machine } })
+            : route.fulfill({ status: 400, json: { error: { code: 'machine_scope_required' } } });
+        }
+        if (url.pathname === '/api/sessions') {
+          catalogScopes.push(machine);
+          return route.fulfill({
+            json: {
+              ...list([meta('one')]),
+              machine,
+              machine_info: { key: machine, label: 'Fixture source', freshness: 'cached' },
+            },
+          });
+        }
+        if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+        return fulfillCatalogStatic(route, url);
+      });
+      await page.goto('http://catalog.test/?harness=claude#retained');
+      await page.addScriptTag({ content: outputFiles[0].text });
+      await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+      if (sourceCount === 2) {
+        await page.locator('[data-source-key="second"]').waitFor();
+        assert.deepEqual(capabilityScopes, [], 'cold multi-source entry must await selection');
+        assert.deepEqual(catalogScopes, [], 'source discovery must not admit a scoped list');
+        assert.equal(new URL(page.url()).hash, '#retained');
+        await page.locator('[data-source-key="second"]').click();
+      }
+      await page.locator('[data-session-row="list"][data-id="one"]').waitFor();
+      const expected = sourceCount === 1 ? 'source' : 'second';
+      assert.ok(capabilityScopes.length > 0);
+      assert.ok(capabilityScopes.every((scope) => scope === expected));
+      assert.ok(catalogScopes.length > 0 && catalogScopes.every((scope) => scope === expected));
+      assert.equal(new URL(page.url()).searchParams.get('harness'), 'claude');
+      if (sourceCount === 1) assert.equal(new URL(page.url()).hash, '#retained');
+      assert.deepEqual(errors, []);
+      await page.evaluate(() => app.destroy());
+    } finally {
+      await browser.close();
+    }
+  });
+
+// Hold workspace metadata independently of source discovery. A source choice
+// within Sessions keeps that request; a real destination change must abort it.
+for (const scenario of ['sole', 'multiple', 'forced', 'hosted', 'scoped'])
+  for (const finish of scenario === 'sole' || scenario === 'multiple'
+    ? ['publish', 'navigate', 'destroy']
+    : ['publish'])
+    test(`cold ${scenario} source bootstrap admits once and ${finish} fences overview`, async () => {
+      const browser = await chromium.launch();
+      const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+      const capabilityScopes = [],
+        catalogScopes = [],
+        errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      const hosted = scenario === 'hosted',
+        chooser = scenario === 'multiple' || scenario === 'forced';
+      try {
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url()),
+            machine = url.searchParams.get('machine');
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({
+              json: {
+                ...singleSourceInventory,
+                items:
+                  scenario === 'multiple'
+                    ? [
+                        ...singleSourceInventory.items,
+                        { source_key: 'second', label: 'Second source' },
+                      ]
+                    : singleSourceInventory.items,
+              },
+            });
+          if (url.pathname === '/api/session-capabilities') {
+            capabilityScopes.push(machine);
+            if (!hosted && !machine)
+              return route.fulfill({
+                status: 400,
+                json: { error: { code: 'machine_scope_required' } },
+              });
+            return route.fulfill({
+              json: {
+                ...capabilities(false),
+                source_key: machine ?? '',
+                global_union: hosted,
+                order: hosted ? 'last_desc_key_asc_machine_asc' : 'last_desc_key_asc',
+              },
+            });
+          }
+          if (url.pathname === '/api/sessions') {
+            catalogScopes.push(machine);
+            return route.fulfill({
+              json: {
+                ...list([
+                  {
+                    ...meta('one'),
+                    ...(hosted ? { machine: { key: 'source', label: 'Fixture source' } } : {}),
+                  },
+                ]),
+                machine: machine ?? '',
+                machine_info: {
+                  key: machine ?? '',
+                  label: 'Fixture source',
+                  freshness: 'cached',
+                },
+                capabilities: {
+                  ...list([]).capabilities,
+                  global_union: hosted,
+                  order: hosted ? 'last_desc_key_asc_machine_asc' : 'last_desc_key_asc',
+                },
+              },
+            });
+          }
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto(
+          'http://catalog.test/?harness=claude' +
+            (scenario === 'forced' ? '&choose_source=1' : '') +
+            (scenario === 'scoped' ? '&machine=source' : '') +
+            '#retained',
+        );
+        const initialHistoryLength = await page.evaluate(() => history.length);
+        await page.clock.install({ time: new Date('2026-10-23T00:00:00Z') });
+        await page.clock.pauseAt(new Date('2026-10-23T00:01:00Z'));
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate((hosted) => {
+          const originalFetch = window.fetch;
+          window.bootstrapOverviewReads = [];
+          window.fetch = (input, options) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/viewer/home') return originalFetch(input, options);
+            const read = { signal: options?.signal };
+            window.bootstrapOverviewReads.push(read);
+            return new Promise((resolve) => {
+              // Deliberately deliver even after abort, to qualify epoch fencing.
+              read.release = (name = 'Bootstrap Recent') =>
+                resolve(
+                  new Response(
+                    JSON.stringify({
+                      api: 1,
+                      version: 'a'.repeat(64),
+                      now: 10000,
+                      next: { inbox: null, working: null, answered: null },
+                      totals: { waiting: 0, working: 0, answered: 0 },
+                      machines: [
+                        {
+                          key: 'source',
+                          label: 'Fixture source',
+                          up: true,
+                          working: 0,
+                          sessions: 1,
+                          last: 10000,
+                        },
+                      ],
+                      recent: [
+                        {
+                          id: 'bootstrap-recent',
+                          source_key: 'source',
+                          catalog_key: 'bootstrap-recent',
+                          session: {
+                            name,
+                            harness: 'claude',
+                            model: '',
+                            repo: null,
+                            state: 'idle',
+                            last: 10000,
+                            start: 9000,
+                            content_generation: 'b'.repeat(64),
+                          },
+                        },
+                      ],
+                      inbox: [],
+                      working: [],
+                      answered: [],
+                      observations: [],
+                    }),
+                    { headers: { 'Content-Type': 'application/json' } },
+                  ),
+                );
+            });
+          };
+          window.app = CatalogViewer.mountViewerApplication(
+            hosted ? { catalogSources: true } : undefined,
+          );
+        }, hosted);
+        if (chooser) {
+          const key = scenario === 'multiple' ? 'second' : 'source';
+          await page.locator(`[data-source-key="${key}"]`).waitFor();
+          assert.deepEqual(capabilityScopes, [], 'chooser must not make unscoped reads');
+          assert.deepEqual(catalogScopes, [], 'chooser must await source authority');
+          assert.equal(await page.evaluate(() => bootstrapOverviewReads.length), 1);
+          assert.equal(
+            await page.evaluate(() => bootstrapOverviewReads[0].signal.aborted),
+            false,
+            'metadata starts before the source is selected',
+          );
+          await page.locator(`[data-source-key="${key}"]`).click();
+        }
+        await page.locator('[data-session-row="list"]').waitFor();
+        assert.match(await page.locator('[data-session-row="list"]').innerText(), /Session one/);
+        await page.clock.runFor(100);
+        const selectedScope = hosted ? null : scenario === 'multiple' ? 'second' : 'source';
+        assert.deepEqual(capabilityScopes, [selectedScope]);
+        assert.deepEqual(catalogScopes, [selectedScope], 'one initial list admission');
+        assert.equal(new URL(page.url()).searchParams.get('harness'), 'claude');
+        if (!chooser) {
+          assert.equal(new URL(page.url()).hash, '#retained');
+          assert.equal(await page.evaluate(() => history.length), initialHistoryLength);
+        }
+        assert.deepEqual(
+          await page.evaluate(() => bootstrapOverviewReads.map((read) => read.signal.aborted)),
+          [false],
+          'source selection must retain the single valid metadata request',
+        );
+        if (finish === 'publish') {
+          await page.evaluate(() => bootstrapOverviewReads[0].release());
+          await page.locator('#lanes').getByText('Bootstrap Recent', { exact: true }).waitFor();
+          await page.clock.runFor(100);
+          assert.equal(await page.evaluate(() => bootstrapOverviewReads.length), 1);
+          assert.deepEqual(catalogScopes, [selectedScope]);
+        } else {
+          if (finish === 'navigate') {
+            await page.locator('#nav [data-go="machines"]').click();
+            assert.equal(await page.evaluate(() => bootstrapOverviewReads.length), 2);
+          } else await page.evaluate(() => app.destroy());
+          assert.equal(
+            await page.evaluate(() => bootstrapOverviewReads[0].signal.aborted),
+            true,
+            'real navigation and destruction must abort the held metadata request',
+          );
+          await page.evaluate(() => bootstrapOverviewReads[0].release('Late bootstrap Recent'));
+          await page.clock.runFor(100);
+          assert.equal(await page.getByText('Late bootstrap Recent', { exact: true }).count(), 0);
+          if (finish === 'navigate') {
+            assert.equal(new URL(page.url()).pathname, '/machines');
+            assert.equal(await page.locator('[data-session-row="list"]').count(), 0);
+            await page.evaluate(() => bootstrapOverviewReads[1].release('Current machine Recent'));
+            await page
+              .locator('#lanes')
+              .getByText('Current machine Recent', { exact: true })
+              .waitFor();
+            assert.equal(await page.getByText('Late bootstrap Recent', { exact: true }).count(), 0);
+          }
+          assert.deepEqual(catalogScopes, [selectedScope], 'late data cannot admit another list');
+        }
+        assert.deepEqual(errors, []);
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
+
+for (const width of [390, 820, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`root opens existing Sessions without Home at ${width}px ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      const page = await browser.newPage({ viewport: { width, height: 860 }, colorScheme });
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      try {
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({
+              json: {
+                ...capabilities(false),
+                metadata_search: true,
+                filters: ['harness', 'repo', 'q'],
+              },
+            });
+          if (url.pathname === '/api/sessions')
+            return route.fulfill({
+              json: {
+                ...list([meta('one'), meta('two')]),
+                search: {
+                  semantics: 'unicode_lowercase_substring',
+                  fields: ['name', 'key', 'repo', 'branch', 'model', 'harness'],
+                  candidates: 2,
+                  partial: false,
+                  index_complete: true,
+                  candidate_budget: 512,
+                  byte_budget: 2097152,
+                },
+              },
+            });
+          if (url.pathname === '/api/viewer/home')
+            return route.fulfill({
+              json: {
+                api: 1,
+                version: 'a'.repeat(64),
+                now: 10000,
+                next: { inbox: null, working: null, answered: null },
+                totals: { waiting: 0, working: 0, answered: 0 },
+                machines: [],
+                recent: [],
+                inbox: [],
+                working: [],
+                answered: [],
+                observations: [],
+              },
+            });
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/?machine=source&q=Session&harness=claude#retained');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => {
+          window.app = CatalogViewer.mountViewerApplication();
+        });
+        await page.locator('#page .nrow').first().waitFor();
+        const url = new URL(page.url());
+        assert.equal(url.pathname, '/sessions');
+        assert.equal(url.searchParams.get('machine'), 'source');
+        assert.equal(url.searchParams.get('q'), 'Session');
+        assert.equal(url.searchParams.get('harness'), 'claude');
+        assert.equal(url.hash, '#retained');
+        assert.deepEqual(
+          await page
+            .locator('#nav [data-go]')
+            .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-go'))),
+          ['sessions', 'analytics', 'machines'],
+        );
+        assert.equal(
+          await page.locator('#nav [aria-current="page"]').getAttribute('data-go'),
+          'sessions',
+        );
+        assert.equal(await page.locator('#page .nrow').count(), 2);
+        assert.doesNotMatch(
+          await page.locator('#page').innerText(),
+          /Needs you|Working now|invalid history view/,
+        );
+        assert.equal(await page.getByRole('searchbox').inputValue(), 'Session');
+        await page.evaluate(() => {
+          history.pushState(null, '', '/?machine=source&q=Session#back');
+          dispatchEvent(new PopStateEvent('popstate'));
+        });
+        await page.locator('#page .nrow').first().waitFor();
+        assert.equal(new URL(page.url()).pathname, '/sessions');
+        assert.equal(new URL(page.url()).hash, '#back');
+        assert.deepEqual(errors, []);
+        const out = process.env.SEMON_UI_OUT;
+        if (out) {
+          await mkdir(out, { recursive: true });
+          await page.screenshot({
+            path: `${out}/sessions-${width}-${colorScheme}.png`,
+            fullPage: true,
+          });
+        }
+        await page.evaluate(() => window.app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
+
 for (const width of [390, 1280])
   for (const retained of [false, true])
     test(`repeated stale projection stops automatically and manual retry recovers at ${width}px retained=${retained}`, async () => {
@@ -119,6 +509,8 @@ for (const width of [390, 1280])
         page.on('pageerror', (error) => errors.push(String(error)));
         await page.route('http://catalog.test/**', async (route) => {
           const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
           if (url.pathname === '/api/session-capabilities')
             return route.fulfill({ json: capabilities(true) });
           if (url.pathname === '/api/session-identity')
@@ -252,6 +644,8 @@ for (const width of [390, 1280])
               ],
             },
           };
+        if (url.pathname === '/api/session-sources')
+          return route.fulfill({ json: singleSourceInventory });
         if (url.pathname === '/api/session-capabilities')
           return route.fulfill({ json: capabilities(true) });
         if (url.pathname === '/api/session-identity')
@@ -456,9 +850,14 @@ for (const width of [390, 1280])
             assert.deepEqual(errors, []);
           };
           await assertNative();
-          if (workspaceChrome)
-            assert.equal(await page.locator('#nav [data-go="home"] .cnt').textContent(), '2');
-          assert.equal(await page.locator('#nav [data-go="home"]').getAttribute('href'), '/');
+          assert.equal(await page.locator('#nav [data-go="home"]').count(), 0);
+          assert.equal(
+            new URL(
+              await page.locator('#nav [data-go="sessions"]').getAttribute('href'),
+              page.url(),
+            ).pathname,
+            '/sessions',
+          );
           assert.equal(
             await page.locator('#nav [data-go="analytics"]').getAttribute('href'),
             '/analytics',
@@ -899,8 +1298,8 @@ for (const width of [390, 1280])
         await page.clock.runFor(32);
         assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
         assert.equal(
-          (await page.locator('#nav [data-go="home"]').textContent()).replace(/\s/g, ''),
-          'Home',
+          await page.locator('#nav [data-go="home"]').count(),
+          0,
           'retired waiting totals cannot publish while the current workspace body is held',
         );
         await page.evaluate(() => window.releaseCurrentWorkspaceBody());
@@ -915,10 +1314,10 @@ for (const width of [390, 1280])
         );
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
         assert.equal((await page.locator('#lanes .row-machine').count()) > 1, true);
-        const homeText = () => page.locator('#nav [data-go="home"]').textContent();
-        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        const homeCount = () => page.locator('#nav [data-go="home"]').count();
+        assert.equal(await homeCount(), 0);
         assert.doesNotMatch(await page.locator('#lanes').textContent(), /Retired publication/);
-        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.equal(await homeCount(), 0);
         assert.match(await page.locator('#page .nrow').first().innerText(), /Focused source-1/);
 
         stage = 'open focused session';
@@ -965,7 +1364,7 @@ for (const width of [390, 1280])
                     ?.includes('unavailable'),
             mode === 'ready',
           );
-          assert.equal((await homeText()).replace(/\s/g, ''), mode === 'ready' ? 'Home4' : 'Home');
+          assert.equal(await homeCount(), 0);
           await ready(
             'workspace rows after ' + mode,
             (label) => document.querySelector('#lanes')?.textContent.includes(label),
@@ -1008,7 +1407,7 @@ for (const width of [390, 1280])
           /context is unavailable/,
         );
         assert.equal(await page.locator('#page .agent-edges path').count(), 0);
-        assert.equal((await homeText()).replace(/\s/g, ''), 'Home4');
+        assert.equal(await homeCount(), 0);
         assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
         assert.equal(
@@ -1191,6 +1590,8 @@ for (const width of [390, 1280])
           await page.route('http://catalog.test/**', async (route) => {
             const url = new URL(route.request().url());
             const machine = url.searchParams.get('machine') ?? 'source';
+            if (url.pathname === '/api/session-sources')
+              return route.fulfill({ json: singleSourceInventory });
             if (url.pathname === '/api/session-capabilities')
               return route.fulfill({ json: { ...capabilities(true), source_key: machine } });
             if (url.pathname === '/api/sessions')
@@ -1453,6 +1854,7 @@ for (const width of [390, 1280])
             },
           });
         });
+        await page.locator('#page [data-source-key="source"]').click();
         await page.locator('#page [data-id="one"]').waitFor();
         assert.equal(await page.locator('#nav [data-go="new-session"]').count(), 0);
         await page.evaluate(() => document.fonts.ready);
@@ -1666,6 +2068,7 @@ test('temporary boot failure and pending projection recover without starting glo
       const url = new URL(route.request().url()),
         p = url.pathname;
       requests.push(p);
+      if (p === '/api/session-sources') return route.fulfill({ json: singleSourceInventory });
       if (p === '/api/session-capabilities') {
         if (++capabilityReads === 1) return route.fulfill({ status: 503, body: '' });
         return route.fulfill({ json: capabilities(ready) });
@@ -2040,6 +2443,7 @@ test('partial catalog discovery completes while retaining uncommitted search foc
       complete = false;
     await page.route('http://catalog.test/**', (route) => {
       const path = new URL(route.request().url()).pathname;
+      if (path === '/api/session-sources') return route.fulfill({ json: singleSourceInventory });
       if (path === '/api/session-capabilities')
         return route.fulfill({
           json: {
@@ -2114,6 +2518,8 @@ test('archive source hint waits for a parsed canonical session without native au
     await page.route('http://catalog.test/**', (route) => {
       const u = new URL(route.request().url());
       requests.push(u.pathname + u.search);
+      if (u.pathname === '/api/session-sources')
+        return route.fulfill({ json: singleSourceInventory });
       if (u.pathname === '/api/session-capabilities')
         return route.fulfill({ json: { ...capabilities(true), source_candidates: true } });
       if (u.pathname === '/api/sessions')
@@ -2196,6 +2602,8 @@ test('bounded metadata search preserves literal query and exposes empty partial 
     await page.route('http://catalog.test/**', (route) => {
       const u = new URL(route.request().url());
       requests.push(u.pathname + u.search);
+      if (u.pathname === '/api/session-sources')
+        return route.fulfill({ json: singleSourceInventory });
       if (u.pathname === '/api/session-capabilities')
         return route.fulfill({
           json: {
@@ -2276,6 +2684,8 @@ for (const { width, colorScheme } of [
       const items = Array.from({ length: 36 }, (_, i) => meta('row-' + i));
       await page.route('http://catalog.test/**', (route) => {
         const u = new URL(route.request().url());
+        if (u.pathname === '/api/session-sources')
+          return route.fulfill({ json: singleSourceInventory });
         if (u.pathname === '/api/session-capabilities')
           return route.fulfill({
             json: {
@@ -2563,6 +2973,8 @@ for (const width of [390, 1280])
         await page.emulateMedia({ colorScheme });
         await page.route('http://catalog.test/**', (route) => {
           const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
           if (url.pathname === '/api/session-capabilities')
             return route.fulfill({
               json: {
@@ -2646,6 +3058,8 @@ for (const width of [390, 1280])
         reads = 0;
       await page.route('http://catalog.test/**', (route) => {
         const url = new URL(route.request().url());
+        if (url.pathname === '/api/session-sources')
+          return route.fulfill({ json: singleSourceInventory });
         if (url.pathname === '/api/session-capabilities')
           return route.fulfill({ json: capabilities(true) });
         if (url.pathname === '/api/sessions')
@@ -2732,6 +3146,8 @@ for (const width of [390, 1280])
         await page.route('http://catalog.test/**', (route) => {
           const u = new URL(route.request().url());
           if (u.pathname.startsWith('/api/')) requests.push(u.pathname + u.search);
+          if (u.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
           if (u.pathname === '/api/session-capabilities')
             return route.fulfill({ json: capabilities(false) });
           if (u.pathname === '/api/sessions') return route.fulfill({ json: list(items) });
@@ -2903,6 +3319,8 @@ for (const width of [390, 1280])
         const previewGeneration = 'c'.repeat(64);
         await page.route('http://catalog.test/**', async (route) => {
           const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
           if (url.pathname === '/api/session-capabilities')
             return route.fulfill({ json: capabilities(true) });
           if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
@@ -3098,6 +3516,8 @@ for (const width of [820, 1280])
         });
         await page.route('http://catalog.test/**', async (route) => {
           const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
           if (url.pathname === '/api/session-capabilities')
             return route.fulfill({ json: capabilities(true) });
           if (url.pathname === '/api/sessions') {
@@ -3316,6 +3736,8 @@ test('cached history restores tail following independently of another reader pos
     await page.route('http://catalog.test/**', async (route) => {
       const url = new URL(route.request().url()),
         key = url.searchParams.get('sid');
+      if (url.pathname === '/api/session-sources')
+        return route.fulfill({ json: singleSourceInventory });
       if (url.pathname === '/api/session-capabilities')
         return route.fulfill({ json: capabilities(true) });
       if (url.pathname === '/api/session-identity')
@@ -3481,6 +3903,8 @@ test('same-projection turn anchors retain loaded fields, focus and the anchor in
           : [];
         return route.fulfill({ json: { api: 1, matches, unavailable: 0 } });
       }
+      if (url.pathname === '/api/session-sources')
+        return route.fulfill({ json: singleSourceInventory });
       if (url.pathname === '/api/session-capabilities')
         return route.fulfill({ json: { ...capabilities(true), selected_entry: true } });
       if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });
@@ -3719,6 +4143,8 @@ test('a lost transcript capability cancels a pending turn anchor before any rang
           : [];
         return route.fulfill({ json: { api: 1, matches, unavailable: 0 } });
       }
+      if (url.pathname === '/api/session-sources')
+        return route.fulfill({ json: singleSourceInventory });
       if (url.pathname === '/api/session-capabilities') {
         const selected = ++capabilityReads === 1;
         return route.fulfill({ json: capabilities(selected) });
@@ -3888,6 +4314,8 @@ test('child activity reads stay separate from event previews and honor participa
       previews = Object.fromEntries(edges.map(({ sid }) => [sid, previewGeneration]));
     await page.route('http://catalog.test/**', async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === '/api/session-sources')
+        return route.fulfill({ json: singleSourceInventory });
       if (url.pathname === '/api/session-capabilities')
         return route.fulfill({ json: capabilities(true) });
       if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('parent')]) });
@@ -4095,6 +4523,8 @@ for (const width of [390, 1280])
           page.on('pageerror', (error) => errors.push(String(error)));
           await page.route('http://catalog.test/**', async (route) => {
             const url = new URL(route.request().url());
+            if (url.pathname === '/api/session-sources')
+              return route.fulfill({ json: singleSourceInventory });
             if (url.pathname === '/api/session-capabilities')
               return route.fulfill({ json: capabilities(true) });
             if (url.pathname === '/api/session-identity')
@@ -4178,6 +4608,8 @@ for (const width of [390, 1280])
     try {
       await page.route('http://catalog.test/**', async (route) => {
         const url = new URL(route.request().url());
+        if (url.pathname === '/api/session-sources')
+          return route.fulfill({ json: singleSourceInventory });
         if (url.pathname === '/api/session-capabilities')
           return route.fulfill({ json: capabilities(true) });
         if (url.pathname === '/api/sessions') return route.fulfill({ json: list([meta('one')]) });

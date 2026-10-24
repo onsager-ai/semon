@@ -31,7 +31,7 @@ export default async function signalsCheck(browser) {
         ];
       });
       await page.reload();
-      await page.waitForFunction(() => history.state?.v === 'home');
+      await page.waitForFunction(() => history.state?.v === 'sessions');
       await goto(page, { v: 'session', id: sid }, D);
       assert.equal(await page.locator('.signal-marker').count(), 2);
       assert.match(
