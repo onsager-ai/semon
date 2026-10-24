@@ -407,7 +407,6 @@ pub(crate) fn validate_semantic_schema(config: &StoreConfig) -> Result<(), Stora
 
 #[cfg(test)]
 pub(crate) fn semantic_tables() -> &'static [&'static str] { semantic_stage::STAGE_TABLES }
-#[cfg(test)]
 pub(crate) fn semantic_recipe() -> &'static str { semantic_stage::RECIPE }
 
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {

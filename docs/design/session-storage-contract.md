@@ -1114,7 +1114,34 @@ unfinished and the configured pipeline still cannot run end to end. No public
 qualification was raised. CI-only checks and fresh independent acceptance remain
 pending; this increment must not be reported as full S1 or #477 delivery.
 
-Resume constraints: one writer on the existing task branch; Worker count 23,
+Worker24 implements a private indexing sub-unit in `storage/sqlite/semantic.rs`.
+The test-only factory requires the real admitted Source, physical epoch, authored
+composite stage schema and a versioned recipe/profile. Its typed owner rechecks
+admission and recipe inside every operation. ConfiguredIndex begin, bounded
+indexing batch and primitive source record now use that capability, the existing
+IndexStore types, parser-written ledgers/headers and Source journal claims. Stage
+and frontier DML explicitly binds namespace. Record compares the captured stage,
+Catalog generation, claim and ledger before writes; claims remain pending until
+publication. The existing unbound ownership guard remains; its role-proof body
+is also reachable through the validated admitted capability.
+
+This is still partial S1A. The private fixture replaces only empty stage schema;
+native data is ingested through the actual configured native writer. The private
+profile retains the sole-Source singleton native families; it does not resolve
+shared-store multi-Source native ownership. The isolation test uses separate
+admitted A/B stores, exercises rollback/reopen, and rejects B on A's store. It
+does not prove two admitted Sources sharing one SQL store. Stale record and stale
+admission tests are added, but a competing Catalog-generation begin test remains
+pending the typed publication port. No test pass is claimed before CI.
+
+Namespace-scoped event paging, native-key/frontier reduction and full reset are
+still unported. Batch refuses once primitive indexing finishes. Record refuses
+withdrawals and nonempty native-parent/lineage dependency inputs rather than
+discarding them. Identity/relations, publish, finish, select and replay remain
+unavailable; the public factory still refuses semantic work. No Current, global,
+metadata, usage or multi-Source qualification changed. S1A/S1/#477 are not complete.
+
+Resume constraints: one writer on the existing task branch; Worker count 24,
 without reset. Thermal readings are absent: no local cargo/build/check/test/
 clippy/fmt, Node tests/typechecks/formatters, browser/screenshots or image work;
 use CI. Check temperatures before/after CPU work and stop at 85 C or higher;
