@@ -873,7 +873,7 @@ test(
             );
             assert.equal(traceSegments[4], 'trace');
             assert.ok(traceSegments[5], 'Run view URL contains the exact turn identity');
-            const traceTurn = decodeURIComponent(traceSegments[5]);
+            const runTraceTurn = decodeURIComponent(traceSegments[5]);
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
             assert.ok(
               apiResponses.some(
@@ -881,7 +881,7 @@ test(
                   row.path === '/api/session-trace' &&
                   row.machine === 'local' &&
                   row.sid === parentSession &&
-                  row.turn === traceTurn,
+                  row.turn === runTraceTurn,
               ),
               'trace request retains the canonical source, session key and turn',
             );
