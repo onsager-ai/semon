@@ -88,8 +88,11 @@ pub fn session_source_proof(
     let absolute = home.join(path);
     let absolute = absolute.to_str().ok_or(InvalidArguments)?;
     let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
-        let Some(crate::storage::catalog::SourceProofObservation { key, source, generation }) =
-            crate::storage::source_proof_observation(options, root, absolute)?
+        let Some(crate::storage::catalog::SourceProofObservation {
+            key,
+            source,
+            generation,
+        }) = crate::storage::source_proof_observation(options, root, absolute)?
         else {
             return Ok(None);
         };

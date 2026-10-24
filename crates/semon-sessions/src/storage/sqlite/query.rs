@@ -77,7 +77,12 @@ fn generation(db: &Connection) -> Result<String, QueryError> {
     )
     .map_err(unavailable)
 }
-fn read(db: &Connection, options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
+fn read(
+    db: &Connection,
+    options: &Options,
+    now: i64,
+    bytes_left: &mut usize,
+) -> Result<Part, QueryError> {
     let generation = generation(db)?;
     let ready: bool = db.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)",rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(),generation],|row|row.get(0)).map_err(unavailable)?;
     if !ready {

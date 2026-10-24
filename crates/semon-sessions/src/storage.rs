@@ -13,8 +13,14 @@ pub(crate) fn read_local_catalog_page(
     source_key: &str,
     request: &crate::catalog::Request,
 ) -> Result<crate::ViewerReply, Box<dyn std::error::Error>> {
-    let namespace = LogicalSourceNamespace::new(if source_key.is_empty() { "local" } else { source_key })?;
-    let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(options, namespace));
+    let namespace = LogicalSourceNamespace::new(if source_key.is_empty() {
+        "local"
+    } else {
+        source_key
+    })?;
+    let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
+        options, namespace,
+    ));
     sqlite::catalog::read_page(&binding, options, source_key, request)
 }
 
@@ -24,7 +30,9 @@ pub(crate) fn source_proof_observation(
     absolute: &str,
 ) -> Result<Option<catalog::SourceProofObservation>, Box<dyn std::error::Error>> {
     let namespace = LogicalSourceNamespace::new("source-proof")?;
-    let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(options, namespace));
+    let binding = NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
+        options, namespace,
+    ));
     sqlite::catalog::source_proof_observation(&binding, options, root, absolute)
 }
 
@@ -34,7 +42,9 @@ pub(crate) fn local_query_catalog(
 ) -> Box<dyn query::QueryCatalogStore> {
     Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
-        binding: NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(options, namespace)),
+        binding: NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(
+            options, namespace,
+        )),
     })
 }
 
@@ -53,7 +63,10 @@ impl NativeReaderBinding {
     }
 }
 
-pub(crate) fn configured_query_catalog(options: &crate::Options, config: StoreConfig) -> Box<dyn query::QueryCatalogStore> {
+pub(crate) fn configured_query_catalog(
+    options: &crate::Options,
+    config: StoreConfig,
+) -> Box<dyn query::QueryCatalogStore> {
     Box::new(sqlite::query::SqliteQueryCatalog {
         options: options.clone(),
         binding: NativeReaderBinding::Admitted(config),
@@ -130,7 +143,10 @@ impl StoreConfig {
 
     /// One bounded, resumable supported-current Catalog assignment step. The
     /// native Event/ledger gate stays closed, and originals remain preserved.
-    pub fn assign_catalog_namespace(&self, max_rows: usize) -> Result<CatalogAssignmentProgress, StorageError> {
+    pub fn assign_catalog_namespace(
+        &self,
+        max_rows: usize,
+    ) -> Result<CatalogAssignmentProgress, StorageError> {
         sqlite::catalog_namespace::assign(self, max_rows)
     }
 
@@ -143,24 +159,44 @@ impl StoreConfig {
 
     /// Read a native Catalog through durable namespace and epoch admission.
     /// Options supplies Raw/runtime authority only, never database coordinates.
-    pub fn catalog_page(&self, options: &crate::Options, query: &str) -> Result<crate::ViewerReply, StorageError> {
-        let request = crate::catalog::Request::parse(query).map_err(|_| StorageError::InvalidArguments)?;
+    pub fn catalog_page(
+        &self,
+        options: &crate::Options,
+        query: &str,
+    ) -> Result<crate::ViewerReply, StorageError> {
+        let request =
+            crate::catalog::Request::parse(query).map_err(|_| StorageError::InvalidArguments)?;
         let binding = NativeReaderBinding::Admitted(self.clone());
-        sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request)
-            .map_err(|error| error.downcast::<StorageError>().map_or(StorageError::Unavailable, |error| *error))
+        sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request).map_err(
+            |error| {
+                error
+                    .downcast::<StorageError>()
+                    .map_or(StorageError::Unavailable, |error| *error)
+            },
+        )
     }
 
     /// Bounded native Query publication metadata from this configured source.
     /// This does not fetch source-backed question text or replace Query tools.
-    pub fn query_metadata(&self, options: &crate::Options, now: i64, max_bytes: usize) -> Result<serde_json::Value, crate::QueryError> {
+    pub fn query_metadata(
+        &self,
+        options: &crate::Options,
+        now: i64,
+        max_bytes: usize,
+    ) -> Result<serde_json::Value, crate::QueryError> {
         if max_bytes == 0 || max_bytes > 8 * 1024 * 1024 {
-            return Err(crate::QueryError::new("invalid_arguments", "Invalid metadata byte bound"));
+            return Err(crate::QueryError::new(
+                "invalid_arguments",
+                "Invalid metadata byte bound",
+            ));
         }
         let store = configured_query_catalog(options, self.clone());
         let mut left = max_bytes;
         let part = store.read_cohort(&self.namespace, now, &mut left)?;
         store.validate(&self.namespace, &part)?;
-        Ok(serde_json::json!({"source_key":self.namespace.as_str(),"generation":part.generation,"runtime":part.runtime,"rows":part.rows}))
+        Ok(
+            serde_json::json!({"source_key":self.namespace.as_str(),"generation":part.generation,"runtime":part.runtime,"rows":part.rows}),
+        )
     }
 
     pub(crate) fn open_local(self) -> Result<Box<dyn SessionMetadataStore>, StorageError> {

@@ -91,10 +91,22 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
     tx.execute_batch("CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY,admission_generation INTEGER NOT NULL CHECK(admission_generation>0),admitted_at INTEGER NOT NULL,format_version INTEGER NOT NULL,writer_qualification INTEGER NOT NULL) STRICT; CREATE TABLE storage_writer_inventory(table_name TEXT PRIMARY KEY,qualified_version INTEGER NOT NULL) STRICT;").map_err(failed)?;
     let sequence_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='storage_namespace_sequence')", [], |r| r.get(0)).map_err(failed)?;
     let generation = if sequence_exists {
-        let prior: i64 = tx.query_row("SELECT last_generation FROM storage_namespace_sequence WHERE singleton=1", [], |r| r.get(0)).map_err(failed)?;
-        if prior <= 0 { return Err(StorageError::NamespaceUpgradePending); }
-        prior.checked_add(1).ok_or(StorageError::NamespaceUpgradePending)?
-    } else { 1 };
+        let prior: i64 = tx
+            .query_row(
+                "SELECT last_generation FROM storage_namespace_sequence WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
+        if prior <= 0 {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        prior
+            .checked_add(1)
+            .ok_or(StorageError::NamespaceUpgradePending)?
+    } else {
+        1
+    };
     let now = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -131,25 +143,63 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
 /// Revert only the still-read-only first-source preparation stage. All checks
 /// precede trigger removal under one writer transaction. No native table/row is
 /// dropped, copied or reset; qualified/migrated state must use future rollback.
-pub(crate) fn unenroll(config: &StoreConfig, expected: &NamespaceAdmission) -> Result<(), StorageError> {
-    if expected.namespace != config.namespace { return Err(StorageError::NamespaceMismatch); }
-    let epoch = config.expected_stream_epoch.as_deref().ok_or(StorageError::InvalidArguments)?;
+pub(crate) fn unenroll(
+    config: &StoreConfig,
+    expected: &NamespaceAdmission,
+) -> Result<(), StorageError> {
+    if expected.namespace != config.namespace {
+        return Err(StorageError::NamespaceMismatch);
+    }
+    let epoch = config
+        .expected_stream_epoch
+        .as_deref()
+        .ok_or(StorageError::InvalidArguments)?;
     let StoreBackend::Sqlite { database } = &config.backend;
-    let mut db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(failed)?;
-    db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+    let mut db = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(failed)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(failed)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
     let actual = require_admitted(&tx, &config.namespace)?;
     if super::catalog_namespace::started(&tx).map_err(failed)? {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    if actual != *expected { return Err(StorageError::ScopeChanged); }
-    let actual_epoch: String = tx.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).map_err(failed)?;
-    if epoch != actual_epoch { return Err(StorageError::ScopeChanged); }
-    let qualification: i64 = tx.query_row("SELECT writer_qualification FROM storage_namespaces WHERE namespace=?1", [config.namespace.as_str()], |r| r.get(0)).map_err(failed)?;
-    if qualification != 0 { return Err(StorageError::NamespaceUpgradePending); }
+    if actual != *expected {
+        return Err(StorageError::ScopeChanged);
+    }
+    let actual_epoch: String = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(failed)?;
+    if epoch != actual_epoch {
+        return Err(StorageError::ScopeChanged);
+    }
+    let qualification: i64 = tx
+        .query_row(
+            "SELECT writer_qualification FROM storage_namespaces WHERE namespace=?1",
+            [config.namespace.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(failed)?;
+    if qualification != 0 {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
     let tables: Vec<(String, i64)> = tx.prepare("SELECT table_name,qualified_version FROM storage_writer_inventory ORDER BY table_name LIMIT 129").map_err(failed)?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)?;
-    if tables.is_empty() || tables.len() > TABLE_LIMIT || tables.iter().any(|(name, version)| name.len()>256 || *version != 0) {
+    if tables.is_empty()
+        || tables.len() > TABLE_LIMIT
+        || tables
+            .iter()
+            .any(|(name, version)| name.len() > 256 || *version != 0)
+    {
         return Err(StorageError::NamespaceUpgradePending);
     }
     let native_tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('storage_namespaces','storage_writer_inventory','storage_namespace_sequence')", [], |r| r.get(0)).map_err(failed)?;
@@ -162,9 +212,20 @@ pub(crate) fn unenroll(config: &StoreConfig, expected: &NamespaceAdmission) -> R
         let quoted = table.replace('"', "\"\"");
         for operation in ["INSERT", "UPDATE", "DELETE"] {
             let name = format!("storage_namespace_fence_{index}_{operation}");
-            let expected_sql = format!("CREATE TRIGGER {name} BEFORE {operation} ON \"{quoted}\" BEGIN SELECT RAISE(ABORT,'native namespace writer upgrade pending'); END");
-            let stored: Option<(String, String)> = tx.query_row("SELECT tbl_name,sql FROM sqlite_schema WHERE type='trigger' AND name=?1", [&name], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(failed)?;
-            if stored.as_ref().is_none_or(|(owner, sql)| owner != table || sql.trim_end_matches(';') != expected_sql) {
+            let expected_sql = format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON \"{quoted}\" BEGIN SELECT RAISE(ABORT,'native namespace writer upgrade pending'); END"
+            );
+            let stored: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT tbl_name,sql FROM sqlite_schema WHERE type='trigger' AND name=?1",
+                    [&name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(failed)?;
+            if stored.as_ref().is_none_or(|(owner, sql)| {
+                owner != table || sql.trim_end_matches(';') != expected_sql
+            }) {
                 return Err(StorageError::NamespaceUpgradePending);
             }
             triggers.push(name);
@@ -173,8 +234,12 @@ pub(crate) fn unenroll(config: &StoreConfig, expected: &NamespaceAdmission) -> R
     tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_namespace_sequence(singleton INTEGER PRIMARY KEY CHECK(singleton=1),last_generation INTEGER NOT NULL CHECK(last_generation>0)) STRICT;").map_err(failed)?;
     let generation = i64::try_from(actual.generation).map_err(|_| StorageError::ScopeChanged)?;
     tx.execute("INSERT INTO storage_namespace_sequence VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET last_generation=max(last_generation,excluded.last_generation)", [generation]).map_err(failed)?;
-    for trigger in triggers { tx.execute_batch(&format!("DROP TRIGGER \"{trigger}\";")).map_err(failed)?; }
-    tx.execute_batch("DROP TABLE storage_writer_inventory; DROP TABLE storage_namespaces;").map_err(failed)?;
+    for trigger in triggers {
+        tx.execute_batch(&format!("DROP TRIGGER \"{trigger}\";"))
+            .map_err(failed)?;
+    }
+    tx.execute_batch("DROP TABLE storage_writer_inventory; DROP TABLE storage_namespaces;")
+        .map_err(failed)?;
     tx.commit().map_err(|_| StorageError::CommitUncertain)?;
     Ok(())
 }
@@ -378,19 +443,43 @@ mod tests {
         let unbound = Fixture::new();
         let bound = Fixture::new();
         bound.config.admit_namespace().unwrap();
-        let options = Options { cache: bound.root.join("decoy-does-not-exist.json"), ..Options::default() };
+        let options = Options {
+            cache: bound.root.join("decoy-does-not-exist.json"),
+            ..Options::default()
+        };
         let mut mismatch = bound.config.clone();
         mismatch.namespace = LogicalSourceNamespace::new("foreign-source").unwrap();
         let mut stale = bound.config.clone();
         stale.expected_stream_epoch = Some("0".repeat(64));
-        crate::storage::conformance::configured_native_read_refusals(&options, unbound.config.clone(), mismatch, stale);
+        crate::storage::conformance::configured_native_read_refusals(
+            &options,
+            unbound.config.clone(),
+            mismatch,
+            stale,
+        );
         assert!(!options.cache.with_extension("sqlite3").exists());
-        let local_options = Options { cache: bound.root.join("index.json"), ..Options::default() };
+        let local_options = Options {
+            cache: bound.root.join("index.json"),
+            ..Options::default()
+        };
         let request = crate::catalog::Request::parse("limit=1").unwrap();
-        let refused = crate::storage::read_local_catalog_page(&local_options, "source-A", &request).err().unwrap();
-        assert_eq!(*refused.downcast::<StorageError>().unwrap(), StorageError::NamespaceUpgradePending);
-        let local = crate::storage::local_query_catalog(&local_options, bound.config.namespace.clone());
-        assert_eq!(local.read_cohort(&bound.config.namespace, 1, &mut 1024).err().unwrap().code, "namespace_upgrade_pending");
+        let refused = crate::storage::read_local_catalog_page(&local_options, "source-A", &request)
+            .err()
+            .unwrap();
+        assert_eq!(
+            *refused.downcast::<StorageError>().unwrap(),
+            StorageError::NamespaceUpgradePending
+        );
+        let local =
+            crate::storage::local_query_catalog(&local_options, bound.config.namespace.clone());
+        assert_eq!(
+            local
+                .read_cohort(&bound.config.namespace, 1, &mut 1024)
+                .err()
+                .unwrap()
+                .code,
+            "namespace_upgrade_pending"
+        );
         // The configured reader resolves the real database even though Options
         // points at an absent decoy, and returns the namespace-labelled page.
         let page = bound.config.catalog_page(&options, "limit=1").unwrap();
@@ -401,24 +490,67 @@ mod tests {
     fn unenroll_round_trip_preserves_native_rows_restores_warm_writer_and_fences_old_token() {
         let f = Fixture::new();
         let warm = f.db();
-        warm.execute("INSERT INTO meta VALUES('reported_fact_test','preserved')", []).unwrap();
-        let before: i64 = warm.query_row("SELECT count(*) FROM meta", [], |r| r.get(0)).unwrap();
+        warm.execute(
+            "INSERT INTO meta VALUES('reported_fact_test','preserved')",
+            [],
+        )
+        .unwrap();
+        let before: i64 = warm
+            .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+            .unwrap();
         let first = f.config.admit_namespace().unwrap();
-        assert!(warm.execute("UPDATE meta SET value='changed' WHERE key='reported_fact_test'", []).is_err());
-        let mut wrong = f.config.clone(); wrong.expected_stream_epoch = Some("0".repeat(64));
-        assert_eq!(wrong.unenroll_namespace(&first), Err(StorageError::ScopeChanged));
+        assert!(
+            warm.execute(
+                "UPDATE meta SET value='changed' WHERE key='reported_fact_test'",
+                []
+            )
+            .is_err()
+        );
+        let mut wrong = f.config.clone();
+        wrong.expected_stream_epoch = Some("0".repeat(64));
+        assert_eq!(
+            wrong.unenroll_namespace(&first),
+            Err(StorageError::ScopeChanged)
+        );
         assert!(is_bound(&warm).unwrap());
         f.config.unenroll_namespace(&first).unwrap();
         assert!(!is_bound(&warm).unwrap());
-        assert_eq!(warm.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0)).unwrap(), before);
-        assert_eq!(warm.query_row("SELECT value FROM meta WHERE key='reported_fact_test'", [], |r| r.get::<_, String>(0)).unwrap(), "preserved");
-        warm.execute("UPDATE meta SET value='changed' WHERE key='reported_fact_test'", []).unwrap();
+        assert_eq!(
+            warm.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            warm.query_row(
+                "SELECT value FROM meta WHERE key='reported_fact_test'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "preserved"
+        );
+        warm.execute(
+            "UPDATE meta SET value='changed' WHERE key='reported_fact_test'",
+            [],
+        )
+        .unwrap();
         assert!(EventCache::open_scoped(&f.root.join("index.json")).is_ok());
         let second = f.config.admit_namespace().unwrap();
         assert!(second.generation > first.generation);
-        assert_eq!(f.config.unenroll_namespace(&first), Err(StorageError::ScopeChanged));
+        assert_eq!(
+            f.config.unenroll_namespace(&first),
+            Err(StorageError::ScopeChanged)
+        );
         f.config.unenroll_namespace(&second).unwrap();
-        assert_eq!(warm.query_row("SELECT value FROM meta WHERE key='reported_fact_test'", [], |r| r.get::<_, String>(0)).unwrap(), "changed");
+        assert_eq!(
+            warm.query_row(
+                "SELECT value FROM meta WHERE key='reported_fact_test'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "changed"
+        );
     }
 
     #[test]
@@ -426,10 +558,19 @@ mod tests {
         let f = Fixture::new();
         let admitted = f.config.admit_namespace().unwrap();
         let db = f.db();
-        db.execute_batch("DROP TRIGGER storage_namespace_fence_0_DELETE").unwrap();
-        assert_eq!(f.config.unenroll_namespace(&admitted), Err(StorageError::NamespaceUpgradePending));
+        db.execute_batch("DROP TRIGGER storage_namespace_fence_0_DELETE")
+            .unwrap();
+        assert_eq!(
+            f.config.unenroll_namespace(&admitted),
+            Err(StorageError::NamespaceUpgradePending)
+        );
         assert!(is_bound(&db).unwrap());
-        assert!(db.execute("UPDATE meta SET value='bad' WHERE key='catalog_generation'", []).is_err());
+        assert!(
+            db.execute(
+                "UPDATE meta SET value='bad' WHERE key='catalog_generation'",
+                []
+            )
+            .is_err()
+        );
     }
-
 }
