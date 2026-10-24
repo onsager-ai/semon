@@ -2203,23 +2203,8 @@ impl IndexStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
-        for path in paths {
-            if tx
-                .execute(
-                    "INSERT OR IGNORE INTO catalog_backfill_sources VALUES(?1)",
-                    [path],
-                )
-                .map_err(failure)?
-                > 0
-            {
-                invalidate_catalog_source(&tx, path, "changed").map_err(failure)?;
-            }
-        }
-        tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state',?1)",
-            [if complete { "draining" } else { "discovering" }],
-        )
-        .map_err(failure)?;
+        crate::storage::sqlite::source_journal::discover(&tx, None, paths, complete)
+            .map_err(failure)?;
         tx.commit().map_err(failure)
     }
     fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError> {
@@ -2363,22 +2348,8 @@ impl IndexStore for SqliteStore {
     }
 
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT revision FROM session_catalog_invalidations WHERE source_path=?1")
-            .map_err(failure)?;
-        paths
-            .iter()
-            .map(|path| {
-                Ok((
-                    path.clone(),
-                    statement
-                        .query_row([path], |row| row.get(0))
-                        .optional()
-                        .map_err(failure)?,
-                ))
-            })
-            .collect()
+        crate::storage::sqlite::source_journal::claims(&self.connection, None, paths)
+            .map_err(failure)
     }
 
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
@@ -2592,23 +2563,7 @@ fn invalidate_catalog_source(
     path: &str,
     reason: &str,
 ) -> rusqlite::Result<()> {
-    // Keep the counter after acknowledgement. Resetting per-path revisions
-    // would let an old claim mistake a later observation for its own (ABA).
-    transaction
-        .prepare_cached(
-            "INSERT INTO meta(key,value) VALUES ('catalog_source_revision','1')
-         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
-        )?
-        .execute([])?;
-    transaction.prepare_cached(
-        "INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at)
-         VALUES (?1,CAST((SELECT value FROM meta WHERE key='catalog_source_revision') AS INTEGER),?2,?3)
-         ON CONFLICT(source_path) DO UPDATE SET revision=excluded.revision,
-         reason=excluded.reason, observed_at=excluded.observed_at",
-    )?.execute(
-        params![path, reason, crate::model::now_ms()],
-    )?;
-    Ok(())
+    crate::storage::sqlite::source_journal::invalidate(transaction, None, path, reason)
 }
 
 pub(super) enum Unopened {

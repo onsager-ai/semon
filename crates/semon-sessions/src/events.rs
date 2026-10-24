@@ -966,6 +966,9 @@ fn consumed_hashes(file: &mut LogFile, offset: u64) -> io::Result<([u8; 32], [u8
 /// Why a store call failed.
 #[derive(Debug)]
 pub(crate) enum StoreError {
+    /// Explicit backend errors never detach a configured producer or fork it
+    /// into an in-memory/unbound writer.
+    Configured(crate::storage::StorageError),
     /// Another process held the store past its wait: this change stays in
     /// memory and is written with the file's next one.
     Busy(String),
@@ -978,6 +981,7 @@ pub(crate) enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Configured(error) => std::fmt::Display::fmt(error, formatter),
             Self::Busy(message) | Self::Data(message) | Self::Failed(message) => {
                 formatter.write_str(message)
             }
@@ -1093,6 +1097,9 @@ pub(crate) trait IndexStore: Send {
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
+    fn invalidate_catalog_sources(&mut self, _expected: &[(String, Option<i64>)]) -> Result<bool, StoreError> {
+        Err(StoreError::Configured(crate::storage::StorageError::NamespaceUpgradePending))
+    }
     fn catalog_component_paths(
         &self,
         paths: &[String],
@@ -1244,6 +1251,37 @@ pub(crate) trait IndexStore: Send {
     ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError>;
 }
 
+impl crate::storage::source_observations::SourceObservationStore for EventCache {
+    fn discover(&mut self, paths: &[String], complete: bool) -> Result<(), crate::storage::StorageError> {
+        self.store.as_mut().ok_or(crate::storage::StorageError::Unavailable)?
+            .discover_catalog_sources(paths, complete).map_err(configured_error)
+    }
+    fn invalidate(&mut self, expected: &[(String, Option<i64>)]) -> Result<bool, crate::storage::StorageError> {
+        self.store.as_mut().ok_or(crate::storage::StorageError::Unavailable)?
+            .invalidate_catalog_sources(expected).map_err(configured_error)
+    }
+    fn claims(&self, paths: &[String]) -> Result<crate::storage::source_observations::SourceClaims, crate::storage::StorageError> {
+        self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
+            .catalog_claims(paths).map_err(configured_error)
+    }
+    fn pending(&self, limit: usize) -> Result<Vec<String>, crate::storage::StorageError> {
+        self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
+            .pending_catalog_sources(limit).map_err(configured_error)
+    }
+    fn backfill_state(&self) -> Result<Option<String>, crate::storage::StorageError> {
+        self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
+            .backfill_state().map_err(configured_error)
+    }
+}
+
+fn configured_error(error: StoreError) -> crate::storage::StorageError {
+    match error {
+        StoreError::Configured(error) => error,
+        StoreError::Busy(_) => crate::storage::StorageError::Busy,
+        StoreError::Data(_) | StoreError::Failed(_) => crate::storage::StorageError::Unavailable,
+    }
+}
+
 /// One file's index in memory, and the ledger it was read at.
 struct CachedFile {
     ledger: Ledger,
@@ -1389,6 +1427,16 @@ enum Base {
 }
 
 impl EventCache {
+    pub(crate) fn open_configured(
+        config: &crate::storage::StoreConfig,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let store = crate::storage::sqlite::open_configured_index(config)?;
+        Ok(Self {
+            store: Some(store),
+            scoped: true,
+            ..Self::default()
+        })
+    }
     /// A read-only request-local cache of selected source generations. The
     /// caller keeps catalog metadata and these ledgers in one SQLite snapshot.
     /// No store is attached, so native projection cannot mutate global rows.
@@ -2179,6 +2227,9 @@ impl EventCache {
     /// failure stops using the store until it is opened again.
     fn store_failed(&mut self, error: &StoreError) {
         match error {
+            StoreError::Configured(_) => {
+                self.busy = true;
+            }
             StoreError::Busy(_) => {
                 self.busy = true;
                 let what = self

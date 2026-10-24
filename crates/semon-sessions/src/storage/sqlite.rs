@@ -6,6 +6,9 @@ pub(crate) mod namespace;
 pub(crate) mod navigation;
 pub(crate) mod publication;
 pub(crate) mod query;
+pub(crate) mod source_journal;
+mod configured_index;
+pub(crate) use configured_index::open as open_configured_index;
 mod reader;
 
 use super::{

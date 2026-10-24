@@ -28,6 +28,8 @@ pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
     "session_search_memberships",
     "session_search_counts",
     "session_catalog_changes",
+    "session_catalog_invalidations",
+    "catalog_backfill_sources",
 ];
 const BYTE_LIMIT: usize = 8 * 1024 * 1024;
 const ROW_LIMIT: usize = 2 * 1024 * 1024;
@@ -204,7 +206,7 @@ fn create_destination(db: &Connection, table: &str, keys: &[String]) -> Result<(
     Ok(())
 }
 
-fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
+pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
     for (operation, predicate) in [
         ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
         (
@@ -213,7 +215,7 @@ fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
         ),
         ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
     ] {
-        db.execute_batch(&format!("CREATE TRIGGER {} BEFORE {operation} ON {} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'namespace writer refused'); END;", quote(&format!("storage_catalog_guard_{table}_{operation}")), quote(table))).map_err(failed)?;
+        db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS {} BEFORE {operation} ON {} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'namespace writer refused'); END;", quote(&format!("storage_catalog_guard_{table}_{operation}")), quote(table))).map_err(failed)?;
     }
     Ok(())
 }
