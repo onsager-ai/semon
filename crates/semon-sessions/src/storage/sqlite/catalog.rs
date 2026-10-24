@@ -1,15 +1,24 @@
 //! Native Catalog SQL and snapshot lifecycle. Rendering/identity stay shared.
-use crate::{Options, events::EventCache, model::summary::{CatalogRow, CatalogSource}, viewer::ViewerReply, catalog::Request};
-use crate::storage::catalog::CatalogSnapshot;
-use rusqlite::{Connection, Transaction, OpenFlags, OptionalExtension, types::Value as SqlValue};
-use std::{io, time::Duration};
-use serde_json::Value;
 use crate::CatalogReadScope;
+use crate::storage::catalog::CatalogSnapshot;
+use crate::{
+    Options,
+    catalog::Request,
+    events::EventCache,
+    model::summary::{CatalogRow, CatalogSource},
+    viewer::ViewerReply,
+};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, types::Value as SqlValue};
+use serde_json::Value;
+use std::{io, time::Duration};
 
 /// Two direct keyset ranges avoid scanning earlier keys when many sessions
 /// share the same timestamp. OFFSET and mixed-order tuple comparisons do not
 /// provide that property. All ranges are read in one SQLite snapshot.
-pub(crate) fn rows(connection: &Connection, request: &Request) -> rusqlite::Result<Vec<CatalogRow>> {
+pub(crate) fn rows(
+    connection: &Connection,
+    request: &Request,
+) -> rusqlite::Result<Vec<CatalogRow>> {
     if let Some(sid) = &request.sid {
         return read_range(
             connection,
@@ -163,8 +172,11 @@ pub(crate) fn read_page(
     Ok(reply)
 }
 
-
-pub(crate) fn source_proof_observation(options: &Options, root: &str, absolute: &str) -> Result<Option<(String, CatalogSource, String)>, Box<dyn std::error::Error>> {
+pub(crate) fn source_proof_observation(
+    options: &Options,
+    root: &str,
+    absolute: &str,
+) -> Result<Option<(String, CatalogSource, String)>, Box<dyn std::error::Error>> {
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -209,14 +221,14 @@ pub(crate) fn source_proof_observation(options: &Options, root: &str, absolute: 
     ).optional()?;
     if revision
         != Some((
-        source.dev,
-        source.ino,
-        source.size,
-        source.modified_ns.to_be_bytes(),
-        source.offset,
-        source.prefix_sha256,
-        source.tail_sha256,
-        source.changed_ns.map(i128::to_be_bytes),
+            source.dev,
+            source.ino,
+            source.size,
+            source.modified_ns.to_be_bytes(),
+            source.offset,
+            source.prefix_sha256,
+            source.tail_sha256,
+            source.changed_ns.map(i128::to_be_bytes),
         ))
     {
         return Err(io::Error::other("source ledger changed").into());
@@ -231,21 +243,55 @@ pub(crate) fn source_proof_observation(options: &Options, root: &str, absolute: 
 }
 
 impl CatalogSnapshot for Transaction<'_> {
-    fn require_current(&self) -> io::Result<()> { crate::events::store::require_current(self) }
+    fn require_current(&self) -> io::Result<()> {
+        crate::events::store::require_current(self)
+    }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
-        self.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0)).optional().map_err(io::Error::other)
+        self.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(io::Error::other)
     }
-    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> { rows(self, request).map_err(io::Error::other) }
-    fn search(&self, query: crate::catalog_search::Query<'_>) -> io::Result<crate::catalog_search::Selection> { crate::catalog_search::read(self, query).map_err(io::Error::other) }
+    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
+        rows(self, request).map_err(io::Error::other)
+    }
+    fn search(
+        &self,
+        query: crate::catalog_search::Query<'_>,
+    ) -> io::Result<crate::catalog_search::Selection> {
+        crate::catalog_search::read(self, query).map_err(io::Error::other)
+    }
     fn has_history(&self, key: &str) -> io::Result<bool> {
-        self.query_row("SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)", [key], |row| row.get(0)).map_err(io::Error::other)
+        self.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key=?1)",
+            [key],
+            |row| row.get(0),
+        )
+        .map_err(io::Error::other)
     }
-    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> { crate::history_projection::catalog(self, key).map_err(io::Error::other) }
-    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> { crate::history_projection::qualified(self, row).map_err(io::Error::other) }
-    fn selected_details(&self, key: &str, sources: &[CatalogSource], status: &mut dyn FnMut(&CatalogRow) -> Value) -> io::Result<Option<Value>> {
-        crate::causal_trace::selected_details(self, key, sources, &mut |row| status(row)).map_err(io::Error::other)
+    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
+        crate::history_projection::catalog(self, key).map_err(io::Error::other)
     }
-    fn transcript_observation(&self, key: &str, generation: &str, history: bool) -> io::Result<Option<Value>> {
-        crate::transcript_range::observation(self, key, generation, history).map_err(io::Error::other)
+    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
+        crate::history_projection::qualified(self, row).map_err(io::Error::other)
+    }
+    fn selected_details(
+        &self,
+        key: &str,
+        sources: &[CatalogSource],
+        status: &mut dyn FnMut(&CatalogRow) -> Value,
+    ) -> io::Result<Option<Value>> {
+        crate::causal_trace::selected_details(self, key, sources, &mut |row| status(row))
+            .map_err(io::Error::other)
+    }
+    fn transcript_observation(
+        &self,
+        key: &str,
+        generation: &str,
+        history: bool,
+    ) -> io::Result<Option<Value>> {
+        crate::transcript_range::observation(self, key, generation, history)
+            .map_err(io::Error::other)
     }
 }

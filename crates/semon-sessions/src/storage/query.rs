@@ -1,7 +1,7 @@
 //! Backend-neutral Query metadata operations; derivation and native parsing stay shared.
 use crate::{QueryError, storage::LogicalSourceNamespace};
-use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,7 +38,17 @@ pub(crate) struct Part {
 }
 
 pub(crate) trait QueryCatalogStore {
-    fn read_cohort(&self, namespace: &LogicalSourceNamespace, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError>;
-    fn has_search_slots(&self, namespace: &LogicalSourceNamespace, key: &str, since: Option<i64>) -> Result<bool, QueryError>;
+    fn read_cohort(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        now: i64,
+        bytes_left: &mut usize,
+    ) -> Result<Part, QueryError>;
+    fn has_search_slots(
+        &self,
+        namespace: &LogicalSourceNamespace,
+        key: &str,
+        since: Option<i64>,
+    ) -> Result<bool, QueryError>;
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError>;
 }

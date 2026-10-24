@@ -8,10 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    io,
-    time::UNIX_EPOCH,
-};
+use std::{io, time::UNIX_EPOCH};
 
 const MAX_LIMIT: usize = 100;
 const MAX_CURSOR: usize = 8192;
@@ -91,7 +88,11 @@ pub fn session_source_proof(
     let absolute = home.join(path);
     let absolute = absolute.to_str().ok_or(InvalidArguments)?;
     let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
-        let Some((key, source, generation)) = crate::storage::source_proof_observation(options, root, absolute)? else { return Ok(None); };
+        let Some((key, source, generation)) =
+            crate::storage::source_proof_observation(options, root, absolute)?
+        else {
+            return Ok(None);
+        };
         // Reuse the catalog's current-root/native-selection validation. A
         // publication race fails closed rather than mixing catalog generations.
         let identity = session_catalog_identity(options, "source-proof", &key)?
@@ -847,18 +848,16 @@ pub(crate) fn read_page_snapshot(
                 last: cursor.last,
                 key: cursor.key.clone(),
             });
-        let found = transaction.search(
-            crate::catalog_search::Query {
-                scope: request.scope,
-                query,
-                harness: request.harness.as_deref(),
-                repo: request.repo.as_deref(),
-                model: request.model.as_deref(),
-                after,
-                limit: request.limit,
-                index_complete: complete,
-            },
-        )?;
+        let found = transaction.search(crate::catalog_search::Query {
+            scope: request.scope,
+            query,
+            harness: request.harness.as_deref(),
+            repo: request.repo.as_deref(),
+            model: request.model.as_deref(),
+            after,
+            limit: request.limit,
+            index_complete: complete,
+        })?;
         (found.rows, found.next, Some(found.report))
     } else {
         (transaction.rows(request)?, None, None)
@@ -963,13 +962,9 @@ pub(crate) fn read_page_snapshot(
         selected
             .first()
             .map(|row| {
-                transaction.selected_details(
-                    &row.key,
-                    &row.sources,
-                    &mut |relative| {
-                        relative_status(options, &runtime_observations, recorded.as_ref(), relative)
-                    },
-                )
+                transaction.selected_details(&row.key, &row.sources, &mut |relative| {
+                    relative_status(options, &runtime_observations, recorded.as_ref(), relative)
+                })
             })
             .transpose()?
             .flatten()
