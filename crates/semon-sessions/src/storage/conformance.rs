@@ -11,8 +11,16 @@ pub(crate) fn configured_native_read_refusals(
     stale: StoreConfig,
 ) {
     for (config, error, code) in [
-        (unadmitted, StorageError::NamespaceUnadmitted, "namespace_unadmitted"),
-        (mismatched, StorageError::NamespaceMismatch, "namespace_mismatch"),
+        (
+            unadmitted,
+            StorageError::NamespaceUnadmitted,
+            "namespace_unadmitted",
+        ),
+        (
+            mismatched,
+            StorageError::NamespaceMismatch,
+            "namespace_mismatch",
+        ),
         (stale, StorageError::ScopeChanged, "storage_epoch_changed"),
     ] {
         assert_eq!(config.catalog_page(options, "limit=1").err(), Some(error));

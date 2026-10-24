@@ -121,10 +121,21 @@ fn read_range(
     mut args: Vec<SqlValue>,
     limit: usize,
 ) -> rusqlite::Result<Vec<CatalogRow>> {
-    let qualified = super::catalog_namespace::ready(connection).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let qualified =
+        super::catalog_namespace::ready(connection).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let (table, index, namespace_filter) = if qualified {
-        ("main.session_catalog", if index == "sqlite_autoindex_session_catalog_1" { "storage_ns_catalog_identity".to_owned() } else { format!("storage_ns_{index}") }, "namespace=semon_namespace() AND ")
-    } else { ("session_catalog", index.to_owned(), "") };
+        (
+            "main.session_catalog",
+            if index == "sqlite_autoindex_session_catalog_1" {
+                "storage_ns_catalog_identity".to_owned()
+            } else {
+                format!("storage_ns_{index}")
+            },
+            "namespace=semon_namespace() AND ",
+        )
+    } else {
+        ("session_catalog", index.to_owned(), "")
+    };
     let sql = format!(
         "SELECT metadata,session_key,last_ms,harness,repo FROM {table} INDEXED BY {index} WHERE {namespace_filter}{filters}{range} ORDER BY last_ms DESC,session_key ASC LIMIT ?"
     );
@@ -168,7 +179,12 @@ pub(crate) fn read_page(
     let mut connection = binding.connection()?;
     let transaction = connection.transaction()?;
     binding.validate(&transaction, &binding.config().namespace)?;
-    let reply = crate::catalog::read_page_snapshot(options, machine, request, &AdmittedSnapshot(&transaction))?;
+    let reply = crate::catalog::read_page_snapshot(
+        options,
+        machine,
+        request,
+        &AdmittedSnapshot(&transaction),
+    )?;
     transaction.commit()?;
     Ok(reply)
 }
@@ -237,7 +253,11 @@ pub(crate) fn source_proof_observation(
         |row| row.get(0),
     )?;
     transaction.commit()?;
-    Ok(Some(crate::storage::catalog::SourceProofObservation { key, source: source.clone(), generation }))
+    Ok(Some(crate::storage::catalog::SourceProofObservation {
+        key,
+        source: source.clone(),
+        generation,
+    }))
 }
 
 impl CatalogSnapshot for Transaction<'_> {
@@ -296,13 +316,44 @@ impl CatalogSnapshot for Transaction<'_> {
 
 struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>);
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
-    fn require_current(&self) -> io::Result<()> { Ok(()) }
-    fn publication_value(&self, key: &str) -> io::Result<Option<String>> { self.0.publication_value(key) }
-    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> { self.0.rows(request) }
-    fn search(&self, query: crate::catalog_search::Query<'_>) -> io::Result<crate::catalog_search::Selection> { self.0.search(query) }
-    fn has_history(&self, key: &str) -> io::Result<bool> { self.0.has_history(key) }
-    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> { self.0.history_catalog(key) }
-    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> { self.0.history_qualified(row) }
-    fn selected_details(&self, key: &str, sources: &[CatalogSource], status: &mut dyn FnMut(&CatalogRow) -> Value) -> io::Result<Option<Value>> { self.0.selected_details(key, sources, status) }
-    fn transcript_observation(&self, key: &str, generation: &str, history: bool) -> io::Result<Option<Value>> { self.0.transcript_observation(key, generation, history) }
+    fn require_current(&self) -> io::Result<()> {
+        Ok(())
+    }
+    fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
+        self.0.publication_value(key)
+    }
+    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
+        self.0.rows(request)
+    }
+    fn search(
+        &self,
+        query: crate::catalog_search::Query<'_>,
+    ) -> io::Result<crate::catalog_search::Selection> {
+        self.0.search(query)
+    }
+    fn has_history(&self, key: &str) -> io::Result<bool> {
+        self.0.has_history(key)
+    }
+    fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
+        self.0.history_catalog(key)
+    }
+    fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
+        self.0.history_qualified(row)
+    }
+    fn selected_details(
+        &self,
+        key: &str,
+        sources: &[CatalogSource],
+        status: &mut dyn FnMut(&CatalogRow) -> Value,
+    ) -> io::Result<Option<Value>> {
+        self.0.selected_details(key, sources, status)
+    }
+    fn transcript_observation(
+        &self,
+        key: &str,
+        generation: &str,
+        history: bool,
+    ) -> io::Result<Option<Value>> {
+        self.0.transcript_observation(key, generation, history)
+    }
 }
