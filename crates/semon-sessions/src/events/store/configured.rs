@@ -81,7 +81,17 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
 CREATE TABLE storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);").map_err(failed)?;
     let ns = config.namespace.as_str().replace('\'', "''");
-    tx.execute_batch(&format!("ALTER TABLE meta ADD COLUMN namespace TEXT NOT NULL DEFAULT '{ns}'; CREATE UNIQUE INDEX storage_event_meta_key ON meta(namespace,key);")).map_err(failed)?;
+    tx.execute_batch(&format!("ALTER TABLE meta ADD COLUMN namespace TEXT NOT NULL DEFAULT '{ns}';")).map_err(failed)?;
+    for table in ["storage_event_tables", "storage_event_operations"] {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            let predicate = match operation {
+                "UPDATE" => "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
+                "DELETE" => "OLD.namespace IS NOT semon_namespace()",
+                _ => "NEW.namespace IS NOT semon_namespace()",
+            };
+            tx.execute_batch(&format!("CREATE TRIGGER storage_event_scope_{table}_{operation} BEFORE {operation} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'event operation namespace refused'); END;")).map_err(failed)?;
+        }
+    }
     for table in TABLES {
         let fences: Vec<String> = tx.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name GLOB 'storage_namespace_fence_*' ORDER BY name LIMIT 4").map_err(failed)?
             .query_map([table], |r| r.get(0)).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)?;
@@ -222,7 +232,8 @@ impl Writer {
             }
             let (state, target): (String, Option<String>) = tx.query_row("SELECT state,target FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2 AND source_path=?3 AND base=?4 AND observed_revision IS ?5", params![self.config.namespace.as_str(),intent.id,path,intent.base,intent.revision], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
             if state == "complete" {
-                if target.as_deref() != Some(&header_ledger(ledger)) {
+                let target_ledger = header_ledger(ledger);
+                if target.as_deref() != Some(target_ledger.as_str()) {
                     return Err(StorageError::Conflict);
                 }
                 work.push(false);
@@ -293,6 +304,7 @@ mod tests {
             drop(EventCache::open_scoped(&cache).unwrap());
             let database = EventCache::path(&cache);
             let db = Connection::open(&database).unwrap();
+            db.execute("INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')", []).unwrap();
             let epoch = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap();
             let config = StoreConfig { backend: StoreBackend::Sqlite { database }, namespace: LogicalSourceNamespace::new("configured-events").unwrap(), expected_stream_epoch: Some(epoch) };
             config.admit_namespace().unwrap();
@@ -355,6 +367,11 @@ mod tests {
         assert!(matches!(stale.native_events(), Err(StorageError::ScopeChanged)));
         assert!(f.db().execute("UPDATE files SET title='unbound'", []).is_err());
         assert!(connection(&f.config).unwrap().execute("UPDATE meta SET value='forged' WHERE key='catalog_changes_epoch'", []).is_err());
+        let custody: String = f.db().query_row("SELECT value FROM meta WHERE key='original-custody'", [], |r| r.get(0)).unwrap();
+        assert_eq!(custody, "preserve-verbatim");
+        // Already-open configured writers also reject a replaced epoch.
+        f.db().execute_batch("DROP TRIGGER storage_event_guard_meta_UPDATE; UPDATE meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE key='catalog_changes_epoch';").unwrap();
+        assert_eq!(restarted.ingest(&"a".repeat(64), &f.raw, "codex"), Err(StorageError::ScopeChanged));
     }
 
     #[test]
@@ -397,5 +414,29 @@ mod tests {
         let mut stale = ledger.clone();
         stale.offset = 1;
         assert_eq!(writer.begin(&path, Some(&stale), &"c".repeat(64)), Err(StorageError::Conflict));
+    }
+
+    #[test]
+    fn configured_initial_batch_is_one_transaction_and_replay_is_idempotent() {
+        let f = Fixture::new();
+        drop(f.config.native_events().unwrap());
+        let mut index = crate::storage::sqlite::open_configured_index(&f.config).unwrap();
+        let files = ["first", "second"].into_iter().enumerate().map(|(i, name)| {
+            let raw = f.root.join(name);
+            fs::write(&raw, b"").unwrap();
+            let path = raw.to_string_lossy().into_owned();
+            let ledger = Ledger { stat: Stat::of(&raw).unwrap(), offset: 0, prefix: Sha256::digest(b"").into(), tail: Sha256::digest(b"").into() };
+            index.prepare_file(&path, None, &format!("{:064x}", i + 1)).unwrap();
+            (path, ledger, std::sync::Arc::new(FileIndex::default()))
+        }).collect::<Vec<_>>();
+        let before = f.state();
+        f.db().execute_batch("CREATE TRIGGER fail_second_event BEFORE INSERT ON files WHEN NEW.path LIKE '%/second' BEGIN SELECT RAISE(ABORT,'fixture interruption'); END;").unwrap();
+        assert!(matches!(index.commit_initial_files(&files), Err(StoreError::Configured(StorageError::Unavailable))));
+        assert_eq!(before, f.state());
+        f.db().execute_batch("DROP TRIGGER fail_second_event").unwrap();
+        assert_eq!(index.commit_initial_files(&files).unwrap(), Outcome::Written);
+        let committed = f.state();
+        assert_eq!(index.commit_initial_files(&files).unwrap(), Outcome::Written);
+        assert_eq!(committed, f.state());
     }
 }

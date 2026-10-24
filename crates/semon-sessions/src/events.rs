@@ -1323,7 +1323,7 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
         if !matches!(harness, "claude" | "codex" | "copilot") || !self.explicit_store {
             return Err(crate::storage::StorageError::InvalidArguments);
         }
-        self.require_configured_store().map_err(|_| crate::storage::StorageError::Unavailable)?;
+        self.require_configured_store().map_err(|error| error.get_ref().and_then(|error| error.downcast_ref::<crate::storage::StorageError>()).copied().unwrap_or(crate::storage::StorageError::Unavailable))?;
         if let Some(receipt) = self.store.as_ref().ok_or(crate::storage::StorageError::Unavailable)?
             .reconcile_event(operation_id, &path.to_string_lossy()).map_err(configured_error)? {
             return Ok(receipt);
@@ -1331,7 +1331,7 @@ impl crate::storage::native_events::NativeEventStore for EventCache {
         self.event_operation = Some(operation_id.to_owned());
         let mut dirty = false;
         scan_file(path, harness, self, &mut dirty).map_err(|error| {
-            error.get_ref().and_then(|error| error.downcast_ref::<crate::storage::StorageError>()).cloned().unwrap_or(crate::storage::StorageError::Unavailable)
+            error.get_ref().and_then(|error| error.downcast_ref::<crate::storage::StorageError>()).copied().unwrap_or(crate::storage::StorageError::Unavailable)
         })?;
         let key = path.to_string_lossy();
         if self.unpersisted.contains(key.as_ref()) {
@@ -2321,6 +2321,14 @@ impl EventCache {
     /// memory and skips the store's other writes in this scan; any other
     /// failure stops using the store until it is opened again.
     fn store_failed(&mut self, error: &StoreError) {
+        if self.explicit_store {
+            self.configured_failure = Some(match error {
+                StoreError::Configured(error) => *error,
+                StoreError::Busy(_) => crate::storage::StorageError::Busy,
+                StoreError::Data(_) | StoreError::Failed(_) => crate::storage::StorageError::Unavailable,
+            });
+            return;
+        }
         match error {
             StoreError::Configured(error) => {
                 self.configured_failure = Some(*error);
@@ -2552,6 +2560,7 @@ impl EventCache {
         let stored = self.store.as_ref().map(|store| store.ledger(path));
         match stored {
             Some(Ok(ledger)) => return Ok(ledger),
+            Some(Err(error)) if self.explicit_store => return Err(io::Error::other(configured_error(error))),
             Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
             Some(Err(StoreError::Data(_))) if self.busy => return Ok(None),
             Some(Err(StoreError::Data(_))) => {
@@ -2601,6 +2610,7 @@ impl EventCache {
         Ok(match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),
             Some(Ok(_)) => Base::Moved,
+            Some(Err(error)) if self.explicit_store => return Err(io::Error::other(configured_error(error))),
             Some(Err(error @ StoreError::Configured(_))) => return Err(store_io_error(error)),
             Some(Err(StoreError::Data(_))) | None => Base::Unreadable,
             Some(Err(error)) => {
@@ -2688,6 +2698,18 @@ impl EventCache {
             .map(|store| store.commit_file(path, expected, changes, ledger, index));
         if let Some(started) = started {
             self.index_write_duration += started.elapsed();
+        }
+        if self.explicit_store {
+            return match committed {
+                Some(Ok(Outcome::Written)) => {
+                    self.unpersisted.remove(path);
+                    Ok(false)
+                }
+                Some(Ok(Outcome::Conflict | Outcome::Deferred)) => Err(io::Error::other(crate::storage::StorageError::Conflict)),
+                Some(Ok(Outcome::Stale)) => Err(io::Error::other(crate::storage::StorageError::ScopeChanged)),
+                Some(Err(error)) => Err(io::Error::other(configured_error(error))),
+                None => Err(io::Error::other(crate::storage::StorageError::Unavailable)),
+            };
         }
         match committed {
             Some(Ok(Outcome::Written)) => {
