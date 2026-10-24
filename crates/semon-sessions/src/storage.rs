@@ -5,6 +5,7 @@ pub(crate) mod catalog;
 #[cfg(test)]
 mod conformance;
 pub(crate) mod query;
+pub(crate) mod navigation;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;
 
@@ -60,6 +61,25 @@ impl NativeReaderBinding {
         match self {
             Self::Admitted(config) | Self::TransitionalUnboundLocal(config) => config,
         }
+    }
+}
+
+pub(crate) fn local_navigation_binding(options: &crate::Options, source: &str) -> Result<NativeReaderBinding, StorageError> {
+    let namespace = LogicalSourceNamespace::new(if source.is_empty() { "local" } else { source })?;
+    Ok(NativeReaderBinding::TransitionalUnboundLocal(StoreConfig::local_metadata(options, namespace)))
+}
+
+pub(crate) fn navigation_store(binding: NativeReaderBinding) -> Box<dyn navigation::NativeNavigationStore> {
+    Box::new(sqlite::navigation::SqliteNavigation(binding))
+}
+
+impl NativeReaderBinding {
+    pub(crate) fn bookmark_page(&self, options: &crate::Options, source: &str, query: &str) -> crate::ViewerReply {
+        let request = match crate::catalog::Request::parse(query) { Ok(request) => request, Err(reply) => return reply };
+        sqlite::catalog::read_page(self, options, source, &request).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
+    }
+    pub(crate) fn bookmark_identity(&self, options: &crate::Options, source: &str, key: &str) -> Result<Option<crate::CatalogSessionIdentity>, CatalogIdentityError> {
+        sqlite::catalog::history_identity(self, options, source, key)
     }
 }
 
@@ -174,6 +194,16 @@ impl StoreConfig {
                     .map_or(StorageError::Unavailable, |error| *error)
             },
         )
+    }
+
+    /// Resolve metadata-only native navigation under this admitted namespace.
+    pub fn resolve_native(&self, options: &crate::Options, harness: &str, native_id: &str, scope: CatalogReadScope, expected_generation: Option<&str>) -> Result<crate::CatalogNativeResolution, StorageError> {
+        let store = navigation_store(NativeReaderBinding::Admitted(self.clone()));
+        crate::native_resolution::resolve_with_store(options, self.namespace.as_str(), harness, native_id, scope, expected_generation, store.as_ref())
+    }
+
+    pub fn session_bookmark(&self, options: &crate::Options, query: &str) -> crate::ViewerReply {
+        crate::session_bookmark::with_binding(options, self.namespace.as_str(), query, &NativeReaderBinding::Admitted(self.clone()))
     }
 
     /// Bounded native Query publication metadata from this configured source.

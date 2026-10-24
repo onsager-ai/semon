@@ -50,7 +50,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `native_evidence/runtime.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_evidence.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_header.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `native_resolution.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `native_resolution.rs` | ported | Shared identity/Raw-path derivation consumes bounded semantic navigation observations; SQLite and unchanged fixture oracles live in storage/sqlite/navigation.rs. |
 | `native_sidecar.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_timing.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_tree/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -65,7 +65,7 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `received.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `retention.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `session_bookmark.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -402,3 +402,39 @@ intents and operation reconciliation; immutable proof/reader leases and GC;
 export/checkpoint/catch-up/fenced cutover/qualified rollback; EventCache fallback
 and no-SQLite instrumentation; #479 PostgreSQL; Hub #313 RLS and migration.
 Exact-head CI and independent review remain required. #380 remains a merge hold.
+
+### Read-port increment: bookmark targets and native aliases
+
+Two real consumers now use semantic navigation snapshot operations:
+`session_bookmark.rs` and `native_resolution.rs`. Their driver/path entries are
+removed from the exact inventory (45 -> 43). Options enters through the named
+transitional unbound binding; StoreConfig enters through durable admitted
+namespace/epoch validation. Both use one bookmark algorithm and one native
+resolution derivation, including the unchanged Raw-home/input-path checks.
+Neither consumer receives SQL, driver types, a database filename or an arbitrary
+SQL callback. The existing native alias fixture and every oracle moved into the
+SQLite adapter, where the fixture calls the same observation reader and shared
+derivation as production.
+
+The adapter reads publication version/generation/completeness, at most two owner
+keys and at most 1 MiB of selected metadata within the admitted read snapshot.
+Qualified reads use main tables, namespace predicates and namespace-composite
+native-binding indexes; no INDEXED BY is applied to a TEMP view. An optional
+expected generation is compared before owner/metadata SQL. Bookmark target
+lookups remain distinct, ordered and bounded to three keys. Missing or
+unsupported configured state is an explicit error; the public unbound native
+resolver retains its unavailable observation for unavailable local storage.
+
+Configured tests cover namespace isolation against private second-source table
+rows, epoch/generation refusal, unadmitted/mismatched namespaces, refusal of the
+unbound bridge on enrolled stores, and preservation of originals. They do not
+open the public multi-source gate or constitute full native two-source ingest.
+Additional tests preserve unbound ambiguity/provisional/current/history/index
+oracles, target bounds and generation refusal before owner SQL.
+
+The connected Event/ledger/meta/claims/stage/invalidation/relocation publication
+unit, the remaining 43 inventory paths and indirect owners, claims/Raw intents,
+operation IDs, immutable proofs/reader leases/GC, export/checkpoint/catch-up/
+fenced cutover/qualified rollback, EventCache fallback and no-SQLite
+instrumentation remain. #479 PostgreSQL and Hub #313 remain wholly outstanding.
+The gate stays version 0; #478/#477 completion and the #380 merge hold are unchanged.
