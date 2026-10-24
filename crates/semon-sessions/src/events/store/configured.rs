@@ -781,6 +781,21 @@ mod tests {
         assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace')",[],|r| r.get::<_,bool>(0)).unwrap());
     }
 
+    #[test]
+    fn prepared_old_connection_cannot_write_after_event_guard_installation() {
+        let f = Fixture::new();
+        let old = f.db();
+        // Prepare against the admission fences before the configured writer
+        // installs its new guards. SQLite must requalify this warm statement.
+        let mut old_write = old.prepare("UPDATE files SET title='old-writer' WHERE path=?1").unwrap();
+        let mut writer = f.config.native_events().unwrap();
+        writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        let before = f.state();
+        assert!(old_write.execute([f.raw.to_str().unwrap()]).is_err());
+        assert_eq!(f.state(),before);
+        assert_eq!(crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,0);
+    }
+
     struct Fixture {
         root: PathBuf,
         config: StoreConfig,
