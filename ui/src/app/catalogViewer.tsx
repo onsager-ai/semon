@@ -3079,7 +3079,7 @@ export function createCatalogViewer(
     syncJump(view);
     scrollEnd();
     void loadSelected(view).finally(() => {
-      if (active === view && !disposed) scrollEnd();
+      if (active === view && !disposed && view.following) scrollEnd();
     });
   }
   function fieldView(view: SelectedView, entry: CatalogTranscriptEntry) {
