@@ -29,6 +29,7 @@ impl NativeResolutionObservation {
 }
 
 pub(crate) trait NativeNavigationStore {
+    fn catalog_generation(&self) -> Result<String, StorageError>;
     fn bookmarked_target_keys(&self, target: &str) -> Result<Vec<String>, StorageError>;
     fn native_resolution(
         &self,

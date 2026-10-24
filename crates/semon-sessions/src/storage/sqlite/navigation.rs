@@ -11,6 +11,16 @@ use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) struct SqliteNavigation(pub(crate) NativeReaderBinding);
 impl NativeNavigationStore for SqliteNavigation {
+    fn catalog_generation(&self) -> Result<String, StorageError> {
+        let db = self.0.snapshot(&self.0.config().namespace)?;
+        db.query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failed)
+    }
+
     fn bookmarked_target_keys(&self, target: &str) -> Result<Vec<String>, StorageError> {
         if target.len() > 4096 {
             return Err(StorageError::InvalidArguments);

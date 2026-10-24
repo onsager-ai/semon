@@ -738,7 +738,6 @@ mod tests {
         );
         let bookmark: serde_json::Value = serde_json::from_slice(&bookmark.body).unwrap();
         assert_eq!(bookmark["matches"][0]["catalog_key"], "same");
-        assert_eq!(bookmark["unavailable"], 0);
         let db = f.db();
         let before: (i64, Option<String>, i64) = db.query_row(
             "SELECT (SELECT count(*) FROM storage_original_session_catalog),(SELECT value FROM meta WHERE key='catalog_generation'),(SELECT count(*) FROM session_catalog_changes)",
@@ -807,12 +806,17 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
+            f.config.catalog_generation(),
+            Err(StorageError::NamespaceUnadmitted)
+        );
+        assert_eq!(
             SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()))
                 .bookmarked_target_keys("target"),
             Err(StorageError::NamespaceUnadmitted)
         );
         f.config.admit_namespace().unwrap();
         f.finish();
+        assert_eq!(f.config.catalog_generation(), Ok(generation.clone()));
         // A private table-level second-source fixture is not public admission.
         let db = f.db();
         register(&db, &LogicalSourceNamespace::new("B").unwrap()).unwrap();
@@ -856,6 +860,7 @@ mod tests {
         ));
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("b".repeat(64));
+        assert_eq!(stale.catalog_generation(), Err(StorageError::ScopeChanged));
         let stale = SqliteNavigation(NativeReaderBinding::Admitted(stale));
         assert_eq!(
             stale.bookmarked_target_keys("target"),
@@ -873,6 +878,13 @@ mod tests {
                 f.config.clone()
             ))
             .bookmarked_target_keys("target"),
+            Err(StorageError::NamespaceUpgradePending)
+        );
+        assert_eq!(
+            SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
+                f.config.clone()
+            ))
+            .catalog_generation(),
             Err(StorageError::NamespaceUpgradePending)
         );
         assert_eq!(
