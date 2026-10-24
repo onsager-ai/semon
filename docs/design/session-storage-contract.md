@@ -11,6 +11,48 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 20 increment: metadata admission and ownership
+
+Composite change-stream DDL now initializes only the store-global epoch. The
+real first-Source admission transaction validates the bound namespace and
+registry, validates both floor values, and fills missing Source floors before
+installing durable fences. Repeated admission does not reset progress. Public
+second admission is still refused. Private two-Source lifecycle tests use the
+same registry DDL and initializer; they do not expose a second public writer.
+
+The configured factory selects the authored store-global epoch UPDATE and
+cache-version INSERT. `writer-inventory.json` explicitly lists store keys,
+Source keys and Source prefixes. Store.rs observation/recovery/backfill,
+generation, slot/search/publication, contract qualification/init and reported
+stamp metadata use authored physical variants. Archive GLOB membership selects
+core and metadata ownership independently. Unknown composite keys, invalid
+Source bindings and malformed metadata namespace primary keys refuse. Source
+Journal revision remains separate from the physical store stream incarnation.
+These statement ports do not qualify their still-fenced publication consumers.
+
+Published proof preservation now selects Current and history references by
+their own physical Catalog families, independently of metadata, and addresses
+main tables with explicit namespace joins. Nonempty singleton history in a
+composite Current Catalog refuses before payload reads or proof copy/GC,
+because its publisher cannot establish a Source owner yet. This is an explicit
+remaining boundary, not qualified history publication. The connected proof
+fixture checks a same-key malformed foreign owner is never decoded, actual
+retained proof copy, unchanged foreign metadata and zero-write history refusal.
+
+Three exact `events::store::reprice::tests::native_usage_metadata_` tests cover
+real admission rollback/idempotence/reopen/warm-writer fencing; private Source
+floor/key isolation across rollback/restart, equal-path native append/cleanup,
+foreign archive poison, corrupt namespace shape and unknown keys; and proof
+reference ownership. The assembly fixture also compares actual configured
+factory column/index/trigger SQL and checks foreign change rows on insert,
+update and delete. All new checks, formatting and performance results await
+exact-SHA CI and independent review. No local CPU checks ran.
+
+Metadata/global/usage qualification stays 0. Semantic stage/dependency/mutation
+keys and consumers, full publication and historical ownership, immutable proof
+generations/reader leases/GC, supported-current migration, PostgreSQL and Hub313
+remain required. The #380 merge hold remains unchanged.
+
 ## Worker 19 increment: complete authored DDL composition
 
 `authored_storage_ddl(PhysicalLayout)` now selects all 21 authored dependency
@@ -25,8 +67,8 @@ and semantic-stage dependencies. A profile selects current Catalog/source rows
 and trace headers only; it does not port the singleton history, trace edges,
 support or semantic-stage owners. Authored change-stream variants scope current
 Catalog trigger effects to the changed row, keep the epoch in store namespace
-`''`, and initialize composite source floors using the explicit binding. Change
-delivery consumers and the historical publisher remain unqualified.
+`''`. Source floor enrollment was subsequently moved to real admission in
+Worker20. Change delivery consumers and the historical publisher remain unqualified.
 
 The copied-usage guard additionally validates its files foreign keys and the
 complete non-partial peer index before payload DML. CI now explicitly registers
@@ -41,10 +83,10 @@ composite Catalog refusal's zero payload decodes are now checked too.
 
 All results, formatting and performance qualification are pending exact-pin CI
 and independent review. No local CPU checks ran because temperature readings
-are unavailable. The bounded code read also confirmed that
-`chunk_proofs/published.rs::preserve` still has an unscoped current/history
-Catalog reference UNION. Its semantic owner remains unported; empty real
-history/source-map dependencies in a private fixture do not qualify that path.
+are unavailable. The Worker19 code read found an unscoped current/history reference UNION in
+`chunk_proofs/published.rs::preserve`. Worker20 ports its selectors and adds
+explicit refusal for unowned singleton history; historical publication remains
+unqualified.
 Public multi-source/current/publisher gates, configured host repair, immutable
 proof/reader lifetime work, supported-current migration, PostgreSQL and Hub
 adoption remain pending. The #380 merge hold is unchanged.

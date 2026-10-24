@@ -151,7 +151,14 @@ pub(crate) fn metadata_sql<'a>(
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    let (columns, namespace, key, values): (i64, i64, i64, i64) = db.prepare_cached(
+        "SELECT count(*),coalesce(max(CASE WHEN name='namespace' AND type='TEXT' AND \"notnull\"=1 THEN pk END),0),coalesce(max(CASE WHEN name='key' AND type='TEXT' THEN pk END),0),coalesce(sum(name='value' AND type='TEXT' AND \"notnull\"=1 AND pk=0),0) FROM pragma_table_info('meta','main')"
+    )?.query_row([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    let composite = match (columns, namespace, key, values) {
+        (2, 0, 1, 1) => false,
+        (3, 1, 2, 1) => true,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
     Ok(if composite { scoped } else { legacy })
 }
 
@@ -171,6 +178,7 @@ const SOURCE_METADATA_PREFIXES: &[&str] = &[
     "native_source_chunks:",
     "native_tree_failure:",
     "native_tree_summary:",
+    "slot_upgrade_selected:",
 ];
 const STORE_METADATA_KEYS: &[&str] = &[
     "cache_version",
@@ -196,6 +204,17 @@ const SOURCE_METADATA_KEYS: &[&str] = &[
     "overview_generation",
     "catalog_changes_floor_current",
     "catalog_changes_floor_retained_history",
+    "catalog_observed_at",
+    "catalog_recovery_after",
+    "catalog_recovery_reason",
+    "catalog_publication_epoch",
+    "slot_projection_catalog_generation",
+    "search_backfill_complete",
+    "search_generation_current",
+    "search_generation_retained_history",
+    "search_incomplete_current",
+    "search_incomplete_retained_history",
+    "claude_json_stamp",
 ];
 
 fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, StorageError> {
@@ -214,6 +233,8 @@ fn metadata_namespace<'a>(namespace: &'a str, key: &str) -> Result<&'a str, Stor
 }
 
 pub(crate) fn bind_metadata_scope(db: &Connection, namespace: &str) -> rusqlite::Result<()> {
+    crate::storage::LogicalSourceNamespace::new(namespace)
+        .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
     let namespace = namespace.to_owned();
     db.create_scalar_function(
         "semon_meta_scope",
@@ -263,12 +284,16 @@ pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
         tx.execute_batch(ddl).map_err(failed)?;
     }
     tx.execute(
-        "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
+        metadata_sql(&tx,
+            "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
+            "INSERT INTO meta(namespace,key,value) VALUES('','cache_version',?1)").map_err(failed)?,
         [CACHE_VERSION.to_string()],
     )
     .map_err(failed)?;
     tx.execute(
-        "UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'",
+        metadata_sql(&tx,
+            "UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'",
+            "UPDATE meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'").map_err(failed)?,
         [epoch],
     )
     .map_err(failed)?;
