@@ -156,9 +156,15 @@ pub(super) fn write(
     ledger: &Ledger,
     summary: &Summary,
 ) -> rusqlite::Result<()> {
-    let id: i64 = tx.query_row(configured::sql(tx, "SELECT file_id FROM files WHERE path=?1", "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?, [path], |r| {
-        r.get(0)
-    })?;
+    let id: i64 = tx.query_row(
+        configured::sql(
+            tx,
+            "SELECT file_id FROM files WHERE path=?1",
+            "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
+        )?,
+        [path],
+        |r| r.get(0),
+    )?;
     let source_id = native_usage::source(tx, path)?
         .ok_or(rusqlite::Error::InvalidQuery)?
         .0;
@@ -194,9 +200,15 @@ pub(super) fn bind_generation(
     ledger: &Ledger,
     projection_id: i64,
 ) -> rusqlite::Result<()> {
-    let id: i64 = tx.query_row(configured::sql(tx, "SELECT file_id FROM files WHERE path=?1", "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?, [path], |r| {
-        r.get(0)
-    })?;
+    let id: i64 = tx.query_row(
+        configured::sql(
+            tx,
+            "SELECT file_id FROM files WHERE path=?1",
+            "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
+        )?,
+        [path],
+        |r| r.get(0),
+    )?;
     tx.execute(
         "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE projection_id=?1",
         params![projection_id, header_ledger(ledger)],

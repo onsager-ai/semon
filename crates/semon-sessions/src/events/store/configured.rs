@@ -98,7 +98,11 @@ END;
 /// Select an authored statement for the physical family shape, never rewrite
 /// SQL or retry errors against another schema. Singleton stores still support
 /// read-only admission/assignment; configured writes require validate_core.
-pub(super) fn sql<'a>(db: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+pub(super) fn sql<'a>(
+    db: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
     let composite: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
     Ok(if composite { scoped } else { legacy })
 }
@@ -110,25 +114,61 @@ pub(super) fn predicate(db: &Connection) -> rusqlite::Result<&'static str> {
 /// Create a new physical store only. Existing files, even empty ones, refuse.
 /// Enrollment and bounded Catalog assignment remain separate explicit steps.
 pub(crate) fn create(config: &StoreConfig) -> Result<(), StorageError> {
-    let epoch = config.expected_stream_epoch.as_deref().filter(|s| s.len()==64 && s.bytes().all(|b| b.is_ascii_hexdigit())).ok_or(StorageError::InvalidArguments)?;
+    let epoch = config
+        .expected_stream_epoch
+        .as_deref()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or(StorageError::InvalidArguments)?;
     let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
     if database.as_os_str().is_empty() || database == Path::new(":memory:") {
         return Err(StorageError::InvalidArguments);
     }
-    let file = fs::OpenOptions::new().write(true).create_new(true).open(database).map_err(|_| StorageError::Unavailable)?;
-    let mut db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW).map_err(failed)?;
-    db.busy_timeout(Duration::from_millis(100)).map_err(failed)?;
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(database)
+        .map_err(|_| StorageError::Unavailable)?;
+    let mut db = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(failed)?;
+    db.busy_timeout(Duration::from_millis(100))
+        .map_err(failed)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
     for ddl in storage_ddl() {
-        let ddl = if ddl == LEGACY_EVENT_SCHEMA { CORE_SCHEMA } else if ddl == reprice::FILE_SCHEMA { PRICING_FILE_SCHEMA } else { ddl };
+        let ddl = if ddl == LEGACY_EVENT_SCHEMA {
+            CORE_SCHEMA
+        } else if ddl == reprice::FILE_SCHEMA {
+            PRICING_FILE_SCHEMA
+        } else {
+            ddl
+        };
         tx.execute_batch(ddl).map_err(failed)?;
     }
-    tx.execute("INSERT INTO meta(key,value) VALUES('cache_version',?1)", [CACHE_VERSION.to_string()]).map_err(failed)?;
-    tx.execute("UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'", [epoch]).map_err(failed)?;
-    tx.pragma_update(None,"user_version",SCHEMA_VERSION).map_err(failed)?;
+    tx.execute(
+        "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
+        [CACHE_VERSION.to_string()],
+    )
+    .map_err(failed)?;
+    tx.execute(
+        "UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'",
+        [epoch],
+    )
+    .map_err(failed)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(failed)?;
     tx.commit().map_err(|_| StorageError::CommitUncertain)?;
-    let mode: String = db.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).map_err(failed)?;
-    if !mode.eq_ignore_ascii_case("wal") { return Err(StorageError::Unavailable); }
+    let mode: String = db
+        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+        .map_err(failed)?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(StorageError::Unavailable);
+    }
     file.sync_all().map_err(|_| StorageError::CommitUncertain)?;
     Ok(())
 }
@@ -200,7 +240,8 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
-    db.pragma_update(None, "foreign_keys", true).map_err(failed)?;
+    db.pragma_update(None, "foreign_keys", true)
+        .map_err(failed)?;
     db.create_scalar_function(
         "semon_event_writer",
         0,
@@ -240,7 +281,9 @@ pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), Stor
 fn validate_core(db: &Connection) -> Result<(), StorageError> {
     for table in CORE_TABLES {
         let ready: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND type='TEXT' AND \"notnull\"=1 AND pk=1)", [table], |r| r.get(0)).map_err(failed)?;
-        if !ready { return Err(StorageError::NamespaceUpgradePending); }
+        if !ready {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let pk: String = db.query_row("SELECT group_concat(name,',') FROM (SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk)", [table], |r| r.get(0)).map_err(failed)?;
         let expected = match *table {
             "files" => "namespace,file_id",
@@ -249,7 +292,7 @@ fn validate_core(db: &Connection) -> Result<(), StorageError> {
         };
         let bad_indexes: i64 = db.query_row("SELECT count(*) FROM pragma_index_list(?1) i WHERE NOT EXISTS(SELECT 1 FROM pragma_index_info(i.name) WHERE seqno=0 AND name='namespace')", [table], |r| r.get(0)).map_err(failed)?;
         let foreign_keys: i64 = db.query_row("SELECT count(*) FROM pragma_foreign_key_list(?1) WHERE seq=0 AND \"from\"='namespace' AND \"to\"='namespace' AND \"table\"='files'", [table], |r| r.get(0)).map_err(failed)?;
-        if pk!=expected || bad_indexes!=0 || foreign_keys!=i64::from(*table!="files") {
+        if pk != expected || bad_indexes != 0 || foreign_keys != i64::from(*table != "files") {
             return Err(StorageError::NamespaceUpgradePending);
         }
     }
@@ -309,7 +352,11 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
         }
         tx.execute(
             "INSERT INTO storage_event_tables VALUES(?1,?2,?3)",
-            params![config.namespace.as_str(), table, i64::from(CORE_TABLES.contains(table))],
+            params![
+                config.namespace.as_str(),
+                table,
+                i64::from(CORE_TABLES.contains(table))
+            ],
         )
         .map_err(failed)?;
         for operation in ["INSERT", "UPDATE", "DELETE"] {
@@ -392,7 +439,9 @@ impl Writer {
         let db = self.snapshot()?;
         let mut readers = Readers::new(&db).map_err(failed)?;
         let mut statement = db
-            .prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE namespace=semon_namespace() AND path=?1"))
+            .prepare(&format!(
+                "SELECT {FILE_COLUMNS} FROM files WHERE namespace=semon_namespace() AND path=?1"
+            ))
             .map_err(failed)?;
         let mut rows = statement.query([path]).map_err(failed)?;
         let mut found = rows
@@ -669,28 +718,78 @@ mod tests {
         let f = Fixture::new();
         drop(f.config.native_events().unwrap());
         let db = f.db();
-        for table in CORE_TABLES.iter().copied().chain(["storage_event_tables", "storage_event_operations"]) {
-            let columns: Vec<(String, i64, Option<String>, i64)> = db.prepare("SELECT name,\"notnull\",dflt_value,pk FROM pragma_table_info(?1)").unwrap()
-                .query_map([table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-            assert!(columns.iter().any(|(name,not_null,default,pk)| name=="namespace" && *not_null==1 && default.is_none() && *pk==1), "{table}");
-            let indexes: Vec<String> = db.prepare("SELECT name FROM pragma_index_list(?1)").unwrap().query_map([table], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        for table in CORE_TABLES
+            .iter()
+            .copied()
+            .chain(["storage_event_tables", "storage_event_operations"])
+        {
+            let columns: Vec<(String, i64, Option<String>, i64)> = db
+                .prepare("SELECT name,\"notnull\",dflt_value,pk FROM pragma_table_info(?1)")
+                .unwrap()
+                .query_map([table], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                columns
+                    .iter()
+                    .any(|(name, not_null, default, pk)| name == "namespace"
+                        && *not_null == 1
+                        && default.is_none()
+                        && *pk == 1),
+                "{table}"
+            );
+            let indexes: Vec<String> = db
+                .prepare("SELECT name FROM pragma_index_list(?1)")
+                .unwrap()
+                .query_map([table], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
             assert!(!indexes.is_empty(), "{table}");
             for index in indexes {
-                let first: String = db.query_row("SELECT name FROM pragma_index_info(?1) WHERE seqno=0", [&index], |r| r.get(0)).unwrap();
-                assert_eq!(first,"namespace","{table}/{index}");
+                let first: String = db
+                    .query_row(
+                        "SELECT name FROM pragma_index_info(?1) WHERE seqno=0",
+                        [&index],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(first, "namespace", "{table}/{index}");
             }
-            let fks: Vec<(i64,String,String)> = db.prepare("SELECT seq,\"from\",\"to\" FROM pragma_foreign_key_list(?1)").unwrap().query_map([table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-            for (_,from,to) in fks.iter().filter(|(seq,_,_)| *seq==0) {
-                assert_eq!((from.as_str(),to.as_str()),("namespace","namespace"),"{table}");
+            let fks: Vec<(i64, String, String)> = db
+                .prepare("SELECT seq,\"from\",\"to\" FROM pragma_foreign_key_list(?1)")
+                .unwrap()
+                .query_map([table], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            for (_, from, to) in fks.iter().filter(|(seq, _, _)| *seq == 0) {
+                assert_eq!(
+                    (from.as_str(), to.as_str()),
+                    ("namespace", "namespace"),
+                    "{table}"
+                );
             }
-            if table=="events" || table=="signals" { assert_eq!(fks.len(),2); }
+            if table == "events" || table == "signals" {
+                assert_eq!(fks.len(), 2);
+            }
         }
         for table in TABLES {
             let qualification: i64 = db.query_row("SELECT qualification FROM storage_event_tables WHERE namespace=?1 AND table_name=?2", params![f.config.namespace.as_str(),table], |r| r.get(0)).unwrap();
-            assert_eq!(qualification,i64::from(CORE_TABLES.contains(table)),"{table}");
+            assert_eq!(
+                qualification,
+                i64::from(CORE_TABLES.contains(table)),
+                "{table}"
+            );
             if !CORE_TABLES.contains(table) {
                 let namespace_pk: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND pk=1)", [table], |r| r.get(0)).unwrap();
-                assert!(!namespace_pk,"unported family claimed composite keys: {table}");
+                assert!(
+                    !namespace_pk,
+                    "unported family claimed composite keys: {table}"
+                );
             }
         }
     }
@@ -703,81 +802,252 @@ mod tests {
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(tree_state::SCHEMA).unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);").unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
+        )
+        .unwrap();
         let bind = |db: &Connection, namespace: &str| {
             let namespace = namespace.to_owned();
-            db.create_scalar_function("semon_namespace",0,FunctionFlags::SQLITE_UTF8,move |_| Ok(namespace.clone())).unwrap();
+            db.create_scalar_function(
+                "semon_namespace",
+                0,
+                FunctionFlags::SQLITE_UTF8,
+                move |_| Ok(namespace.clone()),
+            )
+            .unwrap();
         };
         let put = |db: &Connection, path: &str, size: i64| -> i64 {
-            db.query_row(PUT_FILE, params![path,1,2,size,0_u128.to_be_bytes(),size,[0_u8;32],[0_u8;32],Option::<String>::None,Option::<String>::None,Option::<String>::None,Option::<String>::None,false,Option::<i64>::None,Option::<i64>::None,Option::<String>::None,Option::<String>::None,"{}","{}","{}","{}","{}","{}","{}",Option::<String>::None,Option::<String>::None,Option::<String>::None,Option::<Vec<u8>>::None], |r| r.get(0)).unwrap()
+            db.query_row(
+                PUT_FILE,
+                params![
+                    path,
+                    1,
+                    2,
+                    size,
+                    0_u128.to_be_bytes(),
+                    size,
+                    [0_u8; 32],
+                    [0_u8; 32],
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    false,
+                    Option::<i64>::None,
+                    Option::<i64>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "{}",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<Vec<u8>>::None
+                ],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         let state = |db: &Connection, namespace: &str| -> Vec<Vec<rusqlite::types::Value>> {
             let mut all = Vec::new();
             for table in CORE_TABLES {
-                let mut statement = db.prepare(&format!("SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3")).unwrap();
+                let mut statement = db
+                    .prepare(&format!(
+                        "SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3"
+                    ))
+                    .unwrap();
                 let columns = statement.column_count();
-                let rows = statement.query_map([namespace], |r| (0..columns).map(|i| r.get(i)).collect()).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                let rows = statement
+                    .query_map([namespace], |r| (0..columns).map(|i| r.get(i)).collect())
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
                 all.extend(rows);
             }
             all
         };
-        for (namespace,size) in [("a",10),("b",20)] {
-            bind(&db,namespace);
-            assert_eq!(put(&db,"same/relative.jsonl",size),1,"IDs must collide across namespaces");
+        for (namespace, size) in [("a", 10), ("b", 20)] {
+            bind(&db, namespace);
+            assert_eq!(
+                put(&db, "same/relative.jsonl", size),
+                1,
+                "IDs must collide across namespaces"
+            );
             let mut statement = db.prepare(PUT_EVENT).unwrap();
-            let event = Event { n: Some(namespace.to_owned()), ..Event::default() };
-            put_event(&mut statement,1,false,0,&event).unwrap();
-            db.execute(PUT_SIGNAL,params![1,0,"fixture",0,Option::<i64>::None,0,namespace,Option::<i64>::None]).unwrap();
+            let event = Event {
+                n: Some(namespace.to_owned()),
+                ..Event::default()
+            };
+            put_event(&mut statement, 1, false, 0, &event).unwrap();
+            db.execute(
+                PUT_SIGNAL,
+                params![
+                    1,
+                    0,
+                    "fixture",
+                    0,
+                    Option::<i64>::None,
+                    0,
+                    namespace,
+                    Option::<i64>::None
+                ],
+            )
+            .unwrap();
             let mut readers = Readers::new(&db).unwrap();
-            assert_eq!(readers.events.query_row([1],|r| r.get::<_,String>(7)).unwrap(),namespace);
-            assert_eq!(readers.signals.query_row([1],|r| r.get::<_,String>(5)).unwrap(),namespace);
-            assert_eq!(ledger_row(&db,"same/relative.jsonl").unwrap().unwrap().1.offset,size as u64);
+            assert_eq!(
+                readers
+                    .events
+                    .query_row([1], |r| r.get::<_, String>(7))
+                    .unwrap(),
+                namespace
+            );
+            assert_eq!(
+                readers
+                    .signals
+                    .query_row([1], |r| r.get::<_, String>(5))
+                    .unwrap(),
+                namespace
+            );
+            assert_eq!(
+                ledger_row(&db, "same/relative.jsonl")
+                    .unwrap()
+                    .unwrap()
+                    .1
+                    .offset,
+                size as u64
+            );
         }
-        assert_eq!(put(&db,"only-b.jsonl",21),2);
-        let b = state(&db,"b");
-        bind(&db,"a");
-        assert!(put_event(&mut db.prepare(PUT_EVENT).unwrap(),2,false,0,&Event::default()).is_err(),"a child cannot use b's parent");
-        assert_eq!(put(&db,"same/relative.jsonl",30),1);
-        put_event(&mut db.prepare(PUT_EVENT).unwrap(),1,false,1,&Event::default()).unwrap();
-        assert_eq!(ledger_row(&db,"same/relative.jsonl").unwrap().unwrap().1.offset,30);
-        assert_eq!(state(&db,"b"),b);
+        assert_eq!(put(&db, "only-b.jsonl", 21), 2);
+        let b = state(&db, "b");
+        bind(&db, "a");
+        assert!(
+            put_event(
+                &mut db.prepare(PUT_EVENT).unwrap(),
+                2,
+                false,
+                0,
+                &Event::default()
+            )
+            .is_err(),
+            "a child cannot use b's parent"
+        );
+        assert_eq!(put(&db, "same/relative.jsonl", 30), 1);
+        put_event(
+            &mut db.prepare(PUT_EVENT).unwrap(),
+            1,
+            false,
+            1,
+            &Event::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ledger_row(&db, "same/relative.jsonl")
+                .unwrap()
+                .unwrap()
+                .1
+                .offset,
+            30
+        );
+        assert_eq!(state(&db, "b"), b);
         {
             let tx = db.transaction().unwrap();
-            clear(&tx,1).unwrap();
-            tx.execute("DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
-            assert!(ledger_row(&tx,"same/relative.jsonl").unwrap().is_none());
-            assert_eq!(state(&tx,"b"),b);
+            clear(&tx, 1).unwrap();
+            tx.execute(
+                "DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",
+                [1],
+            )
+            .unwrap();
+            assert!(ledger_row(&tx, "same/relative.jsonl").unwrap().is_none());
+            assert_eq!(state(&tx, "b"), b);
             // Dropping the transaction restores all three families.
         }
-        assert!(ledger_row(&db,"same/relative.jsonl").unwrap().is_some());
+        assert!(ledger_row(&db, "same/relative.jsonl").unwrap().is_some());
         let tx = db.transaction().unwrap();
-        clear(&tx,1).unwrap();
-        tx.execute("DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",[1]).unwrap();
+        clear(&tx, 1).unwrap();
+        tx.execute(
+            "DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",
+            [1],
+        )
+        .unwrap();
         tx.commit().unwrap();
-        assert_eq!(state(&db,"b"),b);
-        bind(&db,"b");
-        assert_eq!(ledger_row(&db,"same/relative.jsonl").unwrap().unwrap().1.offset,20);
+        assert_eq!(state(&db, "b"), b);
+        bind(&db, "b");
+        assert_eq!(
+            ledger_row(&db, "same/relative.jsonl")
+                .unwrap()
+                .unwrap()
+                .1
+                .offset,
+            20
+        );
     }
 
     #[test]
     fn existing_singleton_store_refuses_without_native_changes() {
         let f = Fixture::new();
         // The create-new contract refuses even an already initialized file.
-        assert_eq!(f.config.create_native_store(),Err(StorageError::Unavailable));
+        assert_eq!(
+            f.config.create_native_store(),
+            Err(StorageError::Unavailable)
+        );
         let legacy = f.root.join("legacy.json");
         drop(EventCache::open_scoped(&legacy).unwrap());
         let mut config = f.config.clone();
-        config.backend = StoreBackend::Sqlite { database: EventCache::path(&legacy) };
+        config.backend = StoreBackend::Sqlite {
+            database: EventCache::path(&legacy),
+        };
         let StoreBackend::Sqlite { database } = &config.backend;
         let db = Connection::open(database).unwrap();
-        config.expected_stream_epoch = Some(db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'",[],|r| r.get(0)).unwrap());
-        db.execute("INSERT INTO meta VALUES('original-custody','keep')",[]).unwrap();
+        config.expected_stream_epoch = Some(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        db.execute("INSERT INTO meta VALUES('original-custody','keep')", [])
+            .unwrap();
         config.admit_namespace().unwrap();
-        for _ in 0..128 { if config.assign_catalog_namespace(64).unwrap().complete { break; } }
-        assert!(matches!(config.native_events(),Err(StorageError::NamespaceUpgradePending)));
-        assert_eq!(db.query_row("SELECT value FROM meta WHERE key='original-custody'",[],|r| r.get::<_,String>(0)).unwrap(),"keep");
-        assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')",[],|r| r.get::<_,bool>(0)).unwrap());
-        assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace')",[],|r| r.get::<_,bool>(0)).unwrap());
+        for _ in 0..128 {
+            if config.assign_catalog_namespace(64).unwrap().complete {
+                break;
+            }
+        }
+        assert!(matches!(
+            config.native_events(),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='original-custody'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "keep"
+        );
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('meta') WHERE name='namespace')",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -786,13 +1056,18 @@ mod tests {
         let old = f.db();
         // Prepare against the admission fences before the configured writer
         // installs its new guards. SQLite must requalify this warm statement.
-        let mut old_write = old.prepare("UPDATE files SET title='old-writer' WHERE path=?1").unwrap();
+        let mut old_write = old
+            .prepare("UPDATE files SET title='old-writer' WHERE path=?1")
+            .unwrap();
         let mut writer = f.config.native_events().unwrap();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let before = f.state();
         assert!(old_write.execute([f.raw.to_str().unwrap()]).is_err());
-        assert_eq!(f.state(),before);
-        assert_eq!(crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,0);
+        assert_eq!(f.state(), before);
+        assert_eq!(
+            crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
+            0
+        );
     }
 
     struct Fixture {
@@ -819,7 +1094,11 @@ mod tests {
             config.create_native_store().unwrap();
             let StoreBackend::Sqlite { database } = &config.backend;
             let db = Connection::open(database).unwrap();
-            db.execute("INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')", []).unwrap();
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('original-custody','preserve-verbatim')",
+                [],
+            )
+            .unwrap();
             drop(db);
             config.admit_namespace().unwrap();
             for _ in 0..128 {
@@ -988,19 +1267,23 @@ mod tests {
         let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let before = f.state();
         let second = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
-        assert_eq!(second.operation_id,"b".repeat(64));
+        assert_eq!(second.operation_id, "b".repeat(64));
         assert!(!second.replayed);
-        assert_eq!(second.consumed_bytes,first.consumed_bytes);
+        assert_eq!(second.consumed_bytes, first.consumed_bytes);
         let revision: Option<i64> = f.db().query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace=?1 AND source_path=?2",params![f.config.namespace.as_str(),f.raw.to_str().unwrap()],|r| r.get(0)).optional().unwrap();
-        assert_eq!(second.observed_revision,revision);
-        assert_eq!(f.state(),before,"unchanged core must not advance source effects");
+        assert_eq!(second.observed_revision, revision);
+        assert_eq!(
+            f.state(),
+            before,
+            "unchanged core must not advance source effects"
+        );
         drop(writer);
         fs::remove_file(&f.raw).unwrap();
         let mut restarted = f.config.native_events().unwrap();
         let replay = restarted.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
-        assert_eq!(replay.operation_id,second.operation_id);
-        assert_eq!(replay.consumed_bytes,second.consumed_bytes);
+        assert_eq!(replay.operation_id, second.operation_id);
+        assert_eq!(replay.consumed_bytes, second.consumed_bytes);
     }
 
     #[test]

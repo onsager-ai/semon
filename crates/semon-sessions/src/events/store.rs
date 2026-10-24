@@ -5496,10 +5496,12 @@ impl<'c> Readers<'c> {
         Ok(Self {
             connection,
             events: connection.prepare(&format!(
-                "SELECT {EVENT_COLUMNS} FROM events WHERE {}file_id = ?1 ORDER BY extra, seq", configured::predicate(connection)?
+                "SELECT {EVENT_COLUMNS} FROM events WHERE {}file_id = ?1 ORDER BY extra, seq",
+                configured::predicate(connection)?
             ))?,
             signals: connection.prepare(&format!(
-                "SELECT {SIGNAL_COLUMNS} FROM signals WHERE {}file_id = ?1 ORDER BY seq", configured::predicate(connection)?
+                "SELECT {SIGNAL_COLUMNS} FROM signals WHERE {}file_id = ?1 ORDER BY seq",
+                configured::predicate(connection)?
             ))?,
             usage: connection.prepare(&format!(
                 "SELECT {USAGE_COLUMNS} FROM usage WHERE file_id = ?1"
@@ -5799,7 +5801,13 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
 /// Deletes a file's child rows, keeping its `files` row and id.
 fn clear(transaction: &Transaction<'_>, file_id: i64) -> rusqlite::Result<()> {
     for table in ["events", "signals"] {
-        transaction.execute(&format!("DELETE FROM {table} WHERE {}file_id=?1", configured::predicate(transaction)?), [file_id])?;
+        transaction.execute(
+            &format!(
+                "DELETE FROM {table} WHERE {}file_id=?1",
+                configured::predicate(transaction)?
+            ),
+            [file_id],
+        )?;
     }
     for table in [
         "usage_identity",
@@ -6093,7 +6101,11 @@ fn write_file(
     measurements.record("rate_limit_serialization", started, 1);
     let file_id: i64 = {
         let started = measurements.start();
-        let mut statement = transaction.prepare_cached(configured::sql(transaction, PUT_FILE, configured::PUT_FILE)?)?;
+        let mut statement = transaction.prepare_cached(configured::sql(
+            transaction,
+            PUT_FILE,
+            configured::PUT_FILE,
+        )?)?;
         measurements.record("file_prepare", started, 1);
         let started = measurements.start();
         let parameters = params![
@@ -6147,7 +6159,11 @@ fn write_file(
     #[cfg(test)]
     configured::effect("proof_tree")?;
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::sql(transaction, PUT_EVENT, configured::PUT_EVENT)?)?;
+    let mut put = transaction.prepare_cached(configured::sql(
+        transaction,
+        PUT_EVENT,
+        configured::PUT_EVENT,
+    )?)?;
     let mut cut = transaction
         .prepare_cached(configured::sql(transaction, "DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3")?)?;
     for (extra, before, touched, new_rows) in [
@@ -6171,7 +6187,11 @@ fn write_file(
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::sql(transaction, PUT_SIGNAL, configured::PUT_SIGNAL)?)?;
+    let mut put = transaction.prepare_cached(configured::sql(
+        transaction,
+        PUT_SIGNAL,
+        configured::PUT_SIGNAL,
+    )?)?;
     changed(
         changes.before_signals,
         &changes.signals,
