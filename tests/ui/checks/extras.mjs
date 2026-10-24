@@ -966,6 +966,7 @@ export default async function (browser) {
     await openAll();
     await startedField;
     await page.click('dialog.panel.full .panel-h .ibtn');
+    await page.waitForFunction(() => !history.state?.sheet);
     await openAll();
     releaseField();
     await page.waitForFunction(

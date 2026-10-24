@@ -2016,8 +2016,13 @@ export function createCatalogViewer(
         fieldAction = field?.action,
         fieldNote = script
           ? ''
-          : field?.note ||
-            (item.clipped ? 'Recorded text preview. The complete source text is not loaded.' : ''),
+          : field
+            ? fieldAction || view.fields.get(key)?.note
+              ? field.note
+              : ''
+            : item.clipped
+              ? 'Recorded text preview. The complete source text is not loaded.'
+              : '',
         data = {
           ...entry,
           ...(script ? scriptResult : { scriptText: undefined }),
