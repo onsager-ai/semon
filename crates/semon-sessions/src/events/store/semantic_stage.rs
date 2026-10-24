@@ -210,6 +210,110 @@ CREATE INDEX session_catalog_invalidations_revision ON session_catalog_invalidat
 CREATE TABLE catalog_backfill_sources(namespace TEXT NOT NULL,source_path TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
 ", semantic_support_objects!());
 
+pub(super) const STAGE_TABLES: &[&str] = &[
+    "catalog_semantic_stage",
+    "catalog_semantic_frontier",
+    "catalog_semantic_sources",
+    "catalog_semantic_inputs",
+    "catalog_semantic_keys",
+    "catalog_semantic_endpoints",
+    "catalog_semantic_native",
+    "catalog_semantic_owner_sources",
+    "catalog_semantic_paths",
+    "catalog_semantic_names",
+    "catalog_semantic_events",
+    "catalog_semantic_relations",
+];
+
+type Columns = Vec<(String, String, i64, Option<String>, i64, i64)>;
+
+fn columns(c: &Connection, table: &str) -> rusqlite::Result<Columns> {
+    c.prepare_cached("SELECT name,type,[notnull],dflt_value,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid")?
+        .query_map([table], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?
+        .collect()
+}
+
+#[derive(PartialEq)]
+struct StageShape {
+    columns: Columns,
+    definition: String,
+    indexes: Vec<(String, String)>,
+}
+
+fn stage_shape(c: &Connection, table: &str) -> rusqlite::Result<StageShape> {
+    Ok(StageShape {
+        columns: columns(c, table)?,
+        definition: c.query_row("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?1", [table], |r| r.get(0))?,
+        indexes: c.prepare_cached("SELECT name,sql FROM main.sqlite_schema WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL ORDER BY name")?
+            .query_map([table], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?,
+    })
+}
+
+// Compare with the actual authored DDL, including defaults, CHECK constraints,
+// STRICT/WITHOUT ROWID and expression/partial indexes. These reference databases
+// contain schema only; they never receive source data or act as a store facade.
+fn stage_shapes(composite: bool) -> rusqlite::Result<&'static Vec<StageShape>> {
+    static SINGLETON: OnceLock<Vec<StageShape>> = OnceLock::new();
+    static COMPOSITE: OnceLock<Vec<StageShape>> = OnceLock::new();
+    let cache = if composite { &COMPOSITE } else { &SINGLETON };
+    if let Some(shapes) = cache.get() {
+        return Ok(shapes);
+    }
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(if composite {
+        "CREATE TABLE session_catalog(namespace TEXT,parent_key TEXT,session_key TEXT,lifecycle TEXT);
+CREATE TABLE session_catalog_sources(namespace TEXT,harness TEXT,native_id TEXT,source_path TEXT,session_key TEXT,lifecycle TEXT);
+CREATE TABLE session_catalog_invalidations(namespace TEXT,source_path TEXT);"
+    } else {
+        "CREATE TABLE session_catalog(parent_key TEXT,session_key TEXT,lifecycle TEXT);
+CREATE TABLE session_catalog_sources(harness TEXT,native_id TEXT,source_path TEXT,session_key TEXT,lifecycle TEXT);
+CREATE TABLE session_catalog_invalidations(source_path TEXT);"
+    })?;
+    reference.execute_batch(schema(composite))?;
+    let shapes = STAGE_TABLES.iter().map(|table| stage_shape(&reference, table)).collect::<rusqlite::Result<Vec<_>>>()?;
+    let _ = cache.set(shapes);
+    cache.get().ok_or(rusqlite::Error::InvalidQuery)
+}
+
+pub(super) fn stage_layout(c: &Connection) -> rusqlite::Result<bool> {
+    let version: i64 = c.query_row("PRAGMA main.schema_version", [], |r| r.get(0))?;
+    let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_stage_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
+    if cached {
+        let layout: Option<bool> = c.prepare_cached("SELECT semon_semantic_stage_layout(?1)")?.query_row([version], |r| r.get(0))?;
+        if let Some(layout) = layout {
+            return Ok(layout);
+        }
+    }
+    let composite: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace')", [], |r| r.get(0))?;
+    for (table, expected) in STAGE_TABLES.iter().zip(stage_shapes(composite)?) {
+        if stage_shape(c, table)? != *expected {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    if c.is_autocommit() {
+        c.create_scalar_function("semon_semantic_stage_layout", 1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            move |context| {
+                let observed: i64 = context.get(0)?;
+                Ok((observed == version).then_some(composite))
+            })?;
+    }
+    Ok(composite)
+}
+
+fn observation_shapes(c: &Connection) -> rusqlite::Result<()> {
+    let composite: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_catalog_invalidations','main') WHERE name='namespace')", [], |r| r.get(0))?;
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(support_schema(composite, composite))?;
+    for table in ["session_catalog_invalidations", "catalog_backfill_sources"] {
+        let physical: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)", [table], |r| r.get(0))?;
+        if !physical || columns(c, table)? != columns(&reference, table)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn support_sql<'a>(
     c: &Connection,
     singleton: &'a str,
@@ -225,6 +329,8 @@ pub(super) fn support_sql<'a>(
             return Ok(if composite { scoped } else { singleton });
         }
     }
+    observation_shapes(c)?;
+    stage_layout(c)?;
     let mut composite = None;
     for (table, key) in [
         ("catalog_relocation_candidates", "old_path,new_path"),
@@ -323,8 +429,7 @@ CREATE INDEX IF NOT EXISTS semantic_index_copy ON events(namespace,file_id,COALE
 const MAX_CONTEXT: usize = 1024 * 1024;
 
 pub(super) fn active(c: &Connection) -> rusqlite::Result<bool> {
-    let composite: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace')", [], |r| r.get(0))?;
-    if composite {
+    if stage_layout(c)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     c.query_row(
