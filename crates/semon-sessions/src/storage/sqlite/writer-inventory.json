@@ -22,11 +22,11 @@
   "native_usage_composite": false,
   "native_usage_scoped_helpers": "bound-selector five-table family plus repair queue/claims/clock and Tree generations/headers/dimensions/work/snapshots; native repricing current-source/fact/dimension operations ported; private physical composite fixtures, production activation closed",
   "native_usage_activation_pending": [
-    "copied usage physical schema/DML, Tree peer triggers/token reads and remove/clear helpers now authored/scoped; exact-pin CI and full key review pending before activation",
-    "pricing queue namespace owner keys and all runtime queue SELECT/DELETE/EXISTS now scoped independently of metadata; authored composite Catalog/core triggers; mixed-layout collision/restart/rollback fixture awaits exact-pin CI",
+    "copied usage atomic three-table physical keys validated before payload DML, with committed-schema-cookie connection cache; mixed/missing-family refusal and rollback cache tests authored; Tree peer triggers/token reads and remove/clear helpers scoped; exact-pin CI and fresh review pending",
+    "pricing queue namespace owner keys and runtime queue SELECT/DELETE/EXISTS scoped independently of metadata; family parent/recursive Catalog reads and independently selected trace witnesses/updates scoped; real authored Catalog/source/header DDL fixture spans metadata/Catalog/trace layouts, copied append rollback, equal family IDs, restart and foreign-family no-write; exact-pin CI pending",
     "repair prepare receives an explicit opened Raw carrier and NativeReaderBinding proof snapshot; Options advance refuses enrolled stores before Raw; configured repair semantic entrypoint/claims/producer admission remain unexposed and unqualified",
     "fresh configured DDL/guards/registration qualification for all usage/Tree/repair families; complete assembly and public two-source ingestion; current schema(false) selection remains singleton",
-    "semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification"
+    "full Catalog repricing refuses composite Catalog before payload reads or DML while history/description/overview owners remain singleton; semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification remain pending"
   ],
   "native_event_metadata_public_shape": "singleton; composite shape private-fixture only",
   "native_event_metadata_pending": [

@@ -29,6 +29,16 @@ CREATE TABLE IF NOT EXISTS session_trace_bookmarks(target TEXT NOT NULL,session_
 CREATE INDEX IF NOT EXISTS session_trace_bookmark_owner ON session_trace_bookmarks(session_key);
 ";
 
+// Private assembled storage fixtures use the same authored header family.
+// This does not activate composite trace turns/edges or public producers.
+pub(crate) fn header_schema(composite: bool) -> &'static str {
+    if composite {
+        "CREATE TABLE IF NOT EXISTS session_trace_headers(namespace TEXT NOT NULL,session_key TEXT NOT NULL,generation TEXT NOT NULL,source_generation TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,session_key)) STRICT, WITHOUT ROWID;"
+    } else {
+        "CREATE TABLE IF NOT EXISTS session_trace_headers(session_key TEXT PRIMARY KEY, generation TEXT NOT NULL, source_generation TEXT NOT NULL, metadata TEXT NOT NULL) STRICT;"
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
     query: Option<crate::query_projection::Projection>,
