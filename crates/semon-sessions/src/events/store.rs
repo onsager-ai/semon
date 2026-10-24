@@ -3018,9 +3018,12 @@ impl SqliteStore {
                 return Ok(Outcome::Stale);
             }
             use crate::storage::catalog::CatalogPublicationHead;
-            let publication_head = crate::storage::sqlite::publication::transitional_head(&transaction)
+            let publication_head =
+                crate::storage::sqlite::publication::transitional_head(&transaction)
+                    .map_err(publication_storage_failure)?;
+            let previous = publication_head
+                .base_generation()
                 .map_err(publication_storage_failure)?;
-            let previous = publication_head.base_generation().map_err(publication_storage_failure)?;
             if previous.as_deref() != expected_generation {
                 self.semantic_rejection = Some("publication_generation");
                 return Ok(Outcome::Conflict);
@@ -3521,7 +3524,9 @@ impl SqliteStore {
             if previous.as_deref() != Some(&generation)
                 || previous_version.as_deref() != Some(&version)
             {
-                publication_head.publish_generation(&generation, &version).map_err(publication_storage_failure)?;
+                publication_head
+                    .publish_generation(&generation, &version)
+                    .map_err(publication_storage_failure)?;
             }
             // Closed component publication is coherent for its claimed closure.
             // Its owner advances the cohort observation clock only after all

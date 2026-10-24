@@ -18,8 +18,14 @@ pub(crate) fn transitional_head<'a, 'connection>(
 
 impl CatalogPublicationHead for UnboundPublicationHead<'_, '_> {
     fn base_generation(&self) -> Result<Option<String>, StorageError> {
-        self.0.query_row("SELECT value FROM meta WHERE key='catalog_generation'", [], |row| row.get(0))
-            .optional().map_err(failed)
+        self.0
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failed)
     }
 
     fn publish_generation(&self, generation: &str, version: &str) -> Result<(), StorageError> {

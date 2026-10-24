@@ -17,7 +17,11 @@ pub(crate) struct SourceProofObservation {
 /// that publisher until their whole dependency set is namespace-qualified.
 pub(crate) trait CatalogPublicationHead {
     fn base_generation(&self) -> Result<Option<String>, super::StorageError>;
-    fn publish_generation(&self, generation: &str, version: &str) -> Result<(), super::StorageError>;
+    fn publish_generation(
+        &self,
+        generation: &str,
+        version: &str,
+    ) -> Result<(), super::StorageError>;
 }
 
 pub(crate) trait CatalogSnapshot {
