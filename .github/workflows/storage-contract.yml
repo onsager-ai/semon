@@ -62,6 +62,9 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::native_usage::namespace_tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::native_usage::file_namespace_tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_metadata_enrollment_initializes_floors_atomically_and_fences_warm_writers -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_metadata_source_keys_and_floors_isolate_restart_and_rollback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_metadata_proof_reference_owners_refuse_unported_history_before_gc -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_family_rejects_corrupt_constraints_before_payload_dml -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_family_rejects_mixed_shapes_before_payload_dml -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_layout_is_independent_of_core_and_native_layout -- --exact --nocapture

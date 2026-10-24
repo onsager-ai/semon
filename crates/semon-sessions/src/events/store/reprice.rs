@@ -1472,6 +1472,27 @@ mod tests {
             authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap(),
             configured_original
         );
+        let full_objects = |db: &Connection| {
+            db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name").unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let configured_reference = Connection::open_in_memory().unwrap();
+        for ddl in configured_original {
+            configured_reference.execute_batch(ddl).unwrap();
+        }
+        let directory = root();
+        let config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite { database: directory.join("configured.sqlite") },
+            namespace: crate::storage::LogicalSourceNamespace::new("a").unwrap(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        config.create_native_store().unwrap();
+        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let configured_actual = Connection::open(database).unwrap();
+        assert_eq!(full_objects(&configured_actual), full_objects(&configured_reference), "actual factory columns/indexes/triggers must match authored CONFIGURED DDL");
+        drop(configured_actual);
+        fs::remove_dir_all(directory).unwrap();
         let reference = Connection::open_in_memory().unwrap();
         for ddl in original {
             reference.execute_batch(ddl).unwrap();
@@ -1532,6 +1553,12 @@ mod tests {
                         }
                         if metadata {
                             assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+                            assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "DDL cannot enroll a Source");
+                            db.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA).unwrap();
+                            db.execute("INSERT INTO storage_namespaces VALUES('a',1,0,1,0)", []).unwrap();
+                            let tx = db.unchecked_transaction().unwrap();
+                            crate::storage::sqlite::changes::initialize_source_floors(&tx, &crate::storage::LogicalSourceNamespace::new("a").unwrap()).unwrap();
+                            tx.commit().unwrap();
                             assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
                         }
                         if catalog {
@@ -1539,6 +1566,9 @@ mod tests {
                             // the executing connection is bound to Source A.
                             db.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES('b','same-session',1,'codex','{}')", []).unwrap();
                             assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+                            db.execute("UPDATE session_catalog SET metadata='{\"changed\":true}' WHERE namespace='b'", []).unwrap();
+                            db.execute("DELETE FROM session_catalog WHERE namespace='b'", []).unwrap();
+                            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
                             assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_changes WHERE namespace='a'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                         }
                     }
@@ -1573,6 +1603,213 @@ mod tests {
                 Err(DdlProfileError::UnsupportedFamilyCombination)
             );
         }
+    }
+
+    fn assembled_metadata_fixture(db: &Connection) {
+        bind_fixture(db, "a");
+        for ddl in authored_storage_ddl(PhysicalLayout {
+            core: true, metadata: true, catalog: true, trace: true,
+            copied_usage: true, native_usage: true, tree: true, pricing_queue: true,
+        }).unwrap() {
+            db.execute_batch(ddl).unwrap();
+        }
+        db.execute("INSERT INTO meta VALUES('','cache_version',?1)", [CACHE_VERSION.to_string()]).unwrap();
+        db.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+    }
+
+    #[test]
+    fn native_usage_metadata_enrollment_initializes_floors_atomically_and_fences_warm_writers() {
+        use crate::storage::{LogicalSourceNamespace, StorageError, StoreBackend, StoreConfig};
+        let directory = root();
+        let database = directory.join("metadata.sqlite");
+        let db = Connection::open(&database).unwrap();
+        assembled_metadata_fixture(&db);
+        let epoch: String = db.query_row("SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap();
+        let config = StoreConfig {
+            backend: StoreBackend::Sqlite { database: database.clone() },
+            namespace: LogicalSourceNamespace::new("a").unwrap(),
+            expected_stream_epoch: Some(epoch.clone()),
+        };
+        // A malformed second floor must not leave the first floor, enrollment
+        // row, registry DDL or fences behind after the real admission fails.
+        db.execute("INSERT INTO meta VALUES('a','catalog_changes_floor_retained_history','corrupt')", []).unwrap();
+        assert_eq!(config.admit_namespace(), Err(StorageError::NamespaceUpgradePending));
+        assert!(!crate::storage::sqlite::namespace::is_bound(&db).unwrap());
+        assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE key='catalog_changes_floor_current'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        db.execute("DELETE FROM meta WHERE key='catalog_changes_floor_retained_history'", []).unwrap();
+        let first = config.admit_namespace().unwrap();
+        assert_eq!(config.admit_namespace().unwrap(), first);
+        let restarted = config.clone();
+        assert_eq!(restarted.admit_namespace().unwrap(), first);
+        assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'catalog_changes_floor_*' AND value='0'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        let other = StoreConfig { namespace: LogicalSourceNamespace::new("b").unwrap(), ..config.clone() };
+        assert_eq!(other.admit_namespace(), Err(StorageError::MultiSourceUnqualified));
+        assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert!(db.execute("UPDATE meta SET value='99' WHERE namespace='a' AND key='catalog_changes_floor_current'", []).is_err(), "the warm pre-enrollment writer remains fenced");
+        assert_eq!(db.query_row("SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |r| r.get::<_, String>(0)).unwrap(), epoch);
+        drop(db);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn native_usage_metadata_source_keys_and_floors_isolate_restart_and_rollback() {
+        use crate::storage::{LogicalSourceNamespace, StorageError};
+        use crate::storage::sqlite::changes::initialize_source_floors;
+        let directory = root();
+        let database = directory.join("private-metadata.sqlite");
+        let mut db = Connection::open(&database).unwrap();
+        assembled_metadata_fixture(&db);
+        db.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA).unwrap();
+        let a = LogicalSourceNamespace::new("a").unwrap();
+        let b = LogicalSourceNamespace::new("b").unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            assert_eq!(initialize_source_floors(&tx, &a), Err(StorageError::NamespaceUnadmitted));
+            tx.execute("INSERT INTO storage_namespaces VALUES('a',1,0,1,0)", []).unwrap();
+            initialize_source_floors(&tx, &a).unwrap();
+            tx.execute(native_metadata_put(&tx).unwrap(), params!["catalog_changes_floor_current", "17"]).unwrap();
+            initialize_source_floors(&tx, &a).unwrap();
+            tx.commit().unwrap();
+        }
+        bind_fixture(&db, "b");
+        {
+            // Private lifecycle fixture: public second admission above refuses.
+            let tx = db.transaction().unwrap();
+            tx.execute("INSERT INTO storage_namespaces VALUES('b',2,0,1,0)", []).unwrap();
+            initialize_source_floors(&tx, &b).unwrap();
+            tx.rollback().unwrap();
+        }
+        assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='b'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        {
+            let tx = db.transaction().unwrap();
+            tx.execute("INSERT INTO storage_namespaces VALUES('b',2,0,1,0)", []).unwrap();
+            initialize_source_floors(&tx, &b).unwrap();
+            tx.commit().unwrap();
+        }
+        for namespace in ["a", "b"] {
+            bind_fixture(&db, namespace);
+            for key in ["catalog_generation", "catalog_recovery_after", "slot_projection_catalog_generation", "search_generation_current", "claude_json_stamp", "slot_upgrade_selected:same.jsonl"] {
+                db.execute(native_metadata_put(&db).unwrap(), params![key, namespace]).unwrap();
+            }
+        }
+        for namespace in ["a", "b"] {
+            bind_fixture(&db, namespace);
+            let tx = db.transaction().unwrap();
+            let index = codex_index("gpt-6.1-sol", 3);
+            let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
+            write_file(&tx, "same.jsonl", &ledger(), &changes, &index, &mut crate::native_timing::Measurements::default()).unwrap();
+            tx.commit().unwrap();
+        }
+        bind_fixture(&db, "b");
+        db.execute(native_metadata_put(&db).unwrap(), params!["archive_event_index:same.jsonl", "foreign-poison"]).unwrap();
+        let foreign_family = usage_family_state(&db, "b");
+        bind_fixture(&db, "a");
+        assert_eq!(current_file_count(&db, &BTreeMap::new()).unwrap(), 1, "foreign archive metadata must not affect A's file count");
+        let b_state = || {
+            let db = Connection::open(&database).unwrap();
+            db.prepare("SELECT key,value FROM meta WHERE namespace='b' ORDER BY key").unwrap().query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let before = b_state();
+        bind_fixture(&db, "a");
+        {
+            let tx = db.transaction().unwrap();
+            assert_eq!(initialize_source_floors(&tx, &b), Err(StorageError::NamespaceMismatch));
+            tx.execute(native_metadata_put(&tx).unwrap(), params!["catalog_generation", "rolled-back"]).unwrap();
+            tx.execute(native_metadata_delete(&tx).unwrap(), ["catalog_recovery_after"]).unwrap();
+            tx.rollback().unwrap();
+        }
+        assert_eq!(b_state(), before);
+        assert_eq!(usage_family_state(&db, "b"), foreign_family);
+        {
+            let tx = db.transaction().unwrap();
+            let id: i64 = tx.query_row("SELECT file_id FROM files WHERE namespace='a' AND path='same.jsonl'", [], |r| r.get(0)).unwrap();
+            clear(&tx, id).unwrap();
+            let index = codex_index("gpt-6.1-sol", 5);
+            let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
+            let mut appended = ledger();
+            appended.offset += 1;
+            appended.stat.size += 1;
+            write_file(&tx, "same.jsonl", &appended, &changes, &index, &mut crate::native_timing::Measurements::default()).unwrap();
+            tx.rollback().unwrap();
+        }
+        assert_eq!(b_state(), before);
+        assert_eq!(usage_family_state(&db, "b"), foreign_family);
+        {
+            let tx = db.transaction().unwrap();
+            let id: i64 = tx.query_row("SELECT file_id FROM files WHERE namespace='a' AND path='same.jsonl'", [], |r| r.get(0)).unwrap();
+            clear(&tx, id).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(b_state(), before);
+        assert_eq!(usage_family_state(&db, "b"), foreign_family);
+        let changes = db.total_changes();
+        assert!(db.execute(native_metadata_put(&db).unwrap(), params!["unknown-metadata-owner", "bad"]).is_err());
+        assert_eq!(db.total_changes(), changes);
+        assert!(configured::bind_metadata_scope(&db, "").is_err());
+        assert!(configured::bind_metadata_scope(&db, &"x".repeat(4097)).is_err());
+        drop(db);
+        let db = Connection::open(&database).unwrap();
+        bind_fixture(&db, "a");
+        let tx = db.unchecked_transaction().unwrap();
+        initialize_source_floors(&tx, &a).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(db.query_row(native_metadata_value(&db).unwrap(), ["catalog_changes_floor_current"], |r| r.get::<_, String>(0)).unwrap(), "17");
+        let store = SqliteStore { connection: db, path: database.clone(), selected_runs: None, semantic_rejection: None, traversal_observation: None };
+        assert_eq!(store.session_catalog_generation().unwrap().as_deref(), Some("a"));
+        assert_eq!(b_state(), before);
+        drop(store);
+        let db = Connection::open(&database).unwrap();
+        db.execute_batch("DROP TABLE meta; CREATE TABLE meta(namespace TEXT NOT NULL,key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;").unwrap();
+        assert!(configured::metadata_sql(&db, "legacy", "scoped").is_err(), "a namespace column without the composite key is corrupt, not singleton");
+        drop(db);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn native_usage_metadata_proof_reference_owners_refuse_unported_history_before_gc() {
+        let mut db = Connection::open_in_memory().unwrap();
+        assembled_metadata_fixture(&db);
+        let mut old = ledger();
+        old.offset = crate::source_chunks::SIZE as u64;
+        old.stat.size = old.offset;
+        let chunks = crate::source_chunks::Chunks { offset: old.offset, hashes: vec![[7;32]], resume: None };
+        for namespace in ["a", "b"] {
+            bind_fixture(&db, namespace);
+            let tx = db.transaction().unwrap();
+            chunk_proofs::write(&tx, "same.jsonl", &old, Some(&chunks)).unwrap();
+            let metadata = if namespace=="a" { json(&row("same.jsonl", &old, Cost::default(), "codex")).unwrap() } else { "{}".into() };
+            tx.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(?1,'owner',0,'codex',?2)", params![namespace,metadata]).unwrap();
+            tx.execute("INSERT INTO session_catalog_sources(namespace,session_key,harness,native_id,source_path) VALUES(?1,'owner','codex','native','same.jsonl')", [namespace]).unwrap();
+            tx.commit().unwrap();
+        }
+        let foreign = || {
+            db.prepare("SELECT key,value FROM meta WHERE namespace='b' ORDER BY key").unwrap().query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let before = foreign();
+        bind_fixture(&db, "a");
+        {
+            let tx = db.unchecked_transaction().unwrap();
+            // B's same-key malformed owner must never be decoded. The real
+            // preservation helper copies A's referenced proof before clearing.
+            chunk_proofs::clear(&tx, "same.jsonl").unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(foreign(), before);
+        let manifest = format!("native_published_chunks_manifest:{}", crate::source_carrier::source_hash("same.jsonl"));
+        let saved: String = db.query_row(native_metadata_value(&db).unwrap(), [&manifest], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<String>>(&saved).unwrap().len(), 1);
+        let retained_before: i64 = db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'native_published_chunks:*'", [], |r| r.get(0)).unwrap();
+        assert!(retained_before>0);
+        db.execute("INSERT INTO session_history_catalog VALUES('owner','{}')", []).unwrap();
+        let changes = db.total_changes();
+        {
+            let tx = db.unchecked_transaction().unwrap();
+            assert!(chunk_proofs::clear(&tx, "same.jsonl").is_err(), "singleton history has no proven Source owner in a composite Catalog");
+            tx.rollback().unwrap();
+        }
+        assert_eq!(db.total_changes(), changes, "refuse before proof copy or GC writes");
+        assert_eq!(foreign(), before);
+        assert_eq!(db.query_row("SELECT count(*) FROM meta WHERE namespace='a' AND key GLOB 'native_published_chunks:*'", [], |r| r.get::<_, i64>(0)).unwrap(), retained_before);
     }
 
     #[test]

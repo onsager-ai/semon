@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) const WRITER_QUALIFICATION_VERSION: u32 = 0;
 const FORMAT_VERSION: u32 = 1;
 const TABLE_LIMIT: usize = 128;
+pub(crate) const REGISTRY_SCHEMA: &str = "CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY,admission_generation INTEGER NOT NULL CHECK(admission_generation>0),admitted_at INTEGER NOT NULL,format_version INTEGER NOT NULL,writer_qualification INTEGER NOT NULL) STRICT; CREATE TABLE storage_writer_inventory(table_name TEXT PRIMARY KEY,qualified_version INTEGER NOT NULL) STRICT;";
 
 pub(crate) fn is_bound(db: &Connection) -> rusqlite::Result<bool> {
     db.prepare_cached("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='storage_namespaces')")?.query_row([], |row| row.get(0))
@@ -80,10 +81,13 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         return Err(StorageError::ScopeChanged);
     }
     if is_bound(&tx).map_err(failed)? {
-        return match require_admitted(&tx, &config.namespace) {
+        let admission = match require_admitted(&tx, &config.namespace) {
             Err(StorageError::NamespaceMismatch) => Err(StorageError::MultiSourceUnqualified),
             other => other,
-        };
+        }?;
+        super::changes::initialize_source_floors(&tx, &config.namespace)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        return Ok(admission);
     }
     // Check the supported current contract before any DDL, binding or data write.
     crate::events::store::require_current(&tx).map_err(|_| StorageError::Unavailable)?;
@@ -96,7 +100,7 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
     {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    tx.execute_batch("CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY,admission_generation INTEGER NOT NULL CHECK(admission_generation>0),admitted_at INTEGER NOT NULL,format_version INTEGER NOT NULL,writer_qualification INTEGER NOT NULL) STRICT; CREATE TABLE storage_writer_inventory(table_name TEXT PRIMARY KEY,qualified_version INTEGER NOT NULL) STRICT;").map_err(failed)?;
+    tx.execute_batch(REGISTRY_SCHEMA).map_err(failed)?;
     let sequence_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='storage_namespace_sequence')", [], |r| r.get(0)).map_err(failed)?;
     let generation = if sequence_exists {
         let prior: i64 = tx
@@ -133,6 +137,7 @@ pub(crate) fn admit(config: &StoreConfig) -> Result<NamespaceAdmission, StorageE
         ),
     )
     .map_err(failed)?;
+    super::changes::initialize_source_floors(&tx, &config.namespace)?;
     for (index, table) in tables.iter().enumerate() {
         tx.execute("INSERT INTO storage_writer_inventory VALUES(?1,0)", [table])
             .map_err(failed)?;

@@ -16,7 +16,8 @@
     "relocation evidence and Tree metadata readiness join",
     "source-owned semantic recipe, generation, journal revision, header frontiers and progress metadata",
     "store pricing target versus source pricing work/completion metadata; repair clock",
-    "SourceJournal seed reads, physical reader epoch and source change-stream floors"
+    "SourceJournal seed reads, physical reader epoch and source change-stream floors",
+    "store.rs observation/recovery/backfill/generation/slot/search/publication metadata, schema qualification/init and reported-file stamp; archive GLOB/current file count selects core and meta layouts independently"
   ],
   "native_tree_noop_witness": "transaction-local current header/generation/dimension digest plus parser/ledger/pricing/recipe interpretation; missing or stale witnesses repair",
   "native_usage_composite": false,
@@ -27,16 +28,14 @@
     "pricing queue namespace owner keys and runtime queue SELECT/DELETE/EXISTS scoped independently of metadata; family parent/recursive Catalog reads and independently selected trace witnesses/updates scoped; complete private authored assembly spans metadata/Catalog/header layouts, copied append rollback, equal family IDs, restart and foreign-family no-write; exact-pin CI pending",
     "repair prepare receives an explicit opened Raw carrier and NativeReaderBinding proof snapshot; Options advance refuses enrolled stores before Raw; configured repair semantic entrypoint/claims/producer admission remain unexposed and unqualified",
     "fresh configured DDL/guards/registration qualification for all usage/Tree/repair families; complete assembly and public two-source ingestion; current schema(false) selection remains singleton",
-    "full Catalog repricing refuses composite Catalog before payload reads or DML while history/description/overview owners remain singleton; chunk_proofs/published.rs::preserve current/history reference UNION is still unscoped and unqualified (real empty fixture dependencies do not qualify it); semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification remain pending"
+    "full Catalog repricing refuses composite Catalog before payload reads or DML while history/description/overview owners remain singleton; published proof current/history reference selectors ported with explicit singleton-history refusal in composite current Catalog; historical publisher remains unqualified; semantic stage/dependency/mutation owners, retained-reader lifetime/lease/GC and full migration qualification remain pending"
   ],
   "native_event_metadata_public_shape": "singleton; composite shape private-fixture only",
   "native_event_metadata_pending": [
-    "complete key classification beyond the explicit STORE/SOURCE keys and proof prefixes",
-    "store.rs Catalog observation/recovery/backfill/publication/slot/search metadata; qualify_contract/qualify/qualify_producer/init and archive membership/GLOB operations",
-    "semantic stage/dependency physical row keys and namespace joins (metadata statements are scoped)",
-    "composite pricing Catalog/core trigger joins and pending owner keys are authored; public production DDL/guard activation and full Catalog producer scoping remain pending",
-    "changes.rs private assembly now authors namespace-aware stream keys/index and current Catalog triggers, global epoch/source-floor initialization; change delivery consumers and singleton history publisher remain unported/fenced; SourceJournal legacy unbound-only invalidate/discover statements remain fenced",
-    "fresh configured meta activation, DEFAULT removal and complete qualification"
+    "all public metadata activation/qualification remains closed; current singleton factories preserved; all-key classification of additional consumers remains subject to their owner ports",
+    "semantic stage/dependency/mutation physical row keys, Catalog/Query/search/overview/history publication consumer ports and qualification",
+    "change delivery consumers and singleton history publisher remain unported/fenced; composite floors now initialize atomically/idempotently during real first Source admission, not DDL; public second admission remains refused",
+    "fresh configured composite-meta activation and complete writer/guard qualification; performance qualification remains pending"
   ],
   "unqualified_paths": [
     "catalog_observer.rs",
@@ -91,5 +90,64 @@
     "events::store::reprice::tests::native_usage_authored_assembly_preserves_factories_and_complete_dependencies and native_usage_copied_family_rejects_corrupt_constraints_before_payload_dml are exact CI tests; results pending",
     "events::store::configured::tests:: includes stale-interpretation readiness and exact configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback",
     "catalog::tests::native_usage_history_restart_converges_without_repair_revision_churn retains 256 iterations and same epoch/revision/phase checks"
-  ]
+  ],
+  "metadata_key_ownership": {
+    "store_global": [
+      "cache_version",
+      "catalog_version",
+      "search_version",
+      "catalog_changes_epoch",
+      "native_tree_repair_clock",
+      "pricing_recompute_target"
+    ],
+    "source": [
+      "catalog_semantic_recipe",
+      "catalog_generation",
+      "catalog_source_revision",
+      "catalog_backfill_state",
+      "catalog_semantic_gc",
+      "catalog_push_driven",
+      "catalog_completeness",
+      "semantic_epoch",
+      "pricing_recompute_v2",
+      "pricing_recompute_completed",
+      "overview_generation",
+      "catalog_changes_floor_current",
+      "catalog_changes_floor_retained_history",
+      "catalog_observed_at",
+      "catalog_recovery_after",
+      "catalog_recovery_reason",
+      "catalog_publication_epoch",
+      "slot_projection_catalog_generation",
+      "search_backfill_complete",
+      "search_generation_current",
+      "search_generation_retained_history",
+      "search_incomplete_current",
+      "search_incomplete_retained_history",
+      "claude_json_stamp"
+    ],
+    "source_prefixes": [
+      "archive_event_index:",
+      "native_catalog_relocation:",
+      "native_claude_sidecar:",
+      "native_codex_header:",
+      "native_launch_calls:",
+      "native_parent_marker:",
+      "native_proof_tree:",
+      "native_published_chunks:",
+      "native_published_chunks_manifest:",
+      "native_source_chunks:",
+      "native_tree_failure:",
+      "native_tree_summary:",
+      "slot_upgrade_selected:"
+    ],
+    "unknown": "composite metadata refuses unknown keys with StorageError::InvalidArguments wrapped by the SQLite UDF; invalid namespace binding and malformed physical namespace PK refuse before DML",
+    "journal": "configured SourceJournal revision remains in storage_source_journal; the store-global catalog_changes_epoch is the physical stream incarnation, never the Source revision"
+  },
+  "metadata_admission_tests": [
+    "events::store::reprice::tests::native_usage_metadata_enrollment_initializes_floors_atomically_and_fences_warm_writers",
+    "events::store::reprice::tests::native_usage_metadata_source_keys_and_floors_isolate_restart_and_rollback",
+    "events::store::reprice::tests::native_usage_metadata_proof_reference_owners_refuse_unported_history_before_gc"
+  ],
+  "published_proof_reference_ownership": "Current Catalog/source joins select their own atomic family independently of meta; main-table composite history references use their own namespace keys. Nonempty singleton history with composite current Catalog explicitly refuses before payload or proof copy/GC; history publisher remains unported. Actual complete assembly test exercises same-key foreign malformed owner isolation and real retained copy/cleanup refusal; exact CI/review pending."
 }
