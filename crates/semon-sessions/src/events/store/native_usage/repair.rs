@@ -7,12 +7,14 @@ const RECORDS: usize = 512;
 const BYTES: u64 = 1024 * 1024;
 const RECORD_MAX: u64 = 32 * 1024 * 1024;
 
-pub(in crate::events::store) fn pending(c: &Connection) -> rusqlite::Result<bool> {
-    c.query_row(
+pub(in crate::events::store) fn pending(c: &Connection, namespace: &str) -> rusqlite::Result<bool> {
+    let (scoped, query) = usage_sql(
+        c,
         "SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE state IN ('ready','running'))",
-        [],
-        |r| r.get(0),
-    )
+        "SELECT EXISTS(SELECT 1 FROM native_tree_repairs WHERE namespace=?1 AND state IN ('ready','running'))",
+    )?;
+    if scoped { c.query_row(query, [namespace], |r| r.get(0)) }
+    else { c.query_row(query, [], |r| r.get(0)) }
 }
 
 struct Verified {
@@ -209,6 +211,7 @@ struct Resume {
 }
 
 struct Checkpoint<'a> {
+    namespace: &'a str,
     path: &'a str,
     receipt: &'a str,
     cursor: u64,
@@ -226,11 +229,16 @@ fn progress(
     if !current(&tx)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let actual: (String, i64, Option<i64>) = tx.query_row(
+    let (scoped, query) = usage_sql(
+        &tx,
         "SELECT receipt,cursor,projection_id FROM native_tree_repairs WHERE source_path=?1",
-        [expected.path],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        "SELECT receipt,cursor,projection_id FROM native_tree_repairs WHERE namespace=?1 AND source_path=?2",
     )?;
+    let actual: (String, i64, Option<i64>) = if scoped {
+        tx.query_row(query, params![expected.namespace,expected.path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    } else {
+        tx.query_row(query, [expected.path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    };
     let cursor = i64::try_from(expected.cursor).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if actual != (expected.receipt.into(), cursor, expected.projection_id) {
         return Err(rusqlite::Error::InvalidQuery);
@@ -242,44 +250,63 @@ fn progress(
 pub(in crate::events::store) fn advance(
     store: &mut SqliteStore,
     options: &crate::Options,
+    namespace: &str,
 ) -> io::Result<(bool, Option<String>)> {
     let sql_error = io::Error::other;
-    let selected: Option<PendingSource> = store.connection.query_row("SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
+    let (scoped, query) = usage_sql(
+        &store.connection,
+        "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1",
+        "SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE namespace=?1 AND state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1",
+    ).map_err(sql_error)?;
+    let decode = |r: &rusqlite::Row<'_>| Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?));
+    let selected: Option<PendingSource> = if scoped {
+        store.connection.query_row(query,[namespace],decode).optional().map_err(sql_error)?
+    } else {
+        store.connection.query_row(query,[],decode).optional().map_err(sql_error)?
+    };
     let Some((path, receipt, id, cursor, model, tree, projection_id)) = selected else {
-        return Ok((pending(&store.connection).map_err(sql_error)?, None));
+        return Ok((pending(&store.connection,namespace).map_err(sql_error)?, None));
     };
     let _source_lock = crate::source_change::SourceLock::acquire(options, &path, false)?;
     let Some((_, ledger)) = ledger_row(&store.connection, &path).map_err(sql_error)? else {
         progress(
             &mut store.connection,
             Checkpoint {
+                namespace,
                 path: &path,
                 receipt: &receipt,
                 cursor,
                 projection_id,
             },
             |tx| {
-                tx.execute(
+                let (scoped, query) = usage_sql(
+                    tx,
                     "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1",
-                    [&path],
+                    "UPDATE native_tree_repairs SET state='blocked_source' WHERE namespace=?1 AND source_path=?2",
                 )?;
+                if scoped { tx.execute(query, params![namespace,path])?; }
+                else { tx.execute(query, [&path])?; }
                 Ok(())
             },
         )
         .map_err(sql_error)?;
-        return Ok((pending(&store.connection).map_err(sql_error)?, None));
+        return Ok((pending(&store.connection,namespace).map_err(sql_error)?, None));
     };
     if header_ledger(&ledger) != receipt {
-        let same_incarnation = source(&store.connection, &path)
+        let same_incarnation = source_in(&store.connection, namespace, &path)
             .map_err(sql_error)?
             .is_some_and(|(current, _)| Some(current) == id)
             && ledger.offset >= cursor;
-        progress(&mut store.connection, Checkpoint {path:&path,receipt:&receipt,cursor,projection_id}, |tx| {
+        progress(&mut store.connection, Checkpoint {namespace,path:&path,receipt:&receipt,cursor,projection_id}, |tx| {
             if ledger_row(tx,&path)?.map(|(_,l)|l).as_ref()!=Some(&ledger) {return Err(rusqlite::Error::InvalidQuery);}
             if same_incarnation {
-                tx.execute("UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE source_path=?1",params![path,header_ledger(&ledger)])?;
+                let (scoped, query) = usage_sql(tx, "UPDATE native_tree_repairs SET receipt=?2,state='running' WHERE source_path=?1", "UPDATE native_tree_repairs SET receipt=?3,state='running' WHERE namespace=?1 AND source_path=?2")?;
+                if scoped { tx.execute(query,params![namespace,path,header_ledger(&ledger)])?; }
+                else { tx.execute(query,params![path,header_ledger(&ledger)])?; }
             } else {
-                tx.execute("UPDATE native_tree_repairs SET receipt=?2,source_id=NULL,projection_id=NULL,cursor=0,last_model=NULL,tree_root=NULL,state='ready' WHERE source_path=?1",params![path,header_ledger(&ledger)])?;
+                let (scoped, query) = usage_sql(tx, "UPDATE native_tree_repairs SET receipt=?2,source_id=NULL,projection_id=NULL,cursor=0,last_model=NULL,tree_root=NULL,state='ready' WHERE source_path=?1", "UPDATE native_tree_repairs SET receipt=?3,source_id=NULL,projection_id=NULL,cursor=0,last_model=NULL,tree_root=NULL,state='ready' WHERE namespace=?1 AND source_path=?2")?;
+                if scoped { tx.execute(query,params![namespace,path,header_ledger(&ledger)])?; }
+                else { tx.execute(query,params![path,header_ledger(&ledger)])?; }
             }
             Ok(())
         }).map_err(sql_error)?;
@@ -289,42 +316,42 @@ pub(in crate::events::store) fn advance(
         progress(
             &mut store.connection,
             Checkpoint {
+                namespace,
                 path: &path,
                 receipt: &receipt,
                 cursor,
                 projection_id,
             },
             |tx| {
-                tx.execute(
-                    "UPDATE native_tree_repairs SET state='done' WHERE source_path=?1",
-                    [&path],
-                )?;
+                let (scoped, query) = usage_sql(tx, "UPDATE native_tree_repairs SET state='done' WHERE source_path=?1", "UPDATE native_tree_repairs SET state='done' WHERE namespace=?1 AND source_path=?2")?;
+                if scoped { tx.execute(query,params![namespace,path])?; }
+                else { tx.execute(query,[&path])?; }
                 Ok(())
             },
         )
         .map_err(sql_error)?;
-        return Ok((pending(&store.connection).map_err(sql_error)?, None));
+        return Ok((pending(&store.connection,namespace).map_err(sql_error)?, None));
     }
     let input = crate::native_evidence::catalog_input(Path::new(&path), options);
     if input.is_none() {
         progress(
             &mut store.connection,
             Checkpoint {
+                namespace,
                 path: &path,
                 receipt: &receipt,
                 cursor,
                 projection_id,
             },
             |tx| {
-                tx.execute(
-                    "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1",
-                    [&path],
-                )?;
+                let (scoped, query) = usage_sql(tx, "UPDATE native_tree_repairs SET state='blocked_source' WHERE source_path=?1", "UPDATE native_tree_repairs SET state='blocked_source' WHERE namespace=?1 AND source_path=?2")?;
+                if scoped { tx.execute(query,params![namespace,path])?; }
+                else { tx.execute(query,[&path])?; }
                 Ok(())
             },
         )
         .map_err(sql_error)?;
-        return Ok((pending(&store.connection).map_err(sql_error)?, None));
+        return Ok((pending(&store.connection,namespace).map_err(sql_error)?, None));
     }
     let (id, projection_id) = {
         let tx = store
@@ -340,14 +367,19 @@ pub(in crate::events::store) fn advance(
         {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let claimed:(Option<i64>,i64,Option<i64>,String)=tx.query_row("SELECT source_id,cursor,projection_id,receipt FROM native_tree_repairs WHERE source_path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql_error)?;
+        let (scoped, query) = usage_sql(&tx, "SELECT source_id,cursor,projection_id,receipt FROM native_tree_repairs WHERE source_path=?1", "SELECT source_id,cursor,projection_id,receipt FROM native_tree_repairs WHERE namespace=?1 AND source_path=?2").map_err(sql_error)?;
+        let claimed: (Option<i64>,i64,Option<i64>,String) = if scoped {
+            tx.query_row(query,params![namespace,path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql_error)?
+        } else {
+            tx.query_row(query,[&path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(sql_error)?
+        };
         if claimed != (id, cursor as i64, projection_id, receipt.clone()) {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         let id = match id {
             Some(id) => id,
             None => {
-                source(&tx, &path)
+                source_in(&tx, namespace, &path)
                     .map_err(sql_error)?
                     .ok_or_else(|| io::Error::other("missing current source generation"))?
                     .0
@@ -357,7 +389,9 @@ pub(in crate::events::store) fn advance(
             Some(id) => id,
             None => tree_state::new_generation(&tx, id, &ledger).map_err(sql_error)?,
         };
-        tx.execute("UPDATE native_tree_repairs SET source_id=?2,projection_id=?3,state='running' WHERE source_path=?1",params![path,id,projection_id]).map_err(sql_error)?;
+        let (scoped, query) = usage_sql(&tx, "UPDATE native_tree_repairs SET source_id=?2,projection_id=?3,state='running' WHERE source_path=?1", "UPDATE native_tree_repairs SET source_id=?3,projection_id=?4,state='running' WHERE namespace=?1 AND source_path=?2").map_err(sql_error)?;
+        if scoped { tx.execute(query,params![namespace,path,id,projection_id]).map_err(sql_error)?; }
+        else { tx.execute(query,params![path,id,projection_id]).map_err(sql_error)?; }
         tx.commit().map_err(sql_error)?;
         (id, projection_id)
     };
@@ -386,21 +420,21 @@ pub(in crate::events::store) fn advance(
             progress(
                 &mut store.connection,
                 Checkpoint {
+                    namespace,
                     path: &path,
                     receipt: &receipt,
                     cursor,
                     projection_id: Some(projection_id),
                 },
                 |tx| {
-                    tx.execute(
-                        "UPDATE native_tree_repairs SET state=?2 WHERE source_path=?1",
-                        params![path, reason],
-                    )?;
+                    let (scoped, query) = usage_sql(tx, "UPDATE native_tree_repairs SET state=?2 WHERE source_path=?1", "UPDATE native_tree_repairs SET state=?3 WHERE namespace=?1 AND source_path=?2")?;
+                    if scoped { tx.execute(query,params![namespace,path,reason])?; }
+                    else { tx.execute(query,params![path,reason])?; }
                     Ok(())
                 },
             )
             .map_err(sql_error)?;
-            return Ok((pending(&store.connection).map_err(sql_error)?, None));
+            return Ok((pending(&store.connection,namespace).map_err(sql_error)?, None));
         }
     };
     let tx = store
@@ -417,7 +451,12 @@ pub(in crate::events::store) fn advance(
     {
         return Err(io::ErrorKind::WouldBlock.into());
     }
-    let actual: (i64,i64,i64) = tx.query_row("SELECT source_id,cursor,projection_id FROM native_tree_repairs WHERE source_path=?1 AND receipt=?2",params![path,receipt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(sql_error)?;
+    let (scoped, query) = usage_sql(&tx, "SELECT source_id,cursor,projection_id FROM native_tree_repairs WHERE source_path=?1 AND receipt=?2", "SELECT source_id,cursor,projection_id FROM native_tree_repairs WHERE namespace=?1 AND source_path=?2 AND receipt=?3").map_err(sql_error)?;
+    let actual: (i64,i64,i64) = if scoped {
+        tx.query_row(query,params![namespace,path,receipt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(sql_error)?
+    } else {
+        tx.query_row(query,params![path,receipt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(sql_error)?
+    };
     if actual != (id, cursor as i64, projection_id) {
         return Err(io::ErrorKind::WouldBlock.into());
     }
@@ -443,8 +482,20 @@ pub(in crate::events::store) fn advance(
     )
     .map_err(sql_error)?;
     let complete = batch.cursor == ledger.offset;
-    tx.execute("INSERT INTO meta VALUES('native_tree_repair_clock','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",[]).map_err(sql_error)?;
-    tx.execute("UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST((SELECT value FROM meta WHERE key='native_tree_repair_clock') AS INTEGER) WHERE source_path=?1",params![path,batch.cursor as i64,batch.index.last_model,json(&tree_root).map_err(sql_error)?,if complete {"done"} else {"running"}]).map_err(sql_error)?;
+    let meta_update = configured::metadata_sql(&tx,
+        "INSERT INTO meta VALUES('native_tree_repair_clock','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
+        "INSERT INTO meta(namespace,key,value) VALUES('','native_tree_repair_clock','1') ON CONFLICT(namespace,key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
+    ).map_err(sql_error)?;
+    tx.execute(meta_update,[]).map_err(sql_error)?;
+    let meta_read = configured::metadata_sql(
+        &tx,
+        "SELECT value FROM meta WHERE key='native_tree_repair_clock'",
+        "SELECT value FROM meta WHERE namespace='' AND key='native_tree_repair_clock'",
+    ).map_err(sql_error)?;
+    let meta_clock: String = tx.query_row(meta_read,[],|r|r.get(0)).map_err(sql_error)?;
+    let (scoped, query) = usage_sql(&tx, "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST(?6 AS INTEGER) WHERE source_path=?1", "UPDATE native_tree_repairs SET cursor=?3,last_model=?4,tree_root=?5,state=?6,last_attempt=CAST(?7 AS INTEGER) WHERE namespace=?1 AND source_path=?2").map_err(sql_error)?;
+    if scoped { tx.execute(query,params![namespace,path,batch.cursor as i64,batch.index.last_model,json(&tree_root).map_err(sql_error)?,if complete {"done"} else {"running"},meta_clock]).map_err(sql_error)?; }
+    else { tx.execute(query,params![path,batch.cursor as i64,batch.index.last_model,json(&tree_root).map_err(sql_error)?,if complete {"done"} else {"running"},meta_clock]).map_err(sql_error)?; }
     if complete {
         tree_state::bind_generation(&tx, &path, &ledger, projection_id).map_err(sql_error)?;
         write_tree_summary(&tx, &path, &ledger, Some(&tree_root), true).map_err(sql_error)?;
@@ -452,7 +503,7 @@ pub(in crate::events::store) fn advance(
     crate::selected_read::checkpoint("native_tree_repair_commit")?;
     tx.commit().map_err(sql_error)?;
     Ok((
-        pending(&store.connection).map_err(sql_error)?,
+        pending(&store.connection,namespace).map_err(sql_error)?,
         complete.then_some(path),
     ))
 }
