@@ -5,6 +5,21 @@
   "native_event_namespace_composite_rows": false,
   "native_event_composite_core_tables": ["files", "events", "signals"],
   "native_event_metadata_composite": false,
+  "native_event_metadata_scoped_helpers": [
+    "native headers, parent markers, tree summaries/failures and archive markers",
+    "chunk pages, tree witnesses and retained proof copy/cleanup",
+    "launch pages and bounded measured cleanup",
+    "relocation evidence and Tree metadata readiness join"
+  ],
+  "native_event_metadata_public_shape": "singleton; composite shape private-fixture only",
+  "native_event_metadata_pending": [
+    "store-global key classification beyond the four explicitly classified keys",
+    "Catalog publication/recovery/qualification and archive membership queries",
+    "semantic stage source header scans and global metadata operations",
+    "pricing triggers/work state and native usage repair clock",
+    "SourceJournal, reader epoch and change-stream metadata operations",
+    "fresh configured meta activation, DEFAULT removal and complete qualification"
+  ],
   "unqualified_paths": [
     "catalog_observer.rs",
     "catalog_search.rs",

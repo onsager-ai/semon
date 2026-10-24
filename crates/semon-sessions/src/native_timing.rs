@@ -732,13 +732,18 @@ impl Measurements {
         pages: impl FnOnce() -> usize,
         labels: &CleanupLabels,
     ) -> rusqlite::Result<usize> {
+        let cleanup_sql = crate::events::store::configured::metadata_sql(
+            transaction,
+            CLEANUP_SQL,
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')",
+        )?;
         #[cfg(test)]
         if self.uncached_cleanup_reference {
             let pages = pages();
             // Exact pre-cache acquisition and six ordered bindings, available
             // only through an explicitly scoped real-parent test publication.
             return transaction.execute(
-                CLEANUP_SQL,
+                cleanup_sql,
                 rusqlite::params![
                     prefix,
                     format!("{prefix}~"),
@@ -751,7 +756,7 @@ impl Measurements {
         }
         if !self.is_enabled() {
             let pages = pages();
-            let mut statement = transaction.prepare_cached(CLEANUP_SQL)?;
+            let mut statement = transaction.prepare_cached(cleanup_sql)?;
             return statement.execute(rusqlite::params![
                 prefix,
                 format!("{prefix}~"),
@@ -770,7 +775,7 @@ impl Measurements {
         let suffix = (prefix.len() + 1) as i64;
         let args_us = started.elapsed().as_micros();
         let started = Instant::now();
-        let prepared = transaction.prepare_cached(CLEANUP_SQL);
+        let prepared = transaction.prepare_cached(cleanup_sql);
         let prepare_us = started.elapsed().as_micros();
         let mut statement = match prepared {
             Ok(statement) => statement,

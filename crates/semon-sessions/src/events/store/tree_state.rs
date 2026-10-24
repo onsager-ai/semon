@@ -332,7 +332,9 @@ pub(super) fn restore(
 }
 
 pub(super) fn ready(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
-    c.query_row("SELECT EXISTS(SELECT 1 FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current c ON c.source_path=h.source_path AND c.source_id=g.source_id JOIN meta m ON m.key='native_tree_summary:'||h.source_path WHERE h.source_path=?1 AND h.ledger=?2 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger AND CASE WHEN octet_length(m.value)<=1048576 AND json_valid(m.value) THEN json_extract(m.value,'$.version')=3 ELSE 0 END)",params![path,header_ledger(ledger)],|r|r.get(0))
+    c.query_row(configured::metadata_sql(c,
+        "SELECT EXISTS(SELECT 1 FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current c ON c.source_path=h.source_path AND c.source_id=g.source_id JOIN meta m ON m.key='native_tree_summary:'||h.source_path WHERE h.source_path=?1 AND h.ledger=?2 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger AND CASE WHEN octet_length(m.value)<=1048576 AND json_valid(m.value) THEN json_extract(m.value,'$.version')=3 ELSE 0 END)",
+        "SELECT EXISTS(SELECT 1 FROM native_tree_headers h JOIN native_tree_generations g USING(projection_id) JOIN native_usage_current c ON c.source_path=h.source_path AND c.source_id=g.source_id JOIN meta m ON m.namespace=semon_namespace() AND m.key='native_tree_summary:'||h.source_path WHERE h.source_path=?1 AND h.ledger=?2 AND g.complete=1 AND g.version=3 AND g.receipt=h.ledger AND CASE WHEN octet_length(m.value)<=1048576 AND json_valid(m.value) THEN json_extract(m.value,'$.version')=3 ELSE 0 END)")?,params![path,header_ledger(ledger)],|r|r.get(0))
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
