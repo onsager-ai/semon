@@ -3795,7 +3795,7 @@
       "scope": "two-machines",
       "kind": "frame",
       "key": "desktop-dark|machine-desktop",
-      "candidateFingerprint": "2a0b6f886fd02d3654f72f4158df9208a9c6548d30b3196febd1dcb0c686bfe3",
+      "candidateFingerprint": "9d82596cf9cf85617c306941d28cb899f79027e8e9afaa083bfc23da1584ba40",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3823,7 +3823,7 @@
       "scope": "two-machines",
       "kind": "frame",
       "key": "desktop-dark|machine-laptop",
-      "candidateFingerprint": "2a0b6f886fd02d3654f72f4158df9208a9c6548d30b3196febd1dcb0c686bfe3",
+      "candidateFingerprint": "9d82596cf9cf85617c306941d28cb899f79027e8e9afaa083bfc23da1584ba40",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3851,7 +3851,7 @@
       "scope": "two-machines",
       "kind": "frame",
       "key": "desktop-dark|machines",
-      "candidateFingerprint": "2a0b6f886fd02d3654f72f4158df9208a9c6548d30b3196febd1dcb0c686bfe3",
+      "candidateFingerprint": "9d82596cf9cf85617c306941d28cb899f79027e8e9afaa083bfc23da1584ba40",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3879,7 +3879,7 @@
       "scope": "two-machines",
       "kind": "frame",
       "key": "desktop-light|machine-desktop",
-      "candidateFingerprint": "2a0b6f886fd02d3654f72f4158df9208a9c6548d30b3196febd1dcb0c686bfe3",
+      "candidateFingerprint": "9d82596cf9cf85617c306941d28cb899f79027e8e9afaa083bfc23da1584ba40",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3907,7 +3907,7 @@
       "scope": "two-machines",
       "kind": "frame",
       "key": "desktop-light|machine-laptop",
-      "candidateFingerprint": "2a0b6f886fd02d3654f72f4158df9208a9c6548d30b3196febd1dcb0c686bfe3",
+      "candidateFingerprint": "9d82596cf9cf85617c306941d28cb899f79027e8e9afaa083bfc23da1584ba40",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {
@@ -3935,7 +3935,7 @@
       "scope": "two-machines",
       "kind": "frame",
       "key": "desktop-light|machines",
-      "candidateFingerprint": "2a0b6f886fd02d3654f72f4158df9208a9c6548d30b3196febd1dcb0c686bfe3",
+      "candidateFingerprint": "9d82596cf9cf85617c306941d28cb899f79027e8e9afaa083bfc23da1584ba40",
       "reference": "263a02da278716ab2309b8e34a463419e5c781e5",
       "referenceHub": "503fbe090749ea1d58b9ca9fa4ccae7289ee426e",
       "artifactDigests": {

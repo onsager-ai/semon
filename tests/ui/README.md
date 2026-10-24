@@ -82,6 +82,10 @@ its completion witness is the native-publication success message in the CI log.
   diff PNG hashes are unchanged, as are all reference pins. This maintenance
   does not approve a new appearance or alter any comparator, mask, threshold or
   capture coverage.
+- CI run 40116009494 and artifact 12568905474 support six two-machine transport
+  fingerprint updates. The exact adopted patch changes only candidate runtime
+  fingerprints; all 36 image/DOM digests and reference pins remain unchanged.
+  This is binding maintenance only and creates no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
