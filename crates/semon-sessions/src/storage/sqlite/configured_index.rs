@@ -1,4 +1,4 @@
-//! Explicit configured IndexStore. Only source observation operations qualify.
+//! Explicit configured IndexStore. Unported families still refuse.
 use crate::events::{
     DirtyRows, FileIndex, IndexStore, Ledger, Outcome, ReportedFileStamp, Stat, StoreError,
 };
@@ -7,20 +7,33 @@ use crate::storage::source_observations::SourceObservationStore;
 use crate::storage::{StorageError, StoreConfig};
 use std::{collections::BTreeSet, io, sync::Arc};
 
-pub(super) struct ConfiguredIndex(pub(super) super::source_journal::SourceJournal);
+pub(super) struct ConfiguredIndex {
+    journal: super::source_journal::SourceJournal,
+    native: crate::events::store::configured::Writer,
+}
 
 pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
-    Ok(Box::new(ConfiguredIndex(journal)))
+    Ok(Box::new(ConfiguredIndex { journal, native: crate::events::store::configured::Writer::new(config) }))
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn prepare_file(&mut self, path: &str, expected: Option<&Ledger>, operation_id: &str) -> Result<(), StoreError> {
+        self.native.begin(path, expected, operation_id).map_err(StoreError::Configured)
+    }
+    fn reconcile_event(&self, operation_id: &str, path: &str) -> Result<Option<crate::storage::native_events::EventReceipt>, StoreError> {
+        self.native.reconcile(operation_id, path).map_err(StoreError::Configured)
+    }
+    fn event_receipt(&self, path: &str) -> Result<crate::storage::native_events::EventReceipt, StoreError> {
+        self.native.receipt(path).map_err(StoreError::Configured)
+    }
+
     fn invalidate_catalog_sources(
         &mut self,
         expected: &[(String, Option<i64>)],
     ) -> Result<bool, StoreError> {
-        self.0.invalidate(expected).map_err(StoreError::Configured)
+        self.journal.invalidate(expected).map_err(StoreError::Configured)
     }
     fn describe(&self) -> String {
         "configured source observations".to_owned()
@@ -88,14 +101,14 @@ impl IndexStore for ConfiguredIndex {
         ))
     }
     fn backfill_state(&self) -> Result<Option<String>, StoreError> {
-        self.0.backfill_state().map_err(StoreError::Configured)
+        self.journal.backfill_state().map_err(StoreError::Configured)
     }
     fn discover_catalog_sources(
         &mut self,
         paths: &[String],
         complete: bool,
     ) -> Result<(), StoreError> {
-        self.0
+        self.journal
             .discover(paths, complete)
             .map_err(StoreError::Configured)
     }
@@ -115,28 +128,16 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending,
         ))
     }
-    fn relocate_codex(
-        &mut self,
-        _path: &str,
-        _stat: &Stat,
-        _id: &str,
-        _file: &mut LogFile,
-        _measurements: &mut crate::native_timing::Measurements,
-    ) -> Result<Option<String>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn relocate_codex(&mut self, _path: &str, _stat: &Stat, _id: &str, _file: &mut LogFile, _measurements: &mut crate::native_timing::Measurements) -> Result<Option<String>, StoreError> {
+        // Cross-path relocation admission is unported; ordinary parsing still
+        // commits its relocation advance/dependency effects atomically.
+        Err(StoreError::Configured(StorageError::NamespaceUpgradePending))
     }
-    fn append_evidence(
-        &self,
-        _path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn append_evidence(&self, _path: &str) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
+        Err(StoreError::Configured(StorageError::NamespaceUpgradePending))
     }
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
-        self.0.pending(limit).map_err(StoreError::Configured)
+        self.journal.pending(limit).map_err(StoreError::Configured)
     }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         Err(StoreError::Configured(
@@ -144,7 +145,7 @@ impl IndexStore for ConfiguredIndex {
         ))
     }
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError> {
-        self.0.claims(paths).map_err(StoreError::Configured)
+        self.journal.claims(paths).map_err(StoreError::Configured)
     }
     fn catalog_component_paths(
         &self,
@@ -219,25 +220,14 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending,
         ))
     }
-    fn ledger(&self, _path: &str) -> Result<Option<Ledger>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
+        self.native.ledger(path).map_err(StoreError::Configured)
     }
-    fn load_file(&self, _path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
+        self.native.load(path).map_err(StoreError::Configured)
     }
-    fn native_usage_seen(
-        &self,
-        _path: &str,
-        _ledger: &Ledger,
-        _identity: &str,
-    ) -> Result<crate::events::store::native_usage::Seen, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn native_usage_seen(&self, path: &str, ledger: &Ledger, identity: &str) -> Result<crate::events::store::native_usage::Seen, StoreError> {
+        self.native.seen(path, ledger, identity).map_err(StoreError::Configured)
     }
     fn advance_tree_repair(
         &mut self,
@@ -262,34 +252,18 @@ impl IndexStore for ConfiguredIndex {
             StorageError::NamespaceUpgradePending.to_string(),
         ))
     }
-    fn load_tree(
-        &self,
-        _path: &str,
-        _expected: &Stat,
-    ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn load_tree(&self, path: &str, expected: &Stat) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError> {
+        self.native.tree(path, expected).map_err(StoreError::Configured)
     }
-    fn commit_initial_files(
-        &mut self,
-        _files: &[(String, Ledger, Arc<FileIndex>)],
-    ) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn commit_initial_files(&mut self, files: &[(String, Ledger, Arc<FileIndex>)]) -> Result<Outcome, StoreError> {
+        if files.iter().any(|(_, ledger, _)| ledger.offset != ledger.stat.size) {
+            return Err(StoreError::Configured(StorageError::InvalidArguments));
+        }
+        let files = files.iter().map(|(path, ledger, index)| (path.as_str(), None, None, ledger, index.as_ref())).collect::<Vec<_>>();
+        self.native.commit(&files).map_err(StoreError::Configured)
     }
-    fn commit_file(
-        &mut self,
-        _path: &str,
-        _expected: Option<&Ledger>,
-        _changes: Option<&DirtyRows>,
-        _ledger: &Ledger,
-        _index: &FileIndex,
-    ) -> Result<Outcome, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+    fn commit_file(&mut self, path: &str, expected: Option<&Ledger>, changes: Option<&DirtyRows>, ledger: &Ledger, index: &FileIndex) -> Result<Outcome, StoreError> {
+        self.native.commit(&[(path, expected, changes, ledger, index)]).map_err(StoreError::Configured)
     }
     fn select_reported_runs(
         &mut self,

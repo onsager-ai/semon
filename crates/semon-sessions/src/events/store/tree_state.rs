@@ -62,6 +62,7 @@ pub(crate) struct Snapshot {
     ledger: Ledger,
     file_id: i64,
     projection_id: i64,
+    configured: Option<crate::storage::StoreConfig>,
 }
 impl fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,14 +75,28 @@ type SharedUsage = (
     BTreeMap<String, String>,
 );
 impl Snapshot {
+    pub(super) fn bind_configured(&mut self, config: crate::storage::StoreConfig) {
+        self.configured = Some(config);
+    }
+
     fn with<T>(
         &self,
         read: impl FnOnce(&Connection, i64, i64) -> rusqlite::Result<T>,
     ) -> io::Result<T> {
-        let c = Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(io::Error::other)?;
+        let c = match &self.configured {
+            Some(config) => configured::connection(config).map_err(io::Error::other)?,
+            None => Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(io::Error::other)?,
+        };
         let tx = c.unchecked_transaction().map_err(io::Error::other)?;
-        if !current(&tx).map_err(io::Error::other)?
+        let admitted = match &self.configured {
+            Some(config) => {
+                configured::validate(&tx, config).map_err(io::Error::other)?;
+                true
+            }
+            None => current(&tx).map_err(io::Error::other)?,
+        };
+        if !admitted
             || ledger_row(&tx, &self.path)
                 .map_err(io::Error::other)?
                 .map(|(_, ledger)| ledger)
@@ -298,6 +313,7 @@ pub(super) fn restore(
             ledger: ledger.clone(),
             file_id: id,
             projection_id,
+            configured: None,
         });
     }
     Ok(true)
