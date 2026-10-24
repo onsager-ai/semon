@@ -360,6 +360,7 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
         |_| Ok(1_i64),
     )
     .map_err(failed)?;
+    copied_usage_sql(&db, "", "").map_err(failed)?;
     Ok(db)
 }
 

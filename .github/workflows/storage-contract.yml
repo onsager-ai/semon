@@ -61,6 +61,7 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::native_usage::namespace_tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::native_usage::file_namespace_tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_family_rejects_mixed_shapes_before_payload_dml -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_layout_is_independent_of_core_and_native_layout -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_tree_pricing_collision_restart_and_rollback -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback -- --exact --nocapture

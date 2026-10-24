@@ -260,23 +260,9 @@ const BUSY_TIMEOUT: Duration = if cfg!(test) {
 /// about the store's size, and it would otherwise stay that large.
 const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS session_slot_projections (
-    session_key TEXT PRIMARY KEY,
-    generation TEXT NOT NULL,
-    source_generation TEXT,
-    version INTEGER NOT NULL,
-    total INTEGER NOT NULL
-) STRICT;
-CREATE INDEX IF NOT EXISTS session_slot_projection_version ON session_slot_projections(version,session_key);
-CREATE TABLE IF NOT EXISTS session_slots (
-    session_key TEXT NOT NULL,
-    slot INTEGER NOT NULL,
-    metadata TEXT NOT NULL,
-    PRIMARY KEY(session_key,slot)
-) STRICT, WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS session_slots_turn ON session_slots(session_key,CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.turn') END,slot);
+macro_rules! catalog_ddl {
+    () => {
+        "
 CREATE TABLE IF NOT EXISTS session_catalog (
     session_key TEXT PRIMARY KEY,
     lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
@@ -320,6 +306,12 @@ CREATE INDEX IF NOT EXISTS session_catalog_native_aliases ON session_catalog_sou
 CREATE INDEX IF NOT EXISTS session_catalog_source_path ON session_catalog_sources(source_path, session_key);
 CREATE INDEX IF NOT EXISTS session_catalog_current_native ON session_catalog_sources(lifecycle, harness, native_id, session_key);
 CREATE INDEX IF NOT EXISTS session_catalog_current_source_path ON session_catalog_sources(lifecycle, source_path, session_key);
+"
+    };
+}
+macro_rules! catalog_support_ddl {
+    () => {
+        "
 CREATE TABLE IF NOT EXISTS session_catalog_invalidations (
     source_path TEXT PRIMARY KEY,
     revision INTEGER NOT NULL,
@@ -362,7 +354,96 @@ CREATE TABLE IF NOT EXISTS reported_runs (
     capture_at INTEGER NOT NULL,
     PRIMARY KEY (session_id, start)
 ) STRICT, WITHOUT ROWID;
+"
+    };
+}
+const CATALOG_SCHEMA: &str = catalog_ddl!();
+macro_rules! slot_ddl {
+    () => {
+        "
+CREATE TABLE IF NOT EXISTS session_slot_projections (
+    session_key TEXT PRIMARY KEY,
+    generation TEXT NOT NULL,
+    source_generation TEXT,
+    version INTEGER NOT NULL,
+    total INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS session_slot_projection_version ON session_slot_projections(version,session_key);
+CREATE TABLE IF NOT EXISTS session_slots (
+    session_key TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    metadata TEXT NOT NULL,
+    PRIMARY KEY(session_key,slot)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS session_slots_turn ON session_slots(session_key,CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.turn') END,slot);
+"
+    };
+}
+#[cfg(test)]
+const SCHEMA: &str = concat!(slot_ddl!(), catalog_ddl!(), catalog_support_ddl!());
+const SLOT_SCHEMA: &str = slot_ddl!();
+const CATALOG_SUPPORT_SCHEMA: &str = catalog_support_ddl!();
+
+const COMPOSITE_CATALOG_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS session_catalog (
+    namespace TEXT NOT NULL,
+    session_key TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
+    last_ms INTEGER NOT NULL,
+    harness TEXT NOT NULL,
+    repo TEXT,
+    parent_key TEXT,
+    metadata TEXT NOT NULL,
+    pricing_fingerprint TEXT,
+    PRIMARY KEY(namespace,session_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS session_catalog_order ON session_catalog(namespace,last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness ON session_catalog(namespace,harness, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_repo ON session_catalog(namespace,repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_repo ON session_catalog(namespace,harness, repo, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_parent ON session_catalog(namespace,parent_key, last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_order ON session_catalog(namespace,last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness ON session_catalog(namespace,harness, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_repo ON session_catalog(namespace,repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo ON session_catalog(namespace,harness, repo, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_parent ON session_catalog(namespace,parent_key, last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_order_model ON session_catalog(namespace,json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_model ON session_catalog(namespace,harness, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_repo_model ON session_catalog(namespace,repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_harness_repo_model ON session_catalog(namespace,harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC);
+CREATE INDEX IF NOT EXISTS session_catalog_current_order_model ON session_catalog(namespace,json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_model ON session_catalog(namespace,harness, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_repo_model ON session_catalog(namespace,repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo_model ON session_catalog(namespace,harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS session_catalog_query_last ON session_catalog(namespace,json_extract(metadata,'$.query.last'),session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_query_current_state ON session_catalog(namespace,json_extract(metadata,'$.query.state'),session_key) WHERE lifecycle='current';
+CREATE TABLE IF NOT EXISTS session_catalog_sources (
+    namespace TEXT NOT NULL,
+    session_key TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
+    harness TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    PRIMARY KEY(namespace, session_key, source_path),
+    FOREIGN KEY(namespace,session_key) REFERENCES session_catalog(namespace,session_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(namespace,harness, native_id, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_native_aliases ON session_catalog_sources(namespace,native_id, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_source_path ON session_catalog_sources(namespace,source_path, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_current_native ON session_catalog_sources(namespace,lifecycle, harness, native_id, session_key);
+CREATE INDEX IF NOT EXISTS session_catalog_current_source_path ON session_catalog_sources(namespace,lifecycle, source_path, session_key);
 ";
+
+fn catalog_schema(composite: bool) -> &'static str {
+    if composite {
+        COMPOSITE_CATALOG_SCHEMA
+    } else {
+        CATALOG_SCHEMA
+    }
+}
+
+
 
 const LEGACY_EVENT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
@@ -606,7 +687,53 @@ fn copied_usage_sql<'a>(
     legacy: &'a str,
     scoped: &'a str,
 ) -> rusqlite::Result<&'a str> {
-    let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    let version: i64 = c.pragma_query_value(None, "schema_version", |r| r.get(0))?;
+    let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_copied_usage_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
+    if cached {
+        let layout: Option<bool> = c.prepare_cached("SELECT semon_copied_usage_layout(?1)")?.query_row([version], |r| r.get(0))?;
+        if let Some(composite) = layout {
+            return Ok(if composite { scoped } else { legacy });
+        }
+    }
+    // These tables are one atomic physical family, independent of files and
+    // native usage. Reject missing tables and partial namespace keys before DML.
+    let mut shape = None;
+    for (table, keys) in [
+        ("usage_identity", "file_id,message_id,record_uuid"),
+        ("usage", "file_id,message_id"),
+        ("codex_usage", "file_id,seq"),
+    ] {
+        let actual: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
+        let composite = if actual == keys {
+            false
+        } else if actual == format!("namespace,{keys}") {
+            true
+        } else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=?2 AND coalesce(min(pk=1 AND [notnull]=1 AND type='TEXT'),1) FROM pragma_table_info(?1) WHERE name='namespace'")?.query_row(params![table, i64::from(composite)], |r| r.get(0))?;
+        let physical: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)")?.query_row([table], |r| r.get(0))?;
+        if !namespace_valid || !physical || shape.is_some_and(|prior| prior != composite) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        shape = Some(composite);
+    }
+    let composite = shape.ok_or(rusqlite::Error::InvalidQuery)?;
+    // Do not cache an uncommitted schema cookie: rollback can reuse it for
+    // a different DDL transaction. Existing committed decisions remain usable.
+    if !c.is_autocommit() {
+        return Ok(if composite { scoped } else { legacy });
+    }
+    c.create_scalar_function(
+        "semon_copied_usage_layout",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        move |context| {
+            let observed: i64 = context.get(0)?;
+            Ok((observed == version).then_some(composite))
+        },
+    )?;
     Ok(if composite { scoped } else { legacy })
 }
 
@@ -4090,6 +4217,7 @@ impl SqliteStore {
             return Ok(Outcome::Stale);
         }
         require_current_sql(&transaction)?;
+        copied_usage_sql(&transaction, "", "")?;
         for (path, expected) in files {
             match (ledger_row(&transaction, path), expected) {
                 (Ok(Some((_, found))), Some(expected)) if found == *expected => {
@@ -4586,6 +4714,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     if !matches!(found, Init::Ready) {
         return Ok(found);
     }
+    copied_usage_sql(connection, "", "")?;
     let unsupported_archive: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
         [CACHE_VERSION],
@@ -4600,10 +4729,12 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set, shared by cold initialization and whole-index rebuilds.
-fn storage_ddl() -> [&'static str; 18] {
+fn storage_ddl() -> [&'static str; 21] {
     let [usage, repair] = native_usage::schema(false);
     [
-        SCHEMA,
+        SLOT_SCHEMA,
+        catalog_schema(false),
+        CATALOG_SUPPORT_SCHEMA,
         metadata_schema(false),
         LEGACY_EVENT_SCHEMA,
         copied_usage_schema(false),
@@ -4614,6 +4745,7 @@ fn storage_ddl() -> [&'static str; 18] {
         semantic_stage::SEMANTIC_CORE_INDEXES,
         semantic_stage::metadata_indexes(false),
         crate::overview::SCHEMA,
+        crate::causal_trace::header_schema(false),
         crate::causal_trace::SCHEMA,
         crate::history_projection::SCHEMA,
         crate::catalog_search::SCHEMA,
@@ -6128,6 +6260,7 @@ fn clear_preserving_tree(
     file_id: i64,
     preserve_tree: bool,
 ) -> rusqlite::Result<()> {
+    copied_usage_sql(transaction, "", "")?;
     for table in ["events", "signals"] {
         transaction.execute(
             &format!(
@@ -6217,6 +6350,7 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
+    copied_usage_sql(transaction, "", "")?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
     let started = measurements.start();
@@ -6344,6 +6478,7 @@ fn write_file(
     index: &FileIndex,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
+    copied_usage_sql(transaction, "", "")?;
     let FileIndex {
         dirty_rows: _,
         native_usage_observations: _,
