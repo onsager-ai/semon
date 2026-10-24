@@ -503,7 +503,7 @@ export function createCatalogViewer(
     jumpActions = document.createElement('div'),
     jumpSlot = document.createElement('span'),
     jumpTarget = document.createElement('div');
-  const readerResize = new ResizeObserver(() => {
+  const restoreReaderLayout = () => {
     // Annotation navigation owns its target across paged/group layout commits,
     // just as opening-end navigation owns the tail across those same commits.
     if (active?.errorMode) {
@@ -521,7 +521,14 @@ export function createCatalogViewer(
       active.following = true;
       scrollEnd();
     }
-  });
+  };
+  const readerResize = new ResizeObserver(restoreReaderLayout);
+  // On phones the document grows with its content: changing only the viewport
+  // height need not resize any observed content box. Recenter against the new
+  // viewport as well as against transcript and toolbar layout changes.
+  scope.listen(window, 'resize', restoreReaderLayout);
+  if (window.visualViewport)
+    scope.listen(window.visualViewport, 'resize', restoreReaderLayout);
   readerResize.observe(root);
   readerResize.observe(document.querySelector<HTMLElement>('#main')!);
   readerResize.observe(document.querySelector<HTMLElement>('#topbar')!);

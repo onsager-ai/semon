@@ -943,8 +943,8 @@ export default async function (browser) {
       ok.notes.length === 0 && ok.out > preview,
       'a working fetch shows the whole text, longer than the preview: ' + JSON.stringify(ok),
     );
-    // The transcript and FullTool panel share the same qualified field request.
-    // Opening the panel while that request is in flight must join its completion.
+    // The recorded tool has no outer text-loading control. Closing and reopening
+    // View all while its qualified field read is in flight must join completion.
     await page.reload();
     await settled(page);
     await childRequestsSettled();
@@ -963,8 +963,9 @@ export default async function (browser) {
       }
       await route.continue();
     });
-    await page.getByRole('button', { name: 'Load recorded text', exact: true }).first().click();
+    await openAll();
     await startedField;
+    await page.click('dialog.panel.full .panel-h .ibtn');
     await openAll();
     releaseField();
     await page.waitForFunction(
