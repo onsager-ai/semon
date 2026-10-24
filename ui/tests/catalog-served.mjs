@@ -21,6 +21,7 @@ test(
     assert.equal(fixture.status, 0, fixture.stderr);
     // Source-shaped synthetic Codex desktop records: private bodies replaced.
     // Exercise the native producer, saved recipes and served reader together.
+    // Deliberately no turn lifecycle: completed tools cannot prove turn completion.
     const nativeAt = new Date(Number(fixture.stdout.trim()) - 1000).toISOString();
     const native = (type, payload) => ({ timestamp: nativeAt, type, payload });
     await writeFile(
@@ -473,7 +474,13 @@ test(
           );
         }
         if (session === 'native-tools') {
-          const nativeEntries = (await Promise.all(nativeRanges)).flatMap((range) => range.entries);
+          const ranges = await Promise.all(nativeRanges);
+          assert.ok(ranges.length);
+          for (const range of ranges) {
+            assert.equal(range.session.details.state, 'off');
+            assert.equal(range.session.details.turn_lifecycle, null);
+          }
+          const nativeEntries = ranges.flatMap((range) => range.entries);
           const tools = nativeEntries.filter((entry) => entry.k === 'tool');
           assert.deepEqual(
             tools.map((entry) => entry.name),

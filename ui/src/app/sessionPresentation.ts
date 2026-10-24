@@ -20,9 +20,33 @@ const trademark =
 export function selectedSessionState(session: CatalogSession): string {
   const details = session.details;
   if (!details) return 'off';
+  if (
+    session.harness === 'codex' &&
+    (!details.turn_lifecycle || details.turn_lifecycle.phase === 'unknown')
+  )
+    return 'off';
   return (details.state === 'work' || details.state === 'wait') && !details.live_observation
     ? 'off'
     : details.state;
+}
+function turnOutcome(session: CatalogSession): string | undefined {
+  const phase = session.details?.turn_lifecycle?.phase;
+  if (!phase) return session.harness === 'codex' && session.details ? 'Unknown' : undefined;
+  return {
+    active: 'Terminal not recorded',
+    completed: 'Completed',
+    aborted: 'Aborted',
+    errored: 'Errored',
+    unknown: 'Unknown',
+  }[phase];
+}
+export function selectedSessionStatusTip(session: CatalogSession): string {
+  const outcome = turnOutcome(session);
+  return (
+    'Status: ' +
+    (STATE[selectedSessionState(session)] ?? 'Recorded history') +
+    (outcome ? ' · Last turn: ' + outcome : '')
+  );
 }
 function recordedCostTip(cost: Cost): string {
   const groups = Object.entries(cost.by_model ?? {}).map(([id, model]) => {
@@ -305,7 +329,11 @@ export function selectedSessionLabels(session: CatalogSession, machine?: string)
     {
       key: 'state',
       text: STATE[state] ?? 'Recorded history',
-      tip: 'Recorded status · ' + (details?.turns ?? 0) + ' turns',
+      tip:
+        'Recorded status · ' +
+        (details?.turns ?? 0) +
+        ' turns' +
+        (turnOutcome(session) ? ' · Last turn: ' + turnOutcome(session) : ''),
       drop: 0,
       className: 'state ' + state,
       state,
@@ -431,6 +459,7 @@ export function selectedSessionMenu(
     { label: 'Model', value: session.model, mono: true },
     { label: 'Machine', value: machine },
   ];
+  if (turnOutcome(session)) details.push({ label: 'Last turn', value: turnOutcome(session)! });
   for (const [label, value] of [
     ['Effort', session.effort],
     ['Branch', session.branch],

@@ -92,6 +92,8 @@ impl Evidence {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Summary {
+    #[serde(default)]
+    pub(crate) codex_turn: crate::codex_lifecycle::State,
     pub(crate) malformed_lines: u64,
     pub(crate) line_count: u64,
     pub(crate) first: Option<String>,
@@ -173,6 +175,7 @@ impl Summary {
 
     pub(crate) fn compact(&self, normalized_usage: bool) -> Self {
         Self {
+            codex_turn: self.codex_turn.clone(),
             malformed_lines: self.malformed_lines,
             line_count: self.line_count,
             codex_tokens: self.codex_tokens.clone(),
@@ -231,6 +234,13 @@ impl Summary {
             digest.update(&bytes);
             read += bytes.len() as u64;
             let record = serde_json::from_slice::<Value>(&bytes).ok();
+            if harness == "codex"
+                && let Some(record) = &record
+            {
+                summary
+                    .codex_turn
+                    .observe(record, read - bytes.len() as u64);
+            }
             summary.observe(record.as_ref(), harness);
             bytes.clear();
         }
@@ -409,6 +419,9 @@ pub(crate) fn read(
 ) -> io::Result<Summary> {
     let (source, metadata) = cache.tree(path, harness, native_id, dirty)?;
     let mut summary = metadata.summary;
+    if let Some(turn) = &mut summary.codex_turn.last {
+        *turn = turn.clone().with_generation(&source.prefix_sha256);
+    }
     let sources = crate::query_source::Sources::capture_native(
         options,
         std::iter::once((source.clone(), metadata.chunks.clone())),
