@@ -76,6 +76,8 @@ test('accepts only the exact pathname restoration or an identical accepted evide
   const result = run();
   assert.equal(result.qualified[0].reason, 'canonical-pathname-only');
   assert.equal(result.refused.length, 0);
+  const fingerprint = run({ bytes: previousBytes });
+  assert.equal(fingerprint.qualified[0].reason, 'fingerprint-only');
 });
 
 test('refuses wrong namespace, wrong identity, extra evidence changes and changed escaping', (t) => {

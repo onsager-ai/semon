@@ -242,13 +242,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     JSON.stringify({
       qualified: result.qualified.length,
       refused: result.refused.length,
-      qualifiedStates: result.qualified.slice(0, 8).map(({ key, reason }) => ({
-        key: String(key).slice(0, 100),
-        reason: String(reason).slice(0, 100),
+      qualifiedStates: result.qualified.slice(0, 6).map(({ key, reason }) => ({
+        key: String(key).slice(0, 80),
+        reason: String(reason).slice(0, 80),
       })),
-      refusedStates: result.refused.slice(0, 8).map(({ key, reason }) => ({
-        key: String(key).slice(0, 100),
-        reason: String(reason).slice(0, 140),
+      refusedStates: result.refused.slice(0, 6).map(({ key, reason }) => ({
+        key: String(key).slice(0, 80),
+        reason: String(reason).slice(0, 120),
       })),
       output: 'visual-pathname-audit.json',
     }),
