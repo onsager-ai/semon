@@ -57,6 +57,24 @@ its completion witness is the native-publication success message in the CI log.
   viewer and 15 full frames/24 regions for pushed-data parity. The actual UI
   reference runs through its original `compat=1` route and history states; the
   pushed-data comparison is served against the machine's own viewer.
+- The #380 task-branch visual/transport CI additionally runs
+  `visual-pathname-audit.mjs` against the existing accepted registry records.
+  `SEMON_UI_OUT` supplies current captures; no earlier-run artifact download,
+  token or network access is used. Each raw state must have exactly one accepted
+  record with the same reference pins. The five non-candidate-evidence digests
+  must match that record, and current candidate evidence bytes must match their
+  reported SHA-256. Identical accepted candidate evidence is fingerprint-only.
+  Otherwise, the audit permits only a canonical top-level pathname replacement
+  from `/s/claude/<id>` or `/s/codex/<id>` to `/session/local/<same encoded id>`:
+  restoring either exact historical fixture namespace must produce exactly one
+  byte sequence with the accepted candidate-evidence SHA-256. This digest-bound
+  mapping is local to the audit; other namespaces, identities, escaping, or any
+  text, geometry, style or history change are refused. `visual-pathname-audit.json`
+  lists qualified and refused exact states; CI prints bounded state summaries.
+  This diagnostic never edits the registry, establishes appearance approval or
+  excuses missing coverage/execution errors. A follow-up may refresh only
+  justified exact bindings while preserving original review/decision/provenance/
+  history; final CI and independent review still apply.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw

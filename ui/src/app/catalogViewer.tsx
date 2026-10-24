@@ -503,7 +503,7 @@ export function createCatalogViewer(
     jumpActions = document.createElement('div'),
     jumpSlot = document.createElement('span'),
     jumpTarget = document.createElement('div');
-  const readerResize = new ResizeObserver(() => {
+  const restoreReaderLayout = () => {
     // Annotation navigation owns its target across paged/group layout commits,
     // just as opening-end navigation owns the tail across those same commits.
     if (active?.errorMode) {
@@ -521,7 +521,13 @@ export function createCatalogViewer(
       active.following = true;
       scrollEnd();
     }
-  });
+  };
+  const readerResize = new ResizeObserver(restoreReaderLayout);
+  // On phones the document grows with its content: changing only the viewport
+  // height need not resize any observed content box. Recenter against the new
+  // viewport as well as against transcript and toolbar layout changes.
+  scope.listen(window, 'resize', restoreReaderLayout);
+  if (window.visualViewport) scope.listen(window.visualViewport, 'resize', restoreReaderLayout);
   readerResize.observe(root);
   readerResize.observe(document.querySelector<HTMLElement>('#main')!);
   readerResize.observe(document.querySelector<HTMLElement>('#topbar')!);
@@ -2007,6 +2013,11 @@ export function createCatalogViewer(
     const draw = () => {
       if (disposed || active !== view || sessionPanel !== panel) return;
       const field = script ? null : fieldView(view, item),
+        fieldAction = field?.action,
+        fieldNote = script
+          ? ''
+          : field?.note ||
+            (item.clipped ? 'Recorded text preview. The complete source text is not loaded.' : ''),
         data = {
           ...entry,
           ...(script ? scriptResult : { scriptText: undefined }),
@@ -2027,20 +2038,20 @@ export function createCatalogViewer(
               waiting={selectedSessionState(view.meta!) === 'wait'}
             />
           )}
-          {field && (field.action || view.fields.get(key)?.note) && (
+          {(fieldNote || fieldAction) && (
             <p class="vnote">
-              {field.note}
-              {field.action && (
+              {fieldNote}
+              {fieldAction && (
                 <button
                   class="btn sh-quiet"
                   type="button"
-                  disabled={field.action.busy}
+                  disabled={fieldAction.busy}
                   onClick={() => {
                     void loadField(view, item).then(draw);
                     draw();
                   }}
                 >
-                  {field.action.label}
+                  {fieldAction.label}
                 </button>
               )}
             </p>
@@ -3068,7 +3079,7 @@ export function createCatalogViewer(
     syncJump(view);
     scrollEnd();
     void loadSelected(view).finally(() => {
-      if (active === view && !disposed) scrollEnd();
+      if (active === view && !disposed && view.following) scrollEnd();
     });
   }
   function fieldView(view: SelectedView, entry: CatalogTranscriptEntry) {

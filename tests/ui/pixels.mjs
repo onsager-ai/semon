@@ -750,8 +750,29 @@ async function captureFrame(candidate, reference, key, phone) {
       sidebarOrder(candidate),
       sidebarOrder(reference),
     ]);
-    if (JSON.stringify(candidateOrder) !== JSON.stringify(referenceOrder))
-      throw new Error(`${key}: independent readers have different visible sidebar order`);
+    if (JSON.stringify(candidateOrder) !== JSON.stringify(referenceOrder)) {
+      // Keep the full comparison above; bound only the retained failure diagnostic.
+      const bounded = (rows) => ({
+        count: rows.length,
+        rows: rows.slice(0, 30).map((row) => ({
+          name: String(row.name ?? '').slice(0, 120),
+          current: row.current,
+        })),
+      });
+      const diagnostic = {
+        key: key.slice(0, 180),
+        candidate: bounded(candidateOrder),
+        reference: bounded(referenceOrder),
+      };
+      fs.writeFileSync(
+        path.join(OUT, `${fileKey(key)}-sidebar-order.json`),
+        JSON.stringify(diagnostic, null, 2) + '\n',
+      );
+      throw new Error(
+        `${key}: independent readers have different visible sidebar order; ` +
+          `see ${fileKey(key)}-sidebar-order.json`,
+      );
+    }
   }
   const images = [],
     artifactDigests = {},
