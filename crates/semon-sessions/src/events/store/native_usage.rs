@@ -366,9 +366,12 @@ fn write_observations(tx: &Transaction<'_>, id: i64, index: &FileIndex) -> rusql
                 Some(_) => "conflict",
             };
             if outcome == "accepted" {
-                tx.prepare_cached(sql(tx, "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
-                    "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)")?)?
-                    .execute(params![id, scope, observation.identity, offset])?;
+                tx.prepare_cached(sql(
+                    tx,
+                    "INSERT INTO native_usage_identities VALUES(?1,?2,?3,?4)",
+                    "INSERT INTO native_usage_identities VALUES(semon_namespace(),?1,?2,?3,?4)",
+                )?)?
+                .execute(params![id, scope, observation.identity, offset])?;
             }
             Ok(outcome)
         };
@@ -378,17 +381,20 @@ fn write_observations(tx: &Transaction<'_>, id: i64, index: &FileIndex) -> rusql
         } else {
             "unavailable"
         };
-        tx.prepare_cached(sql(tx, "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)")?)?
-            .execute(params![
-                id,
-                offset,
-                observation.identity,
-                payload,
-                evidence,
-                tree_outcome,
-                model_outcome
-            ])?;
+        tx.prepare_cached(sql(
+            tx,
+            "INSERT INTO native_usage_facts VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO native_usage_facts VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7)",
+        )?)?
+        .execute(params![
+            id,
+            offset,
+            observation.identity,
+            payload,
+            evidence,
+            tree_outcome,
+            model_outcome
+        ])?;
         if model_outcome == "accepted"
             && let Some(model) = &observation.payload.model
         {
@@ -486,34 +492,73 @@ mod namespace_tests {
         db.pragma_update(None, "foreign_keys", true).unwrap();
         let bind = |db: &Connection, namespace: &str| {
             let namespace = namespace.to_owned();
-            db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8,
-                move |_| Ok(namespace.clone())).unwrap();
+            db.create_scalar_function(
+                "semon_namespace",
+                0,
+                FunctionFlags::SQLITE_UTF8,
+                move |_| Ok(namespace.clone()),
+            )
+            .unwrap();
         };
         let state = |db: &Connection, namespace: &str| {
             let mut state = Vec::<Vec<rusqlite::types::Value>>::new();
-            for table in ["native_usage_sources", "native_usage_current", "native_usage_facts",
-                "native_usage_identities", "native_usage_dimensions"] {
-                let mut statement = db.prepare(&format!("SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3")).unwrap();
+            for table in [
+                "native_usage_sources",
+                "native_usage_current",
+                "native_usage_facts",
+                "native_usage_identities",
+                "native_usage_dimensions",
+            ] {
+                let mut statement = db
+                    .prepare(&format!(
+                        "SELECT * FROM {table} WHERE namespace=?1 ORDER BY 1,2,3"
+                    ))
+                    .unwrap();
                 let columns = statement.column_count();
-                state.extend(statement.query_map([namespace], |r| (0..columns).map(|i| r.get(i)).collect::<rusqlite::Result<Vec<_>>>()).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap());
+                state.extend(
+                    statement
+                        .query_map([namespace], |r| {
+                            (0..columns)
+                                .map(|i| r.get(i))
+                                .collect::<rusqlite::Result<Vec<_>>>()
+                        })
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap(),
+                );
             }
             state
         };
         let ledger = Ledger {
-            stat: Stat { dev: 1, ino: 2, size: 64, modified_ns: 3, changed_ns: Some(4) },
-            offset: 64, prefix: [5; 32], tail: [6; 32],
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 64,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset: 64,
+            prefix: [5; 32],
+            tail: [6; 32],
         };
         let path = "same/relative.jsonl";
         for namespace in ["a", "b"] {
             bind(&db, namespace);
             let tx = db.transaction().unwrap();
             assert_eq!(begin_source(&tx, path, None, &ledger, false).unwrap(), 1);
-            let index = FileIndex { native_usage_observations: Some(vec![Observation {
-                identity: "same-identity".into(),
-                payload: Payload { model: Some(namespace.into()), timestamp: None,
-                    tokens: Tokens::default(), model_tokens: ModelTokens::default() },
-                record: Record::capture(b"sanitized observation", 0),
-            }]), ..FileIndex::default() };
+            let index = FileIndex {
+                native_usage_observations: Some(vec![Observation {
+                    identity: "same-identity".into(),
+                    payload: Payload {
+                        model: Some(namespace.into()),
+                        timestamp: None,
+                        tokens: Tokens::default(),
+                        model_tokens: ModelTokens::default(),
+                    },
+                    record: Record::capture(b"sanitized observation", 0),
+                }]),
+                ..FileIndex::default()
+            };
             write(&tx, path, &ledger, &index).unwrap();
             put_dimension(&tx, 1, "model", "same-model", &namespace).unwrap();
             // The original observation at the same offset reconciles exactly.
@@ -540,7 +585,15 @@ mod namespace_tests {
         // A new incarnation keeps the prior non-rebuildable observations.
         assert_eq!(begin_source(&tx, path, None, &ledger, false).unwrap(), 2);
         tx.commit().unwrap();
-        assert_eq!(db.query_row("SELECT count(*) FROM native_usage_facts WHERE namespace='a' AND source_id=1", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM native_usage_facts WHERE namespace='a' AND source_id=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
         assert_eq!(state(&db, "b"), b);
         bind(&db, "b");
         assert_eq!(source(&db, path).unwrap().unwrap().0, 1);

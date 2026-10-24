@@ -134,9 +134,11 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
 }
 
 fn progress_sql(c: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(c,
+    configured::metadata_sql(
+        c,
         "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)")
+        "SELECT (SELECT value FROM meta WHERE namespace='' AND key=?1),(SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
+    )
 }
 
 fn step_inner(
@@ -162,18 +164,18 @@ fn step_inner(
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (current_target, current_completed, has_pending): (Option<String>, Option<String>, bool) =
-        tx.query_row(
-            progress_sql(&tx)?,
-            params![TARGET, COMPLETED],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        tx.query_row(progress_sql(&tx)?, params![TARGET, COMPLETED], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
     if current_target.as_deref() == Some(table.fingerprint.as_str())
         && current_completed.as_deref() == Some(table.fingerprint.as_str())
         && !has_pending
     {
         return Ok(false);
     }
-    let encoded: Option<String>=tx.query_row(native_metadata_value(&tx)?,[WORK],|r|r.get(0)).optional()?;
+    let encoded: Option<String> = tx
+        .query_row(native_metadata_value(&tx)?, [WORK], |r| r.get(0))
+        .optional()?;
     let mut work: Work = encoded
         .as_deref()
         .map(|s| decode_json(0, s))
@@ -283,7 +285,7 @@ fn step_inner(
         }
         value = json(&work)?;
     }
-    tx.execute(native_metadata_put(&tx)?,params![WORK,value])?;
+    tx.execute(native_metadata_put(&tx)?, params![WORK, value])?;
     tx.commit()?;
     Ok(true)
 }

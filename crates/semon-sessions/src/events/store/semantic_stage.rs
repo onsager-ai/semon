@@ -20,7 +20,10 @@ pub(super) fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     Ok(stored.as_deref() == Some(RECIPE))
 }
 pub(super) fn record_recipe(c: &Connection) -> rusqlite::Result<()> {
-    c.execute(native_metadata_put(c)?, params!["catalog_semantic_recipe", RECIPE])?;
+    c.execute(
+        native_metadata_put(c)?,
+        params!["catalog_semantic_recipe", RECIPE],
+    )?;
     Ok(())
 }
 
@@ -209,11 +212,9 @@ fn ledger(c: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
         .transpose()
 }
 pub(super) fn generation(c: &Connection) -> rusqlite::Result<Option<String>> {
-    c.query_row(
-            native_metadata_value(c)?,
-        ["catalog_generation"],
-        |r| r.get(0),
-    )
+    c.query_row(native_metadata_value(c)?, ["catalog_generation"], |r| {
+        r.get(0)
+    })
     .optional()
 }
 pub(super) fn revision(c: &Connection) -> rusqlite::Result<i64> {
@@ -367,10 +368,21 @@ fn native_frontier(c: &Connection, harness: &str, id: &str) -> rusqlite::Result<
             ("headerid", "id"),
             ("headerparent", "metadata.parent_thread"),
         ] {
-            let dependency = if kind == "headerid" { "native" } else { "parent" };
-            let legacy = format!("SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))");
-            let scoped = format!("SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))");
-            let needed:bool=c.query_row(configured::metadata_sql(c, &legacy, &scoped)?,[id],|r|r.get(0))?;
+            let dependency = if kind == "headerid" {
+                "native"
+            } else {
+                "parent"
+            };
+            let legacy = format!(
+                "SELECT EXISTS(SELECT 1 FROM meta m WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
+            );
+            let scoped = format!(
+                "SELECT EXISTS(SELECT 1 FROM meta m WHERE m.namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.{field}')=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=substr(m.key,length('native_codex_header:')+1)) AND NOT EXISTS(SELECT 1 FROM catalog_native_dependencies d WHERE d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?1 AND d.harness='semantic-{dependency}:codex'))"
+            );
+            let needed: bool =
+                c.query_row(configured::metadata_sql(c, &legacy, &scoped)?, [id], |r| {
+                    r.get(0)
+                })?;
             if needed {
                 queue(c, kind, id, "")?;
             }
@@ -465,15 +477,19 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
                 false,
             ),
             "headerid" => (
-                configured::metadata_sql(c,
+                configured::metadata_sql(
+                    c,
                     "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                    "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3")?,
+                    "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3",
+                )?,
                 false,
             ),
             "headerparent" => (
-                configured::metadata_sql(c,
+                configured::metadata_sql(
+                    c,
                     "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                    "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3")?,
+                    "SELECT key,'' FROM meta WHERE namespace=semon_namespace() AND key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3",
+                )?,
                 false,
             ),
             "claudechildren" => (
@@ -1433,8 +1449,11 @@ impl SqliteStore {
                     )
                     .map_err(failure)?;
                 if removed < budget && !remains {
-                    tx.execute(native_metadata_delete(&tx).map_err(failure)?, ["catalog_semantic_gc"])
-                        .map_err(failure)?;
+                    tx.execute(
+                        native_metadata_delete(&tx).map_err(failure)?,
+                        ["catalog_semantic_gc"],
+                    )
+                    .map_err(failure)?;
                 }
             }
             tx.commit().map_err(failure)?;
@@ -1470,7 +1489,11 @@ impl SqliteStore {
             if paths.is_empty() {
                 return Ok(Outcome::Conflict);
             }
-            tx.execute(metadata_increment(&tx).map_err(failure)?, ["semantic_epoch"]).map_err(failure)?;
+            tx.execute(
+                metadata_increment(&tx).map_err(failure)?,
+                ["semantic_epoch"],
+            )
+            .map_err(failure)?;
             tx.execute(configured::metadata_sql(&tx,
                 "INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE key='semantic_epoch'",
                 "INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'").map_err(failure)?,params![generation(&tx).map_err(failure)?,runtime,revision(&tx).map_err(failure)?]).map_err(failure)?;
@@ -1591,8 +1614,11 @@ impl SqliteStore {
                         )
                         .map_err(failure)?;
                     if !remains {
-                        tx.execute(native_metadata_delete(&tx).map_err(failure)?, ["catalog_semantic_gc"])
-                            .map_err(failure)?;
+                        tx.execute(
+                            native_metadata_delete(&tx).map_err(failure)?,
+                            ["catalog_semantic_gc"],
+                        )
+                        .map_err(failure)?;
                     }
                 }
                 tx.commit().map_err(failure)?;
