@@ -693,13 +693,15 @@ fn workspace_union_cursor_generation_snapshot_fails_closed_on_change_or_missing_
         up: false,
     }];
     let first = session_catalog_union(&sources, "workspace", "limit=3");
-    assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
+    assert_eq!(
+        first.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
     let first: Value = serde_json::from_slice(&first.body).unwrap();
     let cursor = first["next_cursor"].as_str().unwrap().to_owned();
-    let query = format!(
-        "limit=3&cursor={}",
-        crate::viewer::percent_encode(&cursor)
-    );
+    let query = format!("limit=3&cursor={}", crate::viewer::percent_encode(&cursor));
 
     let matching = session_catalog_union(&sources, "workspace", &query);
     assert_eq!(

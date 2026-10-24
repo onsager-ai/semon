@@ -4,7 +4,6 @@
   "unqualified_paths": [
     "catalog_observer.rs",
     "catalog_search.rs",
-    "catalog_union.rs",
     "causal_trace.rs",
     "codex_lifecycle.rs",
     "events.rs",
