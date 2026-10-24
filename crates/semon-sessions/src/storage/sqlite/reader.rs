@@ -81,12 +81,15 @@ impl NativeReaderBinding {
         }
         let db = self.connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
-        self.validate(&db, requested)?;
-        Ok(ReadSnapshot(db))
+        let qualified = self.validate(&db, requested)?;
+        Ok(ReadSnapshot(db, qualified))
     }
 }
 
-pub(super) struct ReadSnapshot(Connection);
+pub(super) struct ReadSnapshot(Connection, bool);
+impl ReadSnapshot {
+    pub(super) fn qualified(&self) -> bool { self.1 }
+}
 impl Deref for ReadSnapshot {
     type Target = Connection;
     fn deref(&self) -> &Connection {
