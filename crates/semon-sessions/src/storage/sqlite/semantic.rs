@@ -21,6 +21,8 @@ impl AdmittedSource {
         if namespace::require_admitted(db, &self.config.namespace)?.generation != self.admission {
             return Err(StorageError::ScopeChanged);
         }
+        let profile: bool = db.query_row("SELECT admission=?2 AND recipe=?3 FROM storage_semantic_profiles WHERE namespace=?1", params![self.config.namespace.as_str(),self.admission,crate::events::store::configured::semantic_recipe()], |r|r.get(0)).map_err(failed)?;
+        if !profile { return Err(StorageError::NamespaceUpgradePending); }
         Ok(())
     }
 }
@@ -88,7 +90,7 @@ impl Stage {
             return Err(StoreError::Configured(StorageError::NamespaceUpgradePending));
         }
         if existing.is_none() {
-            tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)?;
+            if tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
             tx.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,generation,runtime,revision) SELECT ?1,1,epoch,'indexing',?2,?3,(SELECT revision FROM storage_source_journal WHERE namespace=?1) FROM storage_semantic_profiles WHERE namespace=?1", params![ns,self.source.generation,runtime]).map_err(error)?;
         }
         let claims = super::source_journal::claims(&tx, Some(ns), paths).map_err(error)?;
