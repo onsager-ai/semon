@@ -85,6 +85,12 @@ pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), Stor
     if !ready {
         return Err(StorageError::NamespaceUpgradePending);
     }
+    // Earlier pre-release singleton stores lack request binding. Never adopt
+    // their unbound operation IDs as completions of the current contract.
+    let bound: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('storage_event_operations') WHERE name='request_digest' AND type='TEXT' AND \"notnull\"=1)", [], |r| r.get(0)).map_err(failed)?;
+    if !bound {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
     let count: i64 = db
         .query_row(
             "SELECT count(*) FROM storage_event_tables WHERE namespace=?1 AND qualification=1",
@@ -119,7 +125,7 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
         return validate(&tx, config);
     }
     tx.execute_batch("CREATE TABLE storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification=1),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
-CREATE TABLE storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
+CREATE TABLE storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);").map_err(failed)?;
     let ns = config.namespace.as_str().replace('\'', "''");
     tx.execute_batch(&format!(
@@ -188,6 +194,20 @@ impl Writer {
             config: config.clone(),
             intents: BTreeMap::new(),
         }
+    }
+
+    fn request_digest(&self, path: &str, harness: &str) -> Result<String, StorageError> {
+        if path.is_empty() || path.len() > 4096 || !matches!(harness, "claude" | "codex" | "copilot") {
+            return Err(StorageError::InvalidArguments);
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"semon-native-event-request-v1");
+        digest.update(CACHE_VERSION.to_be_bytes());
+        for input in [self.config.namespace.as_str(), path, harness] {
+            digest.update((input.len() as u64).to_be_bytes());
+            digest.update(input.as_bytes());
+        }
+        Ok(format!("{:x}", digest.finalize()))
     }
 
     fn snapshot(&self) -> Result<Connection, StorageError> {
@@ -285,7 +305,9 @@ impl Writer {
         path: &str,
         expected: Option<&Ledger>,
         operation_id: &str,
+        harness: &str,
     ) -> Result<(), StorageError> {
+        let request_digest = self.request_digest(path, harness)?;
         if path.is_empty()
             || path.len() > 4096
             || operation_id.len() != 64
@@ -314,13 +336,13 @@ impl Writer {
         .map_err(failed)?[0]
             .1;
         let base = expected.map(header_ledger).unwrap_or_default();
-        let prior: Option<(String, String, Option<i64>)> = tx.query_row("SELECT source_path,base,observed_revision FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(failed)?;
-        if let Some((old_path, old_base, old_revision)) = prior {
-            if old_path != path || old_base != base || old_revision != revision {
+        let prior: Option<(String, String, Option<i64>, String)> = tx.query_row("SELECT source_path,base,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
+        if let Some((old_path, old_base, old_revision, old_request)) = prior {
+            if old_path != path || old_base != base || old_revision != revision || old_request != request_digest {
                 return Err(StorageError::Conflict);
             }
         } else {
-            tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,'intent')", params![self.config.namespace.as_str(),operation_id,path,base,revision]).map_err(failed)?;
+            tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')", params![self.config.namespace.as_str(),operation_id,path,request_digest,base,revision]).map_err(failed)?;
         }
         let id = operation_id.to_owned();
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
@@ -431,16 +453,18 @@ impl Writer {
         &self,
         operation_id: &str,
         path: &str,
+        harness: &str,
     ) -> Result<Option<EventReceipt>, StorageError> {
+        let request_digest = self.request_digest(path, harness)?;
         if operation_id.len() != 64 || !operation_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(StorageError::InvalidArguments);
         }
         let db = self.snapshot()?;
-        let row: Option<(String, String, Option<i64>, Option<i64>)> = db.query_row("SELECT source_path,state,consumed_bytes,observed_revision FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
-        let Some((source, state, consumed, revision)) = row else {
+        let row: Option<(String, String, Option<i64>, Option<i64>, String)> = db.query_row("SELECT source_path,state,consumed_bytes,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(failed)?;
+        let Some((source, state, consumed, revision, stored_request)) = row else {
             return Ok(None);
         };
-        if source != path {
+        if source != path || stored_request != request_digest {
             return Err(StorageError::Conflict);
         }
         if state != "complete" {
@@ -450,6 +474,7 @@ impl Writer {
             operation_id: operation_id.to_owned(),
             consumed_bytes: uint(consumed.ok_or(StorageError::Unavailable)?),
             observed_revision: revision,
+            replayed: true,
         }))
     }
 
@@ -461,6 +486,7 @@ impl Writer {
             operation_id: intent.id.clone(),
             consumed_bytes: uint(consumed),
             observed_revision: intent.revision,
+            replayed: false,
         })
     }
 }
@@ -571,6 +597,8 @@ mod tests {
         let mut restarted = f.config.native_events().unwrap();
         let receipt = restarted.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(receipt.consumed_bytes > 0);
+        assert!(receipt.replayed);
+        assert_eq!(restarted.ingest(&"a".repeat(64), &f.raw, "claude"), Err(StorageError::Conflict));
         assert_eq!(state, f.state());
         assert_eq!(
             restarted.ingest(&"a".repeat(64), &f.root.join("other"), "codex"),
@@ -630,6 +658,49 @@ mod tests {
             restarted.ingest(&"a".repeat(64), &f.raw, "codex"),
             Err(StorageError::ScopeChanged)
         );
+    }
+
+    #[test]
+    fn configured_replay_after_append_returns_original_receipt_and_fresh_id_advances() {
+        let f = Fixture::new();
+        let mut writer = f.config.native_events().unwrap();
+        let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        assert!(!first.replayed);
+        let before = f.state();
+        use std::io::Write;
+        fs::OpenOptions::new().append(true).open(&f.raw).unwrap().write_all(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"new work\"}]}}\n").unwrap();
+        drop(writer);
+        let mut writer = f.config.native_events().unwrap();
+        let replay = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.consumed_bytes, first.consumed_bytes);
+        assert_eq!(replay.observed_revision, first.observed_revision);
+        assert_eq!(before, f.state());
+        assert_eq!(writer.ingest(&"a".repeat(64), &f.raw, "claude"), Err(StorageError::Conflict));
+        let fresh = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
+        assert!(!fresh.replayed);
+        assert!(fresh.consumed_bytes > replay.consumed_bytes);
+        assert!(f.state()["events"].len() > before["events"].len());
+        assert_eq!(writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap(), replay);
+    }
+
+    #[test]
+    fn configured_same_handle_recovers_busy_and_other_operation_refusals() {
+        use crate::storage::native_events::NativeEventStore;
+        let f = Fixture::new();
+        drop(f.config.native_events().unwrap());
+        let mut cache = EventCache::open_configured(&f.config).unwrap();
+        let lock = f.db();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(cache.ingest(&"a".repeat(64), &f.raw, "codex"), Err(StorageError::Busy));
+        lock.execute_batch("ROLLBACK").unwrap();
+        let receipt = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        assert!(!receipt.replayed);
+        let error = cache.retain(&BTreeSet::new(), &mut false).unwrap_err();
+        assert_eq!(error.get_ref().and_then(|error| error.downcast_ref::<StorageError>()), Some(&StorageError::NamespaceUpgradePending));
+        let replay = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
     }
 
     #[test]
@@ -697,7 +768,7 @@ mod tests {
         drop(f.config.native_events().unwrap());
         let mut writer = Writer::new(&f.config);
         let path = f.raw.to_string_lossy().into_owned();
-        writer.begin(&path, None, &"a".repeat(64)).unwrap();
+        writer.begin(&path, None, &"a".repeat(64), "codex").unwrap();
         let mut observations = f.config.source_observations().unwrap();
         observations
             .discover(std::slice::from_ref(&path), true)
@@ -718,14 +789,14 @@ mod tests {
         let lock = f.db();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         assert_eq!(
-            writer.begin(&path, None, &"b".repeat(64)),
+            writer.begin(&path, None, &"b".repeat(64), "codex"),
             Err(StorageError::Busy)
         );
         lock.execute_batch("ROLLBACK").unwrap();
         let mut stale = ledger.clone();
         stale.offset = 1;
         assert_eq!(
-            writer.begin(&path, Some(&stale), &"c".repeat(64)),
+            writer.begin(&path, Some(&stale), &"c".repeat(64), "codex"),
             Err(StorageError::Conflict)
         );
     }
@@ -749,7 +820,7 @@ mod tests {
                     tail: Sha256::digest(b"").into(),
                 };
                 index
-                    .prepare_file(&path, None, &format!("{:064x}", i + 1))
+                    .prepare_file(&path, None, &format!("{:064x}", i + 1), "codex")
                     .unwrap();
                 (path, ledger, std::sync::Arc::new(FileIndex::default()))
             })

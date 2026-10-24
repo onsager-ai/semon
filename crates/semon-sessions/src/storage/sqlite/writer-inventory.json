@@ -1,6 +1,8 @@
 {
   "format": 1,
   "writer_qualification": 0,
+  "native_event_request_binding": 1,
+  "native_event_namespace_composite_rows": false,
   "unqualified_paths": [
     "catalog_observer.rs",
     "catalog_search.rs",
