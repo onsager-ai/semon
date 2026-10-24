@@ -1,6 +1,6 @@
 use crate::events::EventCache;
 use std::time::Duration;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, types::Value as SqlValue};
+use rusqlite::{Connection, types::Value as SqlValue};
 use crate::storage::sqlite::catalog::{rows, SQL_STEPS};
     use super::*;
     use crate::{Refresh, ViewerCore};

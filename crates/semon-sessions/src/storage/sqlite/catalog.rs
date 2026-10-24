@@ -4,6 +4,7 @@ use crate::storage::catalog::CatalogSnapshot;
 use rusqlite::{Connection, Transaction, OpenFlags, OptionalExtension, types::Value as SqlValue};
 use std::{io, time::Duration};
 use serde_json::Value;
+use crate::CatalogReadScope;
 
 /// Two direct keyset ranges avoid scanning earlier keys when many sessions
 /// share the same timestamp. OFFSET and mixed-order tuple comparisons do not

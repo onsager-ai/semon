@@ -1,5 +1,8 @@
 //! Bounded merge of existing Catalog pages. No new index, Core or source reader.
 use super::*;
+use crate::events::EventCache;
+use rusqlite::{Connection, OpenFlags};
+use std::time::Duration;
 use crate::OverviewSource;
 use sha2::{Digest, Sha256};
 
