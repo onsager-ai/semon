@@ -1,5 +1,8 @@
 # Native session source readers
 
+See the [native storage contract and partial port inventory](session-storage-contract.md)
+for the #478 backend boundary and explicit remaining work.
+
 `SessionSourceReader` is a provider-neutral per-request callback for native
 source ranges. It supplements the logical `SessionSourceRef` identities emitted
 by the focused catalog. It provides no authorization grant or raw HTTP route.

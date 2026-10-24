@@ -4514,7 +4514,7 @@ fn storage_ddl() -> [&'static str; 10] {
         crate::causal_trace::SCHEMA,
         crate::history_projection::SCHEMA,
         crate::catalog_search::SCHEMA,
-        crate::catalog_changes::SCHEMA,
+        crate::storage::sqlite::changes::SCHEMA,
         reprice::SCHEMA,
     ]
 }

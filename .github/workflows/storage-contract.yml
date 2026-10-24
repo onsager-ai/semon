@@ -1,0 +1,32 @@
+name: Native storage contract
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: storage-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Inventory native SQLite coupling
+        run: python3 scripts/check-native-storage-boundary.py --discover
+  conformance:
+    runs-on: ubuntu-latest
+    env:
+      SEMON_PRICING_REFRESH: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: SQLite adapter and reusable metadata conformance
+        run: cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
