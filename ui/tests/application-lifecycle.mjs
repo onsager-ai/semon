@@ -240,23 +240,24 @@ for (const width of [390, 1280])
             }
             if (String(path).startsWith('/api/viewer/home')) {
               requests++;
-              return Promise.resolve(
-                new Response(
+              // Keep the producer's current scoped generation. Replaying the boot
+              // snapshot can make preview reads permanently stale after discovery.
+              return originalFetch(path, options).then(async (response) => {
+                const current = await response.json();
+                return new Response(
                   JSON.stringify(
                     pendingObservation
                       ? {
-                          ...model,
+                          ...current,
                           observations: [
-                            { source_key: model.machines[0].key, state: 'catalog_unavailable' },
+                            { source_key: current.machines[0].key, state: 'catalog_unavailable' },
                           ],
                         }
-                      : model,
+                      : current,
                   ),
-                  {
-                    headers: { 'Content-Type': 'application/json' },
-                  },
-                ),
-              );
+                  { headers: { 'Content-Type': 'application/json' } },
+                );
+              });
             }
             if (String(path).startsWith('/api/session-transcript'))
               return new Promise((resolve) =>
