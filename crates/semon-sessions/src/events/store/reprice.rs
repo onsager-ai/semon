@@ -1438,33 +1438,64 @@ mod tests {
             db.execute_batch(copied_usage_schema(composite)).unwrap();
             db.execute_batch(tree_state::schema(composite)).unwrap();
             bind_fixture(&db, "a");
-            assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                if composite { "scoped" } else { "legacy" });
+            assert_eq!(
+                copied_usage_sql(&db, "legacy", "scoped").unwrap(),
+                if composite { "scoped" } else { "legacy" }
+            );
             {
                 let tx = db.transaction().unwrap();
-                tx.execute_batch("DROP TABLE usage_identity; DROP TABLE usage; DROP TABLE codex_usage;").unwrap();
+                tx.execute_batch(
+                    "DROP TABLE usage_identity; DROP TABLE usage; DROP TABLE codex_usage;",
+                )
+                .unwrap();
                 tx.execute_batch(copied_usage_schema(!composite)).unwrap();
-                assert_eq!(copied_usage_sql(&tx, "legacy", "scoped").unwrap(),
-                    if composite { "legacy" } else { "scoped" });
+                assert_eq!(
+                    copied_usage_sql(&tx, "legacy", "scoped").unwrap(),
+                    if composite { "legacy" } else { "scoped" }
+                );
                 tx.rollback().unwrap();
-                assert_eq!(copied_usage_sql(&db, "legacy", "scoped").unwrap(),
-                    if composite { "scoped" } else { "legacy" });
+                assert_eq!(
+                    copied_usage_sql(&db, "legacy", "scoped").unwrap(),
+                    if composite { "scoped" } else { "legacy" }
+                );
             }
             // Invalidate an already cached decision with a partial family DDL.
             db.execute_batch("DROP TABLE codex_usage;").unwrap();
             db.execute_batch(copied_usage_schema(!composite)).unwrap();
             let tx = db.transaction().unwrap();
-            let before: i64 = tx.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
+            let before: i64 = tx
+                .query_row("SELECT total_changes()", [], |r| r.get(0))
+                .unwrap();
             let index = FileIndex::default();
             let changes = crate::events::DirtyRows::between(&FileIndex::default(), &index);
-            assert!(matches!(write_file(&tx, "source", &ledger(), &changes, &index,
-                &mut crate::native_timing::Measurements::default()), Err(rusqlite::Error::InvalidQuery)));
+            assert!(matches!(
+                write_file(
+                    &tx,
+                    "source",
+                    &ledger(),
+                    &changes,
+                    &index,
+                    &mut crate::native_timing::Measurements::default()
+                ),
+                Err(rusqlite::Error::InvalidQuery)
+            ));
             assert!(matches!(clear(&tx, 1), Err(rusqlite::Error::InvalidQuery)));
-            assert_eq!(tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0)).unwrap(), before);
-            assert_eq!(tx.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(
+                tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                tx.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
             tx.rollback().unwrap();
             db.execute_batch("DROP TABLE codex_usage;").unwrap();
-            assert!(matches!(copied_usage_sql(&db, "legacy", "scoped"), Err(rusqlite::Error::InvalidQuery)));
+            assert!(matches!(
+                copied_usage_sql(&db, "legacy", "scoped"),
+                Err(rusqlite::Error::InvalidQuery)
+            ));
         }
     }
 
@@ -1582,9 +1613,11 @@ mod tests {
                     }
                     db.execute_batch(tree_state::schema(true)).unwrap();
                     db.execute_batch(queue_schema(true)).unwrap();
-                    db.execute_batch(crate::events::store::catalog_schema(catalog_composite)).unwrap();
+                    db.execute_batch(crate::events::store::catalog_schema(catalog_composite))
+                        .unwrap();
                     db.execute_batch(crate::events::store::SCHEMA).unwrap();
-                    db.execute_batch(crate::causal_trace::header_schema(trace_composite)).unwrap();
+                    db.execute_batch(crate::causal_trace::header_schema(trace_composite))
+                        .unwrap();
                     db.execute_batch(catalog_schema(true, catalog_composite, meta_composite))
                         .unwrap();
                     db.execute_batch(file_schema(true, meta_composite)).unwrap();
@@ -1635,7 +1668,8 @@ mod tests {
                             });
                             index.tree_summary = Some(crate::native_tree::Summary::default());
                             assert_eq!(
-                                native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),
+                                native_usage::begin_source(&tx, path, None, &ledger, false)
+                                    .unwrap(),
                                 ordinal as i64 + 1
                             );
                             let changes =
@@ -1665,11 +1699,16 @@ mod tests {
                         } else {
                             format!("session-{namespace}")
                         };
-                        let mut owner = row("same/source.jsonl", &ledger, Cost {
-                            usd: Some(amount as f64),
-                            pricing_fingerprint: "family-price".into(),
-                            ..Cost::default()
-                        }, "codex");
+                        let mut owner = row(
+                            "same/source.jsonl",
+                            &ledger,
+                            Cost {
+                                usd: Some(amount as f64),
+                                pricing_fingerprint: "family-price".into(),
+                                ..Cost::default()
+                            },
+                            "codex",
+                        );
                         owner.key = key.clone();
                         let encoded = json(&owner).unwrap();
                         if catalog_composite {
@@ -1686,7 +1725,11 @@ mod tests {
                             "INSERT INTO session_trace_headers(namespace,session_key,generation,source_generation,metadata) VALUES(semon_namespace(),?1,'before',?2,'{\"family_usd\":null}')").unwrap(),
                             params![key, crate::retention::source_generation(&owner.sources).unwrap()]).unwrap();
                         // Equal child IDs and parent IDs must remain in their Source family.
-                        let child = if collide { "same-child".to_owned() } else { format!("child-{namespace}") };
+                        let child = if collide {
+                            "same-child".to_owned()
+                        } else {
+                            format!("child-{namespace}")
+                        };
                         owner.key = child.clone();
                         owner.parent = Some(key.clone());
                         let child_metadata = json(&owner).unwrap();
@@ -1755,24 +1798,51 @@ mod tests {
                         let tx = db.transaction().unwrap();
                         let target = table("openai", "gpt-6.1-sol", 7.0, 1);
                         if catalog_composite {
-                            let before: i64 = tx.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
-                            assert!(matches!(catalog_step(&tx, &mut Work::default(), &target, Some(family_key)), Err(rusqlite::Error::InvalidQuery)));
-                            assert_eq!(tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0)).unwrap(), before);
+                            let before: i64 = tx
+                                .query_row("SELECT total_changes()", [], |r| r.get(0))
+                                .unwrap();
+                            assert!(matches!(
+                                catalog_step(&tx, &mut Work::default(), &target, Some(family_key)),
+                                Err(rusqlite::Error::InvalidQuery)
+                            ));
+                            assert_eq!(
+                                tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+                                    .unwrap(),
+                                before
+                            );
                         }
                         assert!(source_step(&tx, &mut Work::default(), &target, Some(1)).unwrap());
                         let mut appended = FileIndex::default();
-                        appended.usage_by_id.insert("same-message".into(), MessageUsage {
-                            tokens: Tokens { input: 37, total: 37, ..Tokens::default() },
-                            record_ids: ["same-record".to_owned()].into_iter().collect(),
-                            ..MessageUsage::default()
-                        });
+                        appended.usage_by_id.insert(
+                            "same-message".into(),
+                            MessageUsage {
+                                tokens: Tokens {
+                                    input: 37,
+                                    total: 37,
+                                    ..Tokens::default()
+                                },
+                                record_ids: ["same-record".to_owned()].into_iter().collect(),
+                                ..MessageUsage::default()
+                            },
+                        );
                         let mut appended_ledger = ledger.clone();
                         appended_ledger.offset += 1;
                         appended_ledger.stat.size += 1;
-                        let delta = crate::events::DirtyRows::between(&FileIndex::default(), &appended);
-                        write_file(&tx, "same/source.jsonl", &appended_ledger, &delta, &appended,
-                            &mut crate::native_timing::Measurements::default()).unwrap();
-                        assert_eq!(tree_state::shared_usage(&tx, 1, 1).unwrap().1["same-message"].input, 37);
+                        let delta =
+                            crate::events::DirtyRows::between(&FileIndex::default(), &appended);
+                        write_file(
+                            &tx,
+                            "same/source.jsonl",
+                            &appended_ledger,
+                            &delta,
+                            &appended,
+                            &mut crate::native_timing::Measurements::default(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            tree_state::shared_usage(&tx, 1, 1).unwrap().1["same-message"].input,
+                            37
+                        );
                         family_owner(&tx, family_key, "family-price").unwrap();
                         let total: f64 = tx.query_row(trace_sql(&tx,
                             "SELECT json_extract(metadata,'$.family_usd') FROM session_trace_headers WHERE session_key=?1",
@@ -1812,7 +1882,10 @@ mod tests {
                     assert!(pending_step(&tx, &mut work, &family_target).unwrap());
                     assert!(pending_step(&tx, &mut work, &family_target).unwrap());
                     assert!(!pending_step(&tx, &mut work, &family_target).unwrap());
-                    work = Work { target_fingerprint: "family-price".into(), ..Work::default() };
+                    work = Work {
+                        target_fingerprint: "family-price".into(),
+                        ..Work::default()
+                    };
                     family_step(&tx, &mut work).unwrap();
                     assert_eq!(foreign_trace_state(&tx), b_trace);
                     assert_eq!(catalog_family_state(&tx), catalog_before);
