@@ -174,7 +174,7 @@ impl Snapshot {
         }
         let actual: (i64, String, i64) = tx
             .query_row(
-                sql(&tx, "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE source_path=?1", "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
+                sql(&tx, "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE source_path=?1", "SELECT file_id,ledger,projection_id FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1").map_err(io::Error::other)?,
                 [&self.path],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
