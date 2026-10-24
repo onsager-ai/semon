@@ -584,10 +584,10 @@ success. Missing configured stores fail before Raw is opened. Legacy Options
 fallback behavior is retained.
 
 This increment deliberately binds native table ownership to the sole admitted
-namespace. Metadata has an explicit namespace column and composite unique index,
-with a constant default qualifying existing rows without copying/resetting them.
-Its old key uniqueness remains, so shared-database multi-source keys are still
-undelivered. All family mutation guards require the admitted writer connection;
+namespace. Metadata has an explicit namespace column with a constant default
+qualifying existing rows without copying/resetting them or building an unbounded
+index. Existing key uniqueness implies namespace/key uniqueness for this sole
+source; shared-database multi-source keys and predicates are still undelivered. All family mutation guards require the admitted writer connection;
 metadata guards also protect Catalog publication and epoch markers. The global
 writer qualification remains zero and `current()` still refuses enrolled stores.
 Catalog publication/staging, cross-path relocation admission, Raw mutation ACK,
