@@ -1,4 +1,4 @@
-# Native session storage contract (#478, first increment)
+# Native session storage contract (#478, implementation checkpoints)
 
 Status: partial implementation. #477 is not complete. This revision moves only
 change delivery behind `storage::SessionMetadataStore`, with an implemented
@@ -476,3 +476,88 @@ retained bookmark helpers, claims/Raw intents, operation IDs, proofs/reader
 leases/GC, export/checkpoint/catch-up/fenced cutover/qualified rollback,
 no-SQLite instrumentation, all of #479 PostgreSQL and Hub #313 RLS/snapshot/
 migration. The multi-source gate remains 0, and the #380 merge hold is unchanged.
+
+## Configured source-observation writer checkpoint (attempt 9)
+
+This is a functional source discovery/invalidation and revision-CAS family,
+not the requested Event/ledger commit family or a finished #478 backend. Worker
+attempt 9 follows the explicit Manager escalation from cumulative count 8;
+max_auto_rework remains 2. The one-dispatch Sol usage-unknown exception applies.
+The #380 merge hold and global `WRITER_QUALIFICATION_VERSION = 0` remain.
+
+Inspection corrected the proposed Event/ledger isolation premise.
+`commit_initial_files` and `write_one_dirty` call
+`write_index_changes_measured`, which also updates relocation, native usage,
+headers/sidecars, chunk/launch/parent/tree proofs, native dependencies, archive
+metadata, invalidation revisions and mutation retirement in the same native
+transaction. Qualifying just `files`, `events`, `signals`, `usage_identity`,
+`usage` and `codex_usage` would break this unit. None of these writes is unfenced
+here. The prerequisite source-observation family is implemented instead; the
+original requested Event/ledger goal remains pending.
+
+`StoreConfig::source_observations()` creates the real `EventCache` with an
+explicit configured `IndexStore`. Its public semantic `SourceObservationStore`
+operations are discover, claims, pending, backfill_state and invalidate. The
+existing Options producer's discovery and invalidation transactions reuse the
+same SQLite adapter operations. There is no second parser or derivation, SQL
+callback, consumer connection, implicit database creation, repair, memory store
+or unbound fallback in the configured route. Existing default Options behavior
+continues through its unbound adapter. This is an observation writer API, not a
+configured full ingest API.
+
+Bounded assignment now includes `session_catalog_invalidations` and
+`catalog_backfill_sources` (20 tables, extending the earlier 18-table checkpoint).
+Both have namespace-composite keys, fenced immutable originals and adapter
+namespace guards. The pending queue has a covering
+`(namespace, revision, source_path)` index. The separate namespace-keyed
+`storage_source_journal` retains the revision high watermark and backfill state;
+initialization preserves the old counter even when its newest claim was already
+acknowledged. Its family marker is `SOURCE_JOURNAL_QUALIFICATION_VERSION = 1`.
+The global writer gate remains zero. A family marker is not CI acceptance.
+
+Discovery commits new path membership, invalidations, counter and progress
+state atomically. Repeated discovery does not mint a new claim for an existing
+path. Invalidate checks every expected claim under the same write transaction
+before advancing any revision; a stale claim changes nothing. It acknowledges
+no work and publishes no Catalog. Every operation rechecks durable admission,
+namespace, expected stream epoch and completed assignment inside its own
+transaction. Busy and uncertain commit remain explicit storage errors. Callers
+must reconcile durable observations after a lost reply; operation IDs and the
+full recovery protocol remain pending.
+
+All other configured IndexStore methods explicitly refuse with
+`NamespaceUpgradePending`, including inherited optional methods that otherwise
+return empty success, Event commits, staging, Catalog/meta publication,
+relocation, repair, retained runs and backfill completion. A configured error
+keeps the configured store attached and never switches to the unbound producer.
+Catalog generation still reads store-global meta: namespace-qualified publication
+and generation must precede any store-level multi-source admission.
+
+New CI-only tests exercise the public configured API, the existing unbound
+producer, one-row assignment/reopen, preserved originals, idempotent discovery,
+acknowledged-counter preservation, stale-claim atomicity, restart, an injected
+mid-batch rollback, a concurrent writer lock, live epoch replacement, typed
+admission/namespace/epoch/bound errors, missing-store refusal without creation,
+and explicit unported Event/publication/stage refusals. A private foreign-row
+fixture proves observation isolation, not same-store multi-source native ingest.
+The query-plan assertion uses the production pending SQL constant. Existing
+native unbound fixtures and assertions were not changed. Tests and formatting
+have not run locally; exact-head CI and independent code review are required.
+The direct-SQL inventory remains 42: events/store.rs still owns other SQL, so
+there is no allowlist reduction for this partial extraction.
+
+Remaining connected units, in order: Event/ledger and its usage/proof/dependency/
+relocation prerequisites; remaining source invalidation/Raw/discovery producers;
+semantic stage and the connected Catalog/meta publication unit
+(`publish_catalog_with_writer`) with change hints and proof; relocation and ACK;
+retained run metadata; all remaining direct-SQL inventory paths and indirect
+owners; Raw intents and operation IDs; immutable proofs, reader leases and GC;
+export/checkpoint/catch-up, fenced cutover and qualified rollback; no-SQLite
+instrumentation; all #479 PostgreSQL operations and shared parity; Hub #313 RLS,
+snapshot and migration. The earlier read-test follow-ups remain pending.
+
+Functional code pin for this checkpoint:
+`3fd39e0c15ffd0ca90b32a5e00efc1bd5b8d1dd1` (initial WIP
+`0dedac22a7a1ba15ac0a3f9fd74f833fb40fefc8`). The final delivery/report commit
+may follow with documentation only. No exact-head CI result or independent
+acceptance is claimed for either pin.
