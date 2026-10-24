@@ -5207,7 +5207,10 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
     let mut statement = connection.prepare(native_metadata_value(connection)?)?;
     let mut values = Vec::<Option<String>>::new();
     for key in ["pricing_recompute_target", "catalog_semantic_recipe"] {
-        let value: Option<Option<String>> = statement.query_row([key], |r| r.get(0)).optional()?;
+        let value: Option<Option<String>> = statement.query_row([key], |r| {
+            crate::selected_read::row(r, 64)?;
+            r.get(0)
+        }).optional()?;
         if value == Some(None) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -5216,7 +5219,10 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
     let pricing: Option<String> = connection.query_row(configured::sql(connection,
         "SELECT codex_pricing_fingerprint FROM files WHERE path=?1",
         "SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1")?,
-        [path], |r| r.get(0))?;
+        [path], |r| {
+            crate::selected_read::row(r, 64)?;
+            r.get(0)
+        })?;
     values.push(pricing);
     Ok(format!("{:x}", Sha256::digest(json(&values)?.as_bytes())))
 }
@@ -5229,7 +5235,10 @@ fn tree_reusable(
 ) -> rusqlite::Result<bool> {
     let mut statement = connection.prepare(native_metadata_value(connection)?)?;
     let encoded: Option<Option<String>> = statement
-        .query_row([tree_summary_key(path)], |r| r.get(0))
+        .query_row([tree_summary_key(path)], |r| {
+            crate::selected_read::row(r, 512)?;
+            r.get(0)
+        })
         .optional()?;
     let Some(record) = encoded.flatten().and_then(|value| {
         serde_json::from_str::<TreeSummaryRecord>(&value).ok()
@@ -5321,10 +5330,16 @@ fn write_tree_summary(
         if current.projection_witness.is_some() {
             let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
             let encoded: Option<Option<String>> = statement
-                .query_row([tree_summary_key(path)], |r| r.get(0))
+                .query_row([tree_summary_key(path)], |r| {
+                    crate::selected_read::row(r, 512)?;
+                    r.get(0)
+                })
                 .optional()?;
             let failed: Option<Option<String>> = statement
-                .query_row([format!("native_tree_failure:{path}")], |r| r.get(0))
+                .query_row([format!("native_tree_failure:{path}")], |r| {
+                    crate::selected_read::row(r, 64)?;
+                    r.get(0)
+                })
                 .optional()?;
             if failed.is_none() && encoded.flatten().as_deref() == Some(json(&current)?.as_str()) {
                 return Ok(());
