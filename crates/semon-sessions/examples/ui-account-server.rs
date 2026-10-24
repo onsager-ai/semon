@@ -97,8 +97,12 @@ fn handle(core: &mut ViewerCore, mut request: Request, address: SocketAddr) {
         .count()
         == 1
         && request_header(&request, "Host") == Some(expected_host.as_str());
-    let credentials = url::form_urlencoded::parse(query.as_bytes())
-        .filter(|(name, _)| name == "t")
+    let credentials = query
+        .split('&')
+        .filter(|part| {
+            let name = part.split_once('=').map_or(*part, |(name, _)| name);
+            semon_sessions::session_route::decode(name).ok().as_deref() == Some("t")
+        })
         .count();
     let query_token = credentials == 1 && query_value(query, "t") == Some(TOKEN);
     let cookie_token = request_header(&request, "Cookie").is_some_and(|cookies| {
