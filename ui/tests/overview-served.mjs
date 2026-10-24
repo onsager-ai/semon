@@ -137,6 +137,7 @@ test(
                 status: response.status(),
                 machine: url.searchParams.get('machine'),
                 sid: url.searchParams.get('sid'),
+                turn: url.searchParams.get('turn'),
                 scope: url.searchParams.get('scope'),
                 response,
               });
@@ -845,13 +846,29 @@ test(
             const parentSession = new URL(page.url()).pathname.split('/').at(-1);
             await runView.click();
             await page.locator('#page h1').filter({ hasText: 'Trace' }).waitFor();
-            assert.match(new URL(page.url()).pathname, /^\/trace\/native\//);
+            const traceUrl = new URL(page.url());
+            const traceSegments = traceUrl.pathname.split('/');
+            assert.equal(traceSegments[1], 'session');
+            assert.equal(traceSegments[2], 'local');
             assert.equal(
-              new URL(page.url()).pathname.split('/')[3],
+              traceSegments[3],
               parentSession,
-              'Run view retains the sending session as Trace root',
+              'Run view retains the exact sending session key as Trace root',
             );
+            assert.equal(traceSegments[4], 'trace');
+            assert.ok(traceSegments[5], 'Run view URL contains the exact turn identity');
+            const traceTurn = decodeURIComponent(traceSegments[5]);
             await page.getByRole('region', { name: 'Agents', exact: true }).waitFor();
+            assert.ok(
+              apiResponses.some(
+                (row) =>
+                  row.path === '/api/session-trace' &&
+                  row.machine === 'local' &&
+                  row.sid === parentSession &&
+                  row.turn === traceTurn,
+              ),
+              'trace request retains the canonical source, session key and turn',
+            );
             await page.goBack();
             await page.locator('[aria-label="Transcript"]').waitFor();
             await page.locator('#page .child-card').first().waitFor();
