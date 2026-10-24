@@ -464,8 +464,8 @@ export default async function tapsCheck(browser) {
       const page = await served(browser, { size: 'phone', viewport, extras });
       const at = (s) => device + ' ' + name + ' ' + s;
 
-      // The four top-level screens, and Analytics with its slice sheet.
-      await tally(page, at('home'));
+      // The root Sessions screen and the other retained destinations.
+      await tally(page, at('root sessions'));
       for (const v of ['sessions', 'machines']) {
         await goto(page, { v }, D);
         await tally(page, at(v));
@@ -504,8 +504,8 @@ export default async function tapsCheck(browser) {
         await tally(page, at('analytics slice'));
         await closeOverlays(page);
       });
-      // The navigation drawer on Home, with the session tree opened.
-      await goto(page, { v: 'home' }, D);
+      // The navigation drawer on Sessions, with the session tree opened.
+      await goto(page, { v: 'sessions' }, D);
       if (await page.locator('#lead-btn:visible').count())
         await attempt(name + ' navigation drawer', async () => {
           await page.click('#lead-btn');

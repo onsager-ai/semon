@@ -64,12 +64,12 @@ export default async function checkReal(browser) {
     await page.click('#lead-btn');
     await page.waitForTimeout(280);
     await page.click('.nav-item[data-go="' + go + '"]');
-    const titles = { home: 'Home', sessions: 'Sessions', machines: 'Machines' };
+    const titles = { analytics: 'Analytics', sessions: 'Sessions', machines: 'Machines' };
     if (titles[go]) await afterTitle(page, titles[go]);
     await page.waitForTimeout(150);
   };
 
-  for (const go of ['home', 'sessions', 'machines']) {
+  for (const go of ['analytics', 'sessions', 'machines']) {
     await nav(go);
     tally.screens++;
     if (await over()) tally.overflowScreens++;

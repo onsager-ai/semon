@@ -1249,7 +1249,10 @@ export async function goto(page, route, D) {
   } finally {
     page.captureRouteTransition = null;
   }
-  const title = titleOf(route, D);
+  // Historical comparators still open Home on the independent reference.
+  // On the candidate that same root destination now opens Sessions.
+  const title =
+    route.v === 'home' && page.captureRole !== 'reference' ? 'Sessions' : titleOf(route, D);
   // A session's title is in the bar as soon as it is opened; its page is ready once it is no longer aria-busy.
   if (title) {
     try {

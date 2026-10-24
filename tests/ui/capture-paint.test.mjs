@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { launch } from './lib.mjs';
 import { withCapturePaint, captureStableFrame } from './capture-paint.mjs';
 
@@ -57,6 +58,14 @@ test('PNG and evidence share a repeatable phase without masking content or retai
 });
 
 test('independent visual browsers retain exact rounded-edge and text pixels', async () => {
+  const harnessMark = readFileSync(
+    new URL('../../assets/harnesses/claude-code.svg', import.meta.url),
+  );
+  const harnessUrl = 'data:image/svg+xml;base64,' + harnessMark.toString('base64');
+  const harnessMarks = Array.from(
+    { length: 3 },
+    () => `<span class="hicon"><img src="${harnessUrl}" alt="Claude"></span>`,
+  ).join('');
   const capture = async (label) => {
     const browser = await launch({ baselineRaster: true });
     try {
@@ -71,11 +80,19 @@ test('independent visual browsers retain exact rounded-edge and text pixels', as
         button { border: 0; border-radius: 9px; background: #f1f2ef;
           width: 284px; height: 49px; text-align: left; color: inherit; }
         .tail { height: 1200px; }
+        .marks { position: absolute; left: 16px; top: 565.25px; }
+        .hicon { display: flex; box-sizing: border-box; width: 14px; height: 14px;
+          padding: 1.75px; margin-bottom: 35px; }
+        .hicon img { width: 100%; height: 100%; object-fit: contain; }
         article { margin-left: 296px; width: 443.375px; }
         article p { border-radius: 6px; padding: 13.25px; background: #fff; }
         svg { width: 15px; height: 15px; fill: none; stroke: currentColor; }
-      </style><aside><div class="spacer"></div><div class="tree"><button>harbor · Working</button></div><div class="tail"></div></aside>
+      </style><aside><div class="spacer"></div><div class="tree"><button>harbor · Working</button></div><div class="tail"></div>
+      <div class="marks">${harnessMarks}</div></aside>
       <article><p>${label}</p><svg viewBox="0 0 24 24"><path d="M4 4v8h14m-4-4 4 4-4 4"/></svg></article>`);
+      await page
+        .locator('.hicon img')
+        .evaluateAll((images) => Promise.all(images.map((image) => image.decode())));
       const shot = () =>
         withCapturePaint(page, () =>
           captureStableFrame(page, { animations: 'allow', caret: 'hide' }),

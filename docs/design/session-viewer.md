@@ -11,6 +11,12 @@ supported Event Index/Catalog ownership and the
 described below are historical and unavailable, including in the test graph.
 Native semantic golden data remains independent regression evidence.
 
+The Home screen and its inbox described in this historical plan are also
+retired. The current root opens Sessions, retaining supported query, fragment
+and history behavior, with Sessions / Analytics / Machines navigation. See the
+[current design brief](ui-design-brief.md#foundation); historical Home examples
+do not authorize restoring its sections in Sessions.
+
 ## Goal
 
 `semon sessions --serve` shows exactly what the approved mockup shows, on this machine's live logs. The target is a 100% mirror: the same screens, layout, type, colours, interactions and wording. The mockup is not a picture to reimplement; its HTML, CSS and JavaScript become the viewer's frontend.

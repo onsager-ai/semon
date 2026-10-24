@@ -377,6 +377,25 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
       fourth.below && fourth.clear,
       tag + 'the fourth failure is under the bar or the jump button',
     );
+    // A later layout commit must retain the selected annotation's placement.
+    // Height changes expose stale centring without depending on network timing.
+    const viewport = page.viewportSize();
+    await page.setViewportSize({ ...viewport, height: viewport.height + 46 });
+    await sleep(250);
+    const resized = await state(page);
+    R.resized = resized;
+    r.expect(
+      resized.command === fourth.command && resized.off !== null && Math.abs(resized.off) <= 2,
+      tag + 'the current failure lost centring after layout changed: ' + JSON.stringify(resized),
+    );
+    await page.setViewportSize(viewport);
+    await sleep(250);
+    const restored = await state(page);
+    R.restored = restored;
+    r.expect(
+      restored.command === fourth.command && restored.off !== null && Math.abs(restored.off) <= 2,
+      tag + 'the current failure lost centring after layout restored: ' + JSON.stringify(restored),
+    );
     await sleep(1400); // the ring fades; the marker stays
     await page.screenshot({ path: path.join(ENV.out, 'errnav-' + name + '.png') });
     if (opts.size === 'phone') {
@@ -463,7 +482,7 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
       [...document.querySelectorAll('#page button.more')].map((b) => b.textContent),
     );
     const nav = async (route) => {
-      if (route.v === 'home')
+      if (route.v === 'sessions')
         await page.evaluate(() => {
           history.pushState(null, '', '/');
           dispatchEvent(new PopStateEvent('popstate'));
@@ -474,8 +493,10 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
         await page.locator('.session-list .nrow[data-id="faults"]').click();
       }
     };
-    await nav({ v: 'home' });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
+    await nav({ v: 'sessions' });
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+    );
     await nav({ v: 'session', id: 'faults' });
     await page.waitForFunction(
       () =>

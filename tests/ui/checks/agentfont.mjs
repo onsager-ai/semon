@@ -165,13 +165,17 @@ export default async function agentFontCheck(browser) {
     );
     const scans = [];
 
-    // Home: a question that went to you.
-    await goto(page, { v: 'home' }, X);
-    const home = await styles(page, { question: '.ib .q' });
-    res.home = home;
-    same('a question on Home', home.question);
-    scans.push(['home', await serifs(page)]);
-    await shot(page, tag, 'home');
+    // The removed Home inbox has no question text to audit. Keep the same
+    // non-vacuous font/serif audit on retained Sessions row names.
+    await goto(page, { v: 'sessions' }, X);
+    await page.waitForFunction(() =>
+      document.querySelector('.session-list .nrow .nm')?.textContent?.trim(),
+    );
+    const sessions = await styles(page, { name: '.session-list .nrow .nm' });
+    res.sessions = sessions;
+    same('a Sessions row name', sessions.name);
+    scans.push(['sessions', await serifs(page)]);
+    await shot(page, tag, 'sessions');
 
     // A transcript: a message with every construct, and the tables in it.
     await goto(page, { v: 'session', id: 'harbor' }, X);

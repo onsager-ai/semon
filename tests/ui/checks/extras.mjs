@@ -1339,7 +1339,7 @@ export default async function (browser) {
     await page.context().close();
   }
 
-  // ---- Needs you: opening a result persists its read state; unavailable storage leaves pages usable -----------------
+  // ---- Selected result read state persists; unavailable storage leaves retained pages usable -----------------
   {
     const resultHandoff = D.H.find(
       (h) => h.kind === 'toyou' && h.ask === 'result' && h.from === 'result-card',
@@ -1350,42 +1350,12 @@ export default async function (browser) {
       await page.request.get(ENV.extraBase + '/api/session-capabilities')
     ).json();
     const resultKey = JSON.stringify([capability.source_key, resultHandoff?.id]);
-    const selector = '.sec-h + .list .ib[data-h=' + JSON.stringify(resultKey) + ']';
-    await page.waitForFunction(
-      (id) =>
-        [...document.querySelectorAll('.sec-h')].some(
-          (head) => head.firstChild?.textContent === 'Needs you',
-        ) && !!document.querySelector('.sec-h + .list .ib[data-h="' + CSS.escape(id) + '"]'),
-      resultKey,
-    );
-    const before = await page.locator(selector).evaluate((card) => ({
-      brief: card.querySelector('.q')?.innerText ?? '',
-      resultIds: [...(card.parentElement.querySelectorAll('.ib[data-h]') ?? [])].map(
-        (item) => item.dataset.h,
-      ),
-      badge: document.querySelector('.nav-item[data-go="home"] .cnt.hot')?.textContent ?? '',
-      needsYou: card.parentElement.innerText,
-    }));
+    // Inbox grouping, Home badges and read-result removal belonged only to
+    // the removed Home page. Keep selected-result persistence and storage
+    // failure coverage, and assert that Sessions never adopts the inbox.
     r.expect(
-      before.brief.includes('Unique result text for the transcript check.') &&
-        before.needsYou.includes('Unique result text for the transcript check.'),
-      'Needs you shows the full result card text: ' + JSON.stringify(before),
-    );
-    r.expect(
-      before.resultIds.includes(resultKey),
-      'the unread result is grouped with Needs you: ' + JSON.stringify(before),
-    );
-    const waitingKinds = before.resultIds.map(
-      (id) => D.H.find((h) => h.id === JSON.parse(id)[1])?.ask,
-    );
-    r.expect(
-      waitingKinds.every((ask) => ask === 'question' || ask === 'decision' || ask === 'result') &&
-        waitingKinds.includes('result'),
-      'Needs you lists open questions, decisions, and results: ' + JSON.stringify(waitingKinds),
-    );
-    r.expect(
-      Number(before.badge) === before.resultIds.length,
-      'the Home badge counts all open inbox items: ' + JSON.stringify(before),
+      (await page.locator('#page .ib, #nav [data-go="home"]').count()) === 0,
+      'Sessions must not render Home inbox cards or navigation',
     );
 
     await page.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
@@ -1402,20 +1372,18 @@ export default async function (browser) {
     await page.goto(ENV.extraBase + '/?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
-    const onHome = () =>
-      page.evaluate((id) => {
-        const head = [...document.querySelectorAll('.sec-h')].find(
-          (item) => item.firstChild?.textContent === 'Needs you',
-        );
-        return head?.nextElementSibling?.querySelector('.ib[data-h="' + CSS.escape(id) + '"]')
-          ? 1
-          : 0;
-      }, resultHandoff?.id ?? '');
-    r.expect((await onHome()) === 0, 'the read result leaves the Needs-you inbox');
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+    );
     await page.reload({ waitUntil: 'load' });
-    await page.waitForFunction(() => document.querySelector('#topbar .t')?.textContent === 'Home');
-    r.expect((await onHome()) === 0, 'the read result stays cleared after reloading Home');
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
+    );
+    const persisted = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('semon.seen') ?? '[]'),
+    );
+    r.expect(persisted.includes(resultKey), 'selected result read state survives reload');
+    r.expect((await page.locator('#page .ib').count()) === 0, 'Sessions retains no Home inbox');
     await page.context().close();
 
     const blocked = await served(browser, { extras: true, path: '/' });
@@ -1429,7 +1397,7 @@ export default async function (browser) {
     });
     await blocked.reload({ waitUntil: 'load' });
     await blocked.waitForFunction(
-      () => document.querySelector('#topbar .t')?.textContent === 'Home',
+      () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
     );
     await blocked.goto(ENV.extraBase + '/s/claude/result-card?t=' + ENV.extraToken, {
       waitUntil: 'load',
@@ -1437,7 +1405,8 @@ export default async function (browser) {
     await blocked.waitForFunction(() => !!document.querySelector('.turns .event'));
     r.expect(
       blocked.errors.length === 0,
-      'Home and the session page render when localStorage throws: ' + blocked.errors.join(' | '),
+      'Sessions and the session page render when localStorage throws: ' +
+        blocked.errors.join(' | '),
     );
     await blocked.context().close();
   }
@@ -1519,7 +1488,7 @@ export default async function (browser) {
       ['desktop', true],
     ]) {
       const page = await served(browser, { extras: true, size, dark });
-      for (const v of ['home', 'analytics', 'sessions', 'machines']) {
+      for (const v of ['sessions', 'analytics', 'machines']) {
         await goto(page, { v }, D);
         await scan(page, size + ' ' + v);
       }

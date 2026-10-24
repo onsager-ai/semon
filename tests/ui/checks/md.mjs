@@ -37,8 +37,7 @@
 //    the first script on), on either fixture.
 //  - the synthetic pass's structural checks: the ordered list starts on 1 with 3 items and a bullet list nested
 //    under it, a star bullet renders, the blockquote has its two lines, a rule (<hr>) renders, and ledger's answered
-//    question shows the exact answer text both on Home ("You answered: Ship it (Recommended) · Squash the commits")
-//    and in its answer card — a positive check that answers render at all and render correctly, since the
+//    question shows the exact answer text in its transcript answer card — a positive check that answers render at all and render correctly, since the
 //    sample/served model has no answered question anywhere else in this fixture (gaps.json: h18 is not served).
 import path from 'node:path';
 import { ENV, VIEWPORTS, settled, goto, data, reporter, overflow } from '../lib.mjs';
@@ -323,13 +322,8 @@ async function runPass(page, D, tag, scheme) {
     await overAt('trace ' + sid + '/' + t);
     await checkDom('trace ' + sid + '/' + t);
   }
-  await goto(page, { v: 'home' }, D);
-  T.homeAnswers = await page.evaluate(() =>
-    [...document.querySelectorAll('.ib .ans')].map((x) => x.textContent.trim().slice(0, 80)),
-  );
-  T.screens++;
-  await overAt('home');
-  await checkDom('home');
+  // Home answered-card summaries were removed; exact answer text and styling
+  // remain asserted on the selected transcript's question cards below.
   await goto(page, { v: 'sessions' }, D);
   await checkDom('sessions');
   await goto(page, { v: 'machines' }, D);
@@ -448,12 +442,9 @@ async function runPass(page, D, tag, scheme) {
             : null;
         }, waiting.id);
       }
-      await goto(page, { v: 'home' }, D);
-      await page.evaluate(() =>
-        document.querySelector('.ib.quiet')?.scrollIntoView({ block: 'center' }),
-      );
-      await page.waitForTimeout(150);
-      await page.screenshot({ path: path.join(ENV.out, 'bar-answered.png') });
+      await goto(page, { v: 'session', id: 'ledger' }, D);
+      await page.locator('.event .answer').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(ENV.out, 'transcript-answered.png') });
     } else {
       T.shots = {
         table: await shot('.msg .md .tbl', 'bar-md-table.png'),
@@ -567,12 +558,6 @@ export default async function mdCheck(browser) {
         tag +
           ': waiting question card lost its waiting colour or question icon: ' +
           JSON.stringify(T.synthetic.waitingCard),
-      );
-      r.expect(
-        T.homeAnswers.some((answer) => normSpace(answer) === normSpace(wantAnswer)),
-        tag +
-          ': Home does not show the exact answered-question text: ' +
-          JSON.stringify(T.homeAnswers),
       );
     }
   }

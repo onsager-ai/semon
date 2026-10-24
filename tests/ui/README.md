@@ -28,7 +28,20 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
-- Every functional assertion stays required, including live updates, session order,
+- The Sessions-default decision in `docs/design/ui-design-brief.md` supersedes
+  Home navigation and inbox assertions. Root/title waits now require Sessions;
+  ordering leaves the list through Analytics and returns to Sessions; pending
+  overview retries use machine details. Native turn URLs retain anchor, flash,
+  stale-tail-pin and Back coverage. Font, harness-mark, accessibility, storage,
+  transcript answers, Recent and embedding checks stay on retained surfaces.
+  Only removed Home inbox affordances (badges, working/inbox marks, question
+  summary/Trace/Enter/Space controls and inbox grouping) lose their assertions.
+  Negative checks ensure the inbox does not reappear in Sessions. Historical
+  visual case identities remain required: candidate `home` means the root
+  Sessions destination, while the independently pinned reference keeps Home.
+  Pushed self-parity uses root Sessions on both sides. Actual visual differences
+  still require exact artifact review; no baseline acceptance is implied here.
+- Every retained-surface functional assertion stays required, including live updates, session order,
   embedding, approval reviews, transcript paging, and error navigation.
 - The touch audit checks phone, landscape, and tablet viewports; top-level screens,
   account menus, and a named set of distinct transcript/control shapes across the
@@ -93,10 +106,21 @@ its completion witness is the native-publication success message in the CI log.
   Preservation/main comparators now use Chromium's baseline Skia CPU path,
   [deterministic rendering stages](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#rendering--gpu)
   and full rasterization on both independent applications. Playwright keeps normal
-  frame scheduling. Functional/performance and two-machine/pushed-parity browsers
+  frame scheduling. Functional/performance and pushed-parity browsers
   retain their existing launch settings. The capture regression checks independent
   browser processes, clipped sticky geometry, repeated scroll/repaint equality,
   and changed visible text.
+- Two-machine comparisons also use that deterministic Skia launch path on both
+  independent readers. The desktop Machines reference alternated only six SVG
+  edge pixels in three 10.5px Claude marks; text, geometry and the other five
+  image/evidence bindings stayed identical. The cross-process capture regression
+  includes those fractional-size marks. This changes no screenshot content,
+  animation policy, state, threshold or exact digest requirement; fresh CI images
+  and actual review remain required before rebinding acceptance data.
+  The d71b292 capture review uses CI run 40070762417, artifact 12550918798.
+  Actual light/dark desktop Machines candidate/reference/diff images were viewed;
+  only three PNG digests change, with identical bounded text/geometry evidence.
+  Two exact frame bindings retain their prior decisions and all required coverage.
 - Main desktop captures hold a real pointer in inert sidebar padding before
   navigation/capture and require matching visible row names and selection. This
   prevents the independent readers crossing their existing Recent idle-reorder
@@ -120,6 +144,22 @@ its completion witness is the native-publication success message in the CI log.
   stale binding was the runtime fingerprint. Its registry update preserves every
   state, reference, artifact digest and original image-review provenance; the 68
   preservation cases, 113 main frames and 162 strict regions remain required.
+- The Sessions-default review in Source #448 uses the actual
+  [preservation/main captures from run 39943014615](https://github.com/onsager-ai/semon/actions/runs/39943014615/artifacts/12497546002)
+  and its [two-machine/pushed captures](https://github.com/onsager-ai/semon/actions/runs/39943014615/artifacts/12496927958).
+  The settled Foundation decision replaces the root Home inbox with the existing
+  Sessions list and removes Home from navigation; it does not migrate inbox or
+  status sections. Actual root/title, drawer, desktop Analytics, tablet Thinking,
+  phone transcript and multi-machine comparisons retain the shared foundation.
+  The resulting navigation/Recent row shift and the previously approved passive
+  notice/dock changes account for 62 preservation, 90 main and six two-machine
+  raw findings. The 111 earlier records retain their rationale and approval
+  provenance; 47 new records bind only the settled root/title/navigation states.
+  Every record retains the original reference pins and all six exact image/DOM
+  digests. All 68 preservation cases, 113 main frames/162 regions, 12 two-machine
+  frames/20 regions and 15 pushed frames/24 regions remain required. Pushed parity
+  has no raw difference. No threshold, capture input or semantic assertion changes;
+  full required CI must validate the delivered acceptance-data revision.
 - PR474 fingerprint-only maintenance uses [run 39763385836, artifact 12418164659](https://github.com/onsager-ai/semon/actions/runs/39763385836/artifacts/12418164659)
   (archive SHA-256 `f6e073b085e4e665f2f5fcfae58540c5eedda61cef69505dbf32c065c4e3357e`,
   candidate `9dc88082ea630e542850d94e043ed9dc9ef52f21`): 111 identities and all
@@ -129,6 +169,21 @@ its completion witness is the native-publication success message in the CI log.
   `acceptance-image-table-ea77` image inspection and the Manager decision, with
   no human appearance approval claimed. The one-off audit remains in Git history
   and its CI artifact; final-head CI and acceptance remain required.
+- The combined Source #448/main `c589a9d8` review uses
+  [run 39948275965 visual captures](https://github.com/onsager-ai/semon/actions/runs/39948275965/artifacts/12500060720)
+  and its [transport captures](https://github.com/onsager-ai/semon/actions/runs/39948275965/artifacts/12499047700).
+  The 161 exact states retain 62 preservation, 93 main and six two-machine raw
+  differences; pushed parity has none. Of 966 image/evidence digests, 965 match
+  the prior Source 158-state and main three-menu reviews. The sole changed
+  two-machine reference PNG and current family triplets, including all three
+  Last-turn menus, were inspected. The same settled root/navigation and prior
+  notice/menu decisions apply; all original approval history, references,
+  thresholds and required coverage remain. The first interaction attempt had
+  one pending-observation retry timeout (143/144); one unchanged-SHA diagnostic
+  rerun passed 144/144 and the complete interaction lane. Its cause remains
+  unproven. Final delivered-head CI must pass 144/144 on its first attempt, with
+  no rerun allowance, followed by fresh independent acceptance. This capture
+  record does not claim that the delivered revision has already passed CI.
 - Preservation and main-scope full-frame PNGs and their bounded DOM/paint evidence share one animation
   transaction. As with the existing screenshot suppression, finite effects finish;
   infinite effects pause at time zero through both reads, then resume. The former
@@ -217,6 +272,6 @@ remain required.
 The interaction lane also runs `ui/tests/catalog-served.mjs` and
 `ui/tests/overview-served.mjs` against the compiled producer and embedded bundle
 at 390px, 820px and 1280px in both themes. They check bounded ranges, native bytes,
-keyboard paging, focus, Home/Analytics, causal navigation and paused-control
+keyboard paging, focus, root Sessions/Analytics, causal navigation and paused-control
 refusal, and save actual served screenshots for review. New screenshots do not
 replace approved visual references.
