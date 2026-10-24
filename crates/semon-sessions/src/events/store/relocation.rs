@@ -374,7 +374,12 @@ pub(super) fn reuse(
     )
     .map_err(failure)?;
     tx.execute(
-        configured::metadata_sql(&tx, "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)").map_err(failure)?,
+        configured::metadata_sql(
+            &tx,
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+        )
+        .map_err(failure)?,
         params![
             catalog_key(old),
             json(&CatalogRelocation {

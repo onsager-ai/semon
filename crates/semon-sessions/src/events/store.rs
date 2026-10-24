@@ -2403,10 +2403,12 @@ impl IndexStore for SqliteStore {
         }
         let failed: Option<String> = tx
             .query_row(
-                configured::metadata_sql(&tx,
+                configured::metadata_sql(
+                    &tx,
                     "SELECT value FROM meta WHERE key=?1",
-                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1")
-                    .map_err(io::Error::other)?,
+                    "SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1",
+                )
+                .map_err(io::Error::other)?,
                 [format!("native_tree_failure:{path}")],
                 |r| r.get(0),
             )
@@ -4036,13 +4038,28 @@ impl SqliteStore {
             )?;
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
-            transaction.execute(native_metadata_delete(&transaction)?, [archive_index_key(path)])?;
-            transaction.execute(native_metadata_delete(&transaction)?, [codex_header_key(path)])?;
-            transaction.execute(native_metadata_delete(&transaction)?, [claude_sidecar_key(path)])?;
+            transaction.execute(
+                native_metadata_delete(&transaction)?,
+                [archive_index_key(path)],
+            )?;
+            transaction.execute(
+                native_metadata_delete(&transaction)?,
+                [codex_header_key(path)],
+            )?;
+            transaction.execute(
+                native_metadata_delete(&transaction)?,
+                [claude_sidecar_key(path)],
+            )?;
             chunk_proofs::clear(&transaction, path)?;
             launch_calls::clear(&transaction, path)?;
-            transaction.execute(native_metadata_delete(&transaction)?, [parent_marker_key(path)])?;
-            transaction.execute(native_metadata_delete(&transaction)?, [tree_summary_key(path)])?;
+            transaction.execute(
+                native_metadata_delete(&transaction)?,
+                [parent_marker_key(path)],
+            )?;
+            transaction.execute(
+                native_metadata_delete(&transaction)?,
+                [tree_summary_key(path)],
+            )?;
             invalidate_catalog_source(&transaction, path, "removed")?;
         }
         transaction.commit()?;
@@ -4997,7 +5014,10 @@ pub(crate) fn retain_archive_index(
     };
     let encoded = serde_json::to_string(&record)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    connection.execute(native_metadata_put(connection)?, params![archive_index_key(path), encoded])?;
+    connection.execute(
+        native_metadata_put(connection)?,
+        params![archive_index_key(path), encoded],
+    )?;
     Ok(true)
 }
 
@@ -5132,19 +5152,27 @@ const NATIVE_METADATA_VALUE: &str =
     "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1";
 
 fn native_metadata_value(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(connection, NATIVE_METADATA_VALUE,
-        "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1")
+    configured::metadata_sql(
+        connection,
+        NATIVE_METADATA_VALUE,
+        "SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE namespace=semon_namespace() AND key=?1",
+    )
 }
 
 fn native_metadata_put(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(connection,
+    configured::metadata_sql(
+        connection,
         "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value")
+        "INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+    )
 }
 
 fn native_metadata_delete(connection: &Connection) -> rusqlite::Result<&'static str> {
-    configured::metadata_sql(connection, "DELETE FROM meta WHERE key=?1",
-        "DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1")
+    configured::metadata_sql(
+        connection,
+        "DELETE FROM meta WHERE key=?1",
+        "DELETE FROM meta WHERE namespace=semon_namespace() AND key=?1",
+    )
 }
 
 #[derive(Serialize, Deserialize)]
@@ -5213,14 +5241,19 @@ fn write_tree_summary(
         if encoded.len() > NATIVE_METADATA_MAX {
             // Retain the source and current rows, but stop retrying a scalar
             // that cannot fit the compact projection budget.
-            transaction.execute(native_metadata_put(transaction)?,params![format!("native_tree_failure:{path}"),header_ledger(ledger)])?;
+            transaction.execute(
+                native_metadata_put(transaction)?,
+                params![format!("native_tree_failure:{path}"), header_ledger(ledger)],
+            )?;
             transaction.execute(
                 "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
                 [path],
             )?;
             return Ok(());
         }
-        transaction.prepare_cached(native_metadata_put(transaction)?)?.execute(params![tree_summary_key(path), encoded])?;
+        transaction
+            .prepare_cached(native_metadata_put(transaction)?)?
+            .execute(params![tree_summary_key(path), encoded])?;
         transaction.execute(
             native_metadata_delete(transaction)?,
             [format!("native_tree_failure:{path}")],
@@ -5274,9 +5307,11 @@ fn read_parent_marker(
 
 fn parent_marker_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let text: Option<Option<String>> = connection
-        .query_row(native_metadata_value(connection)?, [parent_marker_key(path)], |row| {
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [parent_marker_key(path)],
+            |row| row.get(0),
+        )
         .optional()?;
     Ok(text
         .flatten()
@@ -5296,7 +5331,9 @@ fn write_parent_marker(
             ledger: header_ledger(ledger),
             index: index.clone(),
         })?;
-        transaction.prepare_cached(native_metadata_put(transaction)?)?.execute(params![parent_marker_key(path), encoded])?;
+        transaction
+            .prepare_cached(native_metadata_put(transaction)?)?
+            .execute(params![parent_marker_key(path), encoded])?;
     } else {
         transaction
             .prepare_cached(native_metadata_delete(transaction)?)?
@@ -5351,9 +5388,11 @@ fn read_codex_header(
 
 fn codex_header_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let encoded: Option<Option<String>> = connection
-        .query_row(native_metadata_value(connection)?, [codex_header_key(path)], |row| {
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [codex_header_key(path)],
+            |row| row.get(0),
+        )
         .optional()?;
     Ok(encoded
         .flatten()
@@ -5377,7 +5416,9 @@ fn write_codex_header(
         })
         .transpose()?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
-        transaction.prepare_cached(native_metadata_put(transaction)?)?.execute(params![codex_header_key(path), encoded])?;
+        transaction
+            .prepare_cached(native_metadata_put(transaction)?)?
+            .execute(params![codex_header_key(path), encoded])?;
     } else {
         // Current readers keep their complete in-memory header. An oversized
         // projection cannot authorize eviction; do not truncate native fields.
@@ -5424,9 +5465,11 @@ fn read_claude_sidecar(
 
 fn claude_sidecar_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let encoded: Option<Option<String>> = connection
-        .query_row(native_metadata_value(connection)?, [claude_sidecar_key(path)], |row| {
-            row.get(0)
-        })
+        .query_row(
+            native_metadata_value(connection)?,
+            [claude_sidecar_key(path)],
+            |row| row.get(0),
+        )
         .optional()?;
     Ok(encoded
         .flatten()
@@ -5453,7 +5496,9 @@ fn write_claude_sidecar(
         })
         .transpose()?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
-        transaction.prepare_cached(native_metadata_put(transaction)?)?.execute(params![claude_sidecar_key(path), encoded])?;
+        transaction
+            .prepare_cached(native_metadata_put(transaction)?)?
+            .execute(params![claude_sidecar_key(path), encoded])?;
     } else {
         transaction
             .prepare_cached(native_metadata_delete(transaction)?)?
@@ -5989,7 +6034,10 @@ fn write_index_changes_measured(
     #[cfg(test)]
     configured::effect("semantic_dependencies")?;
     let started = measurements.start();
-    transaction.execute(native_metadata_delete(transaction)?, [archive_index_key(path)])?;
+    transaction.execute(
+        native_metadata_delete(transaction)?,
+        [archive_index_key(path)],
+    )?;
     measurements.record("archive_metadata", started, 1);
     #[cfg(test)]
     configured::effect("archive_metadata")?;

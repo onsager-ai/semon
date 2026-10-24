@@ -62,9 +62,11 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     for digest in saved.clone() {
         let retained = prefix(path, &digest);
         let header: Option<String> = tx
-            .query_row(native_metadata_value(tx)?, [format!("{retained}header")], |r| {
-                r.get(0)
-            })
+            .query_row(
+                native_metadata_value(tx)?,
+                [format!("{retained}header")],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten();
         let compatible = header.as_deref().is_some_and(|text| {
@@ -76,7 +78,11 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         }
         for namespace in namespaces(&retained) {
             tx.execute(
-                configured::metadata_sql(tx, "DELETE FROM meta WHERE key>=?1 AND key<?2", "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?,
+                configured::metadata_sql(
+                    tx,
+                    "DELETE FROM meta WHERE key>=?1 AND key<?2",
+                    "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+                )?,
                 params![&namespace, format!("{namespace}~")],
             )?;
         }
@@ -109,7 +115,7 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     if !saved.is_empty() || prior.is_some() {
         let encoded = json(&saved)?;
         if prior.as_deref() != Some(&encoded) {
-            tx.execute(native_metadata_put(tx)?, params![key,encoded])?;
+            tx.execute(native_metadata_put(tx)?, params![key, encoded])?;
         }
     }
     Ok(())
