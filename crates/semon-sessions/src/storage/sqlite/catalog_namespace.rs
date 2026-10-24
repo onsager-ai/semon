@@ -762,37 +762,96 @@ mod tests {
 
     #[test]
     fn navigation_reads_pin_admission_epoch_generation_and_namespace() {
-        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
         use super::super::navigation::SqliteNavigation;
+        use crate::storage::{NativeReaderBinding, navigation::NativeNavigationStore};
         let f = Fixture::new();
         let generation = "a".repeat(64);
-        f.db().execute("INSERT OR REPLACE INTO meta VALUES('catalog_version',?1)", [crate::model::summary::CATALOG_VERSION.to_string()]).unwrap();
-        f.db().execute("INSERT OR REPLACE INTO meta VALUES('catalog_generation',?1)", [&generation]).unwrap();
-        f.db().execute("INSERT INTO session_trace_bookmarks VALUES('target','same','edge')", []).unwrap();
-        assert_eq!(SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone())).bookmarked_target_keys("target"), Err(StorageError::NamespaceUnadmitted));
+        f.db()
+            .execute(
+                "INSERT OR REPLACE INTO meta VALUES('catalog_version',?1)",
+                [crate::model::summary::CATALOG_VERSION.to_string()],
+            )
+            .unwrap();
+        f.db()
+            .execute(
+                "INSERT OR REPLACE INTO meta VALUES('catalog_generation',?1)",
+                [&generation],
+            )
+            .unwrap();
+        f.db()
+            .execute(
+                "INSERT INTO session_trace_bookmarks VALUES('target','same','edge')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()))
+                .bookmarked_target_keys("target"),
+            Err(StorageError::NamespaceUnadmitted)
+        );
         f.config.admit_namespace().unwrap();
         f.finish();
         // A private table-level second-source fixture is not public admission.
         let db = f.db();
         register(&db, &LogicalSourceNamespace::new("B").unwrap()).unwrap();
-        db.execute("INSERT INTO session_trace_bookmarks VALUES('B','target','foreign','edge')", []).unwrap();
+        db.execute(
+            "INSERT INTO session_trace_bookmarks VALUES('B','target','foreign','edge')",
+            [],
+        )
+        .unwrap();
         db.execute("INSERT INTO session_catalog_sources VALUES('B','foreign','current','codex','native-same','relative/same.jsonl')", []).unwrap();
         let store = SqliteNavigation(NativeReaderBinding::Admitted(f.config.clone()));
         assert_eq!(f.config.bookmarked_target_keys("target").unwrap(), ["same"]);
-        let observation = store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&generation)).unwrap();
+        let observation = store
+            .native_resolution(
+                "codex",
+                "native-same",
+                crate::CatalogReadScope::Current,
+                Some(&generation),
+            )
+            .unwrap();
         assert_eq!(observation.keys, ["same"]);
         assert_eq!(observation.metadata.as_deref(), Some("{\"owner\":\"A\"}"));
         assert_eq!(observation.generation.as_deref(), Some(generation.as_str()));
-        assert!(matches!(store.native_resolution("codex", "native-same", crate::CatalogReadScope::Current, Some(&"b".repeat(64))), Err(StorageError::ScopeChanged)));
+        assert!(matches!(
+            store.native_resolution(
+                "codex",
+                "native-same",
+                crate::CatalogReadScope::Current,
+                Some(&"b".repeat(64))
+            ),
+            Err(StorageError::ScopeChanged)
+        ));
         let mut stale = f.config.clone();
         stale.expected_stream_epoch = Some("b".repeat(64));
         let stale = SqliteNavigation(NativeReaderBinding::Admitted(stale));
-        assert_eq!(stale.bookmarked_target_keys("target"), Err(StorageError::ScopeChanged));
+        assert_eq!(
+            stale.bookmarked_target_keys("target"),
+            Err(StorageError::ScopeChanged)
+        );
         let mut foreign = f.config.clone();
         foreign.namespace = LogicalSourceNamespace::new("B").unwrap();
-        assert!(SqliteNavigation(NativeReaderBinding::Admitted(foreign)).bookmarked_target_keys("target").is_err());
-        assert!(SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(f.config.clone())).bookmarked_target_keys("target").is_err());
-        assert_eq!(db.query_row("SELECT count(*) FROM storage_original_session_catalog", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
+        assert!(
+            SqliteNavigation(NativeReaderBinding::Admitted(foreign))
+                .bookmarked_target_keys("target")
+                .is_err()
+        );
+        assert!(
+            SqliteNavigation(NativeReaderBinding::TransitionalUnboundLocal(
+                f.config.clone()
+            ))
+            .bookmarked_target_keys("target")
+            .is_err()
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM storage_original_session_catalog",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
     }
 
     #[test]

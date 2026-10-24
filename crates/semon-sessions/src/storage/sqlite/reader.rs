@@ -88,7 +88,9 @@ impl NativeReaderBinding {
 
 pub(super) struct ReadSnapshot(Connection, bool);
 impl ReadSnapshot {
-    pub(super) fn qualified(&self) -> bool { self.1 }
+    pub(super) fn qualified(&self) -> bool {
+        self.1
+    }
 }
 impl Deref for ReadSnapshot {
     type Target = Connection;
