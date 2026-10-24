@@ -3,7 +3,11 @@
 use super::*;
 use std::io::{BufRead, BufReader, Read};
 
-pub(in crate::events::store) fn sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+pub(in crate::events::store) fn sql<'a>(
+    c: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
     let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('native_tree_repairs') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
     Ok(if composite { scoped } else { legacy })
 }
@@ -456,8 +460,13 @@ pub(in crate::events::store) fn advance(
         ["native_tree_repair_clock"],
     )
     .map_err(sql_error)?;
-    let clock: String = tx.query_row(native_metadata_value(&tx).map_err(sql_error)?,
-        ["native_tree_repair_clock"], |r| r.get(0)).map_err(sql_error)?;
+    let clock: String = tx
+        .query_row(
+            native_metadata_value(&tx).map_err(sql_error)?,
+            ["native_tree_repair_clock"],
+            |r| r.get(0),
+        )
+        .map_err(sql_error)?;
     tx.execute(sql(&tx,
         "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST(?6 AS INTEGER) WHERE source_path=?1",
         "UPDATE native_tree_repairs SET cursor=?2,last_model=?3,tree_root=?4,state=?5,last_attempt=CAST(?6 AS INTEGER) WHERE namespace=semon_namespace() AND source_path=?1").map_err(sql_error)?,

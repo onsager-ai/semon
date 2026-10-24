@@ -6039,7 +6039,11 @@ fn clear_preserving_tree(
     }
     if !preserve_tree {
         transaction.execute(
-            tree_state::sql(transaction, "DELETE FROM native_tree_headers WHERE file_id=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1")?,
+            tree_state::sql(
+                transaction,
+                "DELETE FROM native_tree_headers WHERE file_id=?1",
+                "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1",
+            )?,
             [file_id],
         )?;
     }

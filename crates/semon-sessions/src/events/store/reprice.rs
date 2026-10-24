@@ -433,7 +433,11 @@ fn put_dimension<T: Serialize>(
     value: &T,
 ) -> rusqlite::Result<()> {
     tx.execute(
-        native_usage::sql(tx, "INSERT INTO native_usage_dimensions VALUES(?1,?2,?3,?4)", "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4)")?,
+        native_usage::sql(
+            tx,
+            "INSERT INTO native_usage_dimensions VALUES(?1,?2,?3,?4)",
+            "INSERT INTO native_usage_dimensions VALUES(semon_namespace(),?1,?2,?3,?4)",
+        )?,
         params![id, kind, key, json(value)?],
     )?;
     Ok(())
@@ -1114,56 +1118,71 @@ mod tests {
     #[test]
     fn native_usage_composite_repricing_isolates_colliding_source_ids_and_rollback() {
         use rusqlite::functions::FunctionFlags;
-        let mut db=Connection::open_in_memory().unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE files (
             namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
             codex_native_usage TEXT,codex_pricing_fingerprint TEXT,
             PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));
             CREATE INDEX files_codex_pricing_fingerprint ON files(namespace,file_id,codex_pricing_fingerprint) WHERE codex_native_usage IS NOT NULL;").unwrap();
-        for ddl in native_usage::schema(true) { db.execute_batch(ddl).unwrap(); }
-        let bind=|db:&Connection,namespace:&str| {
-            let namespace=namespace.to_owned();
-            db.create_scalar_function("semon_namespace",0,FunctionFlags::SQLITE_UTF8,
-                move |_| Ok(namespace.clone())).unwrap();
+        for ddl in native_usage::schema(true) {
+            db.execute_batch(ddl).unwrap();
+        }
+        let bind = |db: &Connection, namespace: &str| {
+            let namespace = namespace.to_owned();
+            db.create_scalar_function(
+                "semon_namespace",
+                0,
+                FunctionFlags::SQLITE_UTF8,
+                move |_| Ok(namespace.clone()),
+            )
+            .unwrap();
         };
-        let ledger=ledger();
-        let path="same/relative.jsonl";
-        for (namespace,count) in [("a",3),("b",5)] {
-            bind(&db,namespace);
-            let tx=db.transaction().unwrap();
-            let index=codex_index("gpt-6.1-sol",count);
-            assert_eq!(native_usage::begin_source(&tx,path,None,&ledger,false).unwrap(),1);
-            native_usage::write(&tx,path,&ledger,&index).unwrap();
-            let mut root:Value=serde_json::from_str(&native_usage::encoded(&index).unwrap().unwrap()).unwrap();
-            root["cost"]["pricing_fingerprint"]=Value::String("stale".into());
-            tx.execute("INSERT INTO files VALUES(semon_namespace(),1,?1,?2,'stale')",params![path,json(&root).unwrap()]).unwrap();
+        let ledger = ledger();
+        let path = "same/relative.jsonl";
+        for (namespace, count) in [("a", 3), ("b", 5)] {
+            bind(&db, namespace);
+            let tx = db.transaction().unwrap();
+            let index = codex_index("gpt-6.1-sol", count);
+            assert_eq!(
+                native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),
+                1
+            );
+            native_usage::write(&tx, path, &ledger, &index).unwrap();
+            let mut root: Value =
+                serde_json::from_str(&native_usage::encoded(&index).unwrap().unwrap()).unwrap();
+            root["cost"]["pricing_fingerprint"] = Value::String("stale".into());
+            tx.execute(
+                "INSERT INTO files VALUES(semon_namespace(),1,?1,?2,'stale')",
+                params![path, json(&root).unwrap()],
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
-        let state=|db:&Connection,namespace:&str| -> (String,String,String) {
+        let state = |db: &Connection, namespace: &str| -> (String, String, String) {
             (
                 db.query_row("SELECT codex_native_usage FROM files WHERE namespace=?1",[namespace],|r|r.get(0)).unwrap(),
                 db.query_row("SELECT json_group_array(json_array(kind,dimension,value)) FROM (SELECT kind,dimension,value FROM native_usage_dimensions WHERE namespace=?1 ORDER BY kind,dimension)",[namespace],|r|r.get(0)).unwrap(),
                 db.query_row("SELECT json_group_array(json_array(native_offset,payload,record,outcome,model_outcome)) FROM (SELECT * FROM native_usage_facts WHERE namespace=?1 ORDER BY native_offset)",[namespace],|r|r.get(0)).unwrap()
             )
         };
-        let b=state(&db,"b");
-        let a_facts=state(&db,"a").2;
-        let target=table("openai","gpt-6.1-sol",7.0,1);
-        bind(&db,"a");
-        let tx=db.transaction().unwrap();
-        assert!(source_step(&tx,&mut Work::default(),&target,Some(1)).unwrap());
-        assert_eq!(state(&tx,"b"),b);
-        assert_eq!(state(&tx,"a").2,a_facts);
-        let root:Value=serde_json::from_str(&state(&tx,"a").0).unwrap();
-        assert_eq!(root["cost"]["pricing_fingerprint"],target.fingerprint);
+        let b = state(&db, "b");
+        let a_facts = state(&db, "a").2;
+        let target = table("openai", "gpt-6.1-sol", 7.0, 1);
+        bind(&db, "a");
+        let tx = db.transaction().unwrap();
+        assert!(source_step(&tx, &mut Work::default(), &target, Some(1)).unwrap());
+        assert_eq!(state(&tx, "b"), b);
+        assert_eq!(state(&tx, "a").2, a_facts);
+        let root: Value = serde_json::from_str(&state(&tx, "a").0).unwrap();
+        assert_eq!(root["cost"]["pricing_fingerprint"], target.fingerprint);
         tx.commit().unwrap();
-        let a=state(&db,"a");
-        let tx=db.transaction().unwrap();
-        let other=table("openai","gpt-6.1-sol",9.0,2);
-        assert!(source_step(&tx,&mut Work::default(),&other,Some(1)).unwrap());
+        let a = state(&db, "a");
+        let tx = db.transaction().unwrap();
+        let other = table("openai", "gpt-6.1-sol", 9.0, 2);
+        assert!(source_step(&tx, &mut Work::default(), &other, Some(1)).unwrap());
         tx.rollback().unwrap();
-        assert_eq!(state(&db,"a"),a);
-        assert_eq!(state(&db,"b"),b);
+        assert_eq!(state(&db, "a"), a);
+        assert_eq!(state(&db, "b"), b);
     }
 
     #[test]

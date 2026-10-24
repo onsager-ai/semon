@@ -1815,11 +1815,20 @@ mod tests {
         assert!(tree_state::ready(&db, path, &ledger).unwrap());
         // The JSON/version and physical generation still look ready, but the
         // consumer must refuse a summary built under another interpretation.
-        db.execute("UPDATE files SET codex_pricing_fingerprint='changed-interpretation'", []).unwrap();
+        db.execute(
+            "UPDATE files SET codex_pricing_fingerprint='changed-interpretation'",
+            [],
+        )
+        .unwrap();
         assert!(!tree_state::ready(&db, path, &ledger).unwrap());
         let tx = db.transaction().unwrap();
-        let summary: String = tx.query_row(native_metadata_value(&tx).unwrap(),
-            [tree_summary_key(path)], |r| r.get(0)).unwrap();
+        let summary: String = tx
+            .query_row(
+                native_metadata_value(&tx).unwrap(),
+                [tree_summary_key(path)],
+                |r| r.get(0),
+            )
+            .unwrap();
         let record: TreeSummaryRecord = serde_json::from_str(&summary).unwrap();
         write_tree_summary(&tx, path, &ledger, Some(&record.summary), true).unwrap();
         assert!(tree_state::ready(&tx, path, &ledger).unwrap());

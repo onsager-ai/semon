@@ -55,8 +55,6 @@ CREATE TRIGGER IF NOT EXISTS native_tree_copy_delete AFTER DELETE ON usage_ident
 END;
 ";
 
-
-
 // Candidate physical family. Copied-usage triggers remain an activation
 // dependency on the usage_identity owner; public creation selects SCHEMA.
 const COMPOSITE_SCHEMA: &str = "
@@ -115,7 +113,11 @@ pub(super) fn schema(composite: bool) -> &'static str {
     if composite { COMPOSITE_SCHEMA } else { SCHEMA }
 }
 
-pub(super) fn sql<'a>(c: &Connection, legacy: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+pub(super) fn sql<'a>(
+    c: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
     Ok(if composite(c)? { scoped } else { legacy })
 }
 fn composite(c: &Connection) -> rusqlite::Result<bool> {
@@ -306,8 +308,12 @@ pub(super) fn write_values(
         }
     }
     for model in &summary.models {
-        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_models VALUES(?1,?2) ON CONFLICT DO NOTHING", "INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING")?)?
-            .execute(params![id, model])?;
+        tx.prepare_cached(sql(
+            tx,
+            "INSERT INTO native_tree_models VALUES(?1,?2) ON CONFLICT DO NOTHING",
+            "INSERT INTO native_tree_models VALUES(semon_namespace(),?1,?2) ON CONFLICT DO NOTHING",
+        )?)?
+        .execute(params![id, model])?;
     }
     for (tool, name) in &summary.tools {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_tools VALUES(?1,?2,?3,0) ON CONFLICT(projection_id,tool_id) DO UPDATE SET name=excluded.name", "INSERT INTO native_tree_tools VALUES(semon_namespace(),?1,?2,?3,0) ON CONFLICT(namespace,projection_id,tool_id) DO UPDATE SET name=excluded.name")?)?.execute(params![id,tool,name])?;
@@ -440,9 +446,15 @@ pub(super) fn witness(
     ] {
         digest.update(sql.as_bytes());
         let scoped = match sql {
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label" => "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model" => "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model",
-            _ => "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label" => {
+                "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label"
+            }
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model" => {
+                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model"
+            }
+            _ => {
+                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id"
+            }
         };
         let mut statement = c.prepare(self::sql(c, sql, scoped)?)?;
         let mut rows = statement.query([projection])?;
@@ -477,7 +489,11 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
             ("native_tree_usage_work", "message_id"),
             ("native_tree_codex_work", "identity"),
         ] {
-            let predicate = if composite(&tx)? { "namespace=semon_namespace() AND " } else { "" };
+            let predicate = if composite(&tx)? {
+                "namespace=semon_namespace() AND "
+            } else {
+                ""
+            };
             tx.execute(&format!("DELETE FROM {table} WHERE {predicate}projection_id=?1 AND {key} IN (SELECT {key} FROM {table} WHERE {predicate}projection_id=?1 ORDER BY {key} LIMIT 512)"),[id])?;
         }
         tx.execute(sql(&tx, "UPDATE native_tree_generations SET work_pending=0 WHERE projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE projection_id=?1)", "UPDATE native_tree_generations SET work_pending=0 WHERE namespace=semon_namespace() AND projection_id=?1 AND NOT EXISTS(SELECT 1 FROM native_tree_usage_work WHERE namespace=semon_namespace() AND projection_id=?1) AND NOT EXISTS(SELECT 1 FROM native_tree_codex_work WHERE namespace=semon_namespace() AND projection_id=?1)")?,[id])?;
@@ -496,56 +512,106 @@ mod namespace_tests {
     fn bind(db: &Connection, namespace: &str) {
         configured::bind_metadata_scope(db, namespace).unwrap();
         let namespace = namespace.to_owned();
-        db.create_scalar_function("semon_namespace", 0, FunctionFlags::SQLITE_UTF8,
-            move |_| Ok(namespace.clone())).unwrap();
+        db.create_scalar_function(
+            "semon_namespace",
+            0,
+            FunctionFlags::SQLITE_UTF8,
+            move |_| Ok(namespace.clone()),
+        )
+        .unwrap();
     }
 
     #[test]
     fn native_usage_tree_colliding_generations_restore_witness_and_rollback() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE files (
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; CREATE TABLE files (
             namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
             dev INTEGER NOT NULL,ino INTEGER NOT NULL,size INTEGER NOT NULL,
             mtime_ns BLOB NOT NULL,resume_at INTEGER NOT NULL,head_sha256 BLOB NOT NULL,
             tail_sha256 BLOB NOT NULL,ctime_ns BLOB,codex_pricing_fingerprint TEXT,
-            PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));").unwrap();
+            PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
+        )
+        .unwrap();
         db.execute_batch(metadata_schema(true)).unwrap();
-        for ddl in native_usage::schema(true) { db.execute_batch(ddl).unwrap(); }
+        for ddl in native_usage::schema(true) {
+            db.execute_batch(ddl).unwrap();
+        }
         db.execute_batch(schema(true)).unwrap();
-        let ledger = Ledger { stat: Stat { dev:1,ino:2,size:64,modified_ns:3,changed_ns:Some(4) },
-            offset:64,prefix:[5;32],tail:[6;32] };
+        let ledger = Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 64,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset: 64,
+            prefix: [5; 32],
+            tail: [6; 32],
+        };
         let path = "same/relative.jsonl";
         let mut witnesses = Vec::new();
         for namespace in ["a", "b"] {
             bind(&db, namespace);
             let tx = db.transaction().unwrap();
-            tx.execute("INSERT INTO files VALUES(semon_namespace(),1,?1,1,2,64,?2,64,?3,?4,?5,NULL)",
-                params![path,3_u128.to_be_bytes(),ledger.prefix,ledger.tail,4_i128.to_be_bytes()]).unwrap();
-            assert_eq!(native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),1);
-            let summary = Summary { cwd:Some(namespace.into()),models:BTreeSet::from([namespace.into()]),..Summary::default() };
-            write_tree_summary(&tx,path,&ledger,Some(&summary),true).unwrap();
-            assert!(ready(&tx,path,&ledger).unwrap());
-            witnesses.push(witness(&tx,path,&ledger).unwrap().unwrap());
+            tx.execute(
+                "INSERT INTO files VALUES(semon_namespace(),1,?1,1,2,64,?2,64,?3,?4,?5,NULL)",
+                params![
+                    path,
+                    3_u128.to_be_bytes(),
+                    ledger.prefix,
+                    ledger.tail,
+                    4_i128.to_be_bytes()
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),
+                1
+            );
+            let summary = Summary {
+                cwd: Some(namespace.into()),
+                models: BTreeSet::from([namespace.into()]),
+                ..Summary::default()
+            };
+            write_tree_summary(&tx, path, &ledger, Some(&summary), true).unwrap();
+            assert!(ready(&tx, path, &ledger).unwrap());
+            witnesses.push(witness(&tx, path, &ledger).unwrap().unwrap());
             tx.commit().unwrap();
         }
-        assert_ne!(witnesses[0],witnesses[1]);
-        for (i,namespace) in ["a","b"].into_iter().enumerate() {
-            bind(&db,namespace);
-            assert_eq!(witness(&db,path,&ledger).unwrap().as_ref(),Some(&witnesses[i]));
-            let mut summary=Summary::default();
-            assert!(restore(&db,path,&ledger,&mut summary).unwrap());
-            assert_eq!(summary.cwd.as_deref(),Some(namespace));
-            assert_eq!(summary.models,BTreeSet::from([namespace.to_owned()]));
+        assert_ne!(witnesses[0], witnesses[1]);
+        for (i, namespace) in ["a", "b"].into_iter().enumerate() {
+            bind(&db, namespace);
+            assert_eq!(
+                witness(&db, path, &ledger).unwrap().as_ref(),
+                Some(&witnesses[i])
+            );
+            let mut summary = Summary::default();
+            assert!(restore(&db, path, &ledger, &mut summary).unwrap());
+            assert_eq!(summary.cwd.as_deref(), Some(namespace));
+            assert_eq!(summary.models, BTreeSet::from([namespace.to_owned()]));
         }
-        bind(&db,"a");
-        let tx=db.transaction().unwrap();
-        write_values(&tx,1,&Summary {cwd:Some("changed".into()),..Summary::default()}).unwrap();
-        assert!(!ready(&tx,path,&ledger).unwrap());
-        bind(&tx,"b");
-        assert!(ready(&tx,path,&ledger).unwrap());
-        assert_eq!(witness(&tx,path,&ledger).unwrap().as_ref(),Some(&witnesses[1]));
+        bind(&db, "a");
+        let tx = db.transaction().unwrap();
+        write_values(
+            &tx,
+            1,
+            &Summary {
+                cwd: Some("changed".into()),
+                ..Summary::default()
+            },
+        )
+        .unwrap();
+        assert!(!ready(&tx, path, &ledger).unwrap());
+        bind(&tx, "b");
+        assert!(ready(&tx, path, &ledger).unwrap());
+        assert_eq!(
+            witness(&tx, path, &ledger).unwrap().as_ref(),
+            Some(&witnesses[1])
+        );
         tx.rollback().unwrap();
-        bind(&db,"a");
-        assert!(ready(&db,path,&ledger).unwrap());
+        bind(&db, "a");
+        assert!(ready(&db, path, &ledger).unwrap());
     }
 }
