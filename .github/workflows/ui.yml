@@ -463,6 +463,9 @@ jobs:
         env:
           SEMON_ORDER_SCHEMES: ${{ matrix.suite == 'order-phone' && 'phone-light,phone-dark' || matrix.suite == 'order-desktop-light' && 'desktop-light' || 'desktop-dark' }}
         run: node checks/order.mjs
+      - name: Retain bounded per-case visual binding provenance
+        if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        run: node tests/ui/visual-provenance.mjs
       - name: Server logs
         if: ${{ always() }}
         run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/two-machines-reference.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
