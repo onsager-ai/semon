@@ -1169,29 +1169,34 @@ export async function closePage(page) {
 }
 
 // Goes to a route the way the mockup's check scripts did: a history entry and a popstate, then waits for its screen.
+const routeSegment = (value) =>
+  encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase(),
+  );
+
 export async function goto(page, route, D) {
   const sid = route.id ?? route.sid,
     session = D.SESS[sid],
-    machine = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
+    source = session ? (D.SOURCES?.[session.machine] ?? session.machine) : undefined,
     key = D.KEYS?.[sid] ?? sid,
     machineKey = D.SOURCES?.[route.id] ?? route.id,
     paths = { home: '/', analytics: '/analytics', sessions: '/sessions', machines: '/machines' },
     destination =
       route.v === 'session'
-        ? '/s/' + (session?.harness ?? 'native') + '/' + encodeURIComponent(key)
+        ? '/session/' + routeSegment(source ?? 'local') + '/' + routeSegment(key)
         : route.v === 'trace'
-          ? '/trace/' +
-            (session?.harness ?? 'native') +
+          ? '/session/' +
+            routeSegment(source ?? 'local') +
             '/' +
-            encodeURIComponent(key) +
-            '/' +
-            encodeURIComponent(route.turn)
+            routeSegment(key) +
+            '/trace/' +
+            routeSegment(route.turn)
           : route.v === 'machine'
             ? '/machines/' + encodeURIComponent(machineKey)
             : paths[route.v];
   const url = new URL(destination, page.url());
-  if (machine && ['session', 'trace'].includes(route.v)) url.searchParams.set('machine', machine);
-  if (route.v === 'session' && route.turn) url.hash = 'turn=' + encodeURIComponent(route.turn);
+  if (route.v === 'session' && route.turn) url.hash = routeSegment(route.turn);
   const current = JSON.stringify(route);
   if (page.captureReadinessEnabled) {
     const previous = page.captureRouteKey;
@@ -1206,7 +1211,7 @@ export async function goto(page, route, D) {
       previousRoute = JSON.parse(previous);
     } catch {}
     const traceQuery = new URLSearchParams({
-      machine: machine ?? '',
+      machine: source ?? '',
       scope: 'retained_history',
       sid: key ?? '',
       turn: route.turn ?? '',
@@ -1215,7 +1220,7 @@ export async function goto(page, route, D) {
       page.captureRole === 'candidate' &&
       previousRoute?.v === 'trace' &&
       route.v === 'trace' &&
-      machine
+      source
         ? {
             from: previous,
             to: current,
