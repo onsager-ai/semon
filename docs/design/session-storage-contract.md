@@ -11,6 +11,62 @@ MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
 visual, cold-start, performance and security acceptance remains required.
 
+## Worker 16 checkpoint: usage history reconciliation and repair readiness
+
+This is a bounded WIP increment, requiring exact-pin CI and fresh acceptance.
+The ordinary merge retains both `fe08864f` and component `43399c01` histories.
+The production boundary remains the bound `semon_namespace()` selector API.
+Component15's file-backed same-ID/path append, exact replay, reopen and conflicting
+replay rollback test is adapted to that boundary. Parent relocation and retained
+incarnation coverage is kept. All these tests are selected by the existing
+`native_usage_` CI filter; configured regressions retain their existing filter.
+
+A concrete non-convergence mechanism was found in `tree_state::ready`: its old
+JSON/version predicate could mark a root complete even though `read_tree_summary`
+refused its dimension or interpretation witness. That sent the next consumer
+back to the same repair queue. Readiness now uses the consumer's bounded full
+validation. A regression changes interpretation while retaining valid JSON and a
+complete generation, requires not-ready, rewrites the summary and requires stable
+readiness. The original Catalog test still has its 256-iteration limit and the
+same epoch, revision and phase assertions. Passing that test is **not yet verified**.
+
+Repair selection, progress CAS, failure/reset/completion and queue writes now use
+the repair table's own shape selector. The store clock is read independently
+through metadata ownership. Tree generations, headers, models, labels, tools,
+usage models, work rows, restoration, witnesses and snapshot header/tool reads
+have authored scoped statements. Namespace-local generation IDs use an explicit
+allocation inside the writer transaction. Native repricing selects current source
+incarnations and reads/replaces fact-derived dimensions within the bound source;
+current facts, receipts and byte/row bounds stay intact. Private tests collide
+Tree IDs and paths, verify restored dimensions/witnesses and rollback, and reprice
+colliding source IDs while checking the other source and original facts.
+
+`native_usage::schema(bool)` centralizes usage and repair DDL selection;
+`tree_state::schema(bool)` selects the Tree tables. Candidate PKs, unique keys,
+indexes and foreign keys lead with namespace. `storage_ddl()` still selects the
+singleton family: activating it before the remaining coupled owners would be
+incorrect. Candidate Tree DDL does not yet include composite copied-usage
+triggers. No database is reset or converted, and no public qualification changes.
+
+Exact remaining activation work for this family:
+
+- `usage_identity`, `usage`, `codex_usage` schema/DML, the two copied-identity
+  triggers, `Snapshot::shared_usage` token read and store remove/clear loops.
+- `reprice.rs` pending owner row keys and SELECT/DELETE/EXISTS operations, plus
+  Catalog and core pricing trigger queue ownership. Current source/fact/dimension
+  operations are ported, but mixed-layout conformance remains pending.
+- `native_usage/repair.rs::prepare` currently opens a legacy proof snapshot and
+  uses local Options source admission. A configured repair API must bind an
+  explicit authorized source and proof snapshot before exposing it.
+- Production configured DDL and guards for the whole family, public two-source
+  ingestion, retained-reader lifetime/lease/GC, and semantic/dependency/mutation
+  owners. Metadata and global writer qualification remain **0**.
+
+CI compilation, formatting, all applicable tests and performance are pending.
+No local cargo/formatter/browser work ran because thermal readings are absent.
+Full #478/#477, PG #479, Hub #313 and migration/cutover are unfinished; the #380
+merge hold remains in force.
+
 ## Worker 14 checkpoint: Tree completion witness and metadata ownership
 
 Fresh operation IDs over unchanged Raw still receive their own durable completion.

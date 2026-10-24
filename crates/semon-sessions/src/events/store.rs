@@ -2422,7 +2422,9 @@ impl IndexStore for SqliteStore {
                 "native tree compact metadata exceeds budget",
             ));
         }
-        tx.execute("INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END",params![path,header_ledger(ledger)]).map_err(io::Error::other)?;
+        tx.execute(native_usage::repair_sql(&tx,
+            "INSERT INTO native_tree_repairs(source_path,receipt) VALUES(?1,?2) ON CONFLICT(source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END",
+            "INSERT INTO native_tree_repairs(namespace,source_path,receipt) VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET state=CASE WHEN native_tree_repairs.state='done' THEN 'ready' ELSE native_tree_repairs.state END").map_err(io::Error::other)?,params![path,header_ledger(ledger)]).map_err(io::Error::other)?;
         tx.commit().map_err(io::Error::other)
     }
 
@@ -4033,7 +4035,7 @@ impl SqliteStore {
                 )?;
             }
             transaction.execute(
-                "DELETE FROM native_tree_headers WHERE source_path=?1",
+                tree_state::sql(&transaction, "DELETE FROM native_tree_headers WHERE source_path=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
                 [path],
             )?;
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
@@ -4492,13 +4494,14 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 
 /// One authored DDL set, shared by cold initialization and whole-index rebuilds.
 fn storage_ddl() -> [&'static str; 16] {
+    let [usage, repair] = native_usage::schema(false);
     [
         SCHEMA,
         metadata_schema(false),
         LEGACY_EVENT_SCHEMA,
-        native_usage::SCHEMA,
-        native_usage::REPAIR_SCHEMA,
-        tree_state::SCHEMA,
+        usage,
+        repair,
+        tree_state::schema(false),
         semantic_stage::SCHEMA,
         semantic_stage::SEMANTIC_CORE_INDEXES,
         semantic_stage::metadata_indexes(false),
@@ -5374,7 +5377,9 @@ fn write_tree_summary(
                 params![format!("native_tree_failure:{path}"), header_ledger(ledger)],
             )?;
             transaction.execute(
-                "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
+                native_usage::repair_sql(transaction,
+                    "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE source_path=?1",
+                    "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1")?,
                 [path],
             )?;
             return Ok(());
@@ -6034,7 +6039,7 @@ fn clear_preserving_tree(
     }
     if !preserve_tree {
         transaction.execute(
-            "DELETE FROM native_tree_headers WHERE file_id=?1",
+            tree_state::sql(transaction, "DELETE FROM native_tree_headers WHERE file_id=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1")?,
             [file_id],
         )?;
     }
