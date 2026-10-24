@@ -117,6 +117,10 @@ its completion witness is the native-publication success message in the CI log.
   includes those fractional-size marks. This changes no screenshot content,
   animation policy, state, threshold or exact digest requirement; fresh CI images
   and actual review remain required before rebinding acceptance data.
+  The d71b292 capture review uses CI run 40070762417, artifact 12550918798.
+  Actual light/dark desktop Machines candidate/reference/diff images were viewed;
+  only three PNG digests change, with identical bounded text/geometry evidence.
+  Two exact frame bindings retain their prior decisions and all required coverage.
 - Main desktop captures hold a real pointer in inert sidebar padding before
   navigation/capture and require matching visible row names and selection. This
   prevents the independent readers crossing their existing Recent idle-reorder
