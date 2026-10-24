@@ -13,6 +13,7 @@ pub(super) struct ConfiguredIndex {
 }
 
 pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
+    crate::events::store::configured::validate_semantic_schema(config)?;
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
     Ok(Box::new(ConfiguredIndex {

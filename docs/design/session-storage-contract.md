@@ -1091,7 +1091,30 @@ prerequisite, not end-to-end Catalog acceptance. Immutable snapshots/leases/GC,
 remaining #478 ports, #479 PostgreSQL and Hub #313 remain outstanding; global,
 metadata, usage and publisher qualification remain zero and #380 holds merging.
 
-Resume constraints: one writer on the existing task branch; Worker count 22,
+Worker23 added factory validation of all twelve stage tables against the authored
+schema (columns, defaults, constraints and indexes), invalidation/backfill and
+input-witness column validation, and checks for all three event guards on every
+event-owned table. Malformed stage state refuses before journal preparation in
+both configured factories. Committed schema-cookie caches retain their rollback
+rules. The refusal fixture now represents an absent journal separately from an
+empty journal, preserving its table-presence and zero-write oracle.
+
+Worker23 also warms the existing copied-usage layout cache through the actual
+producer and selected factories before their first transaction. A factory-path
+test covers cache presence and rollback invalidation. The cleanup error test now
+uses valid metadata and an SQLite authorizer to inject the same real DELETE
+prepare failure for ordinary and measured calls, preserving VM-unknown, no-record
+and no-status-read assertions. This does not establish the cause of the parallel
+Catalog completion stall: the unchanged 0/256/2048-row and full-suite 2 s/60 s
+gates still require CI evidence. No Worker24 was dispatched by this Worker.
+
+These corrections do not implement S1 begin/batch/record/publication/finish/select
+or its three planned end-to-end/isolation/stale-publisher tests. S1 remains
+unfinished and the configured pipeline still cannot run end to end. No public
+qualification was raised. CI-only checks and fresh independent acceptance remain
+pending; this increment must not be reported as full S1 or #477 delivery.
+
+Resume constraints: one writer on the existing task branch; Worker count 23,
 without reset. Thermal readings are absent: no local cargo/build/check/test/
 clippy/fmt, Node tests/typechecks/formatters, browser/screenshots or image work;
 use CI. Check temperatures before/after CPU work and stop at 85 C or higher;

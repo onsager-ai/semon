@@ -400,6 +400,11 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
     Ok(db)
 }
 
+pub(crate) fn validate_semantic_schema(config: &StoreConfig) -> Result<(), StorageError> {
+    let db = connection(config)?;
+    SourceJournal(config.clone()).validate(&db)
+}
+
 pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), StorageError> {
     SourceJournal(config.clone()).validate(db)?;
     validate_core(db)?;
@@ -2048,6 +2053,7 @@ mod tests {
             .unwrap();
         let before = f.state();
         assert!(f.config.native_events().is_err());
+        assert!(crate::storage::sqlite::open_configured_index(&f.config).is_err());
         assert_eq!(f.state(), before);
         assert!(!f.state().contains_key("storage_source_journal"));
         let db = f.db();
