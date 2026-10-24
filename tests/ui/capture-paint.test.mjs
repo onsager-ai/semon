@@ -58,7 +58,9 @@ test('PNG and evidence share a repeatable phase without masking content or retai
 });
 
 test('independent visual browsers retain exact rounded-edge and text pixels', async () => {
-  const harnessMark = readFileSync(new URL('../../assets/harnesses/claude-code.svg', import.meta.url));
+  const harnessMark = readFileSync(
+    new URL('../../assets/harnesses/claude-code.svg', import.meta.url),
+  );
   const harnessUrl = 'data:image/svg+xml;base64,' + harnessMark.toString('base64');
   const harnessMarks = Array.from(
     { length: 3 },
@@ -88,9 +90,9 @@ test('independent visual browsers retain exact rounded-edge and text pixels', as
       </style><aside><div class="spacer"></div><div class="tree"><button>harbor · Working</button></div><div class="tail"></div>
       <div class="marks">${harnessMarks}</div></aside>
       <article><p>${label}</p><svg viewBox="0 0 24 24"><path d="M4 4v8h14m-4-4 4 4-4 4"/></svg></article>`);
-      await page.locator('.hicon img').evaluateAll((images) =>
-        Promise.all(images.map((image) => image.decode())),
-      );
+      await page
+        .locator('.hicon img')
+        .evaluateAll((images) => Promise.all(images.map((image) => image.decode())));
       const shot = () =>
         withCapturePaint(page, () =>
           captureStableFrame(page, { animations: 'allow', caret: 'hide' }),
