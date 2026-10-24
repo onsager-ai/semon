@@ -1698,7 +1698,9 @@ fn runtime_input_evidence(
     connection: &Connection,
     path: &str,
 ) -> rusqlite::Result<Option<crate::source_change::RuntimeInputEvidence>> {
-    let text: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1", [path], |row| row.get(0)).optional()?;
+    let text: Option<Option<String>> = connection.query_row(semantic_stage::support_sql(connection,
+        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1",
+        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?, [path], |row| row.get(0)).optional()?;
     Ok(text
         .flatten()
         .and_then(|text| {
@@ -1874,7 +1876,9 @@ fn read_append_evidence(
     connection: &Connection,
     path: &str,
 ) -> rusqlite::Result<Option<crate::source_change::AppendEvidence>> {
-    let text: Option<Option<String>> = connection.query_row("SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1",[path],|row|row.get(0)).optional()?;
+    let text: Option<Option<String>> = connection.query_row(semantic_stage::support_sql(connection,
+        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE source_path=?1",
+        "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE NULL END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,[path],|row|row.get(0)).optional()?;
     Ok(text
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok()))
@@ -4004,6 +4008,7 @@ impl SqliteStore {
             Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
             Init::Fresh | Init::Obsolete => unreachable!("init initializes fresh storage"),
         }
+        semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
         let store = Self {
             connection,
             path: path.to_owned(),
@@ -4086,6 +4091,7 @@ impl SqliteStore {
         )
         .map_err(classify)?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
+        semantic_stage::support_sql(&connection, "", "").map_err(classify)?;
         let store = Self {
             connection,
             path: path.to_owned(),
@@ -4789,6 +4795,8 @@ struct PhysicalLayout {
     native_usage: bool,
     tree: bool,
     pricing_queue: bool,
+    semantic_support: bool,
+    semantic_stage: bool,
 }
 
 impl PhysicalLayout {
@@ -4801,6 +4809,8 @@ impl PhysicalLayout {
         native_usage: false,
         tree: false,
         pricing_queue: false,
+        semantic_support: false,
+        semantic_stage: false,
     };
 }
 
@@ -4818,6 +4828,7 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         || (p.tree && (!p.core || !p.native_usage))
         || (p.pricing_queue && (!p.core || !p.native_usage))
         || (!p.pricing_queue && (p.metadata || p.catalog || p.native_usage))
+        || (p.semantic_stage && (!p.semantic_support || !p.catalog || !p.metadata))
     {
         return Err(DdlProfileError::UnsupportedFamilyCombination);
     }
@@ -4832,7 +4843,7 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
     Ok([
         SLOT_SCHEMA,
         catalog_schema(p.catalog),
-        CATALOG_SUPPORT_SCHEMA,
+        semantic_stage::support_schema(p.semantic_support, p.semantic_stage),
         metadata_schema(p.metadata),
         if p.core {
             configured::CORE_SCHEMA
@@ -4843,7 +4854,7 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         usage,
         repair,
         tree_state::schema(p.tree),
-        semantic_stage::SCHEMA,
+        semantic_stage::schema(p.semantic_stage),
         if p.core {
             semantic_stage::SEMANTIC_CORE_INDEXES_NS
         } else {
@@ -6478,6 +6489,7 @@ fn write_index_changes_measured(
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
     copied_usage_sql(transaction, "", "")?;
+    semantic_stage::support_sql(transaction, "", "")?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
     let started = measurements.start();
@@ -6516,7 +6528,9 @@ fn write_index_changes_measured(
     #[cfg(test)]
     configured::effect("native_usage")?;
     let started = measurements.start();
-    transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
+    transaction.execute(semantic_stage::support_sql(transaction,
+        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
+        "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')")?, [path])?;
     for id in index
         .links
         .session_ids
@@ -6524,13 +6538,17 @@ fn write_index_changes_measured(
         .chain(&index.links.continued_in)
     {
         transaction.execute(
-            "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'lineage:claude',?2)",
+            semantic_stage::support_sql(transaction,
+                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'lineage:claude',?2)",
+                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'lineage:claude',?2)")?,
             params![path, id],
         )?;
     }
     for id in &index.links.bridges {
         transaction.execute(
-            "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'bridge:claude',?2)",
+            semantic_stage::support_sql(transaction,
+                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'bridge:claude',?2)",
+                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'bridge:claude',?2)")?,
             params![path, id],
         )?;
     }
@@ -6539,17 +6557,23 @@ fn write_index_changes_measured(
     configured::effect("dependencies")?;
 
     let started = measurements.start();
-    transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
+    transaction.execute(semantic_stage::support_sql(transaction,
+        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
+        "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')")?, [path])?;
     if let Some(header) = &index.codex_header {
         if let Some(id) = header.native_id(Path::new(path)) {
-            transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-native:codex',?2)", params![path,id])?;
+            transaction.execute(semantic_stage::support_sql(transaction,
+                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-native:codex',?2)",
+                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'semantic-native:codex',?2)")?, params![path,id])?;
         }
         let metadata =
             serde_json::to_value(&header.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if metadata.get("guardian_review").and_then(Value::as_bool) != Some(true)
             && let Some(parent) = metadata.get("parent_thread").and_then(Value::as_str)
         {
-            transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)", params![path,parent])?;
+            transaction.execute(semantic_stage::support_sql(transaction,
+                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)",
+                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'semantic-parent:codex',?2)")?, params![path,parent])?;
         }
     }
     measurements.record("semantic_dependencies", started, 1);
@@ -6579,7 +6603,9 @@ fn write_index_changes_measured(
     }
     let started = measurements.start();
     transaction.execute(
-        "DELETE FROM session_source_mutations WHERE source_path=?1",
+        semantic_stage::support_sql(transaction,
+            "DELETE FROM session_source_mutations WHERE source_path=?1",
+            "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,
         [path],
     )?;
     measurements.record("mutation_retirement", started, 1);

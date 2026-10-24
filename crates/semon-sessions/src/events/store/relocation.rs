@@ -152,7 +152,9 @@ pub(super) fn advance(
     append: bool,
 ) -> rusqlite::Result<()> {
     let olds = connection
-        .prepare("SELECT old_path FROM catalog_relocation_candidates WHERE new_path=?1")?
+        .prepare(semantic_stage::support_sql(connection,
+            "SELECT old_path FROM catalog_relocation_candidates WHERE new_path=?1",
+            "SELECT old_path FROM catalog_relocation_candidates WHERE namespace=semon_namespace() AND new_path=?1")?)?
         .query_map([path], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for old in olds {

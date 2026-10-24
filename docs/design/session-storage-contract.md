@@ -1031,10 +1031,10 @@ success. Missing configured stores fail before Raw is opened. Legacy Options
 fallback behavior is retained.
 
 This increment deliberately binds native table ownership to the sole admitted
-namespace. Metadata has an explicit namespace column with a constant default
-qualifying existing rows without copying/resetting them or building an unbounded
-index. Existing key uniqueness implies namespace/key uniqueness for this sole
-source; shared-database multi-source keys and predicates are still undelivered. All family mutation guards require the admitted writer connection;
+namespace. Metadata retains its authored singleton shape; Event preparation
+refuses composite metadata before writing. It does not append a namespace column
+or adopt existing rows. Shared-database multi-source writers are still
+undelivered. All family mutation guards require the admitted writer connection;
 metadata guards also protect Catalog publication and epoch markers. The global
 writer qualification remains zero and `current()` still refuses enrolled stores.
 Catalog publication/staging, cross-path relocation admission, Raw mutation ACK,
@@ -1051,3 +1051,50 @@ refusal, old-writer fences and the configured error-mapping regression. No local
 checks ran: thermal readings are unavailable. Exact-head CI and independent
 acceptance are pending. This WIP does not deliver full #478/#477; PostgreSQL
 #479 and Hub #313 remain undelivered. #380 still gates merging.
+
+## Semantic stage/publication S1: unfinished implementation
+
+The authored 21-chunk assembly now has two private physical groups: the complete
+semantic stage (12 tables and namespace-leading primary/secondary keys), and
+its relocation/dependency/mutation input witnesses. The production default and
+configured factory still select their original profiles. The composite stage
+requires composite metadata, Catalog and input witnesses; unsupported combinations
+are rejected before creating a configured file. Its invalidation/backfill keys
+are also composite. Descriptions, reported facts, history and slot owners are
+not qualified by either new flag.
+
+The input-witness profile is connected to the existing configured parser/ingest
+transaction. Native lineage/bridge and Codex identity/parent dependency writes,
+mutation retirement and relocation-proof advancement select that family's
+authored scoped SQL. The connection validates all three input-table primary
+keys, namespace types and lookup indexes before Raw admission. Committed layout
+decisions are cached per connection/schema cookie; transient DDL is not cached.
+The existing sole-Source guards also enforce OLD/NEW namespace ownership on
+these composite rows, without raising their qualification from zero.
+
+CI fixtures exercise real ingest, append, forced rollback after mutation
+retirement, reopen/retry/replay, and colliding foreign input witnesses. The
+foreign rows are private pre-enrollment fixtures, not two publicly admitted
+Sources. Additional fixtures cover corrupt/mixed input layouts, cache rollback,
+the complete authored stage key/index set and explicit unported-stage refusal.
+No local test, formatter or performance measurement ran; exact-head CI and
+independent review remain required.
+
+S1 is NOT complete: ConfiguredIndex begin/batch/record/publish/finish/select
+still return NamespaceUpgradePending. The existing stage algorithm and its
+remaining dependency/frontier/reset/ACK SQL, whole Catalog publication/history/
+slot/search/proof owners and typed Source publication transaction still need
+ports. The two planned configured semantic end-to-end/publication tests are
+not implemented or claimed. The composite stage's active probe refuses rather
+than allowing the old singleton algorithm to read its payload. This is a WIP
+prerequisite, not end-to-end Catalog acceptance. Immutable snapshots/leases/GC,
+remaining #478 ports, #479 PostgreSQL and Hub #313 remain outstanding; global,
+metadata, usage and publisher qualification remain zero and #380 holds merging.
+
+Resume constraints: one writer on the existing task branch; Worker count 22,
+without reset. Thermal readings are absent: no local cargo/build/check/test/
+clippy/fmt, Node tests/typechecks/formatters, browser/screenshots or image work;
+use CI. Check temperatures before/after CPU work and stop at 85 C or higher;
+do not start CPU work without current readings. Bound each read/search to one
+named file under 10 MB. Preserve unrelated work, disable Git automatic GC and
+maintenance, and do not merge, deploy, publish or move live data.

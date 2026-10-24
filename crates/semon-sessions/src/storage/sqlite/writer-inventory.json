@@ -9,6 +9,13 @@
     "signals"
   ],
   "native_event_metadata_composite": false,
+  "semantic_stage_publication_qualification": 0,
+  "semantic_stage_wip": [
+    "private authored complete 12-table namespace-keyed stage and relocation/dependency/mutation physical input groups added to the existing 21-chunk composition; default and public configured profiles unchanged",
+    "real configured ingest selects scoped dependency writes, mutation retirement and relocation advancement from its own input-family layout; mixed/corrupt keys/indexes rejected before Raw admission; sole-Source guards enforce composite OLD/NEW namespace ownership without qualification",
+    "four configured_semantic_ CI fixtures cover actual ingest/colliding foreign witnesses/restart/rollback/replay, mixed-layout refusal, complete stage keys and committed-schema cache rollback; CI and independent acceptance pending",
+    "ConfiguredIndex begin/batch/record/publish/finish/select still refuse; remaining stage SQL, dependency/frontier/reset/ACK consumers and whole Catalog/history/slot/search/proof publication unit remain unported; the planned end-to-end S1 tests are not implemented"
+  ],
   "native_event_metadata_scoped_helpers": [
     "native headers, parent markers, tree summaries/failures and archive markers",
     "chunk pages, tree witnesses and retained proof copy/cleanup",

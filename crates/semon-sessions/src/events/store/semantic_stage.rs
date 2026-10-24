@@ -95,6 +95,160 @@ CREATE TABLE IF NOT EXISTS catalog_semantic_relations (
 CREATE INDEX IF NOT EXISTS catalog_semantic_relation_from ON catalog_semantic_relations(from_key,relation_id);
 CREATE INDEX IF NOT EXISTS catalog_semantic_relation_to ON catalog_semantic_relations(to_key,relation_id);
 ";
+
+// Physical stage ownership is independent of the core and metadata families.
+// The composite profile is private until every stage/publication consumer is
+// ported; active() refuses it before any stage payload is read.
+pub(super) fn schema(composite: bool) -> &'static str {
+    if composite { COMPOSITE_SCHEMA } else { SCHEMA }
+}
+
+const COMPOSITE_SCHEMA: &str = "
+CREATE TABLE catalog_semantic_stage (
+ namespace TEXT NOT NULL, singleton INTEGER NOT NULL CHECK(singleton=1), epoch INTEGER NOT NULL,
+ phase TEXT NOT NULL CHECK(phase IN ('indexing','identity','relations','publication')),
+ generation TEXT, runtime TEXT NOT NULL, revision INTEGER NOT NULL, resetting INTEGER NOT NULL DEFAULT 0, reset_after TEXT NOT NULL DEFAULT '', key_after_harness TEXT NOT NULL DEFAULT '', key_after_native TEXT NOT NULL DEFAULT '', keys_done INTEGER NOT NULL DEFAULT 0, key_candidate TEXT NOT NULL DEFAULT '', key_epoch INTEGER NOT NULL DEFAULT 0, withdrawal_authority TEXT,
+ PRIMARY KEY(namespace,singleton)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_frontier (
+ namespace TEXT NOT NULL, kind TEXT NOT NULL,value TEXT NOT NULL,harness TEXT NOT NULL,after_key TEXT NOT NULL DEFAULT '',after_edge TEXT NOT NULL DEFAULT '',done INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(namespace,kind,value,harness)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_frontier_pending ON catalog_semantic_frontier(namespace,done,kind,value,harness);
+CREATE INDEX semantic_catalog_parent_key ON session_catalog(namespace,parent_key,session_key) WHERE lifecycle='current';
+CREATE INDEX semantic_catalog_native_paths ON session_catalog_sources(namespace,harness,native_id,source_path,session_key) WHERE lifecycle='current';
+CREATE TABLE catalog_semantic_sources (
+ namespace TEXT NOT NULL, source_path TEXT NOT NULL, claim INTEGER, ledger TEXT, withdrawal TEXT,
+ index_done INTEGER NOT NULL DEFAULT 0, event_after INTEGER NOT NULL DEFAULT -1, events_done INTEGER NOT NULL DEFAULT 0, identity_done INTEGER NOT NULL DEFAULT 0, relation_done INTEGER NOT NULL DEFAULT 0, publication_done INTEGER NOT NULL DEFAULT 0, ack_done INTEGER NOT NULL DEFAULT 0, relation_after TEXT NOT NULL DEFAULT '',
+ dev INTEGER, ino INTEGER, size INTEGER, mtime_ns BLOB, ctime_ns BLOB, resume_at INTEGER, head_sha256 BLOB, tail_sha256 BLOB,
+ PRIMARY KEY(namespace,source_path)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_inputs(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,is_top INTEGER NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_keys(namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL,key_epoch INTEGER NOT NULL,PRIMARY KEY(namespace,harness,native_id)) STRICT, WITHOUT ROWID;
+CREATE INDEX semantic_input_collision ON catalog_semantic_inputs(namespace,native_id,harness);
+CREATE INDEX semantic_copilot_pending_id ON session_catalog_invalidations(namespace,substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1),source_path) WHERE source_path GLOB '*/session-state/*/events.jsonl';
+CREATE INDEX catalog_semantic_input_native ON catalog_semantic_inputs(namespace,harness,native_id,is_top,source_path);
+CREATE INDEX catalog_semantic_index ON catalog_semantic_sources(namespace,index_done,source_path);
+CREATE INDEX catalog_semantic_identity ON catalog_semantic_sources(namespace,identity_done,source_path);
+CREATE INDEX catalog_semantic_relation ON catalog_semantic_sources(namespace,relation_done,source_path);
+CREATE TABLE catalog_semantic_endpoints (
+ namespace TEXT NOT NULL, session_key TEXT NOT NULL, harness TEXT NOT NULL, parent_native TEXT, parent_native_harness TEXT,
+ parent_key TEXT, root_key TEXT, task TEXT, nickname TEXT, cost REAL,
+ metadata TEXT NOT NULL, published INTEGER NOT NULL DEFAULT 0, parent_resolved INTEGER NOT NULL DEFAULT 0,
+ children_pending INTEGER NOT NULL DEFAULT 0, family_cost REAL, cost_done INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(namespace,session_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_parent_reduce ON catalog_semantic_endpoints(namespace,parent_resolved,parent_native,session_key);
+CREATE INDEX catalog_semantic_root_reduce ON catalog_semantic_endpoints(namespace,root_key,session_key);
+CREATE INDEX catalog_semantic_cost_reduce ON catalog_semantic_endpoints(namespace,cost_done,children_pending,session_key);
+CREATE INDEX catalog_semantic_parent ON catalog_semantic_endpoints(namespace,harness,parent_native,task,session_key);
+CREATE INDEX catalog_semantic_parent_key ON catalog_semantic_endpoints(namespace,parent_key,session_key);
+CREATE INDEX catalog_semantic_root_name ON catalog_semantic_endpoints(namespace,root_key,nickname,session_key);
+CREATE TABLE catalog_semantic_native (
+ namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL,
+ PRIMARY KEY(namespace,harness,native_id,session_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_native_owner ON catalog_semantic_native(namespace,session_key,harness,native_id);
+CREATE TABLE catalog_semantic_owner_sources (
+ namespace TEXT NOT NULL,session_key TEXT NOT NULL,source_path TEXT NOT NULL,
+ PRIMARY KEY(namespace,session_key,source_path)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_source_owner ON catalog_semantic_owner_sources(namespace,source_path,session_key);
+CREATE TABLE catalog_semantic_paths (
+ namespace TEXT NOT NULL,root_key TEXT,path TEXT NOT NULL,session_key TEXT NOT NULL,
+ PRIMARY KEY(namespace,path,session_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_root_path ON catalog_semantic_paths(namespace,root_key,path,session_key);
+CREATE INDEX semantic_pending_filename ON session_catalog_invalidations(namespace,substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1),source_path);
+CREATE TABLE catalog_semantic_names(namespace TEXT NOT NULL,name TEXT NOT NULL,session_key TEXT NOT NULL,PRIMARY KEY(namespace,name,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_events(
+ namespace TEXT NOT NULL,source_path TEXT NOT NULL,event_key TEXT NOT NULL,owner TEXT NOT NULL,kind TEXT NOT NULL,msg_id TEXT,tool_id TEXT,name TEXT,metadata TEXT NOT NULL,native_seq INTEGER NOT NULL,copy_key TEXT,copied INTEGER NOT NULL DEFAULT 0,qualified INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(namespace,source_path,event_key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_event_qualification ON catalog_semantic_events(namespace,qualified,source_path,event_key);
+CREATE INDEX catalog_semantic_message ON catalog_semantic_events(namespace,msg_id,kind,copied,qualified,source_path,native_seq);
+CREATE INDEX catalog_semantic_call ON catalog_semantic_events(namespace,tool_id,kind,source_path,event_key);
+CREATE TABLE catalog_semantic_relations (
+ namespace TEXT NOT NULL,relation_id TEXT NOT NULL,from_key TEXT NOT NULL,to_key TEXT,metadata TEXT NOT NULL,
+ PRIMARY KEY(namespace,relation_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_relation_from ON catalog_semantic_relations(namespace,from_key,relation_id);
+CREATE INDEX catalog_semantic_relation_to ON catalog_semantic_relations(namespace,to_key,relation_id);
+";
+
+// Relocation, dependency and mutation witnesses form one authored input family.
+// Catalog invalidations/backfill retain their existing admission/assignment
+// lifecycle. This profile does not qualify descriptions or reported facts.
+pub(super) fn support_schema(composite: bool, stage: bool) -> &'static str {
+    if stage { STAGE_SUPPORT_SCHEMA } else if composite { COMPOSITE_SUPPORT_SCHEMA } else { CATALOG_SUPPORT_SCHEMA }
+}
+
+macro_rules! semantic_support_objects {
+    () => { "CREATE TABLE catalog_relocation_candidates(namespace TEXT NOT NULL,old_path TEXT NOT NULL,new_path TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(namespace,old_path,new_path)) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_relocation_new ON catalog_relocation_candidates(namespace,new_path,old_path);
+CREATE TABLE catalog_native_dependencies(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(namespace,source_path,harness,native_id)) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_native_dependency ON catalog_native_dependencies(namespace,harness,native_id,source_path);
+CREATE TABLE session_source_mutations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,evidence TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
+CREATE TABLE session_descriptions(session_key TEXT PRIMARY KEY,version INTEGER NOT NULL,inputs TEXT NOT NULL,description TEXT NOT NULL) STRICT;
+CREATE TABLE reported_runs(session_id TEXT NOT NULL,start INTEGER NOT NULL,cost REAL,duration INTEGER,api_duration INTEGER,tool_duration INTEGER,lines_added INTEGER,lines_removed INTEGER,model_usage TEXT NOT NULL,capture_at INTEGER NOT NULL,PRIMARY KEY(session_id,start)) STRICT, WITHOUT ROWID;
+" };
+}
+const COMPOSITE_SUPPORT_SCHEMA: &str = concat!("
+CREATE TABLE session_catalog_invalidations(source_path TEXT PRIMARY KEY,revision INTEGER NOT NULL,reason TEXT NOT NULL CHECK(reason IN ('changed','removed')),observed_at INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+CREATE INDEX session_catalog_invalidations_revision ON session_catalog_invalidations(revision,source_path);
+CREATE TABLE catalog_backfill_sources(source_path TEXT PRIMARY KEY) STRICT, WITHOUT ROWID;
+", semantic_support_objects!());
+const STAGE_SUPPORT_SCHEMA: &str = concat!("
+CREATE TABLE session_catalog_invalidations(namespace TEXT NOT NULL,source_path TEXT NOT NULL,revision INTEGER NOT NULL,reason TEXT NOT NULL CHECK(reason IN ('changed','removed')),observed_at INTEGER NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
+CREATE INDEX session_catalog_invalidations_revision ON session_catalog_invalidations(namespace,revision,source_path);
+CREATE TABLE catalog_backfill_sources(namespace TEXT NOT NULL,source_path TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
+", semantic_support_objects!());
+
+pub(super) fn support_sql<'a>(c: &Connection, singleton: &'a str, scoped: &'a str) -> rusqlite::Result<&'a str> {
+    let version: i64 = c.pragma_query_value(Some(rusqlite::DatabaseName::Main), "schema_version", |r| r.get(0))?;
+    let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_support_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
+    if cached {
+        let layout: Option<bool> = c.prepare_cached("SELECT semon_semantic_support_layout(?1)")?.query_row([version], |r| r.get(0))?;
+        if let Some(composite) = layout {
+            return Ok(if composite { scoped } else { singleton });
+        }
+    }
+    let mut composite = None;
+    for (table, key) in [
+        ("catalog_relocation_candidates", "old_path,new_path"),
+        ("catalog_native_dependencies", "source_path,harness,native_id"),
+        ("session_source_mutations", "source_path"),
+    ] {
+        let pk: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1,'main') WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
+        let ns = pk == format!("namespace,{key}");
+        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=?2 AND coalesce(min(pk=1 AND [notnull]=1 AND type='TEXT'),1) FROM pragma_table_info(?1,'main') WHERE name='namespace'")?.query_row(params![table, i64::from(ns)], |r| r.get(0))?;
+        let physical: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)")?.query_row([table], |r| r.get(0))?;
+        if (!ns && pk != key) || !namespace_valid || !physical || composite.is_some_and(|prior| prior != ns) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        composite = Some(ns);
+    }
+    let composite = composite.ok_or(rusqlite::Error::InvalidQuery)?;
+    for (table, name, columns) in [
+        ("catalog_relocation_candidates", "catalog_relocation_new", "new_path,old_path"),
+        ("catalog_native_dependencies", "catalog_native_dependency", "harness,native_id,source_path"),
+    ] {
+        let actual: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_index_info(?1,'main') ORDER BY seqno)")?.query_row([name], |r| r.get(0))?;
+        let owned: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name=?1 AND tbl_name=?2) AND EXISTS(SELECT 1 FROM pragma_index_list(?2,'main') WHERE name=?1 AND [unique]=0 AND partial=0)")?.query_row(params![name,table], |r| r.get(0))?;
+        let expected = if composite { format!("namespace,{columns}") } else { columns.to_owned() };
+        if actual != expected || !owned {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    // Cache only committed main-schema decisions. A rolled-back DDL cookie can
+    // be reused; never pin its transient layout or any Source binding.
+    if c.is_autocommit() {
+        c.create_scalar_function("semon_semantic_support_layout", 1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            move |context| { let observed: i64 = context.get(0)?; Ok((observed == version).then_some(composite)) })?;
+    }
+    Ok(if composite { scoped } else { singleton })
+}
 pub(super) fn metadata_indexes(composite: bool) -> &'static str {
     if composite {
         "CREATE INDEX IF NOT EXISTS semantic_codex_header_native ON meta(namespace,json_extract(value,'$.header.id'),key)
@@ -127,6 +281,10 @@ CREATE INDEX IF NOT EXISTS semantic_index_copy ON events(namespace,file_id,COALE
 const MAX_CONTEXT: usize = 1024 * 1024;
 
 pub(super) fn active(c: &Connection) -> rusqlite::Result<bool> {
+    let composite: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace')", [], |r| r.get(0))?;
+    if composite {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     c.query_row(
         "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
         [],
