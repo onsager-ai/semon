@@ -206,10 +206,9 @@ pub(crate) fn source_proof_observation(
     } else {
         "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1"
     };
-    let encoded: Option<(String, Option<String>)> = transaction.query_row(
-        sql,
-        [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()?;
+    let encoded: Option<(String, Option<String>)> = transaction
+        .query_row(sql, [absolute], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
     let Some((key, encoded)) = encoded else {
         return Ok(None);
     };
@@ -326,7 +325,9 @@ struct AdmittedSnapshot<'a, 'b>(&'a Transaction<'b>, bool);
 
 fn require_ported_helper(qualified: bool) -> io::Result<()> {
     if qualified {
-        return Err(io::Error::other(crate::storage::StorageError::NamespaceUpgradePending));
+        return Err(io::Error::other(
+            crate::storage::StorageError::NamespaceUpgradePending,
+        ));
     }
     Ok(())
 }
@@ -388,9 +389,14 @@ mod namespace_reader_tests {
         let mut db = Connection::open_in_memory().unwrap();
         let tx = db.transaction().unwrap();
         let snapshot = AdmittedSnapshot(&tx, true);
-        let error = snapshot.transcript_observation("same", "generation", true).unwrap_err();
+        let error = snapshot
+            .transcript_observation("same", "generation", true)
+            .unwrap_err();
         assert_eq!(
-            error.get_ref().unwrap().downcast_ref::<crate::storage::StorageError>(),
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<crate::storage::StorageError>(),
             Some(&crate::storage::StorageError::NamespaceUpgradePending)
         );
         assert!(require_ported_helper(false).is_ok());

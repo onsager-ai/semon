@@ -90,12 +90,23 @@ pub(super) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
     for table in QUALIFIED_CATALOG_TABLES {
         // Preserve the native positional row layout. Namespace is an adapter
         // qualifier, not a new native payload column.
-        let mut statement = db.prepare(&format!("PRAGMA main.table_info({})", quote(table))).map_err(failed)?;
-        let names = statement.query_map([], |row| row.get::<_, String>(1)).map_err(failed)?
-            .collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-        let columns = names.iter().filter(|name| name.as_str() != "namespace")
-            .map(|name| quote(name)).collect::<Vec<_>>().join(",");
-        if columns.is_empty() { return Err(StorageError::NamespaceUpgradePending); }
+        let mut statement = db
+            .prepare(&format!("PRAGMA main.table_info({})", quote(table)))
+            .map_err(failed)?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(failed)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failed)?;
+        let columns = names
+            .iter()
+            .filter(|name| name.as_str() != "namespace")
+            .map(|name| quote(name))
+            .collect::<Vec<_>>()
+            .join(",");
+        if columns.is_empty() {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         db.execute_batch(&format!("CREATE TEMP VIEW IF NOT EXISTS {} AS SELECT {columns} FROM main.{} WHERE namespace=semon_namespace();", quote(table), quote(table))).map_err(failed)?;
     }
     Ok(true)
@@ -522,7 +533,9 @@ mod tests {
         }
         fn finish(&self) {
             for _ in 0..128 {
-                if assign(&self.config, 1).unwrap().complete {
+                // The explicit first batch below proves one-row interruption.
+                // Drain real publisher search metadata with bounded full batches.
+                if assign(&self.config, 64).unwrap().complete {
                     return;
                 }
             }
@@ -586,9 +599,21 @@ mod tests {
             .unwrap(),
             "{\"owner\":\"A\"}"
         );
-        let epoch: String = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |r| r.get(0)).unwrap();
+        let epoch: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(!epoch.is_empty());
-        assert!(db.execute("UPDATE meta SET value='bad' WHERE key='catalog_changes_epoch'", []).is_err());
+        assert!(
+            db.execute(
+                "UPDATE meta SET value='bad' WHERE key='catalog_changes_epoch'",
+                []
+            )
+            .is_err()
+        );
         db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
         for table in QUALIFIED_CATALOG_TABLES {
             let original = quote(&format!("storage_original_{table}"));
@@ -596,17 +621,28 @@ mod tests {
             assert_eq!(triggers, 3, "renamed original retains all admission fences");
             if *table == "session_catalog" {
                 for sql in [
-                    format!("INSERT INTO {original}(session_key,last_ms,harness,metadata) VALUES('new-original',11,'codex','{{}}')"),
+                    format!(
+                        "INSERT INTO {original}(session_key,last_ms,harness,metadata) VALUES('new-original',11,'codex','{{}}')"
+                    ),
                     format!("UPDATE {original} SET last_ms=11 WHERE session_key='same'"),
                     format!("DELETE FROM {original} WHERE session_key='same'"),
                 ] {
                     let error = db.execute(&sql, []).unwrap_err();
-                    assert!(error.to_string().contains("native namespace writer upgrade pending"));
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("native namespace writer upgrade pending")
+                    );
                 }
             }
-            let mut foreign_keys = db.prepare(&format!("PRAGMA main.foreign_key_list({})", quote(table))).unwrap();
-            assert_eq!(foreign_keys.query_map([], |_| Ok(())).unwrap().count(), 0,
-                "supported native schema has no production foreign keys");
+            let mut foreign_keys = db
+                .prepare(&format!("PRAGMA main.foreign_key_list({})", quote(table)))
+                .unwrap();
+            assert_eq!(
+                foreign_keys.query_map([], |_| Ok(())).unwrap().count(),
+                0,
+                "supported native schema has no production foreign keys"
+            );
         }
         let scoped = f.db();
         register(&scoped, &f.config.namespace).unwrap();
@@ -632,39 +668,95 @@ mod tests {
         let mut producer = EventCache::open_scoped(&f.root.join("index.json")).unwrap();
         // Replace the table-level fixture with metadata produced by the real
         // native publication algorithm before enrollment.
-        f.db().execute_batch("DELETE FROM session_catalog_sources; DELETE FROM session_catalog;").unwrap();
-        let rows: Vec<_> = ["same", "tail"].into_iter().map(|key| crate::model::summary::CatalogRow {
-            overview: None, trace: None, query: None,
-            lifecycle: crate::model::summary::CatalogLifecycle::Current,
-            key: key.into(), name: key.into(), harness: "codex".into(), kind: "main".into(),
-            presentation_kind: None, native_ids: vec![key.into()], parent: None,
-            parent_source: None, repo: None, branch: None, model: "unknown".into(),
-            effort: None, start: Some(1), last: Some(10), tokens: [0.0; 3],
-            cost: crate::pricing::CostBuild::default().finish(), sources: vec![],
-        }).collect();
-        let generation = producer.publish_catalog_projection_fenced(
-            &crate::slot_projection::Publication { rows: &rows, transcripts: None }, None,
-        ).unwrap().expect("real native publisher committed its generation");
+        f.db()
+            .execute_batch("DELETE FROM session_catalog_sources; DELETE FROM session_catalog;")
+            .unwrap();
+        let rows: Vec<_> = ["same", "tail"]
+            .into_iter()
+            .map(|key| crate::model::summary::CatalogRow {
+                overview: None,
+                trace: None,
+                query: None,
+                lifecycle: crate::model::summary::CatalogLifecycle::Current,
+                key: key.into(),
+                name: key.into(),
+                harness: "codex".into(),
+                kind: "main".into(),
+                presentation_kind: None,
+                native_ids: vec![key.into()],
+                parent: None,
+                parent_source: None,
+                repo: None,
+                branch: None,
+                model: "unknown".into(),
+                effort: None,
+                start: Some(1),
+                last: Some(10),
+                tokens: [0.0; 3],
+                cost: crate::pricing::CostBuild::default().finish(),
+                sources: vec![],
+            })
+            .collect();
+        let generation = producer
+            .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &rows,
+                    transcripts: None,
+                },
+                None,
+            )
+            .unwrap()
+            .expect("real native publisher committed its generation");
         let db = f.db();
-        assert_eq!(db.query_row("SELECT value FROM meta WHERE key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(), generation);
-        assert!(db.query_row("SELECT count(*) FROM session_catalog_changes", [], |r| r.get::<_, i64>(0)).unwrap() >= 4);
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            generation
+        );
+        assert!(
+            db.query_row("SELECT count(*) FROM session_catalog_changes", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap()
+                >= 4
+        );
         f.config.admit_namespace().unwrap();
         f.finish();
         let db = f.db();
         let before: (i64, Option<String>, i64) = db.query_row(
             "SELECT (SELECT count(*) FROM storage_original_session_catalog),(SELECT value FROM meta WHERE key='catalog_generation'),(SELECT count(*) FROM session_catalog_changes)",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
-        let error = producer.publish_catalog_projection_fenced(
-            &crate::slot_projection::Publication { rows: &[], transcripts: None },
-            before.1.as_deref(),
-        ).unwrap_err();
-        assert!(error.to_string().contains(&StorageError::NamespaceUpgradePending.to_string()));
+        let error = producer
+            .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &[],
+                    transcripts: None,
+                },
+                before.1.as_deref(),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&StorageError::NamespaceUpgradePending.to_string())
+        );
         let after: (i64, Option<String>, i64) = db.query_row(
             "SELECT (SELECT count(*) FROM storage_original_session_catalog),(SELECT value FROM meta WHERE key='catalog_generation'),(SELECT count(*) FROM session_catalog_changes)",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
         assert_eq!(before, after);
         assert_eq!(before.0, 2);
-        assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace='A'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM session_catalog WHERE namespace='A'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
         assert_eq!(super::namespace::WRITER_QUALIFICATION_VERSION, 0);
     }
 
