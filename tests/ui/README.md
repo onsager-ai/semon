@@ -106,10 +106,17 @@ its completion witness is the native-publication success message in the CI log.
   Preservation/main comparators now use Chromium's baseline Skia CPU path,
   [deterministic rendering stages](https://github.com/GoogleChrome/chrome-launcher/blob/main/docs/chrome-flags-for-tools.md#rendering--gpu)
   and full rasterization on both independent applications. Playwright keeps normal
-  frame scheduling. Functional/performance and two-machine/pushed-parity browsers
+  frame scheduling. Functional/performance and pushed-parity browsers
   retain their existing launch settings. The capture regression checks independent
   browser processes, clipped sticky geometry, repeated scroll/repaint equality,
   and changed visible text.
+- Two-machine comparisons also use that deterministic Skia launch path on both
+  independent readers. The desktop Machines reference alternated only six SVG
+  edge pixels in three 10.5px Claude marks; text, geometry and the other five
+  image/evidence bindings stayed identical. The cross-process capture regression
+  includes those fractional-size marks. This changes no screenshot content,
+  animation policy, state, threshold or exact digest requirement; fresh CI images
+  and actual review remain required before rebinding acceptance data.
 - Main desktop captures hold a real pointer in inert sidebar padding before
   navigation/capture and require matching visible row names and selection. This
   prevents the independent readers crossing their existing Recent idle-reorder
