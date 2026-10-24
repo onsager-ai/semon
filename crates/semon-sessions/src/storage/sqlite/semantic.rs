@@ -157,10 +157,10 @@ impl Stage {
             )
             .optional()
             .map_err(error)?;
-        if let Some((_, generation)) = &existing {
-            if generation != &self.source.generation {
-                return Ok(Outcome::Conflict);
-            }
+        if let Some((_, generation)) = &existing
+            && generation != &self.source.generation
+        {
+            return Ok(Outcome::Conflict);
         }
         if existing.as_ref().is_some_and(|(old, _)| old != runtime) {
             // A full reset/frontier replay is not yet ported. Refuse BEFORE any
