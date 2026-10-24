@@ -269,7 +269,9 @@ export function catalogTranscriptBlocks(
           data: {
             ...preview,
             expandable:
-              !!field?.action || !!(entry.cut && (entry.out?.split('\n').length ?? 0) > 24),
+              !!field?.action ||
+              !!clipped ||
+              !!(entry.cut && (entry.out?.split('\n').length ?? 0) > 24),
           },
         },
       });
@@ -350,15 +352,17 @@ export function catalogTranscriptBlocks(
         className: 'signal-marker',
         text: recordedSignalLabel(entry),
       });
-    if (field) {
-      views.push({
-        kind: 'label',
-        key: entry_id + ':field',
-        className: 'vnote',
-        text: field.note,
-        action: field.action,
-      });
-    } else if (clipped) label('Recorded text preview. The complete source text is not loaded.');
+    if (entry.k !== 'tool') {
+      if (field) {
+        views.push({
+          kind: 'label',
+          key: entry_id + ':field',
+          className: 'vnote',
+          text: field.note,
+          action: field.action,
+        });
+      } else if (clipped) label('Recorded text preview. The complete source text is not loaded.');
+    }
     if (
       freshness &&
       freshness.state !== 'cached' &&
