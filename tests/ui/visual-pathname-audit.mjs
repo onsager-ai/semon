@@ -74,26 +74,50 @@ function pathnameToken(text) {
   return matches[0];
 }
 
+const routeSegment = (value) =>
+  encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase(),
+  );
+
+function decodeCanonicalSegment(segment, label) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(segment);
+  } catch {
+    throw new Error(`Current pathname has invalid encoded ${label}`);
+  }
+  if (routeSegment(decoded) !== segment)
+    throw new Error(`Current pathname ${label} escaping changed`);
+  return decoded;
+}
+
 function historicalPathname(bytes, approvedDigest) {
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   const token = pathnameToken(text);
   const currentPath = token.value;
   if (text.slice(token.start, token.end) !== JSON.stringify(currentPath))
     throw new Error('Pathname JSON escaping is not canonical');
-  const match = /^\/session\/local\/([^/?#]+)$/.exec(currentPath);
-  if (!match) throw new Error('Current pathname is outside /session/local/<id>');
-  let decodedId;
-  try {
-    decodedId = decodeURIComponent(match[1]);
-  } catch {
-    throw new Error('Current pathname has invalid encoded identity');
+
+  let restore;
+  const session = /^\/session\/local\/([^/?#]+)$/.exec(currentPath);
+  const trace = /^\/session\/local\/([^/?#]+)\/trace\/([^/?#]+)$/.exec(currentPath);
+  if (session) {
+    const key = decodeCanonicalSegment(session[1], 'identity');
+    restore = (namespace) => `/s/${namespace}/${encodeURIComponent(key)}`;
+  } else if (trace) {
+    const key = decodeCanonicalSegment(trace[1], 'catalog key');
+    const turn = decodeCanonicalSegment(trace[2], 'turn');
+    // The pre-redesign fixture helper used encodeURIComponent for both legacy trace segments.
+    restore = (namespace) =>
+      `/trace/${namespace}/${encodeURIComponent(key)}/${encodeURIComponent(turn)}`;
+  } else {
+    throw new Error('Current pathname is outside the canonical session or trace grammar');
   }
-  if (encodeURIComponent(decodedId) !== match[1])
-    throw new Error('Current pathname identity escaping changed');
 
   const matches = [];
   for (const namespace of ['claude', 'codex']) {
-    const replacement = JSON.stringify(`/s/${namespace}/${match[1]}`);
+    const replacement = JSON.stringify(restore(namespace));
     const restored = Buffer.from(
       text.slice(0, token.start) + replacement + text.slice(token.end),
       'utf8',
