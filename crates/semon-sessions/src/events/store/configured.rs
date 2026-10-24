@@ -9,7 +9,7 @@ const CORE_TABLES: &[&str] = &["files", "events", "signals"];
 
 // Authored separately from the transitional Options schema. There are no
 // namespace defaults, views, SQL rewriting, or implicit namespace row adoption.
-const CORE_SCHEMA: &str = "
+pub(super) const CORE_SCHEMA: &str = "
 CREATE TABLE files (
  namespace TEXT NOT NULL, file_id INTEGER NOT NULL, path TEXT NOT NULL,
  dev INTEGER NOT NULL, ino INTEGER NOT NULL, size INTEGER NOT NULL,
@@ -754,7 +754,7 @@ impl Writer {
                 } else if *expected == Some(*ledger) && !preserve_tree {
                     // A repaired summary may arrive as an empty append delta.
                     // Retire the bad header so write() cannot reuse its generation.
-                    tx.execute("DELETE FROM native_tree_headers WHERE file_id=?1", [id])
+                    tx.execute(tree_state::sql(&tx, "DELETE FROM native_tree_headers WHERE file_id=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1").map_err(failed)?, [id])
                         .map_err(failed)?;
                 }
             }
@@ -1300,6 +1300,7 @@ mod tests {
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(metadata_schema(false)).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
+        db.execute_batch(copied_usage_schema(false)).unwrap();
         db.execute_batch(tree_state::SCHEMA).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
@@ -1567,6 +1568,26 @@ mod tests {
             crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
             0
         );
+    }
+
+    #[test]
+    fn configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback() {
+        let f = Fixture::new();
+        let binding = crate::storage::NativeReaderBinding::Admitted(f.config.clone());
+        assert!(binding.proof_snapshot().is_ok());
+        let transitional = crate::storage::NativeReaderBinding::TransitionalUnboundLocal(f.config.clone());
+        assert!(matches!(transitional.proof_snapshot(), Err(StorageError::NamespaceUpgradePending)));
+        let mut stale = f.config.clone();
+        stale.expected_stream_epoch = Some("0".repeat(64));
+        assert!(matches!(crate::storage::NativeReaderBinding::Admitted(stale).proof_snapshot(), Err(StorageError::ScopeChanged)));
+        let mut foreign = f.config.clone();
+        foreign.namespace = LogicalSourceNamespace::new("foreign").unwrap();
+        assert!(matches!(crate::storage::NativeReaderBinding::Admitted(foreign).proof_snapshot(), Err(StorageError::NamespaceMismatch)));
+        let mut absent = f.config.clone();
+        let database = f.root.join("absent.sqlite3");
+        absent.backend = StoreBackend::Sqlite { database: database.clone() };
+        assert!(crate::storage::NativeReaderBinding::Admitted(absent).proof_snapshot().is_err());
+        assert!(!database.exists());
     }
 
     struct Fixture {

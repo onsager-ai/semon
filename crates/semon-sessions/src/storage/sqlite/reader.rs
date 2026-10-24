@@ -77,6 +77,17 @@ impl NativeReaderBinding {
         Ok(false)
     }
 
+    /// Repair and lazy proof readers retain this admitted snapshot until their
+    /// last proof handle drops. There is no Options or alternate-store retry.
+    pub(crate) fn proof_snapshot(
+        &self,
+    ) -> Result<std::sync::Arc<crate::events::store::chunk_proofs::Snapshot>, StorageError> {
+        let db = self.connection()?;
+        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
+        self.validate(&db, &self.config().namespace)?;
+        Ok(crate::events::store::chunk_proofs::Snapshot::new(db))
+    }
+
     pub(super) fn snapshot(
         &self,
         requested: &LogicalSourceNamespace,

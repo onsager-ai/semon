@@ -349,51 +349,6 @@ CREATE TABLE IF NOT EXISTS session_descriptions (
     inputs TEXT NOT NULL,
     description TEXT NOT NULL
 ) STRICT;
-CREATE TABLE IF NOT EXISTS usage_identity (
-    file_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    record_uuid TEXT NOT NULL,
-    PRIMARY KEY(file_id, message_id, record_uuid)
-) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(message_id, record_uuid, file_id);
-CREATE TABLE IF NOT EXISTS usage (
-    file_id INTEGER NOT NULL,
-    message_id TEXT NOT NULL,
-    model TEXT,
-    input INTEGER NOT NULL,
-    cached_input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    reasoning_output INTEGER NOT NULL,
-    total INTEGER NOT NULL,
-    model_input INTEGER NOT NULL,
-    model_output INTEGER NOT NULL,
-    model_cache_write INTEGER NOT NULL,
-    model_cache_read INTEGER NOT NULL,
-    billing_input INTEGER NOT NULL,
-    billing_output INTEGER NOT NULL,
-    billing_cache_read INTEGER NOT NULL,
-    billing_cache_write_5m INTEGER NOT NULL,
-    billing_cache_write_1h INTEGER NOT NULL,
-    billing_web_search_requests INTEGER NOT NULL,
-    billing_speed TEXT,
-    billing_service_tier TEXT,
-    billing_prompt_size INTEGER NOT NULL,
-    billing_timestamp INTEGER,
-    billing_split_unknown INTEGER NOT NULL,
-    record_ids TEXT NOT NULL,
-    PRIMARY KEY (file_id, message_id)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS codex_usage (
-    file_id INTEGER NOT NULL,
-    seq INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    input INTEGER NOT NULL,
-    output INTEGER NOT NULL,
-    cache_write INTEGER NOT NULL,
-    cache_read INTEGER NOT NULL,
-    t INTEGER,
-    PRIMARY KEY (file_id, seq)
-) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS reported_runs (
     session_id TEXT NOT NULL,
     start INTEGER NOT NULL,
@@ -536,6 +491,137 @@ struct EventState {
     native_direct_call: bool,
 }
 
+const COPIED_USAGE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS usage_identity (
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    record_uuid TEXT NOT NULL,
+    PRIMARY KEY(file_id, message_id, record_uuid)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(message_id, record_uuid, file_id);
+CREATE TABLE IF NOT EXISTS usage (
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    model TEXT,
+    input INTEGER NOT NULL,
+    cached_input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    reasoning_output INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    model_input INTEGER NOT NULL,
+    model_output INTEGER NOT NULL,
+    model_cache_write INTEGER NOT NULL,
+    model_cache_read INTEGER NOT NULL,
+    billing_input INTEGER NOT NULL,
+    billing_output INTEGER NOT NULL,
+    billing_cache_read INTEGER NOT NULL,
+    billing_cache_write_5m INTEGER NOT NULL,
+    billing_cache_write_1h INTEGER NOT NULL,
+    billing_web_search_requests INTEGER NOT NULL,
+    billing_speed TEXT,
+    billing_service_tier TEXT,
+    billing_prompt_size INTEGER NOT NULL,
+    billing_timestamp INTEGER,
+    billing_split_unknown INTEGER NOT NULL,
+    record_ids TEXT NOT NULL,
+    PRIMARY KEY (file_id, message_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS codex_usage (
+    file_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    t INTEGER,
+    PRIMARY KEY (file_id, seq)
+) STRICT, WITHOUT ROWID;
+";
+
+const COMPOSITE_COPIED_USAGE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS usage_identity (
+    namespace TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    record_uuid TEXT NOT NULL,
+    PRIMARY KEY(namespace, file_id, message_id, record_uuid),
+    FOREIGN KEY(namespace,file_id) REFERENCES files(namespace,file_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS usage_identity_peers ON usage_identity(namespace, message_id, record_uuid, file_id);
+CREATE TABLE IF NOT EXISTS usage (
+    namespace TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    model TEXT,
+    input INTEGER NOT NULL,
+    cached_input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    reasoning_output INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    model_input INTEGER NOT NULL,
+    model_output INTEGER NOT NULL,
+    model_cache_write INTEGER NOT NULL,
+    model_cache_read INTEGER NOT NULL,
+    billing_input INTEGER NOT NULL,
+    billing_output INTEGER NOT NULL,
+    billing_cache_read INTEGER NOT NULL,
+    billing_cache_write_5m INTEGER NOT NULL,
+    billing_cache_write_1h INTEGER NOT NULL,
+    billing_web_search_requests INTEGER NOT NULL,
+    billing_speed TEXT,
+    billing_service_tier TEXT,
+    billing_prompt_size INTEGER NOT NULL,
+    billing_timestamp INTEGER,
+    billing_split_unknown INTEGER NOT NULL,
+    record_ids TEXT NOT NULL,
+    PRIMARY KEY (namespace, file_id, message_id),
+    FOREIGN KEY(namespace,file_id) REFERENCES files(namespace,file_id)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS codex_usage (
+    namespace TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    t INTEGER,
+    PRIMARY KEY (namespace, file_id, seq),
+    FOREIGN KEY(namespace,file_id) REFERENCES files(namespace,file_id)
+) STRICT, WITHOUT ROWID;
+";
+
+fn copied_usage_schema(composite: bool) -> &'static str {
+    if composite {
+        COMPOSITE_COPIED_USAGE_SCHEMA
+    } else {
+        COPIED_USAGE_SCHEMA
+    }
+}
+
+fn copied_usage_sql<'a>(
+    c: &Connection,
+    legacy: &'a str,
+    scoped: &'a str,
+) -> rusqlite::Result<&'a str> {
+    let composite: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage') WHERE name='namespace' AND pk=1)")?.query_row([], |r| r.get(0))?;
+    Ok(if composite { scoped } else { legacy })
+}
+
+fn child_predicate(c: &Connection, table: &str) -> rusqlite::Result<&'static str> {
+    match table {
+        "usage_identity" | "usage" | "codex_usage" => {
+            copied_usage_sql(c, "", "namespace=semon_namespace() AND ")
+        }
+        "native_tree_copied_identities" => {
+            tree_state::sql(c, "", "namespace=semon_namespace() AND ")
+        }
+        _ => configured::predicate(c),
+    }
+}
+
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
 
 const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
@@ -556,10 +642,22 @@ const PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (file_id, message_id, mode
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24)";
 
+const COMPOSITE_PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (namespace, file_id, message_id, model, input, \
+     cached_input, output, reasoning_output, total, model_input, model_output, \
+     model_cache_write, model_cache_read, billing_input, billing_output, billing_cache_read, \
+     billing_cache_write_5m, billing_cache_write_1h, billing_web_search_requests, \
+     billing_speed, billing_service_tier, billing_prompt_size, billing_timestamp, \
+     billing_split_unknown, record_ids) \
+     VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
+     ?19, ?20, ?21, ?22, ?23, ?24)";
+
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
 const PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (file_id, seq, model, input, \
      output, cache_write, cache_read, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+const COMPOSITE_PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (namespace, file_id, seq, model, input, \
+     output, cache_write, cache_read, t) VALUES (semon_namespace(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool_duration, \
      lines_added, lines_removed, model_usage, capture_at";
@@ -4028,8 +4126,10 @@ impl SqliteStore {
             ] {
                 transaction.execute(
                     &format!(
-                        "DELETE FROM {table} WHERE file_id IN \
-                         (SELECT file_id FROM files WHERE path = ?1)"
+                        "DELETE FROM {table} WHERE {}file_id IN \
+                         (SELECT file_id FROM files WHERE {}path = ?1)",
+                        child_predicate(&transaction, table)?,
+                        configured::predicate(&transaction)?
                     ),
                     [path],
                 )?;
@@ -4038,7 +4138,7 @@ impl SqliteStore {
                 tree_state::sql(&transaction, "DELETE FROM native_tree_headers WHERE source_path=?1", "DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1")?,
                 [path],
             )?;
-            transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
+            transaction.execute(configured::sql(&transaction, "DELETE FROM files WHERE path = ?1", "DELETE FROM files WHERE namespace=semon_namespace() AND path=?1")?, [path])?;
             transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
             transaction.execute(
                 native_metadata_delete(&transaction)?,
@@ -4493,12 +4593,13 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set, shared by cold initialization and whole-index rebuilds.
-fn storage_ddl() -> [&'static str; 16] {
+fn storage_ddl() -> [&'static str; 18] {
     let [usage, repair] = native_usage::schema(false);
     [
         SCHEMA,
         metadata_schema(false),
         LEGACY_EVENT_SCHEMA,
+        copied_usage_schema(false),
         usage,
         repair,
         tree_state::schema(false),
@@ -4510,8 +4611,9 @@ fn storage_ddl() -> [&'static str; 16] {
         crate::history_projection::SCHEMA,
         crate::catalog_search::SCHEMA,
         crate::storage::sqlite::changes::SCHEMA,
-        reprice::SCHEMA,
-        reprice::FILE_SCHEMA,
+        reprice::queue_schema(false),
+        reprice::catalog_schema(false, false, false),
+        reprice::file_schema(false, false),
     ]
 }
 
@@ -5713,10 +5815,12 @@ impl<'c> Readers<'c> {
                 configured::predicate(connection)?
             ))?,
             usage: connection.prepare(&format!(
-                "SELECT {USAGE_COLUMNS} FROM usage WHERE file_id = ?1"
+                "SELECT {USAGE_COLUMNS} FROM usage WHERE {}file_id = ?1",
+                copied_usage_sql(connection, "", "namespace=semon_namespace() AND ")?
             ))?,
             codex_usage: connection.prepare(&format!(
-                "SELECT {CODEX_USAGE_COLUMNS} FROM codex_usage WHERE file_id = ?1 ORDER BY seq"
+                "SELECT {CODEX_USAGE_COLUMNS} FROM codex_usage WHERE {}file_id = ?1 ORDER BY seq",
+                copied_usage_sql(connection, "", "namespace=semon_namespace() AND ")?
             ))?,
             codex_header: connection.prepare(native_metadata_value(connection)?)?,
             claude_sidecar: connection.prepare(native_metadata_value(connection)?)?,
@@ -6033,7 +6137,10 @@ fn clear_preserving_tree(
         "native_tree_copied_identities",
     ] {
         transaction.execute(
-            &format!("DELETE FROM {table} WHERE file_id = ?1"),
+            &format!(
+                "DELETE FROM {table} WHERE {}file_id = ?1",
+                child_predicate(transaction, table)?
+            ),
             [file_id],
         )?;
     }
@@ -6451,13 +6558,17 @@ fn write_file(
     measurements.count("signal_records", signals.len());
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(PUT_USAGE)?;
+    let mut put = transaction.prepare_cached(copied_usage_sql(
+        transaction,
+        PUT_USAGE,
+        COMPOSITE_PUT_USAGE,
+    )?)?;
     let mut put_identity = transaction.prepare_cached(
-        "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)",
+        copied_usage_sql(transaction, "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)")?,
     )?;
     for id in &changes.usage {
         transaction.execute(
-            "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
+            copied_usage_sql(transaction, "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2", "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2")?,
             params![file_id, id],
         )?;
         if let Some(usage) = usage_by_id.get(id) {
@@ -6467,7 +6578,7 @@ fn write_file(
             }
         } else {
             transaction.execute(
-                "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
+                copied_usage_sql(transaction, "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2", "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2")?,
                 params![file_id, id],
             )?;
         }
@@ -6477,7 +6588,11 @@ fn write_file(
     configured::effect("usage")?;
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(PUT_CODEX_USAGE)?;
+    let mut put = transaction.prepare_cached(copied_usage_sql(
+        transaction,
+        PUT_CODEX_USAGE,
+        COMPOSITE_PUT_CODEX_USAGE,
+    )?)?;
     changed(
         changes.before_codex_usage,
         &changes.codex_usage,
@@ -6509,7 +6624,7 @@ fn write_file(
         |from| {
             transaction
                 .execute(
-                    "DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2",
+                    copied_usage_sql(transaction, "DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2", "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2")?,
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
