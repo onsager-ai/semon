@@ -497,7 +497,8 @@ export function createCatalogViewer(
     // Annotation navigation owns its target across paged/group layout commits,
     // just as opening-end navigation owns the tail across those same commits.
     if (active?.errorMode) {
-      highlightAnnotation(active);
+      const view = active;
+      scope.frame(() => highlightAnnotation(view));
       return;
     }
     if (
