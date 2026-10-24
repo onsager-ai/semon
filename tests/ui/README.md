@@ -75,6 +75,13 @@ its completion witness is the native-publication success message in the CI log.
   excuses missing coverage/execution errors. A follow-up may refresh only
   justified exact bindings while preserving original review/decision/provenance/
   history; final CI and independent review still apply.
+- The exact visual binding maintenance from CI run 40113982012 uses artifact
+  12568435116 and updates 155 existing records: all 155 candidate fingerprints,
+  123 pathname-restored candidate evidence digests, and 32 fingerprint-only
+  records whose candidate evidence digest already matched. Candidate/reference/
+  diff PNG hashes are unchanged, as are all reference pins. This maintenance
+  does not approve a new appearance or alter any comparator, mask, threshold or
+  capture coverage.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
