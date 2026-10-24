@@ -12,7 +12,12 @@ pub fn session_bookmark(options: &Options, source: &str, query: &str) -> ViewerR
     with_binding(options, source, query, &binding)
 }
 
-pub(crate) fn with_binding(options: &Options, source: &str, query: &str, binding: &crate::storage::NativeReaderBinding) -> ViewerReply {
+pub(crate) fn with_binding(
+    options: &Options,
+    source: &str,
+    query: &str,
+    binding: &crate::storage::NativeReaderBinding,
+) -> ViewerReply {
     let args = query
         .split('&')
         .map(|part| {

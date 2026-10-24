@@ -193,13 +193,29 @@ pub(crate) fn read_page(
 }
 
 pub(crate) fn history_identity(
-    binding: &crate::storage::NativeReaderBinding, options: &Options, source: &str, key: &str,
+    binding: &crate::storage::NativeReaderBinding,
+    options: &Options,
+    source: &str,
+    key: &str,
 ) -> Result<Option<crate::CatalogSessionIdentity>, crate::CatalogIdentityError> {
-    let mut db = binding.connection().map_err(crate::CatalogIdentityError::from)?;
-    let tx = db.transaction().map_err(|_| crate::CatalogIdentityError::Unavailable)?;
-    let qualified = binding.validate(&tx, &binding.config().namespace).map_err(crate::CatalogIdentityError::from)?;
-    let selected = crate::catalog::catalog_selection_in_snapshot(options, source, key, CatalogReadScope::RetainedHistory, &AdmittedSnapshot(&tx, qualified))?;
-    tx.commit().map_err(|_| crate::CatalogIdentityError::Unavailable)?;
+    let mut db = binding
+        .connection()
+        .map_err(crate::CatalogIdentityError::from)?;
+    let tx = db
+        .transaction()
+        .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
+    let qualified = binding
+        .validate(&tx, &binding.config().namespace)
+        .map_err(crate::CatalogIdentityError::from)?;
+    let selected = crate::catalog::catalog_selection_in_snapshot(
+        options,
+        source,
+        key,
+        CatalogReadScope::RetainedHistory,
+        &AdmittedSnapshot(&tx, qualified),
+    )?;
+    tx.commit()
+        .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
     Ok(selected.map(|(identity, _)| identity))
 }
 

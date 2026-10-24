@@ -1,7 +1,6 @@
 //! Indexed native-to-catalog navigation. This grants no native control authority.
 use crate::{
-    CatalogIdentityError, CatalogReadScope, Options,
-    model::summary::CatalogRow,
+    CatalogIdentityError, CatalogReadScope, Options, model::summary::CatalogRow,
     viewer::ViewerReply,
 };
 use serde::{Deserialize, Serialize};
@@ -38,18 +37,34 @@ pub fn session_catalog_resolve_native(
 ) -> Result<CatalogNativeResolution, CatalogIdentityError> {
     let binding = crate::storage::local_navigation_binding(options, source_key)?;
     let store = crate::storage::navigation_store(binding);
-    resolve_with_store(options, source_key, harness, native_id, scope, None, store.as_ref())
-        .map_err(Into::into)
+    resolve_with_store(
+        options,
+        source_key,
+        harness,
+        native_id,
+        scope,
+        None,
+        store.as_ref(),
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) fn resolve_with_store(
-    options: &Options, source_key: &str, harness: &str, native_id: &str,
-    scope: CatalogReadScope, expected_generation: Option<&str>,
+    options: &Options,
+    source_key: &str,
+    harness: &str,
+    native_id: &str,
+    scope: CatalogReadScope,
+    expected_generation: Option<&str>,
     store: &dyn crate::storage::navigation::NativeNavigationStore,
 ) -> Result<CatalogNativeResolution, crate::storage::StorageError> {
-    if source_key.is_empty() || source_key.len() > 4096 || native_id.is_empty()
-        || native_id.len() > 4096 || native_id.chars().any(char::is_control)
-        || !matches!(harness, "claude" | "codex" | "copilot") {
+    if source_key.is_empty()
+        || source_key.len() > 4096
+        || native_id.is_empty()
+        || native_id.len() > 4096
+        || native_id.chars().any(char::is_control)
+        || !matches!(harness, "claude" | "codex" | "copilot")
+    {
         return Err(crate::storage::StorageError::InvalidArguments);
     }
     let mut result = CatalogNativeResolution {
@@ -68,13 +83,16 @@ pub(crate) fn resolve_with_store(
 }
 
 pub(crate) fn apply_observation(
-    result: &mut CatalogNativeResolution, options: Option<&Options>,
+    result: &mut CatalogNativeResolution,
+    options: Option<&Options>,
     observation: &crate::storage::navigation::NativeResolutionObservation,
 ) -> Result<(), CatalogIdentityError> {
     result.state = CatalogNativeResolutionState::Unavailable;
     result.catalog_key = None;
     result.generation = None;
-    let Some((generation, complete)) = observation.qualified_head() else { return Ok(()); };
+    let Some((generation, complete)) = observation.qualified_head() else {
+        return Ok(());
+    };
     result.generation = Some(generation.into());
     match observation.keys.as_slice() {
         [] => result.state = CatalogNativeResolutionState::Pending,
@@ -156,4 +174,3 @@ pub(crate) fn page(options: &Options, key: &str, query: &str) -> ViewerReply {
         ),
     }
 }
-

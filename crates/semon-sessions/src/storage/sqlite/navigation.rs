@@ -1,57 +1,142 @@
 //! SQLite snapshots for native aliases and metadata-only bookmark targets.
 use super::failed;
-use crate::{CatalogReadScope, storage::{NativeReaderBinding, StorageError, navigation::{NativeNavigationStore, NativeResolutionObservation}}};
+use crate::{
+    CatalogReadScope,
+    storage::{
+        NativeReaderBinding, StorageError,
+        navigation::{NativeNavigationStore, NativeResolutionObservation},
+    },
+};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) struct SqliteNavigation(pub(crate) NativeReaderBinding);
 impl NativeNavigationStore for SqliteNavigation {
     fn bookmarked_target_keys(&self, target: &str) -> Result<Vec<String>, StorageError> {
-        if target.len() > 4096 { return Err(StorageError::InvalidArguments); }
+        if target.len() > 4096 {
+            return Err(StorageError::InvalidArguments);
+        }
         let db = self.0.snapshot(&self.0.config().namespace)?;
         bookmark_keys(&db, db.qualified(), target)
     }
-    fn native_resolution(&self, harness: &str, native_id: &str, scope: CatalogReadScope, expected_generation: Option<&str>) -> Result<NativeResolutionObservation, StorageError> {
+    fn native_resolution(
+        &self,
+        harness: &str,
+        native_id: &str,
+        scope: CatalogReadScope,
+        expected_generation: Option<&str>,
+    ) -> Result<NativeResolutionObservation, StorageError> {
         let db = match self.0.snapshot(&self.0.config().namespace) {
             Ok(db) => db,
-            Err(StorageError::Unavailable) if matches!(self.0, NativeReaderBinding::TransitionalUnboundLocal(_)) => return Ok(NativeResolutionObservation::default()),
+            Err(StorageError::Unavailable)
+                if matches!(self.0, NativeReaderBinding::TransitionalUnboundLocal(_)) =>
+            {
+                return Ok(NativeResolutionObservation::default());
+            }
             Err(error) => return Err(error),
         };
-        let observation = read_observation(&db, db.qualified(), harness, native_id, scope, expected_generation)?;
-        if matches!(self.0, NativeReaderBinding::Admitted(_)) && observation.qualified_head().is_none() {
+        let observation = read_observation(
+            &db,
+            db.qualified(),
+            harness,
+            native_id,
+            scope,
+            expected_generation,
+        )?;
+        if matches!(self.0, NativeReaderBinding::Admitted(_))
+            && observation.qualified_head().is_none()
+        {
             return Err(StorageError::Unavailable);
         }
         Ok(observation)
     }
 }
-fn bookmark_keys(db: &Connection, qualified: bool, target: &str) -> Result<Vec<String>, StorageError> {
+fn bookmark_keys(
+    db: &Connection,
+    qualified: bool,
+    target: &str,
+) -> Result<Vec<String>, StorageError> {
     let sql = if qualified {
         "SELECT DISTINCT session_key FROM main.session_trace_bookmarks WHERE namespace=semon_namespace() AND target=?1 ORDER BY session_key LIMIT 3"
     } else {
         "SELECT DISTINCT session_key FROM session_trace_bookmarks WHERE target=?1 ORDER BY session_key LIMIT 3"
     };
-    db.prepare(sql).map_err(failed)?.query_map([target], |row| row.get(0)).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)
+    db.prepare(sql)
+        .map_err(failed)?
+        .query_map([target], |row| row.get(0))
+        .map_err(failed)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(failed)
 }
-fn read_observation(db: &Connection, qualified: bool, harness: &str, native: &str, scope: CatalogReadScope, expected: Option<&str>) -> Result<NativeResolutionObservation, StorageError> {
-    let meta = |key: &str| db.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get::<_, String>(0)).optional().map_err(failed);
-    let mut observation = NativeResolutionObservation { version: meta("catalog_version")?, generation: meta("catalog_generation")?, completeness: meta("catalog_completeness")?, ..Default::default() };
-    if expected.is_some_and(|expected| observation.generation.as_deref() != Some(expected)) { return Err(StorageError::ScopeChanged); }
-    if observation.qualified_head().is_none() { return Ok(observation); }
-    let sql = match qualified {
-        true => "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2",
-        false => "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2",
+fn read_observation(
+    db: &Connection,
+    qualified: bool,
+    harness: &str,
+    native: &str,
+    scope: CatalogReadScope,
+    expected: Option<&str>,
+) -> Result<NativeResolutionObservation, StorageError> {
+    let meta = |key: &str| {
+        db.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(failed)
     };
-    let lookup = |sql: &str| db.prepare(sql).map_err(failed)?.query_map((harness, native), |row| row.get(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<String>>>().map_err(failed);
+    let mut observation = NativeResolutionObservation {
+        version: meta("catalog_version")?,
+        generation: meta("catalog_generation")?,
+        completeness: meta("catalog_completeness")?,
+        ..Default::default()
+    };
+    if expected.is_some_and(|expected| observation.generation.as_deref() != Some(expected)) {
+        return Err(StorageError::ScopeChanged);
+    }
+    if observation.qualified_head().is_none() {
+        return Ok(observation);
+    }
+    let sql = match qualified {
+        true => {
+            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_current_native WHERE namespace=semon_namespace() AND lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
+        }
+        false => {
+            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_current_native WHERE lifecycle='current' AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
+        }
+    };
+    let lookup = |sql: &str| {
+        db.prepare(sql)
+            .map_err(failed)?
+            .query_map((harness, native), |row| row.get(0))
+            .map_err(failed)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(failed)
+    };
     observation.keys = lookup(sql)?;
     let current = !observation.keys.is_empty();
     if !current && scope == CatalogReadScope::RetainedHistory {
-        observation.keys = lookup(if qualified { "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2" } else { "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_native WHERE harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2" })?;
+        observation.keys = lookup(if qualified {
+            "SELECT DISTINCT session_key FROM main.session_catalog_sources INDEXED BY storage_ns_session_catalog_native WHERE namespace=semon_namespace() AND harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
+        } else {
+            "SELECT DISTINCT session_key FROM session_catalog_sources INDEXED BY session_catalog_native WHERE harness=?1 AND native_id=?2 ORDER BY session_key LIMIT 2"
+        })?;
     }
     if let [key] = observation.keys.as_slice() {
         let metadata = |table: &str| -> Result<Option<Option<String>>, StorageError> {
-            let predicate = if qualified { "namespace=semon_namespace() AND " } else { "" };
+            let predicate = if qualified {
+                "namespace=semon_namespace() AND "
+            } else {
+                ""
+            };
             db.query_row(&format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{table} WHERE {predicate}session_key=?1"), [key], |row| row.get(0)).optional().map_err(failed)
         };
-        observation.metadata = if current { metadata("session_catalog")? } else { match metadata("session_history_catalog")? { None => metadata("session_catalog")?, present => present } }.flatten();
+        observation.metadata = if current {
+            metadata("session_catalog")?
+        } else {
+            match metadata("session_history_catalog")? {
+                None => metadata("session_catalog")?,
+                present => present,
+            }
+        }
+        .flatten();
     }
     Ok(observation)
 }
@@ -59,35 +144,76 @@ fn read_observation(db: &Connection, qualified: bool, harness: &str, native: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_resolution::{CatalogNativeResolution, CatalogNativeResolutionState};
     use crate::model::summary::CATALOG_VERSION;
+    use crate::native_resolution::{CatalogNativeResolution, CatalogNativeResolutionState};
 
-    fn resolve(db: &mut Connection, result: &mut CatalogNativeResolution, options: Option<&crate::Options>) -> Result<(), StorageError> {
+    fn resolve(
+        db: &mut Connection,
+        result: &mut CatalogNativeResolution,
+        options: Option<&crate::Options>,
+    ) -> Result<(), StorageError> {
         let tx = db.transaction().map_err(failed)?;
-        let observation = read_observation(&tx, false, &result.harness, &result.native_id, result.read_scope, None)?;
-        crate::native_resolution::apply_observation(result, options, &observation).map_err(|_| StorageError::Unavailable)?;
+        let observation = read_observation(
+            &tx,
+            false,
+            &result.harness,
+            &result.native_id,
+            result.read_scope,
+            None,
+        )?;
+        crate::native_resolution::apply_observation(result, options, &observation)
+            .map_err(|_| StorageError::Unavailable)?;
         tx.commit().map_err(failed)
     }
     use serde_json::json;
     #[test]
     fn generation_refusal_precedes_binding_sql_and_does_not_mutate() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);").unwrap();
-        db.execute("INSERT INTO meta VALUES('catalog_version',?1)", [CATALOG_VERSION.to_string()]).unwrap();
-        db.execute("INSERT INTO meta VALUES('catalog_generation',?1)", ["a".repeat(64)]).unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);")
+            .unwrap();
+        db.execute(
+            "INSERT INTO meta VALUES('catalog_version',?1)",
+            [CATALOG_VERSION.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO meta VALUES('catalog_generation',?1)",
+            ["a".repeat(64)],
+        )
+        .unwrap();
         let before = db.total_changes();
-        assert!(matches!(read_observation(&db, false, "codex", "native", CatalogReadScope::Current, Some(&"b".repeat(64))), Err(StorageError::ScopeChanged)));
+        assert!(matches!(
+            read_observation(
+                &db,
+                false,
+                "codex",
+                "native",
+                CatalogReadScope::Current,
+                Some(&"b".repeat(64))
+            ),
+            Err(StorageError::ScopeChanged)
+        ));
         assert_eq!(db.total_changes(), before);
     }
 
     #[test]
     fn bookmarked_targets_are_distinct_ordered_and_bounded_for_unbound_store() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE session_trace_bookmarks(target TEXT,session_key TEXT,edge_id TEXT);").unwrap();
-        for (key, edge) in [("d","1"),("b","1"),("a","1"),("c","1"),("a","2")] {
-            db.execute("INSERT INTO session_trace_bookmarks VALUES('target',?1,?2)", (key, edge)).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session_trace_bookmarks(target TEXT,session_key TEXT,edge_id TEXT);",
+        )
+        .unwrap();
+        for (key, edge) in [("d", "1"), ("b", "1"), ("a", "1"), ("c", "1"), ("a", "2")] {
+            db.execute(
+                "INSERT INTO session_trace_bookmarks VALUES('target',?1,?2)",
+                (key, edge),
+            )
+            .unwrap();
         }
-        assert_eq!(bookmark_keys(&db, false, "target").unwrap(), ["a", "b", "c"]);
+        assert_eq!(
+            bookmark_keys(&db, false, "target").unwrap(),
+            ["a", "b", "c"]
+        );
         assert!(bookmark_keys(&db, false, "missing").unwrap().is_empty());
     }
 
