@@ -7246,9 +7246,12 @@ mod tests {
         let path = root.join("index.sqlite3");
         for selected in [false, true] {
             let mut store = if selected {
-                SqliteStore::attempt_selected(&path).unwrap_or_else(|_| panic!("selected factory refused current store"))
+                SqliteStore::attempt_selected(&path)
+                    .unwrap_or_else(|_| panic!("selected factory refused current store"))
             } else {
-                SqliteStore::attempt_scoped(&path, true).unwrap_or_else(|_| panic!("producer factory refused current store")).0
+                SqliteStore::attempt_scoped(&path, true)
+                    .unwrap_or_else(|_| panic!("producer factory refused current store"))
+                    .0
             };
             let cookie: i64 = store
                 .connection

@@ -270,7 +270,10 @@ CREATE TABLE session_catalog_sources(harness TEXT,native_id TEXT,source_path TEX
 CREATE TABLE session_catalog_invalidations(source_path TEXT);"
     })?;
     reference.execute_batch(schema(composite))?;
-    let shapes = STAGE_TABLES.iter().map(|table| stage_shape(&reference, table)).collect::<rusqlite::Result<Vec<_>>>()?;
+    let shapes = STAGE_TABLES
+        .iter()
+        .map(|table| stage_shape(&reference, table))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let _ = cache.set(shapes);
     cache.get().ok_or(rusqlite::Error::InvalidQuery)
 }
@@ -279,7 +282,9 @@ pub(super) fn stage_layout(c: &Connection) -> rusqlite::Result<bool> {
     let version: i64 = c.query_row("PRAGMA main.schema_version", [], |r| r.get(0))?;
     let cached: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_stage_layout' AND narg=1)")?.query_row([], |r| r.get(0))?;
     if cached {
-        let layout: Option<bool> = c.prepare_cached("SELECT semon_semantic_stage_layout(?1)")?.query_row([version], |r| r.get(0))?;
+        let layout: Option<bool> = c
+            .prepare_cached("SELECT semon_semantic_stage_layout(?1)")?
+            .query_row([version], |r| r.get(0))?;
         if let Some(layout) = layout {
             return Ok(layout);
         }
@@ -291,12 +296,16 @@ pub(super) fn stage_layout(c: &Connection) -> rusqlite::Result<bool> {
         }
     }
     if c.is_autocommit() {
-        c.create_scalar_function("semon_semantic_stage_layout", 1,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        c.create_scalar_function(
+            "semon_semantic_stage_layout",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
             move |context| {
                 let observed: i64 = context.get(0)?;
                 Ok((observed == version).then_some(composite))
-            })?;
+            },
+        )?;
     }
     Ok(composite)
 }
@@ -306,7 +315,11 @@ fn observation_shapes(c: &Connection) -> rusqlite::Result<()> {
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(support_schema(composite, composite))?;
     for table in ["session_catalog_invalidations", "catalog_backfill_sources"] {
-        let physical: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)", [table], |r| r.get(0))?;
+        let physical: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
+            [table],
+            |r| r.get(0),
+        )?;
         if !physical || columns(c, table)? != columns(&reference, table)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -358,6 +371,17 @@ pub(super) fn support_sql<'a>(
         composite = Some(ns);
     }
     let composite = composite.ok_or(rusqlite::Error::InvalidQuery)?;
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(support_schema(composite, false))?;
+    for table in [
+        "catalog_relocation_candidates",
+        "catalog_native_dependencies",
+        "session_source_mutations",
+    ] {
+        if columns(c, table)? != columns(&reference, table)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
     for (table, name, columns) in [
         (
             "catalog_relocation_candidates",
