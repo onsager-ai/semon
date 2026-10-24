@@ -44,17 +44,26 @@ const inView = (page, sel) =>
   }, sel);
 // Waiting is tied to source-qualified selected reads, with no child workspace poller.
 function trackChildRequests(page) {
-  const requests = new Set();
+  const requests = new Map();
   const selected = (request) => new URL(request.url()).pathname === '/api/session-transcript';
   page.on('request', (request) => {
-    if (selected(request)) requests.add(request);
+    if (selected(request)) requests.set(request, Date.now());
   });
   const done = (request) => requests.delete(request);
   page.on('requestfinished', done);
   page.on('requestfailed', done);
   return async () => {
     for (let n = 0; requests.size && n < 100; n++) await page.waitForTimeout(20);
-    if (requests.size) throw Error('Selected requests did not settle');
+    if (requests.size)
+      throw Error(
+        'Selected requests did not settle: ' +
+          JSON.stringify(
+            [...requests].slice(0, 16).map(([request, started]) => ({
+              path: new URL(request.url()).pathname + new URL(request.url()).search,
+              elapsedMs: Date.now() - started,
+            })),
+          ),
+      );
   };
 }
 export default async function (browser) {
