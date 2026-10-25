@@ -375,7 +375,12 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
                 "SELECT peer.source_path FROM main.session_catalog_sources own JOIN main.session_catalog_sources peer ON peer.namespace=own.namespace AND peer.session_key=own.session_key WHERE own.namespace=?1 AND own.source_path=?2 AND own.lifecycle='current' AND peer.lifecycle='current' AND peer.source_path>?3 GROUP BY peer.source_path ORDER BY peer.source_path LIMIT ?4"
             }
             "native" => {
-                "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
+                // Both are authored current profiles. The singleton family is
+                // read only through its admitted physical owner, never unscoped.
+                crate::events::store::semantic_stage::support_sql(c,
+                    "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT d.source_path FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.native_id=?2 AND d.harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4",
+                    "SELECT source_path FROM (SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND lifecycle='current' AND harness=?5 UNION SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness='lineage:'||?5) WHERE source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
+                ).map_err(error)?
             }
             "dependency" => {
                 "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
@@ -1820,8 +1825,6 @@ impl Stage {
             };
             tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,?4)",params![ns,kind,native,harness]).map_err(error)?;
         }
-        #[cfg(test)]
-        crate::events::store::configured::effect("semantic_record_owners").map_err(error)?;
         for (harness, source) in &prepared.indexed_sources {
             if self.reduction && !matches!(harness.as_str(), "codex" | "claude") {
                 return Err(refuse("semantic_nonprimitive_event_harness"));
@@ -1849,6 +1852,8 @@ impl Stage {
             }
             tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'pathowner',?2,'')",params![ns,path.as_ref()]).map_err(error)?;
         }
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_record_owners").map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_record").map_err(error)?;
         tx.commit().map_err(error)?;

@@ -5158,11 +5158,9 @@ mod tests {
                 };
                 let before = shared_state(f);
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
-                assert!(
-                    cache
-                        .record_semantic_batch(&batch, model.prepared())
-                        .is_err()
-                );
+                let failed = cache.record_semantic_batch(&batch, model.prepared());
+                assert_eq!(FAIL_EFFECT.with(|p| p.get()), None, "fault not reached: {point}, phase {:?}, result {failed:?}", batch.phase);
+                assert!(failed.is_err(), "{point} must fail after being hit");
                 FAIL_EFFECT.with(|p| p.set(None));
                 assert_eq!(
                     shared_state(f),
@@ -5208,6 +5206,7 @@ mod tests {
                         .is_err(),
                     "{point}"
                 );
+                assert_eq!(FAIL_EFFECT.with(|p| p.get()), None, "publication fault not reached: {point}");
                 FAIL_EFFECT.with(|p| p.set(None));
                 assert_eq!(
                     shared_state(f),

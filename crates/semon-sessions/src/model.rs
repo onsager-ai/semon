@@ -1270,6 +1270,19 @@ fn scan(
     machine: &MachineFacts,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
+    scan_with_retirement(options, cache, dirty, texts, cutoff, machine, selected, true)
+}
+
+fn scan_with_retirement(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    cutoff: Option<i64>,
+    machine: &MachineFacts,
+    selected: Option<&[crate::inputs::Input]>,
+    retire_missing: bool,
+) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
             !crate::is_input_path(input.root.as_str(), &input.path)
@@ -1481,10 +1494,12 @@ fn scan(
         });
     }
     cache.flush_cold_writes()?;
-    if let Some(selected) = selected {
-        cache.retire_scoped_sources(options, selected, &seen, machine)?;
-    } else {
-        cache.retain(&seen, dirty)?;
+    if retire_missing {
+        if let Some(selected) = selected {
+            cache.retire_scoped_sources(options, selected, &seen, machine)?;
+        } else {
+            cache.retain(&seen, dirty)?;
+        }
     }
     cache.end_scan();
     texts
@@ -7376,6 +7391,12 @@ pub(crate) fn prepare_semantic_batch(
             "semantic model inputs differ from staged batch",
         ));
     }
+    let by_path: BTreeMap<_, _> = inputs
+        .iter()
+        .map(|input| (input.full_path(options).to_string_lossy().into_owned(), input.clone()))
+        .collect();
+    let ordered = batch.paths.iter().map(|path| by_path[path].clone()).collect::<Vec<_>>();
+    let inputs = ordered.as_slice();
     let mut prepared = match batch.phase {
         relation_stage::Phase::Indexing => {
             prepare_semantic_index_sources(options, cache, inputs, now)?
@@ -7493,7 +7514,7 @@ pub(crate) fn prepare_semantic_index_sources(
     let facts = MachineFacts::of(options);
     let runtime = crate::native_evidence::query_runtime_generation(options)?;
     let withdrawals = semantic_withdrawals(options, inputs)?;
-    let (mut files, _, _) = scan(
+    let (mut files, _, _) = scan_with_retirement(
         options,
         cache,
         &mut false,
@@ -7501,6 +7522,7 @@ pub(crate) fn prepare_semantic_index_sources(
         scan_cutoff(options, now),
         &facts,
         Some(inputs),
+        false,
     )?;
     verify_sidecars(&files)?;
     let claims = cache.catalog_claims(&paths)?;
@@ -8037,14 +8059,15 @@ fn build_sources_inner(
         | BuildSelection::Matching { inputs, .. } => {
             let (files, skipped, duration) = timed!(
                 "scan",
-                scan(
+                scan_with_retirement(
                     options,
                     cache,
                     dirty,
                     texts,
                     window_start,
                     &facts,
-                    Some(inputs)
+                    Some(inputs),
+                    false
                 )?
             );
             (Some(inputs), None, files, skipped, duration)
