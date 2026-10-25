@@ -357,7 +357,7 @@ pub(super) fn write_values(
     let turn = &rows.codex_turn;
     tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,'codex_turn',?2) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,'codex_turn',?2) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,turn])?;
     for (label, value) in rows.labels() {
-            tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,?2,?3) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,label,value])?;
+        tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,?2,?3) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,label,value])?;
     }
     for model in rows.models {
         tx.prepare_cached(sql(
