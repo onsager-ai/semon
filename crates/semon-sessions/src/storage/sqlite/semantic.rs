@@ -591,6 +591,37 @@ impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFr
     }
 }
 
+// Measure the actual physical adapter, not a parallel EXPLAIN-only query.
+#[cfg(test)]
+pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Vec<(String, usize)> {
+    use crate::events::store::semantic_stage::NativeFrontierPort;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let mut result = Vec::new();
+    // Each read/page starts from exactly the same source/stage state.
+    for kind in ["filename", "copilot", "header", "parent", "claudeid", "copilotid", "headerid", "headerparent"] {
+        c.execute_batch("SAVEPOINT native_vm_probe").unwrap();
+        let port = ScopedNativeFrontier { db: c, ns };
+        if !matches!(kind, "filename" | "copilot" | "header" | "parent") {
+            let value = if kind == "claudeid" { format!("{id}.jsonl") } else { id.to_owned() };
+            port.queue(kind, &value, "").unwrap();
+        }
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = steps.clone();
+        c.progress_handler(1, Some(move || { observed.fetch_add(1, Ordering::Relaxed); false }));
+        match kind {
+            "filename" => { port.needed_filename(false, &format!("{id}.jsonl")).unwrap(); }
+            "copilot" => { port.needed_filename(true, id).unwrap(); }
+            "header" => { port.needed_header(false, false, id).unwrap(); }
+            "parent" => { port.needed_header(true, true, id).unwrap(); }
+            _ => { frontier_page(c, ns).unwrap(); }
+        }
+        c.progress_handler(0, None::<fn() -> bool>);
+        result.push((kind.to_owned(), steps.load(Ordering::Relaxed)));
+        c.execute_batch("ROLLBACK TO native_vm_probe; RELEASE native_vm_probe").unwrap();
+    }
+    result
+}
+
 struct ScopedQualification<'a> {
     db: &'a Connection,
     ns: &'a str,
