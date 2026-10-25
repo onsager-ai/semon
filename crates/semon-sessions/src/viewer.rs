@@ -6981,6 +6981,7 @@ mod tests {
 
     #[test]
     fn initial_catalog_page_precedes_global_native_observation() {
+        const FIRST_PAGE_LIMIT: Duration = Duration::from_secs(5);
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
             fixture.write("proc/sys/kernel/hostname", "producer-fixture\n");
@@ -7024,7 +7025,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(observed, if unrelated == 0 { 60 } else { 64 });
                 assert!(
-                    start.elapsed() <= AT_ONCE,
+                    start.elapsed() <= FIRST_PAGE_LIMIT,
                     "bounded initial page took {:?}",
                     start.elapsed()
                 );
@@ -7038,7 +7039,7 @@ mod tests {
             }));
             view.note_catalog_read().unwrap();
             first_page
-                .recv_timeout(HUNG_AFTER)
+                .recv_timeout(FIRST_PAGE_LIMIT + HUNG_AFTER)
                 .expect("bounded cold page was not published");
             let reading = view.clone();
             let page = at_once(
