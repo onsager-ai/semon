@@ -7286,6 +7286,27 @@ pub(crate) struct PreparedSources {
 }
 
 impl PreparedSources {
+    /// Exact content-free publication witness shared by staging and publish.
+    pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
+        serde_json::to_string(&(
+            self.transcripts
+                .iter()
+                .map(|p| (&p.key, &p.slots, p.repair))
+                .collect::<Vec<_>>(),
+            self.rows
+                .iter()
+                .map(|row| {
+                    (
+                        &row.key,
+                        row.trace
+                            .as_ref()
+                            .map(|trace| trace.publication_witness(row)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ))
+        .map_err(io::Error::other)
+    }
     /// Header/path parent references exist before a selected cohort can resolve
     /// them. Keep them as native identities rather than dropping an absent end.
     pub(crate) fn native_parents(&self) -> Vec<(String, String)> {
@@ -7318,6 +7339,51 @@ impl PreparedSources {
             .into_iter()
             .collect()
     }
+}
+
+/// Typed producer port: only the native model constructs the prepared payload.
+/// The runtime keeps the batch witnesses alongside it through record/publish.
+pub(crate) struct SemanticModelBatch {
+    prepared: PreparedSources,
+}
+
+impl SemanticModelBatch {
+    pub(crate) fn prepared(&self) -> &PreparedSources {
+        &self.prepared
+    }
+}
+
+pub(crate) fn prepare_semantic_batch(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::Input],
+    batch: &relation_stage::Batch,
+    now: i64,
+) -> io::Result<SemanticModelBatch> {
+    let paths: BTreeSet<_> = inputs
+        .iter()
+        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+        .collect();
+    if paths != batch.paths.iter().cloned().collect() {
+        return Err(io::Error::other(
+            "semantic model inputs differ from staged batch",
+        ));
+    }
+    let prepared = match batch.phase {
+        relation_stage::Phase::Indexing => {
+            prepare_semantic_index_sources(options, cache, inputs, now)?
+        }
+        relation_stage::Phase::Identity => {
+            prepare_semantic_identity_sources(options, cache, inputs, &batch.context, now)?
+        }
+        relation_stage::Phase::Relations | relation_stage::Phase::Publication => {
+            prepare_staged_sources(options, cache, inputs, &batch.context, false, now)?
+        }
+    };
+    if prepared.base_generation != batch.base_generation {
+        return Err(io::Error::other("semantic model generation changed"));
+    }
+    Ok(SemanticModelBatch { prepared })
 }
 
 /// Primitive source observations precede owner identity closure. No partial
@@ -7876,7 +7942,10 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+        if let Some(binding) = cache.query_runtime_binding()? {
+            crate::native_evidence::RuntimeObservations::bound(&binding, &query_runtime)?
+                .into_scoped()
+        } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
             crate::native_evidence::RuntimeObservations::for_publication_measured(
                 options,
                 &query_runtime,

@@ -1152,6 +1152,11 @@ pub(crate) trait IndexStore: Send {
         native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError>;
 
+    fn query_runtime_binding(
+        &self,
+    ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
+        Ok(None)
+    }
     fn begin_semantic_stage(
         &mut self,
         paths: &[String],
@@ -1563,6 +1568,16 @@ enum Base {
 }
 
 impl EventCache {
+    pub(crate) fn query_runtime_binding(
+        &self,
+    ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
+        self.store
+            .as_ref()
+            .map(|store| store.query_runtime_binding())
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
     #[allow(dead_code)]
     pub(crate) fn open_semantic(
         capability: crate::storage::sqlite::semantic::SemanticStaging,
@@ -1977,6 +1992,23 @@ impl EventCache {
         self.store
             .as_deref()
             .and_then(|store| store.semantic_rejection())
+    }
+
+    /// Prepare with the shared native algorithm, then persist its exact staged
+    /// publication witness before exposing the payload to the publisher.
+    #[allow(dead_code)] // Private admitted runtime; public qualification is zero.
+    pub(crate) fn prepare_semantic_model_batch(
+        &mut self,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        batch: &crate::model::relation_stage::Batch,
+        now: i64,
+    ) -> io::Result<crate::model::SemanticModelBatch> {
+        let model = crate::model::prepare_semantic_batch(options, self, inputs, batch, now)?;
+        if self.record_semantic_batch(batch, model.prepared())? != Outcome::Written {
+            return Err(io::Error::other("semantic model stage changed"));
+        }
+        Ok(model)
     }
 
     pub(crate) fn publish_semantic_catalog(
@@ -2897,6 +2929,51 @@ pub(crate) fn scan_file(
         .transpose()?;
     cache.scan_measurements.record("source_lock", started, 1);
     let agent = harness == "claude" && crate::native_sidecar::agent_path(path);
+    // Model preparation consumes the committed typed Index/proof binding. It
+    // has no ingestion operation ID and must neither create an intent nor
+    // reparse changed Raw behind the staged claim. load_file validates the
+    // configured current schema, admission and namespace in its read snapshot.
+    if configured && cache.event_operation.is_none() {
+        let (ledger, index) = cache
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+            .load_file(&key)
+            .map_err(store_io_error)?
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Conflict))?;
+        if ledger.stat != Stat::of(path)?
+            || (harness != "copilot" && index.tree_summary.is_none())
+            || !index
+                .source_chunks
+                .as_ref()
+                .is_some_and(|chunks| chunks.valid(ledger.offset))
+            || (harness != "copilot" && index.marker_index.is_none())
+            || index.handoff_index.is_none()
+            || (harness == "codex" && index.codex_header.is_none())
+            || (agent
+                && !index
+                    .claude_sidecar
+                    .as_ref()
+                    .is_some_and(|sidecar| sidecar.current(path)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "committed model source changed or incomplete",
+            ));
+        }
+        cache.require_usage_store(&index)?;
+        let index = Arc::new(index);
+        cache.files.insert(
+            key,
+            CachedFile {
+                ledger,
+                index: Some(Arc::clone(&index)),
+            },
+        );
+        // The existing model captures these exact chunks, verifies every used
+        // range and finishes its source/sidecar fences before record/publish.
+        return Ok(index);
+    }
     if !configured
         && let Some(entry) = cache.files.get(&key)
         && let Some(index) = &entry.index
