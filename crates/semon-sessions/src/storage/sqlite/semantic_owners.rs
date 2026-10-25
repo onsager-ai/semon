@@ -156,7 +156,17 @@ impl crate::model::relation_stage::LifecycleStore for Owners<'_> {
     }
     fn owner(&self, key: &str) -> std::io::Result<crate::model::summary::CatalogRow> {
         let text: String = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'",params![self.namespace,key],|r|r.get(0)).map_err(std::io::Error::other)?;
-        serde_json::from_str(&text).map_err(std::io::Error::other)
+        let row: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+        let members = (|| -> rusqlite::Result<Vec<(String,String,String)>> {
+            self.db.prepare("SELECT source_path,harness,native_id FROM main.session_catalog_sources WHERE namespace=?1 AND session_key=?2 AND lifecycle='current' ORDER BY source_path LIMIT 65")?
+                .query_map(params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect()
+        })().map_err(std::io::Error::other)?;
+        let mut expected = row.sources.iter().map(|s| (s.path.to_string_lossy().into_owned(),row.harness.clone(),s.native_id.clone())).collect::<Vec<_>>();
+        expected.sort();
+        if row.lifecycle != crate::model::summary::CatalogLifecycle::Current || members.len()>64 || members != expected {
+            return Err(std::io::Error::other("semantic_affected_owner_membership"));
+        }
+        Ok(row)
     }
     fn neighbors(&self, key: &str) -> std::io::Result<Vec<String>> {
         // These are physical incident indexes, not a relationship reducer.
