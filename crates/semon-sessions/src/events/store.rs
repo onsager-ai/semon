@@ -50,8 +50,10 @@ use sha2::{Digest, Sha256};
 use super::{
     BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
     MessageUsage, ModelTokens, Outcome, Peer, Reply, ReportedFileStamp, Signal, Stat, StoreError,
-    Yield,
 };
+use super::native_rows::EventState;
+#[cfg(test)]
+use super::Yield;
 use crate::storage::sqlite::source_journal;
 use crate::storage::{
     StorageError,
@@ -592,21 +594,6 @@ const PUT_EVENT: &str = "INSERT OR REPLACE INTO events (file_id, extra, seq, k, 
      reply_e, reply_f, reply_m, item, peer, peer_sock, peer_pid, peer_start, u) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
      ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)";
-
-/// Event-local parser metadata kept in the existing `events.y` JSON slot.
-/// The parser version invalidates older rows when this envelope is introduced.
-#[derive(Debug, Deserialize, Serialize)]
-struct EventState {
-    version: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    yielded: Option<Box<Yield>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    poll_target: Option<String>,
-    #[serde(default)]
-    result_source: bool,
-    #[serde(default, skip_serializing_if = "super::is_false")]
-    native_direct_call: bool,
-}
 
 const COPIED_USAGE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS usage_identity (
@@ -7132,7 +7119,7 @@ fn write_file_with_usage_deletes<'tx>(
         last,
         cwd,
         branch,
-        usage_by_id,
+        usage_by_id: _,
         codex_tokens,
         codex_tokens_by_model,
         codex_usage_events,
@@ -7336,8 +7323,7 @@ fn write_file_with_usage_deletes<'tx>(
     write_copied_usage_rows_with_deletes(
         transaction,
         file_id,
-        changes,
-        usage_by_id,
+        row_plan.usage,
         measurements,
         usage_deletes,
     )?;
@@ -7429,8 +7415,7 @@ fn write_copied_usage_rows(
     write_copied_usage_rows_with_deletes(
         transaction,
         file_id,
-        changes,
-        usage_by_id,
+        super::native_rows::UsageChanges::new(changes, usage_by_id),
         measurements,
         &mut UsageDeletes::default(),
     )
@@ -7439,8 +7424,7 @@ fn write_copied_usage_rows(
 fn write_copied_usage_rows_with_deletes<'tx>(
     transaction: &'tx Transaction<'_>,
     file_id: i64,
-    changes: &super::DirtyRows,
-    usage_by_id: &BTreeMap<String, MessageUsage>,
+    rows: super::native_rows::UsageChanges<'_>,
     measurements: &mut crate::native_timing::Measurements,
     deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<UsageDeleteWork> {
@@ -7453,7 +7437,7 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     let mut put_identity = transaction.prepare_cached(
         copied_usage_sql(transaction, "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)")?,
     )?;
-    for id in &changes.usage {
+    for (id, usage) in rows.iter() {
         let started = measurements.start();
         let selected = copied_usage_sql(
             transaction,
@@ -7482,7 +7466,7 @@ fn write_copied_usage_rows_with_deletes<'tx>(
         statement.execute(params![file_id, id])?;
         work.identity_executions += 1;
         measurements.record("usage_identity_delete_execute", started, 1);
-        if let Some(usage) = usage_by_id.get(id) {
+        if let Some(usage) = usage {
             put_usage(&mut put, file_id, id, usage)?;
             for uuid in &usage.record_ids {
                 put_identity.execute(params![file_id, id, uuid])?;
@@ -7538,90 +7522,37 @@ fn put_event(
     seq: usize,
     event: &Event,
 ) -> rusqlite::Result<()> {
-    let Event {
-        k,
-        o,
-        b,
-        t,
-        id,
-        n,
-        code_mode,
-        native_direct_call,
-        code_mode_open,
-        parent,
-        script,
-        poll_target,
-        result_source,
-        y,
-        poll,
-        r,
-        item,
-        peer,
-        u,
-    } = event;
-    let y = if y.is_some() || poll_target.is_some() || *result_source || *native_direct_call {
-        Some(json(&EventState {
-            version: 1,
-            yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
-            poll_target: poll_target.as_ref().cloned(),
-            result_source: *result_source,
-            native_direct_call: *native_direct_call,
-        })?)
-    } else {
-        None
-    };
-    let (reply, reply_o, reply_b, reply_t, reply_e, reply_f, reply_m) = match r {
-        Some(Reply {
-            o: reply_o,
-            b: reply_b,
-            t: reply_t,
-            e: reply_e,
-            f: reply_f,
-            m: reply_m,
-        }) => (
-            true,
-            Some(int(*reply_o)),
-            Some(*reply_b),
-            *reply_t,
-            Some(*reply_e),
-            Some(*reply_f),
-            reply_m.as_deref(),
-        ),
-        None => (false, None, None, None, None, None, None),
-    };
-    let (has_peer, peer_sock, peer_pid, peer_start) = match peer {
-        Some(Peer { sock, pid, start }) => (true, sock.as_deref(), pid.map(int), start.as_deref()),
-        None => (false, None, None, None),
-    };
+    let row = super::native_rows::EventRow::encode(event)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     statement.execute(params![
         file_id,
         extra,
         seq_int(seq),
-        tag(k)?,
-        int(*o),
-        b,
-        t,
-        id,
-        n,
-        code_mode,
-        code_mode_open,
-        parent.map(seq_int),
-        script,
-        y,
-        poll.map(seq_int),
-        reply,
-        reply_o,
-        reply_b,
-        reply_t,
-        reply_e,
-        reply_f,
-        reply_m,
-        item.map(int),
-        has_peer,
-        peer_sock,
-        peer_pid,
-        peer_start,
-        u,
+        row.k,
+        row.o,
+        row.b,
+        row.t,
+        row.id,
+        row.n,
+        row.code_mode,
+        row.code_mode_open,
+        row.parent,
+        row.script,
+        row.y,
+        row.poll,
+        row.reply,
+        row.reply_o,
+        row.reply_b,
+        row.reply_t,
+        row.reply_e,
+        row.reply_f,
+        row.reply_m,
+        row.item,
+        row.has_peer,
+        row.peer_sock,
+        row.peer_pid,
+        row.peer_start,
+        row.u,
     ])?;
     Ok(())
 }
@@ -7632,64 +7563,33 @@ fn put_usage(
     message_id: &str,
     usage: &MessageUsage,
 ) -> rusqlite::Result<()> {
-    let MessageUsage {
-        record_ids,
-        model,
-        tokens:
-            Tokens {
-                input,
-                cached_input,
-                output,
-                reasoning_output,
-                total,
-            },
-        model_tokens:
-            ModelTokens {
-                input: model_input,
-                output: model_output,
-                cache_write: model_cache_write,
-                cache_read: model_cache_read,
-            },
-        billing:
-            BillingUsage {
-                input: billing_input,
-                output: billing_output,
-                cache_read: billing_cache_read,
-                cache_write_5m,
-                cache_write_1h,
-                web_search_requests,
-                speed,
-                service_tier,
-                prompt_size,
-                timestamp,
-                split_unknown,
-            },
-    } = usage;
+    let row = super::native_rows::UsageRow::encode(usage)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     statement.execute(params![
         file_id,
         message_id,
-        model,
-        int(*input),
-        int(*cached_input),
-        int(*output),
-        int(*reasoning_output),
-        int(*total),
-        int(*model_input),
-        int(*model_output),
-        int(*model_cache_write),
-        int(*model_cache_read),
-        int(*billing_input),
-        int(*billing_output),
-        int(*billing_cache_read),
-        int(*cache_write_5m),
-        int(*cache_write_1h),
-        int(*web_search_requests),
-        speed,
-        service_tier,
-        int(*prompt_size),
-        timestamp,
-        split_unknown,
-        json(record_ids)?,
+        row.model,
+        row.input,
+        row.cached_input,
+        row.output,
+        row.reasoning_output,
+        row.total,
+        row.model_input,
+        row.model_output,
+        row.model_cache_write,
+        row.model_cache_read,
+        row.billing_input,
+        row.billing_output,
+        row.billing_cache_read,
+        row.cache_write_5m,
+        row.cache_write_1h,
+        row.web_search_requests,
+        row.speed,
+        row.service_tier,
+        row.prompt_size,
+        row.timestamp,
+        row.split_unknown,
+        row.record_ids,
     ])?;
     Ok(())
 }
