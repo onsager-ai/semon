@@ -1103,18 +1103,11 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
-    fn backfill_state(&self) -> Result<Option<String>, StoreError>;
     fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
         Err(StoreError::Configured(
             crate::storage::StorageError::NamespaceUpgradePending,
         ))
     }
-    fn discover_catalog_sources(
-        &mut self,
-        paths: &[String],
-        complete: bool,
-    ) -> Result<(), StoreError>;
-    fn finish_catalog_backfill(&mut self, expected: Option<&str>) -> Result<Outcome, StoreError>;
     fn resolve_catalog_input(
         &mut self,
         path: &str,
@@ -1134,17 +1127,7 @@ pub(crate) trait IndexStore: Send {
         &self,
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
-    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
-    fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
-    fn invalidate_catalog_sources(
-        &mut self,
-        _expected: &[(String, Option<i64>)],
-    ) -> Result<bool, StoreError> {
-        Err(StoreError::Configured(
-            crate::storage::StorageError::NamespaceUpgradePending,
-        ))
-    }
     fn catalog_component_paths(
         &self,
         paths: &[String],
@@ -1558,10 +1541,16 @@ impl EventCache {
         &mut self,
         path: &str,
     ) -> Result<Outcome, StoreError> {
-        let store = self.store.as_mut().expect("test producer store");
-        let revision = store.catalog_claims(&[path.to_owned()])?[0]
+        let observations = self
+            .source_observations
+            .as_ref()
+            .expect("test source observation store");
+        let revision = observations
+            .claims(&[path.to_owned()])
+            .map_err(StoreError::Configured)?[0]
             .1
             .expect("test source claim");
+        let store = self.store.as_mut().expect("test producer store");
         store.resolve_catalog_input(path, revision, None, None)
     }
 
