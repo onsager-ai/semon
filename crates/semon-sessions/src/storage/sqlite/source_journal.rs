@@ -1396,7 +1396,8 @@ mod tests {
             || legacy.open(),
             || {
                 let db = Connection::open(EventCache::path(&legacy.cache_path)).unwrap();
-                db.execute("DELETE FROM session_catalog_invalidations", []).unwrap();
+                db.execute("DELETE FROM session_catalog_invalidations", [])
+                    .unwrap();
             },
             "",
         );
@@ -1406,7 +1407,9 @@ mod tests {
         shared_source_observation_conformance(
             || configured.config.source_observations().unwrap(),
             || {
-                let db = SourceJournal(configured.config.clone()).connection().unwrap();
+                let db = SourceJournal(configured.config.clone())
+                    .connection()
+                    .unwrap();
                 db.execute(
                     "DELETE FROM session_catalog_invalidations WHERE namespace=?1",
                     [configured.config.namespace.as_str()],
