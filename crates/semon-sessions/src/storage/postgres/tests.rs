@@ -695,14 +695,20 @@ fn pg_digest_collision_refuses_without_alias_or_effect() {
             "ALTER TABLE semon_pg_operations ALTER COLUMN namespace_digest DROP EXPRESSION",
         )
         .unwrap();
-    pool.transaction(&ns("b"), TxnKind::Write, &PgCancellation::default(), |tx| {
+    // Deliberate corruption bypasses admission only in this fixture. Ordinary
+    // calls now refuse the changed generated column before entering effects.
+    pool.transaction_inner(&ns("b"), TxnKind::Write, &PgCancellation::default(), false, |tx| {
         tx.driver.execute("INSERT INTO semon_pg_operations(namespace, namespace_digest, operation_id, kind, request_digest, outcome) VALUES ($1, sha256($2::bytea), $3, $4, $5, '1')",
             &[&b"b".as_slice(), &b"a".as_slice(), &identity().operation_id, &identity().kind, &&identity().request_digest[..]]).unwrap();
         Ok(())
     }).unwrap();
+    assert_eq!(pool.transaction_inner(&ns("a"), TxnKind::ReadSnapshot, &PgCancellation::default(), false, |tx| {
+        tx.driver.query("SELECT namespace FROM semon_pg_operations", &[]).map_err(super::sqlstate::error)?;
+        Ok(())
+    }), Err(StorageError::Unavailable), "the RLS collision guard still refuses independently of admission");
     assert_eq!(
         pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
-        Err(StorageError::Unavailable)
+        Err(StorageError::ScopeChanged)
     );
     assert!(matches!(
         pool.apply_operation(
