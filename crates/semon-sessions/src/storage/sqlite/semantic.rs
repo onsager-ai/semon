@@ -1,4 +1,5 @@
-//! Private admitted-Source staging. No Current publication qualification.
+//! Private admitted-Source staging and bounded initial Current publication.
+//! Public and complete-domain publication qualifications remain closed.
 use super::source_journal::SourceJournal;
 use super::{failed, namespace};
 use crate::events::{Ledger, Outcome, StoreError};
@@ -8,6 +9,37 @@ use crate::model::{
 };
 use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+
+#[cfg(test)]
+thread_local! {
+    static PUBLICATION_PHASE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+struct PublicationDiagnostic(Option<&'static str>);
+#[cfg(test)]
+impl Drop for PublicationDiagnostic {
+    fn drop(&mut self) {
+        PUBLICATION_PHASE.with(|phase| phase.set(self.0));
+    }
+}
+fn publication_phase(label: &'static str) {
+    #[cfg(test)]
+    PUBLICATION_PHASE.with(|phase| phase.set(Some(label)));
+    #[cfg(not(test))]
+    let _ = label;
+}
+#[cfg(test)]
+pub(super) fn diagnose(error: &rusqlite::Error) {
+    PUBLICATION_PHASE.with(|phase| {
+        if let Some(phase) = phase.get() {
+            // Never print SQLite messages: they can contain SQL or native data.
+            eprintln!(
+                "semantic_publication_failure phase={phase} sqlite_extended_code={:?}",
+                error.sqlite_error().map(|e| e.extended_code)
+            );
+        }
+    });
+}
 
 /// This capability binds the real admission and physical incarnation. Its fields
 /// cannot be supplied by a caller or inferred from an Options path.
@@ -19,6 +51,34 @@ pub(crate) struct AdmittedSource {
 }
 
 impl AdmittedSource {
+    pub(super) fn namespace(&self) -> &str {
+        self.config.namespace.as_str()
+    }
+    pub(super) fn validate_publication(&self, db: &Connection) -> Result<(), StorageError> {
+        if self.owner.is_none() {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        // Private profiles are authored as one physical family. Never upgrade
+        // a profile that predates the scoped custody/recipe/search effects.
+        for table in [
+            "session_slot_projections",
+            "session_slots",
+            "session_history_catalog",
+            "session_history_projections",
+            "session_history_slots",
+            "session_history_slot_parts",
+            "session_search_coverage",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+        ] {
+            let scoped: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |r|r.get(0)).map_err(failed)?;
+            if !scoped {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
+        }
+        self.validate(db)
+    }
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
             owner.validate_ready(db)?;
@@ -48,7 +108,8 @@ pub(crate) struct Stage {
 }
 
 /// Internal runtime qualification, deliberately absent from public configuration.
-/// It qualifies only primitive Codex reduction, never Current publication.
+/// It qualifies primitive Codex reduction; composite ownership also admits the
+/// bounded initial Current publisher. No public configuration constructs it.
 pub(crate) struct SemanticStaging {
     config: StoreConfig,
     reduction: bool,
@@ -231,7 +292,7 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
         };
         let sql = match kind.as_str() {
             "pathowner" => {
-                "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND source_path=?2 AND lifecycle='current' AND source_path>?3 ORDER BY source_path LIMIT ?4"
+                "SELECT peer.source_path FROM main.session_catalog_sources own JOIN main.session_catalog_sources peer ON peer.namespace=own.namespace AND peer.session_key=own.session_key WHERE own.namespace=?1 AND own.source_path=?2 AND own.lifecycle='current' AND peer.lifecycle='current' AND peer.source_path>?3 GROUP BY peer.source_path ORDER BY peer.source_path LIMIT ?4"
             }
             "native" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' AND harness=?5 GROUP BY source_path ORDER BY source_path LIMIT ?4"
@@ -276,9 +337,6 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
         }
         drop(rows);
         drop(q);
-        if kind == "pathowner" && !paths.is_empty() {
-            return Err(refuse("semantic_existing_owner_closure_pending"));
-        }
         let claims = super::source_journal::claims(c, Some(ns), &paths).map_err(error)?;
         for (path, claim) in claims {
             c.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
@@ -358,6 +416,495 @@ fn head(db: &Connection) -> rusqlite::Result<Option<String>> {
 }
 
 impl Stage {
+    pub(crate) fn publish(
+        &mut self,
+        batch: &Batch,
+        prepared: &PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        use crate::storage::catalog::CatalogPublicationHead;
+        use sha2::{Digest, Sha256};
+        #[cfg(test)]
+        let _diagnostic =
+            PublicationDiagnostic(PUBLICATION_PHASE.with(|phase| phase.replace(Some("prepare"))));
+        if batch.phase != Phase::Publication || batch.base_generation != prepared.base_generation {
+            return Ok((Outcome::Conflict, None));
+        }
+        if prepared.rows.len() > 64 || prepared.claims.len() > 64 || prepared.rows.is_empty() {
+            return Err(refuse("semantic_publication_component_budget"));
+        }
+        if !prepared.pids.is_empty()
+            || !prepared.withdrawals.is_empty()
+            || !prepared.lineage_dependencies.is_empty()
+            || !prepared.indexed_native_parents.is_empty()
+            || !prepared.relationships.relations.is_empty()
+        {
+            return Err(refuse("semantic_publication_nonprimitive_owners_pending"));
+        }
+        let projection_rows: std::collections::BTreeMap<_, _> =
+            prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
+        let mut projection_keys = std::collections::BTreeSet::new();
+        let mut slot_bytes = 0usize;
+        for projection in &prepared.transcripts {
+            let Some(row) = projection_rows.get(projection.key.as_str()) else {
+                return Err(refuse("semantic_publication_projection_owner"));
+            };
+            if !projection_keys.insert(&projection.key) || projection.slots.len() > 64 {
+                return Err(refuse("semantic_publication_projection_budget"));
+            }
+            for slot in &projection.slots {
+                if slot
+                    .source_paths()
+                    .iter()
+                    .any(|path| !row.sources.iter().any(|s| &s.path == *path))
+                {
+                    return Err(refuse("semantic_publication_projection_source"));
+                }
+                slot_bytes = slot_bytes.saturating_add(
+                    serde_json::to_vec(slot)
+                        .map_err(|e| StoreError::Data(e.to_string()))?
+                        .len(),
+                );
+                if slot_bytes > 1048576 {
+                    return Err(refuse("semantic_publication_projection_budget"));
+                }
+            }
+        }
+        if !prepared.transcripts.is_empty() && projection_keys.len() != projection_rows.len() {
+            return Err(refuse("semantic_publication_projection_owner"));
+        }
+        let projection_witness = prepared
+            .transcripts
+            .iter()
+            .map(|p| (&p.key, &p.slots, p.repair))
+            .collect::<Vec<_>>();
+        let metadata = prepared
+            .rows
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        if metadata.iter().map(String::len).sum::<usize>() > 1048576 {
+            return Err(refuse("semantic_publication_metadata_budget"));
+        }
+        let claims_text =
+            serde_json::to_string(&prepared.claims).map_err(|e| StoreError::Data(e.to_string()))?;
+        let metadata_text =
+            serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
+        let proof_digest = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    batch.epoch,
+                    &batch.runtime,
+                    &batch.base_generation,
+                    &claims_text,
+                    &metadata_text,
+                    &projection_witness
+                ))
+                .map_err(|e| StoreError::Data(e.to_string()))?
+            )
+        );
+        publication_phase("admission_and_witnesses");
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        self.source
+            .validate_publication(&tx)
+            .map_err(StoreError::Configured)?;
+        let ns = self.source.namespace();
+        let publication_head =
+            super::publication::admitted_head(&tx, &self.source).map_err(StoreError::Configured)?;
+        let previous = publication_head
+            .base_generation()
+            .map_err(StoreError::Configured)?;
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication' AND runtime=?3 AND resetting=0)",params![ns,batch.epoch,batch.runtime],|r|r.get(0)).map_err(error)?;
+        if !valid || self.epoch != Some(batch.epoch) {
+            return Ok((Outcome::Conflict, None));
+        }
+        let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_event_operations WHERE namespace=?1 AND state='intent')",[ns],|r|r.get(0)).map_err(error)?;
+        if pending {
+            return Err(refuse("semantic_publication_recovery_intent_pending"));
+        }
+        if !reduction_witnesses(&tx, ns).map_err(error)? {
+            return Ok((Outcome::Conflict, None));
+        }
+        for source in prepared.rows.iter().flat_map(|row| &row.sources) {
+            let Some((_, ledger)) =
+                crate::events::store::ledger_row(&tx, source.path.to_string_lossy().as_ref())
+                    .map_err(error)?
+            else {
+                return Ok((Outcome::Conflict, None));
+            };
+            if crate::events::Stat::of(&source.path).ok().as_ref() != Some(&ledger.stat)
+                || !crate::events::store::admitted_roles_current(
+                    &tx,
+                    std::slice::from_ref(source),
+                    &self.source,
+                )
+                .map_err(error)?
+            {
+                return Ok((Outcome::Conflict, None));
+            }
+        }
+        let replay:Option<(String,String)>=tx.query_row("SELECT generation,proof_digest FROM storage_semantic_publications WHERE namespace=?1 AND epoch=?2",params![ns,batch.epoch],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(error)?;
+        if let Some((generation, digest)) = replay {
+            if previous.as_deref() == Some(generation.as_str())
+                && digest == proof_digest
+                && super::source_journal::claims(&tx, Some(ns), &batch.paths)
+                    .map_err(error)?
+                    .iter()
+                    .all(|(_, claim)| claim.is_none())
+            {
+                return Ok((Outcome::Written, Some(generation)));
+            }
+            return Ok((Outcome::Conflict, None));
+        }
+        if previous != batch.base_generation || self.source.generation != batch.base_generation {
+            return Ok((Outcome::Conflict, None));
+        }
+        let revision: i64 = tx
+            .query_row(
+                "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                [ns],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if revision != batch.source_revision {
+            return Ok((Outcome::Conflict, None));
+        }
+        let staged:Vec<String>=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 ORDER BY source_path LIMIT 65").map_err(error)?.query_map([ns],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
+        let mut requested = batch.paths.clone();
+        requested.sort();
+        if staged != requested
+            || prepared
+                .claims
+                .iter()
+                .map(|(p, _)| p.clone())
+                .collect::<Vec<_>>()
+                != staged
+            || super::source_journal::claims(&tx, Some(ns), &staged).map_err(error)?
+                != prepared.claims
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        let unfinished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND (index_done=0 OR events_done=0 OR identity_done=0 OR relation_done=0)) OR EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0) OR EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND (parent_resolved=0 OR root_key IS NULL OR cost_done=0))",[ns],|r|r.get(0)).map_err(error)?;
+        if unfinished {
+            return Ok((Outcome::Conflict, None));
+        }
+        let mut covered = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        let mut unchanged = true;
+        for (row, encoded) in prepared.rows.iter().zip(&metadata) {
+            if !keys.insert(&row.key) || row.sources.is_empty() {
+                return Ok((Outcome::Conflict, None));
+            }
+            let endpoint:Option<String>=tx.query_row("SELECT metadata FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
+            let Some(endpoint) = endpoint else {
+                return Ok((Outcome::Conflict, None));
+            };
+            let endpoint: crate::model::relation_stage::Endpoint =
+                serde_json::from_str(&endpoint).map_err(|e| StoreError::Data(e.to_string()))?;
+            // This bounded publisher admits the exact staged primitive row.
+            // Final transcript/query/slot derivation remains a separate port.
+            if serde_json::to_string(&endpoint.row).map_err(|e| StoreError::Data(e.to_string()))?
+                != *encoded
+            {
+                return Ok((Outcome::Conflict, None));
+            }
+            let old:Option<String>=tx.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
+            unchanged &= old.as_ref() == Some(encoded);
+            for source in &row.sources {
+                let path = source.path.to_string_lossy().into_owned();
+                if !staged.contains(&path) {
+                    return Ok((Outcome::Conflict, None));
+                }
+                let Some((_, ledger)) =
+                    crate::events::store::ledger_row(&tx, &path).map_err(error)?
+                else {
+                    return Ok((Outcome::Conflict, None));
+                };
+                let mut observed = ledger.source(&source.path, &source.native_id);
+                observed.native_role = source.native_role.clone();
+                if observed != *source
+                    || crate::events::Stat::of(&source.path).ok().as_ref() != Some(&ledger.stat)
+                    || !crate::events::store::admitted_roles_current(
+                        &tx,
+                        std::slice::from_ref(source),
+                        &self.source,
+                    )
+                    .map_err(error)?
+                {
+                    return Ok((Outcome::Conflict, None));
+                }
+                covered.insert(path);
+            }
+        }
+        if covered.into_iter().collect::<Vec<_>>() != staged {
+            return Ok((Outcome::Conflict, None));
+        }
+        // All stale/scope/Raw/claim checks precede the first durable write.
+        let old_epoch:Option<String>=tx.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_publication_epoch'",[ns],|r|r.get(0)).optional().map_err(error)?;
+        let mut projections_unchanged = true;
+        for projection in &prepared.transcripts {
+            let row = projection_rows[projection.key.as_str()];
+            let slots = projection
+                .slots
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let expected = crate::slot_projection::generation(&slots, &row.sources)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let actual:Option<String> = tx.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2 AND version=?3",params![ns,projection.key,crate::slot_projection::VERSION],|r|r.get(0)).optional().map_err(error)?;
+            projections_unchanged &= actual.as_ref() == Some(&expected);
+        }
+        let repeat = unchanged
+            && projections_unchanged
+            && previous.is_some()
+            && prepared.claims.iter().all(|(_, claim)| claim.is_none());
+        let old_epoch = old_epoch
+            .map(|s| s.parse::<u64>())
+            .transpose()
+            .map_err(|_| refuse("semantic_publication_epoch"))?
+            .unwrap_or(0);
+        let epoch = if repeat {
+            old_epoch
+        } else {
+            old_epoch
+                .checked_add(1)
+                .ok_or_else(|| refuse("semantic_publication_epoch"))?
+        }
+        .to_string();
+        let version = crate::model::summary::CATALOG_VERSION.to_string();
+        let generation = if repeat {
+            previous
+                .clone()
+                .ok_or_else(|| refuse("semantic_publication_replay_head"))?
+        } else {
+            let mut generation_metadata = metadata.clone();
+            if !projection_witness.is_empty() {
+                generation_metadata.push(
+                    serde_json::to_string(&projection_witness)
+                        .map_err(|e| StoreError::Data(e.to_string()))?,
+                );
+            }
+            crate::storage::catalog::component_generation(
+                &version,
+                previous.as_deref(),
+                &epoch,
+                &generation_metadata,
+            )
+        };
+        publication_phase("original_history");
+        let history = super::history::OriginalHistory::admitted(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
+        if !crate::storage::catalog::preserve_replacement_rows(&history, &prepared.rows)
+            .map_err(error)?
+        {
+            // Only private custody checkpoints commit; Current and its claims
+            // remain owned by the original generation until custody completes.
+            tx.commit().map_err(error)?;
+            return Ok((Outcome::Deferred, None));
+        }
+        publication_phase("composite_history");
+        crate::storage::catalog::publish_history_rows(
+            &history,
+            &prepared.rows,
+            Some(&prepared.transcripts),
+        )
+        .map_err(error)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
+        publication_phase("slot_effects");
+        if !prepared.transcripts.is_empty() {
+            crate::storage::catalog::publish_slot_rows(
+                &super::publication::SlotWriter::admitted(&tx, &self.source)
+                    .map_err(StoreError::Configured)?,
+                &prepared.rows,
+                &prepared.transcripts,
+            )?;
+            tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_projection_catalog_generation',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,generation]).map_err(error)?;
+        } else if !repeat {
+            tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='slot_projection_catalog_generation'",[ns]).map_err(error)?;
+        }
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_slots").map_err(error)?;
+        publication_phase("current_effects");
+        let current_effects = super::publication::CurrentWriter::admitted(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
+        for (row, encoded) in prepared.rows.iter().zip(&metadata) {
+            use crate::storage::catalog::CurrentPublicationStore;
+            if current_effects.current(row, encoded).map_err(error)? {
+                crate::storage::catalog::publish_current_sources(&current_effects, row)
+                    .map_err(error)?;
+            }
+        }
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_rows").map_err(error)?;
+        publication_phase("search_effects");
+        crate::catalog_search::publish_current_rows_with_store(
+            &tx,
+            &prepared.rows.iter().collect::<Vec<_>>(),
+            &super::search::SearchWriter::admitted(&tx, &self.source)
+                .map_err(StoreError::Configured)?,
+        )
+        .map_err(error)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_search").map_err(error)?;
+        publication_phase("publication_proof");
+        tx.execute(
+            "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                ns,
+                generation,
+                batch.epoch,
+                i64::try_from(self.source.admission)
+                    .map_err(|_| refuse("semantic_admission_range"))?,
+                batch.base_generation,
+                batch.source_revision,
+                proof_digest,
+                claims_text,
+                metadata_text
+            ],
+        )
+        .map_err(error)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
+        publication_phase("claim_ack");
+        for (path, claim) in &prepared.claims {
+            if let Some(claim) = claim
+                && tx.execute("DELETE FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND revision=?3",params![ns,path,claim]).map_err(error)? != 1
+            {
+                return Err(refuse("semantic_publication_claim_changed"));
+            }
+        }
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_ack").map_err(error)?;
+        publication_phase("head_and_hints");
+        publication_head
+            .publish_generation(&generation, &version)
+            .map_err(StoreError::Configured)?;
+        tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,crate::model::now_ms().to_string()]).map_err(error)?;
+        tx.execute("UPDATE main.catalog_semantic_sources SET publication_done=1,ack_done=1,claim=NULL WHERE namespace=?1",[ns]).map_err(error)?;
+        tx.execute(
+            "UPDATE main.catalog_semantic_endpoints SET published=1 WHERE namespace=?1",
+            [ns],
+        )
+        .map_err(error)?;
+        tx.execute(
+            "UPDATE main.catalog_semantic_stage SET generation=?2 WHERE namespace=?1",
+            params![ns, generation],
+        )
+        .map_err(error)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_head").map_err(error)?;
+        publication_phase("commit");
+        tx.commit().map_err(error)?;
+        self.source.generation = Some(generation.clone());
+        Ok((Outcome::Written, Some(generation)))
+    }
+
+    pub(crate) fn finish(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        self.source
+            .validate_publication(&tx)
+            .map_err(StoreError::Configured)?;
+        let ns = self.source.namespace();
+        if self.epoch != Some(epoch) || head(&tx).map_err(error)? != self.source.generation {
+            return Ok(Outcome::Conflict);
+        }
+        let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication' AND generation IS ?3) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND (publication_done=0 OR ack_done=0))",params![ns,epoch,self.source.generation],|r|r.get(0)).map_err(error)?;
+        if !ready {
+            return Ok(Outcome::Conflict);
+        }
+        for table in crate::events::store::configured::semantic_tables() {
+            tx.execute(
+                &format!("DELETE FROM main.{table} WHERE namespace=?1"),
+                [ns],
+            )
+            .map_err(error)?;
+        }
+        tx.commit().map_err(error)?;
+        self.epoch = None;
+        Ok(Outcome::Written)
+    }
+
+    pub(crate) fn select(
+        &mut self,
+        epoch: i64,
+        selector: &crate::model::relation_stage::Selector,
+    ) -> Result<crate::model::relation_stage::Selection, StoreError> {
+        let tx = self.db.transaction().map_err(error)?;
+        self.source.validate(&tx).map_err(StoreError::Configured)?;
+        let ns = self.source.namespace();
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND resetting=0)",params![ns,epoch],|r|r.get(0)).map_err(error)?;
+        if !valid {
+            return Err(refuse("stale semantic selector"));
+        }
+        match selector {
+            crate::model::relation_stage::Selector::NativeKey { native, harness } => {
+                let key:Option<String>=tx.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3",params![ns,harness,native],|r|r.get(0)).optional().map_err(error)?;
+                Ok(crate::model::relation_stage::Selection {
+                    count: usize::from(key.is_some()),
+                    key,
+                    ..Default::default()
+                })
+            }
+            _ => Err(refuse("semantic_nonprimitive_selector_pending")),
+        }
+    }
+
+    pub(crate) fn replay(
+        &mut self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> Result<Context, StoreError> {
+        if owners.len() > 64 || !after.is_empty() {
+            return Err(refuse("semantic_nonprimitive_replay_pending"));
+        }
+        let tx = self.db.transaction().map_err(error)?;
+        self.source.validate(&tx).map_err(StoreError::Configured)?;
+        let ns = self.source.namespace();
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication' AND resetting=0)",params![ns,epoch],|r|r.get(0)).map_err(error)?;
+        if !valid {
+            return Err(refuse("stale semantic replay epoch"));
+        }
+        let relations: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_relations WHERE namespace=?1)",
+                [ns],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if relations {
+            return Err(refuse("semantic_nonprimitive_replay_pending"));
+        }
+        let mut context = Context {
+            epoch: Some(epoch),
+            ..Default::default()
+        };
+        let mut bytes = 0usize;
+        for owner in owners {
+            let row:Option<(String,String,Option<f64>)>=tx.query_row("SELECT metadata,root_key,family_cost FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,owner],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(error)?;
+            if let Some((text, root, cost)) = row {
+                bytes += text.len();
+                if bytes > 1048576 {
+                    return Err(refuse("semantic_context_budget"));
+                }
+                let mut endpoint: crate::model::relation_stage::Endpoint =
+                    serde_json::from_str(&text).map_err(|e| StoreError::Data(e.to_string()))?;
+                endpoint.root = root;
+                context.family_costs.insert(owner.clone(), cost);
+                context.endpoints.insert(owner.clone(), endpoint);
+            }
+        }
+        Ok(context)
+    }
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
         let mut db = capability.journal().connection()?;
@@ -387,6 +934,19 @@ impl Stage {
             |_| Ok(1_i64),
         )
         .map_err(failed)?;
+        if capability.owner.is_some() {
+            tx.create_scalar_function(
+                "semon_semantic_publisher",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1_i64),
+            )
+            .map_err(failed)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER NOT NULL,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,epoch)) STRICT, WITHOUT ROWID;").map_err(failed)?;
+            super::catalog_namespace::guard(&tx, "storage_semantic_publications")?;
+            tx.execute_batch("CREATE TRIGGER IF NOT EXISTS storage_semantic_proof_immutable_update BEFORE UPDATE ON storage_semantic_publications BEGIN SELECT RAISE(ABORT,'immutable semantic proof'); END; CREATE TRIGGER IF NOT EXISTS storage_semantic_proof_immutable_delete BEFORE DELETE ON storage_semantic_publications BEGIN SELECT RAISE(ABORT,'immutable semantic proof'); END;").map_err(failed)?;
+        }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS storage_semantic_profiles(namespace TEXT PRIMARY KEY,admission INTEGER NOT NULL,recipe TEXT NOT NULL,epoch INTEGER NOT NULL) STRICT;").map_err(failed)?;
         for table in crate::events::store::configured::semantic_tables()
             .iter()
@@ -623,7 +1183,9 @@ impl Stage {
                         context.endpoints.insert(endpoint.row.key.clone(), endpoint);
                     }
                     if paths.is_empty() {
-                        return Err(refuse("semantic_publication_pending"));
+                        tx.execute("UPDATE main.catalog_semantic_stage SET phase='publication' WHERE namespace=?1",[ns]).map_err(error)?;
+                        result_phase = Phase::Publication;
+                        paths=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND publication_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
                     }
                 }
             }

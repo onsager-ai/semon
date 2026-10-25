@@ -453,16 +453,25 @@ test(
           const records = await finishNativeDiagnostic(start, label);
           return records.at(-1);
         };
-        const navigateNativeWithRetry = async (label, action, canonicalPath) => {
+        const navigateNativeWithRetry = async (
+          label,
+          action,
+          canonicalPath,
+          requestedPath = canonicalPath,
+        ) => {
           let record = await captureNativeNavigation(label, action);
-          const detail = JSON.stringify(record);
+          let detail = JSON.stringify(record);
           assert.equal(record.method, 'GET', `${label} navigation is a read: ${detail}`);
-          assert.equal(record.canonicalPath, canonicalPath, `${label} canonical path: ${detail}`);
           assert.ok(
             record.status === 200 || record.status === 503,
             `${label} unexpected HTTP status: ${detail}`,
           );
           if (record.status === 503) {
+            assert.equal(
+              record.canonicalPath,
+              requestedPath,
+              `${label} retry starts from the requested path: ${detail}`,
+            );
             const retryMessage =
               'The recorded session index is updating. Reload this page to retry.';
             assert.equal(
@@ -477,7 +486,10 @@ test(
             const retryURL = new URL(href, url[1]);
             const currentURL = new URL(nativePage.url());
             assert.equal(retryURL.origin, currentURL.origin, `${label} retry stays same-origin`);
-            assert.equal(retryURL.pathname, canonicalPath, `${label} retry keeps canonical path`);
+            assert.ok(
+              [requestedPath, canonicalPath].includes(retryURL.pathname),
+              `${label} retry keeps its requested or canonical path`,
+            );
             assert.equal(
               retryURL.searchParams.get('native'),
               '1',
@@ -500,12 +512,16 @@ test(
             record = await captureNativeNavigation(`${label} documented GET retry`, (timeout) =>
               nativePage.goto(retryURL.href, { timeout }),
             );
+            detail = JSON.stringify(record);
             assert.equal(record.method, 'GET', `${label} documented retry is a read`);
             assert.equal(
               record.canonicalPath,
               canonicalPath,
               `${label} GET retry canonical path: ${JSON.stringify(record)}`,
             );
+          }
+          if (record.status === 200) {
+            assert.equal(record.canonicalPath, canonicalPath, `${label} canonical path: ${detail}`);
           }
           assert.equal(
             record.status,
@@ -560,6 +576,7 @@ test(
             (timeout) =>
               nativePage.goto(url[1] + '/s/codex/native-tools?machine=local&native=1', { timeout }),
             '/session/local/native-tools',
+            '/s/codex/native-tools',
           );
           const thinking = nativePage
             .locator('details')

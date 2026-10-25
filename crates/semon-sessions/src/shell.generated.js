@@ -2142,7 +2142,7 @@ globalThis.__semonUIShared = __semonUIShared;
       document,
       "close",
       (event) => {
-        if (event.target instanceof HTMLDialogElement) {
+        if (event.target instanceof HTMLDialogElement && !event.target.open) {
           waitingForms.delete(event.target);
           dialogs.delete(event.target);
         }

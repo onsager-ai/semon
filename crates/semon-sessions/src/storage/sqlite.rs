@@ -3,10 +3,12 @@ pub(crate) mod catalog;
 pub(crate) mod catalog_namespace;
 pub(crate) mod changes;
 pub(crate) mod configured_index;
+pub(crate) mod history;
 pub(crate) mod namespace;
 pub(crate) mod navigation;
 pub(crate) mod publication;
 pub(crate) mod query;
+pub(crate) mod search;
 pub(crate) mod source_journal;
 pub(crate) use configured_index::open as open_configured_index;
 #[cfg(test)]
@@ -23,6 +25,8 @@ use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::time::Duration;
 
 pub(super) fn failed(error: rusqlite::Error) -> StorageError {
+    #[cfg(test)]
+    semantic::diagnose(&error);
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
         _ => StorageError::Unavailable,
