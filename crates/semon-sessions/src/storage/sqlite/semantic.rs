@@ -387,7 +387,8 @@ impl Stage {
         {
             return Err(refuse("semantic_publication_nonprimitive_owners_pending"));
         }
-        let projection_rows: std::collections::BTreeMap<_, _> = prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
+        let projection_rows: std::collections::BTreeMap<_, _> =
+            prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
         let mut projection_keys = std::collections::BTreeSet::new();
         let mut slot_bytes = 0usize;
         for projection in &prepared.transcripts {
@@ -398,10 +399,18 @@ impl Stage {
                 return Err(refuse("semantic_publication_projection_budget"));
             }
             for slot in &projection.slots {
-                if slot.source_paths().iter().any(|path| !row.sources.iter().any(|s| &s.path == *path)) {
+                if slot
+                    .source_paths()
+                    .iter()
+                    .any(|path| !row.sources.iter().any(|s| &s.path == *path))
+                {
                     return Err(refuse("semantic_publication_projection_source"));
                 }
-                slot_bytes = slot_bytes.saturating_add(serde_json::to_vec(slot).map_err(|e| StoreError::Data(e.to_string()))?.len());
+                slot_bytes = slot_bytes.saturating_add(
+                    serde_json::to_vec(slot)
+                        .map_err(|e| StoreError::Data(e.to_string()))?
+                        .len(),
+                );
                 if slot_bytes > 1048576 {
                     return Err(refuse("semantic_publication_projection_budget"));
                 }
@@ -410,7 +419,11 @@ impl Stage {
         if !prepared.transcripts.is_empty() && projection_keys.len() != projection_rows.len() {
             return Err(refuse("semantic_publication_projection_owner"));
         }
-        let projection_witness = prepared.transcripts.iter().map(|p| (&p.key, &p.slots, p.repair)).collect::<Vec<_>>();
+        let projection_witness = prepared
+            .transcripts
+            .iter()
+            .map(|p| (&p.key, &p.slots, p.repair))
+            .collect::<Vec<_>>();
         let metadata = prepared
             .rows
             .iter()
@@ -581,12 +594,19 @@ impl Stage {
         let mut projections_unchanged = true;
         for projection in &prepared.transcripts {
             let row = projection_rows[projection.key.as_str()];
-            let slots = projection.slots.iter().map(serde_json::to_string).collect::<Result<Vec<_>,_>>().map_err(|e|StoreError::Data(e.to_string()))?;
-            let expected = crate::slot_projection::generation(&slots, &row.sources).map_err(|e|StoreError::Data(e.to_string()))?;
+            let slots = projection
+                .slots
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let expected = crate::slot_projection::generation(&slots, &row.sources)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
             let actual:Option<String> = tx.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2 AND version=?3",params![ns,projection.key,crate::slot_projection::VERSION],|r|r.get(0)).optional().map_err(error)?;
             projections_unchanged &= actual.as_ref() == Some(&expected);
         }
-        let repeat = unchanged && projections_unchanged
+        let repeat = unchanged
+            && projections_unchanged
             && previous.is_some()
             && prepared.claims.iter().all(|(_, claim)| claim.is_none());
         let old_epoch = old_epoch
@@ -610,7 +630,10 @@ impl Stage {
         } else {
             let mut generation_metadata = metadata.clone();
             if !projection_witness.is_empty() {
-                generation_metadata.push(serde_json::to_string(&projection_witness).map_err(|e|StoreError::Data(e.to_string()))?);
+                generation_metadata.push(
+                    serde_json::to_string(&projection_witness)
+                        .map_err(|e| StoreError::Data(e.to_string()))?,
+                );
             }
             crate::storage::catalog::component_generation(
                 &version,
@@ -633,7 +656,8 @@ impl Stage {
         crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
         if !prepared.transcripts.is_empty() {
             crate::storage::catalog::publish_slot_rows(
-                &super::publication::SlotWriter::admitted(&tx, &self.source).map_err(StoreError::Configured)?,
+                &super::publication::SlotWriter::admitted(&tx, &self.source)
+                    .map_err(StoreError::Configured)?,
                 &prepared.rows,
                 &prepared.transcripts,
             )?;
