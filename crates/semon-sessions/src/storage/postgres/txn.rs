@@ -99,6 +99,7 @@ impl PgPool {
             if verify_schema {
                 schema::verify(&mut tx)?;
                 super::store_metadata::lock(&mut tx, matches!(kind, TxnKind::StoreWrite))?;
+                if matches!(kind, TxnKind::Write) { super::store_metadata::lock_publication(&mut tx)?; }
             }
             let value = operation(&mut tx)?;
             tx.check()?;
