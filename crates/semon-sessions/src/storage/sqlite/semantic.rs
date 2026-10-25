@@ -807,7 +807,10 @@ impl Stage {
         let mut real_projection_keys = std::collections::BTreeSet::new();
         let mut slot_bytes = 0usize;
         for projection in &prepared.transcripts {
-            if !projection_keys.insert(&projection.key) || projection.slots.len() > 64 {
+            // 64 bounds source/owner admission, not a native transcript's
+            // length. Slot work is bounded by the aggregate byte budget below,
+            // as the shared writer accepts complete multi-page transcripts.
+            if !projection_keys.insert(&projection.key) {
                 return Err(refuse("semantic_publication_projection_budget"));
             }
             let row = projection_rows.get(projection.key.as_str());
