@@ -496,12 +496,48 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
         self.db.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key='',after_edge='' WHERE catalog_semantic_frontier.done=1",params![self.ns,kind,value])?;
         Ok(())
     }
-    fn native(&self, _id: &str) -> rusqlite::Result<()> {
-        // The preflight gives this unported discovery family a typed refusal.
-        Err(rusqlite::Error::InvalidQuery)
+    fn native(&self, id: &str) -> rusqlite::Result<()> {
+        crate::events::store::semantic_stage::native_frontier_with(&ScopedNativeFrontier { db: self.db, ns: self.ns }, "claude", id)
     }
     fn done(&self) -> rusqlite::Result<bool> {
         self.db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 AND events_done=0)",[self.ns],|r|r.get(0))
+    }
+}
+
+struct ScopedNativeFrontier<'a> { db: &'a Connection, ns: &'a str }
+impl crate::events::store::semantic_stage::NativeFrontierPort for ScopedNativeFrontier<'_> {
+    fn needed_native(&self, harness: &str, id: &str) -> rusqlite::Result<bool> {
+        self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources own WHERE own.namespace=?1 AND own.harness=?2 AND own.native_id=?3 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=own.source_path))",params![self.ns,harness,id],|r|r.get(0))
+    }
+    fn needed_dependency(&self, harness: &str, id: &str) -> rusqlite::Result<bool> {
+        let sql = crate::events::store::semantic_stage::support_sql(self.db,
+            "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))",
+            "SELECT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE d.namespace=?1 AND d.harness=?2 AND d.native_id=?3 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=d.source_path))")?;
+        self.db.query_row(sql, params![self.ns,harness,id],|r|r.get(0))
+    }
+    fn needed_nativeall(&self, id: &str) -> rusqlite::Result<bool> {
+        self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog_sources own WHERE own.namespace=?1 AND own.native_id=?2 AND own.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=own.source_path))",params![self.ns,id],|r|r.get(0))
+    }
+    fn needed_filename(&self, copilot: bool, value: &str) -> rusqlite::Result<bool> {
+        let predicate = if copilot { "source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2" } else { "substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2" };
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM (SELECT f.path source_path FROM main.files f WHERE f.namespace=?1 UNION SELECT i.source_path FROM main.session_catalog_invalidations i WHERE i.namespace=?1) candidate WHERE {predicate} AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=candidate.source_path))");
+        self.db.query_row(&sql,params![self.ns,value],|r|r.get(0))
+    }
+    fn needed_header(&self, parent: bool, qualified: bool, id: &str) -> rusqlite::Result<bool> {
+        let field = if parent { "metadata.parent_thread" } else { "id" };
+        let dependency = if parent { "parent" } else { "native" };
+        let header_scoped = crate::events::store::configured::metadata_sql(self.db,"","namespace")? == "namespace";
+        let support_scoped = crate::events::store::semantic_stage::support_sql(self.db,"","namespace")? == "namespace";
+        let owner = if header_scoped { "" } else { "JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='meta' AND owner.qualification=0" };
+        let guard = if header_scoped { "m.namespace=?1 AND" } else { "" };
+        let dependencies = if support_scoped { "d.namespace=?1 AND" } else { "EXISTS(SELECT 1 FROM storage_event_tables dependency_owner WHERE dependency_owner.namespace=?1 AND dependency_owner.table_name='catalog_native_dependencies' AND dependency_owner.qualification=0) AND" };
+        let qualification = if qualified { format!("AND NOT EXISTS(SELECT 1 FROM main.catalog_native_dependencies d WHERE {dependencies} d.source_path=substr(m.key,length('native_codex_header:')+1) AND d.native_id=?2 AND d.harness='semantic-{dependency}:codex')") } else { String::new() };
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM main.meta m {owner} WHERE {guard} m.key GLOB 'native_codex_header:*' AND json_valid(m.value) AND json_extract(m.value,'$.header.{field}')=?2 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path=substr(m.key,length('native_codex_header:')+1)) {qualification})");
+        self.db.query_row(&sql,params![self.ns,id],|r|r.get(0))
+    }
+    fn queue(&self, kind: &str, value: &str, harness: &str) -> rusqlite::Result<()> {
+        self.db.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,?4) ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key='',after_edge='' WHERE catalog_semantic_frontier.done=1",params![self.ns,kind,value,harness])?;
+        Ok(())
     }
 }
 
@@ -532,11 +568,6 @@ fn event_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0)))",[ns],|r|r.get(0)).map_err(error)?;
     if unsupported {
         return Err(refuse("semantic_nonprimitive_event_harness"));
-    }
-    let predicate = crate::events::store::semantic_stage::projection_predicate("e.");
-    let peer: bool=c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id JOIN main.catalog_semantic_inputs i ON i.namespace=f.namespace AND i.source_path=f.path WHERE e.namespace=?1 AND f.namespace=?1 AND i.namespace=?1 AND i.harness='claude' AND e.extra=0 AND e.peer_sock IS NOT NULL AND {predicate})"),[ns],|r|r.get(0)).map_err(error)?;
-    if peer {
-        return Err(refuse("semantic_claude_native_frontier_pending"));
     }
     crate::events::store::semantic_stage::event_page_with(&ScopedProjection { db: c, ns })
         .map_err(error)
@@ -589,8 +620,12 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
                 "SELECT f.path FROM main.events e JOIN main.files f ON f.namespace=e.namespace AND f.file_id=e.file_id WHERE e.namespace=?1 AND f.namespace=?1 AND e.k='tool' AND e.n='SendMessage' AND e.reply_m=?2 AND f.path>?3 GROUP BY f.path ORDER BY f.path LIMIT ?4"
             }
             "dependency" => {
-                "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4"
+                crate::events::store::semantic_stage::support_sql(c,
+                    "SELECT d.source_path FROM main.catalog_native_dependencies d JOIN storage_event_tables owner ON owner.namespace=?1 AND owner.table_name='catalog_native_dependencies' AND owner.qualification=0 WHERE d.native_id=?2 AND d.harness=?5 AND d.source_path>?3 GROUP BY d.source_path ORDER BY d.source_path LIMIT ?4",
+                    "SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND native_id=?2 AND harness=?5 AND source_path>?3 GROUP BY source_path ORDER BY source_path LIMIT ?4").map_err(error)?
             }
+            "claudeid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND substr(path,length(rtrim(path,replace(path,'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
+            "copilotid" => "SELECT source_path FROM (SELECT path source_path FROM main.files WHERE namespace=?1 AND path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?2 UNION SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?2) WHERE source_path>?3 ORDER BY source_path LIMIT ?4",
             "nativeall" => {
                 "SELECT source_path FROM main.session_catalog_sources WHERE namespace=?1 AND native_id=?2 AND source_path>?3 AND lifecycle='current' GROUP BY source_path ORDER BY source_path LIMIT ?4"
             }
