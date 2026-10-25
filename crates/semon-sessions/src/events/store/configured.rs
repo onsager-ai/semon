@@ -1344,10 +1344,7 @@ impl Writer {
 mod tests {
     use super::*;
     use crate::events::EventCache;
-    use crate::storage::{
-        LogicalSourceNamespace, StoreBackend,
-        source_observations::SourceClaims,
-    };
+    use crate::storage::{LogicalSourceNamespace, StoreBackend, source_observations::SourceClaims};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
