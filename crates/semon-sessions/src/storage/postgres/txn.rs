@@ -51,8 +51,7 @@ impl PgPool {
         verify_schema: bool,
         operation: impl FnOnce(&mut PgTxn<'_>) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        // Keep namespace+operation primary keys below PG's btree tuple limit.
-        if namespace.as_str().len() > 1024 || namespace.as_str().contains('\0') {
+        if namespace.as_str().is_empty() || namespace.as_str().len() > 4096 {
             return Err(StorageError::InvalidArguments);
         }
         let mut lease = self.acquire(control)?;
@@ -98,7 +97,7 @@ impl PgPool {
             tx.driver
                 .query_one(
                     "SELECT set_config('semon.namespace', $1, true)",
-                    &[&namespace.as_str()],
+                    &[&super::namespace_context(namespace)],
                 )
                 .map_err(sqlstate::error)?;
             tx.check()?;
@@ -119,7 +118,7 @@ impl PgPool {
             }
             tx.driver
                 .commit()
-                .map_err(|_| StorageError::CommitUncertain)?;
+                .map_err(|error| sqlstate::classify(error.code().map(|code| code.code()), true))?;
             #[cfg(test)]
             if super::tests::lose_ack() {
                 return Err(StorageError::CommitUncertain);

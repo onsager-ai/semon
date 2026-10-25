@@ -13,5 +13,16 @@ pub use cancel::PgCancellation;
 pub use operations::{OperationIdentity, Reconciliation};
 pub use pool::{PgConnection, PgConnectionFactory, PgPool, PoolLimits};
 
+/// Lossless GUC transport for the common opaque UTF-8 bytes, including NUL.
+fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(namespace.as_str().len() * 2);
+    for byte in namespace.as_str().bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 15) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests;
