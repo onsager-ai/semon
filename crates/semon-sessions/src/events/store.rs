@@ -3909,6 +3909,7 @@ impl SqliteStore {
             }
             stage("search", &transaction);
             let generation = {
+                let mut return_component_generation = None;
                 let mut digest = Sha256::new();
                 digest.update(version.as_bytes());
                 if claims.is_some() {
@@ -3920,12 +3921,7 @@ impl SqliteStore {
                             |row| row.get(0),
                         )
                         .map_err(failure)?;
-                    digest.update(previous.as_deref().unwrap_or("").as_bytes());
-                    digest.update(epoch.as_bytes());
-                    for value in &metadata {
-                        digest.update((value.len() as u64).to_le_bytes());
-                        digest.update(value.as_bytes());
-                    }
+                    return_component_generation = Some(crate::storage::catalog::component_generation(&version,previous.as_deref(),&epoch,&metadata));
                 } else {
                     for table in ["session_catalog", "session_history_catalog"] {
                         digest.update(table.as_bytes());
@@ -3942,7 +3938,7 @@ impl SqliteStore {
                         }
                     }
                 }
-                format!("{:x}", digest.finalize())
+                return_component_generation.unwrap_or_else(||format!("{:x}", digest.finalize()))
             };
             if previous.as_deref() != Some(&generation)
                 || previous_version.as_deref() != Some(&version)

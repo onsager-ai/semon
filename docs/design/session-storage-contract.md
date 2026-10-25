@@ -1215,3 +1215,37 @@ finish/select/replay, competing Catalog generation tests, immutable retained
 snapshots/leases/GC/Raw custody, all other owner ports, PostgreSQL, supported-store
 migration/cutover/rollback and Hub #313 remain required. The cold full-suite gate
 and #380 image acceptance remain open; #477 merge stays held.
+
+Worker29 adds a private initial-Current publication candidate, not full S1B
+qualification. The admitted composite owner supplies an IMMEDIATE transaction
+that checks Source admission/physical inventory, stage epoch/runtime, Catalog
+base generation, journal revision, exact claims, staged completion and current
+Raw/role witnesses before writes. Current rows and their existing scoped change
+triggers, an append-only proof/claim inventory, exact-revision ACKs and the bound
+head commit together. Four fault points cover rows, proof, ACK and head. The
+component-generation hash recipe is shared with the legacy publisher; its
+History/search/slot publication body has NOT been ported or duplicated.
+
+Private finish removes only the matching namespace's working stage after all
+publication/ACK flags are complete. Native-key selection and bounded no-relation
+endpoint replay now have scoped implementations. Identical publication retry
+is read-only, and a new stage over unchanged Raw retains the generation digest.
+The unbound transitional head still refuses enrolled stores. Public factories,
+configuration and qualification flags remain closed.
+
+This candidate refuses replacement of differing existing Current metadata until
+retained History is ported. It also refuses transcripts, PID/relations, lineage,
+native-parent and withdrawal payloads; non-native-key selectors and incident
+relation replay remain unported. This is therefore NOT the complete existing
+publication/recipe algorithm and NOT S1B acceptance. Generic partial/closed/full
+Catalog writers, slot/search/history/description/trace owners and the typed
+multi-Source proof/repair reader remain fenced. Previously authored private
+profiles with unconditional Catalog fences are not upgraded implicitly.
+
+Five new explicit CI cases cover actual two-Source ingest/stage/publication,
+competing epochs and stale begin/publish zero-write snapshots, rollback at each
+commit step, Raw replay idempotence and preservation of the unbound head refusal.
+No local checks ran; CI and independent acceptance are pending. Worker count is
+29 without reset. Worker28 cold witness/instrumentation, PG/Cargo, UI and Hub are
+untouched. Full-domain S1B, S2-S4, #479 integration, migration/cutover/rollback and
+Hub #313 remain required; #380 completion still gates #477 merge.
