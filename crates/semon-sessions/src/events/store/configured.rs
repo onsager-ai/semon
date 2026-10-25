@@ -6474,7 +6474,11 @@ mod tests {
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
                 let result = cache.publish_semantic_catalog(batch, model.prepared());
                 assert!(result.is_err(), "{point}");
-                let reason = result.as_ref().err().map(ToString::to_string).unwrap_or_default();
+                let reason = result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
                 let refusal = if reason.starts_with("semantic_")
                     && reason.len() < 128
                     && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')

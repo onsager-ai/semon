@@ -43,7 +43,7 @@ The repair distinguishes real and virtual transcript keys. A virtual projection
 must be an explicit typed stub in a relation which names that key and has a real
 endpoint in BOTH this publication's rows and prepared endpoints. Its slots must
 reference zero Raw paths. All projections still charge duplicate/slot/byte
-limits. The exact real projection key set must still cover all real rows.
+and byte limits. The exact real projection key set must still cover all real rows.
 Namespace-scoped staged identity/ledger/claim checks validate those real anchors
 inside the transaction. The existing exact recorded staged_projection_witness
 check covers every stub field, relation and transcript before the first write.
@@ -59,7 +59,7 @@ There is no arbitrary missing-owner exception or new Raw authority.
 
 ## Verification and test changes
 
-No existing assertion changed or was removed. Existing test count remains 83.
+No existing assertion was weakened or removed. Existing test count remains 83.
 The foreign-isolation test gains checks using newly prepared REAL shared-model
 output (not fabricated rows/endpoints): changing a virtual projection key refuses
 with semantic_publication_projection_owner and whole-DB equality; changing a
@@ -72,6 +72,39 @@ was normally pushed early. Exact Storage run40211881972, conformance121224655496
 boundary121224655695 PASS. Formatting121224655572 failed; exact own-SHA artifact
 12606062700, 1438 bytes, was downloaded/applied without a local formatter.
 Final exact revision/check results are recorded below and in the delivery JSON.
+
+First WIP exact-head conformance121224655496 actually executed 32 SQLite + 3
+journal PASS and 82/83 configured PASS. All four publication failures and the
+complete copied selector-value comparison passed. The copied test then reached
+the unchanged fault-consumption assertion and failed before the owners hook.
+The old 64-slot preflight cap conflated source/owner admission with transcript
+length: the unchanged fixture has 65 tool calls. Shared catalog.rs:350-380 and
+sqlite/publication.rs:188-216 publish complete slot vectors without that cap.
+The repair removes ONLY that unsupported slot-count cap; 64 sources, 64 owners,
+64 prepared projections at record, 1MiB aggregate serialized slot bytes, metadata
+and producer-witness bounds remain. Full native transcripts remain byte-bounded.
+
+Intermediate16b87ca5 CI40212312250/job121225983824 failed compilation in the
+new diagnostic: EventCache returns io::Error rather than StoreError. No tests
+executed there; no green claim. Corrected the diagnostic to print only allowlisted
+static semantic refusal names and numeric max_slots. The existing fault assert
+and rollback checks still run unchanged. Exact16b formatting artifact12605908845
+(661 bytes) was applied. Implementation07169a41 follows16b with the slot-count
+correction and diagnostic type fix; exact CI40212508965 is the next check.
+
+The fault helper assertion changed syntactically from inline `publish(...).is_err()`
+to `let result=publish(...); assert!(result.is_err())`, with an allowlisted diagnostic
+added to the SAME fault-consumption equality. This preserves all original truth
+conditions and does not clear the TLS hook. All parity/History/foreign/epoch/proof
+and previous budget assertions retain their original expressions.
+
+Final formatting exactly matches07169a41's own CI artifact12605394639 (560 bytes;
+reverse-apply check succeeds against the local formatting). Boundary121226592973
+passed on07169a41. The final commit includes this formatting plus this evidence
+update, with no further semantic changes. Its exact-head CI results and verified
+full remote SHA are supplied in the Worker JSON; checks pending at handoff-file
+write time must not be read as acceptance. Named full code diff:
+evidence/worker77-publication-driver.diff.patch (base30b54c69 to final code).
 
 Hunk contacts: semantic.rs publication projection preflight and repeat comparison;
 configured.rs ordinary Claude driver/two call sites/foreign-isolation additions.
