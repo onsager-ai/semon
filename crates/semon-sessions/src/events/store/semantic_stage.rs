@@ -2591,7 +2591,8 @@ impl SqliteStore {
                     }
                     let prior: Relation = serde_json::from_str(&old)
                         .map_err(|error| StoreError::Data(error.to_string()))?;
-                    merged = merged.merge_prior(&prior)
+                    merged = merged
+                        .merge_prior(&prior)
                         .map_err(|error| StoreError::Data(error.to_string()))?;
                 }
                 let encoded = json(&merged).map_err(failure)?;

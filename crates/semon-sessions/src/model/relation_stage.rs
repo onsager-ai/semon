@@ -271,7 +271,9 @@ pub(crate) trait OwnerStore {
 impl Relation {
     /// Same exact comparison and physical-sender witness merge for every store.
     pub(crate) fn merge_prior(&self, prior: &Self) -> io::Result<Self> {
-        let witness = prior.source_turn.merge(&self.source_turn)
+        let witness = prior
+            .source_turn
+            .merge(&self.source_turn)
             .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
         let mut before = prior.clone();
         let mut merged = self.clone();
@@ -280,14 +282,22 @@ impl Relation {
         let before = serde_json::to_value(before)?;
         let after = serde_json::to_value(&merged)?;
         if before != after {
-            let before = before.as_object().ok_or_else(|| io::Error::other("invalid relation"))?;
-            let after = after.as_object().ok_or_else(|| io::Error::other("invalid relation"))?;
-            let fields = before.keys().chain(after.keys())
+            let before = before
+                .as_object()
+                .ok_or_else(|| io::Error::other("invalid relation"))?;
+            let after = after
+                .as_object()
+                .ok_or_else(|| io::Error::other("invalid relation"))?;
+            let fields = before
+                .keys()
+                .chain(after.keys())
                 .filter(|key| before.get(*key) != after.get(*key))
-                .map(String::as_str).collect::<BTreeSet<_>>();
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
             return Err(io::Error::other(format!(
                 "conflicting staged native relationship: kind={} fields={}",
-                self.kind, fields.into_iter().collect::<Vec<_>>().join(",")
+                self.kind,
+                fields.into_iter().collect::<Vec<_>>().join(",")
             )));
         }
         merged.source_turn = witness;

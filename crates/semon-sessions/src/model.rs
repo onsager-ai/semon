@@ -7399,7 +7399,10 @@ pub(crate) fn prepare_semantic_batch(
     Ok(SemanticModelBatch { prepared })
 }
 
-fn semantic_withdrawals(options: &Options, inputs: &[crate::Input]) -> io::Result<Vec<relation_stage::Withdrawal>> {
+fn semantic_withdrawals(
+    options: &Options,
+    inputs: &[crate::Input],
+) -> io::Result<Vec<relation_stage::Withdrawal>> {
     let facts = MachineFacts::of(options);
     let runtime = crate::native_evidence::query_runtime_generation(options)?;
     let mut withdrawals = Vec::new();
@@ -7439,10 +7442,14 @@ fn semantic_withdrawals(options: &Options, inputs: &[crate::Input]) -> io::Resul
     }
     for withdrawal in &withdrawals {
         if !withdrawal.current()? {
-            return Err(io::Error::other("native source admission withdrawal changed"));
+            return Err(io::Error::other(
+                "native source admission withdrawal changed",
+            ));
         }
     }
-    if !withdrawals.is_empty() && crate::native_evidence::query_runtime_generation(options)? != runtime {
+    if !withdrawals.is_empty()
+        && crate::native_evidence::query_runtime_generation(options)? != runtime
+    {
         return Err(io::Error::other("native source admission runtime changed"));
     }
     Ok(withdrawals)

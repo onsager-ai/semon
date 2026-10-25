@@ -17,7 +17,12 @@ pub(super) fn validate(db: &Connection) -> Result<(), crate::storage::StorageErr
     let strict: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name='catalog_native_dependencies' AND strict=1 AND wr=1)",[],|r|r.get(0)).map_err(super::failed)?;
     let index: Option<String> = db.query_row("SELECT group_concat(name,',') FROM (SELECT * FROM pragma_index_xinfo('catalog_native_dependency','main') WHERE key=1 ORDER BY seqno)",[],|r|r.get(0)).map_err(super::failed)?;
     let valid_index: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_index_list('catalog_native_dependencies','main') WHERE name='catalog_native_dependency' AND origin='c' AND [unique]=0 AND partial=0)",[],|r|r.get(0)).map_err(super::failed)?;
-    if shape.as_deref() != Some("namespace:TEXT:1:1,source_path:TEXT:1:2,harness:TEXT:1:3,native_id:TEXT:1:4") || !strict || index.as_deref()!=Some("namespace,harness,native_id,source_path") || !valid_index {
+    if shape.as_deref()
+        != Some("namespace:TEXT:1:1,source_path:TEXT:1:2,harness:TEXT:1:3,native_id:TEXT:1:4")
+        || !strict
+        || index.as_deref() != Some("namespace,harness,native_id,source_path")
+        || !valid_index
+    {
         return Err(StorageError::NamespaceUpgradePending);
     }
     // Endpoints, sources/withdrawal and relations are validated byte-for-byte
@@ -28,11 +33,21 @@ pub(super) fn validate(db: &Connection) -> Result<(), crate::storage::StorageErr
 impl OwnerStore for Owners<'_> {
     type Error = rusqlite::Error;
     fn endpoint(&self, endpoint: &Endpoint) -> rusqlite::Result<()> {
-        let parents = endpoint.native_parents.iter().collect::<std::collections::BTreeSet<_>>();
-        if parents.len() > 1 { return Err(rusqlite::Error::InvalidQuery); }
+        let parents = endpoint
+            .native_parents
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if parents.len() > 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let parent = parents.into_iter().next();
-        let task = endpoint.paths.first().and_then(|p| p.rsplit('/').next())
-            .filter(|p| !p.is_empty()).map(str::to_owned).or_else(|| endpoint.nickname.clone());
+        let task = endpoint
+            .paths
+            .first()
+            .and_then(|p| p.rsplit('/').next())
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .or_else(|| endpoint.nickname.clone());
         let metadata = serde_json::to_string(endpoint).map_err(invalid)?;
         self.db.execute("INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,parent_native,parent_native_harness,parent_key,task,nickname,cost,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,parent_native=excluded.parent_native,parent_native_harness=excluded.parent_native_harness,parent_key=excluded.parent_key,task=excluded.task,nickname=excluded.nickname,cost=excluded.cost",params![self.namespace,endpoint.row.key,endpoint.row.harness,parent.map(|p|&p.1),parent.map(|p|&p.0),endpoint.parent,task,endpoint.nickname,endpoint.row.cost.usd,metadata])?;
         for path in &endpoint.paths {
@@ -43,7 +58,11 @@ impl OwnerStore for Owners<'_> {
         }
         if let Some(pid) = endpoint.pid {
             for source in &endpoint.row.sources {
-                self.dependency(source.path.to_string_lossy().as_ref(), "runtime:pid", &pid.to_string())?;
+                self.dependency(
+                    source.path.to_string_lossy().as_ref(),
+                    "runtime:pid",
+                    &pid.to_string(),
+                )?;
             }
         }
         Ok(())
@@ -51,10 +70,16 @@ impl OwnerStore for Owners<'_> {
     fn relation(&self, relation: &Relation) -> rusqlite::Result<()> {
         let old: Option<String> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional()?;
         let merged = if let Some(old) = old {
-            relation.merge_prior(&serde_json::from_str(&old).map_err(invalid)?).map_err(invalid)?
-        } else { relation.clone() };
+            relation
+                .merge_prior(&serde_json::from_str(&old).map_err(invalid)?)
+                .map_err(invalid)?
+        } else {
+            relation.clone()
+        };
         let metadata = serde_json::to_string(&merged).map_err(invalid)?;
-        if metadata.len() > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
+        if metadata.len() > 1048576 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         self.db.execute("INSERT INTO main.catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,relation_id) DO UPDATE SET metadata=excluded.metadata",params![self.namespace,merged.id,merged.from,merged.to,metadata])?;
         Ok(())
     }
@@ -64,18 +89,32 @@ impl OwnerStore for Owners<'_> {
     }
     fn withdrawal(&self, withdrawal: &Withdrawal) -> rusqlite::Result<()> {
         let metadata = serde_json::to_string(withdrawal).map_err(invalid)?;
-        if metadata.len() > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
-        let previous: Option<String> = self.db.query_row("SELECT withdrawal_authority FROM main.catalog_semantic_stage WHERE namespace=?1",[self.namespace],|r|r.get(0))?;
+        if metadata.len() > 1048576 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let previous: Option<String> = self.db.query_row(
+            "SELECT withdrawal_authority FROM main.catalog_semantic_stage WHERE namespace=?1",
+            [self.namespace],
+            |r| r.get(0),
+        )?;
         if let Some(previous) = previous {
             let previous: Withdrawal = serde_json::from_str(&previous).map_err(invalid)?;
-            if previous.facts_path != withdrawal.facts_path || previous.facts_identity != withdrawal.facts_identity || previous.runtime != withdrawal.runtime {
+            if previous.facts_path != withdrawal.facts_path
+                || previous.facts_identity != withdrawal.facts_identity
+                || previous.runtime != withdrawal.runtime
+            {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         } else {
-            self.db.execute("UPDATE main.catalog_semantic_stage SET withdrawal_authority=?2 WHERE namespace=?1",params![self.namespace,metadata])?;
+            self.db.execute(
+                "UPDATE main.catalog_semantic_stage SET withdrawal_authority=?2 WHERE namespace=?1",
+                params![self.namespace, metadata],
+            )?;
         }
         let ledger = crate::events::store::ledger_row(self.db, &withdrawal.path)?
-            .map(|(_,l)|serde_json::to_string(&l)).transpose().map_err(invalid)?;
+            .map(|(_, l)| serde_json::to_string(&l))
+            .transpose()
+            .map_err(invalid)?;
         if self.db.execute("UPDATE main.catalog_semantic_sources SET withdrawal=?3,ledger=?4,index_done=1,events_done=1,identity_done=1,relation_done=1 WHERE namespace=?1 AND source_path=?2 AND index_done=0",params![self.namespace,withdrawal.path,metadata,ledger])? != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -84,29 +123,45 @@ impl OwnerStore for Owners<'_> {
 }
 
 impl Owners<'_> {
-    pub(super) fn replay(&self, epoch: i64, owners: &[String], after: &str) -> rusqlite::Result<crate::model::relation_stage::Context> {
+    pub(super) fn replay(
+        &self,
+        epoch: i64,
+        owners: &[String],
+        after: &str,
+    ) -> rusqlite::Result<crate::model::relation_stage::Context> {
         let mut keys = std::collections::BTreeSet::new();
         for owner in owners {
             for column in ["from_key", "to_key"] {
                 let mut q = self.db.prepare(&format!("SELECT relation_id FROM main.catalog_semantic_relations WHERE namespace=?1 AND {column}=?2 AND relation_id>?3 ORDER BY relation_id LIMIT 64"))?;
-                for key in q.query_map(params![self.namespace,owner,after],|r|r.get::<_,String>(0))? {
+                for key in q.query_map(params![self.namespace, owner, after], |r| {
+                    r.get::<_, String>(0)
+                })? {
                     keys.insert(key?);
-                    if keys.len() > 64 { keys.pop_last(); }
+                    if keys.len() > 64 {
+                        keys.pop_last();
+                    }
                 }
             }
         }
-        let mut out = crate::model::relation_stage::Context { epoch: Some(epoch), ..Default::default() };
+        let mut out = crate::model::relation_stage::Context {
+            epoch: Some(epoch),
+            ..Default::default()
+        };
         let mut bytes = 0usize;
         if after.is_empty() {
             for owner in owners {
                 let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![self.namespace,owner],|r|r.get(0))?;
-                if !exists { continue; }
+                if !exists {
+                    continue;
+                }
                 let endpoint = self.endpoint(owner)?;
                 bytes = bytes.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
-                if bytes > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
+                if bytes > 1048576 {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
                 let cost: Option<f64> = self.db.query_row("SELECT family_cost FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,owner],|r|r.get(0))?;
-                out.family_costs.insert(owner.clone(),cost);
-                out.endpoints.insert(owner.clone(),endpoint);
+                out.family_costs.insert(owner.clone(), cost);
+                out.endpoints.insert(owner.clone(), endpoint);
             }
         }
         for key in keys {
@@ -115,21 +170,26 @@ impl Owners<'_> {
             let mut next = bytes.saturating_add(text.len());
             let mut endpoints = std::collections::BTreeMap::new();
             for key in std::iter::once(&relation.from).chain(relation.to.iter()) {
-                if out.endpoints.contains_key(key) || endpoints.contains_key(key) { continue; }
+                if out.endpoints.contains_key(key) || endpoints.contains_key(key) {
+                    continue;
+                }
                 let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![self.namespace,key],|r|r.get(0))?;
                 if exists {
                     let endpoint = self.endpoint(key)?;
-                    next = next.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
-                    endpoints.insert(key.clone(),endpoint);
+                    next =
+                        next.saturating_add(serde_json::to_vec(&endpoint).map_err(invalid)?.len());
+                    endpoints.insert(key.clone(), endpoint);
                 }
             }
             if next > 1048576 {
-                if out.relations.is_empty() { return Err(rusqlite::Error::InvalidQuery); }
+                if out.relations.is_empty() {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
                 break;
             }
             bytes = next;
             out.endpoints.extend(endpoints);
-            out.relations.insert(key,relation);
+            out.relations.insert(key, relation);
         }
         Ok(out)
     }
