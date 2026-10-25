@@ -525,13 +525,13 @@ pub(super) fn witness(
             }
         }
     }
-    crate::events::tree_rows::witness::digest(
-        labels.iter().map(|(key, value)| (key.as_str(), value.as_str())),
+    Ok(Some(crate::events::tree_rows::witness::digest(
+        labels
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
         models.iter().map(String::as_str),
         tools.iter().map(|(id, name)| (id.as_str(), name.as_str())),
-    )
-    .map(Some)
-    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+    )))
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
@@ -678,5 +678,64 @@ mod namespace_tests {
         tx.rollback().unwrap();
         bind(&db, "a");
         assert!(ready(&db, path, &ledger).unwrap());
+    }
+
+    // The recipe must reproduce the SQLite json_array witness bytes exactly,
+    // including control, NUL, escape and non-BMP content.
+    #[test]
+    fn tree_witness_recipe_matches_sqlite_json_array_bytes() {
+        use crate::events::tree_rows::witness::digest;
+        use sha2::{Digest, Sha256};
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE native_tree_labels(projection_id,label,value);CREATE TABLE native_tree_models(projection_id,model);CREATE TABLE native_tree_tools(projection_id,tool_id,name,closed);").unwrap();
+        let odd = "a\0b\u{1}\u{1f}\t\n\r\u{8}\u{c}\"\\/\u{7f}\u{2028}é🦀";
+        let labels = [
+            ("branch", odd),
+            ("cwd", "/w"),
+            ("first", "🦀"),
+            ("last", ""),
+        ];
+        for (label, value) in labels {
+            c.execute(
+                "INSERT INTO native_tree_labels VALUES(7,?1,?2)",
+                [label, value],
+            )
+            .unwrap();
+        }
+        for model in ["m\0", "m🦀", "Z"] {
+            c.execute("INSERT INTO native_tree_models VALUES(7,?1)", [model])
+                .unwrap();
+        }
+        for (id, name, closed) in [
+            ("t\0", Some(odd), 0),
+            ("t🦀", Some("n"), 0),
+            ("u", Some("closed"), 1),
+            ("v", None, 0),
+        ] {
+            c.execute(
+                "INSERT INTO native_tree_tools VALUES(7,?1,?2,?3)",
+                rusqlite::params![id, name, closed],
+            )
+            .unwrap();
+        }
+        let mut oracle = Sha256::new();
+        for sql in [
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
+            "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
+        ] {
+            oracle.update(sql.as_bytes());
+            let mut statement = c.prepare(sql).unwrap();
+            let mut rows = statement.query([7]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                let value: String = row.get(0).unwrap();
+                oracle.update((value.len() as u64).to_be_bytes());
+                oracle.update(value.as_bytes());
+            }
+        }
+        let mut models = ["m\0", "m🦀", "Z"];
+        models.sort_unstable();
+        let actual = digest(labels, models, [("t\0", odd), ("t🦀", "n")]);
+        assert_eq!(actual, format!("{:x}", oracle.finalize()));
     }
 }
