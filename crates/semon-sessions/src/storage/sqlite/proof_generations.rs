@@ -29,16 +29,17 @@ pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     // Compare the complete authored current physical contract, including key
     // order, STRICT/WITHOUT ROWID, indexes and immutable triggers. Never adopt
     // a partial shape.
-    for statement in SCHEMA.split(';') {
-        let statement = statement.trim();
-        let Some((kind, rest)) = ["TABLE", "INDEX", "TRIGGER"]
-            .into_iter()
-            .find_map(|kind| {
-                statement
-                    .strip_prefix(&format!("CREATE {kind} IF NOT EXISTS "))
-                    .map(|rest| (kind, rest))
-            })
-        else {
+    // Each authored definition occupies one line. Trigger bodies contain an
+    // internal semicolon; keep the complete body when comparing sqlite_schema.
+    for statement in SCHEMA.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let statement = statement
+            .strip_suffix(';')
+            .ok_or(StorageError::Unavailable)?;
+        let Some((kind, rest)) = ["TABLE", "INDEX", "TRIGGER"].into_iter().find_map(|kind| {
+            statement
+                .strip_prefix(&format!("CREATE {kind} IF NOT EXISTS "))
+                .map(|rest| (kind, rest))
+        }) else {
             continue;
         };
         let name = if kind == "TABLE" {
@@ -98,7 +99,8 @@ pub(super) fn publish(
                 slots,
                 prefix
             ],
-        ).map_err(failed)?;
+        )
+        .map_err(failed)?;
         for source in &row.sources {
             let digest =
                 crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
@@ -111,13 +113,15 @@ pub(super) fn publish(
                     source.path.to_string_lossy(),
                     digest
                 ],
-            ).map_err(failed)?;
+            )
+            .map_err(failed)?;
         }
         tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
         tx.execute(
             "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
             params![namespace, row.key, id.0],
-        ).map_err(failed)?;
+        )
+        .map_err(failed)?;
         let history: Option<String> = tx.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![namespace, row.key], |r| r.get(0)).optional().map_err(failed)?;
         let mut retained = std::collections::BTreeSet::new();
         if let Some(history) = history {
@@ -144,7 +148,8 @@ pub(super) fn publish(
             tx.execute(
                 "INSERT INTO storage_proof_refs VALUES(?1,?2,'history',?3)",
                 params![namespace, row.key, retained],
-            ).map_err(failed)?;
+            )
+            .map_err(failed)?;
         }
     }
     Ok(())
@@ -336,7 +341,9 @@ impl ReaderRuntime {
             (expected.0.clone(), serial)
         };
         let (publication, proof, metadata, prefix, admission, stream): (String, String, String, String, i64, String) = tx.query_row("SELECT publication,proof,metadata,prefix,admission,stream FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).map_err(failed)?;
-        if ProofGenerationId::derive(ns, owner.admission(), &stream, &proof) != ProofGenerationId(id.clone()) {
+        if ProofGenerationId::derive(ns, owner.admission(), &stream, &proof)
+            != ProofGenerationId(id.clone())
+        {
             return Err(StorageError::ScopeChanged);
         }
         let admission = u64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
@@ -381,7 +388,13 @@ impl Lease {
         let Some(proof) = proof else {
             return Err(StorageError::ScopeChanged);
         };
-        if ProofGenerationId::derive(self.snapshot.namespace.as_str(), self.snapshot.admission, &self.snapshot.stream_epoch, &proof) != self.snapshot.proof_generation {
+        if ProofGenerationId::derive(
+            self.snapshot.namespace.as_str(),
+            self.snapshot.admission,
+            &self.snapshot.stream_epoch,
+            &proof,
+        ) != self.snapshot.proof_generation
+        {
             return Err(StorageError::ScopeChanged);
         }
         let metadata = serde_json::to_string(&self.row).map_err(|_| StorageError::Unavailable)?;

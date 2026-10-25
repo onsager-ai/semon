@@ -5495,9 +5495,11 @@ mod tests {
             [a.config.namespace.as_str()],
         )
         .unwrap();
-        assert!(runtime
-            .selected_generation(key, &id, &"b".repeat(64), 60_000)
-            .is_err());
+        assert!(
+            runtime
+                .selected_generation(key, &id, &"b".repeat(64), 60_000)
+                .is_err()
+        );
 
         let initialized = crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap();
         let _ = EventCache::open_semantic(initialized).unwrap();
