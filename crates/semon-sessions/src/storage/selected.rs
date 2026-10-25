@@ -492,6 +492,19 @@ impl PresentationObservations {
         // against the SAME still-open authority, never a new Facts snapshot.
         // Leased readers deserialize authority=None and only use saved status.
         let captured = (|| -> io::Result<()> {
+            let keys = row
+                .sources
+                .iter()
+                .take(64)
+                .map(Self::source_key)
+                .collect::<io::Result<Vec<_>>>()?;
+            // A completed observation remains self-contained even after the
+            // live Facts file changes. Reopening or validating authority here
+            // would turn authenticated A data into an unnecessary unavailable
+            // result despite no lazy lookup being requested.
+            if keys.iter().all(|key| self.sources.contains_key(key)) {
+                return Ok(());
+            }
             let Some(authority) = &self.authority else {
                 return Ok(());
             };
