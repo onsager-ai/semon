@@ -13,6 +13,7 @@ pub(super) struct ConfiguredIndex {
 
 pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageError> {
     crate::events::store::configured::validate_semantic_schema(config)?;
+    super::source_journal::SourceJournal(config.clone()).prepare()?;
     Ok(Box::new(ConfiguredIndex {
         native: crate::events::store::configured::Writer::new(config),
         semantic: None,
@@ -31,6 +32,7 @@ pub(crate) fn open_private_semantic(
 pub(crate) fn open_semantic(
     capability: super::semantic::SemanticStaging,
 ) -> Result<Box<dyn IndexStore>, StorageError> {
+    capability.journal().prepare()?;
     let native = capability.writer();
     Ok(Box::new(ConfiguredIndex {
         native,
