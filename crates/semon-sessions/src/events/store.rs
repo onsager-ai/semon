@@ -2961,7 +2961,7 @@ impl IndexStore for SqliteStore {
         let started = measurements.start();
         let mut usage_deletes = UsageDeletes::default();
         for (path, ledger, index) in files {
-            write_index_changes_measured(
+            write_index_changes_with_usage_deletes(
                 &transaction,
                 path,
                 ledger,
@@ -6706,7 +6706,7 @@ fn write_index_changes(
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
 ) -> rusqlite::Result<()> {
-    write_index_changes_measured(
+    write_index_changes_with_usage_deletes(
         transaction,
         path,
         ledger,
@@ -6720,7 +6720,31 @@ fn write_index_changes(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_index_changes_measured<'tx>(
+fn write_index_changes_measured(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+    changes: Option<&super::DirtyRows>,
+    expected: Option<&Ledger>,
+    measurements: &mut crate::native_timing::Measurements,
+    namespace: Option<&str>,
+) -> rusqlite::Result<()> {
+    write_index_changes_with_usage_deletes(
+        transaction,
+        path,
+        ledger,
+        index,
+        changes,
+        expected,
+        measurements,
+        namespace,
+        &mut UsageDeletes::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_index_changes_with_usage_deletes<'tx>(
     transaction: &'tx Transaction<'_>,
     path: &str,
     ledger: &Ledger,
@@ -6767,7 +6791,7 @@ fn write_index_changes_measured<'tx>(
         ..super::DirtyRows::default()
     };
     measurements.record("dirty_rows", started, 1);
-    write_file(
+    write_file_with_usage_deletes(
         transaction,
         path,
         ledger,
@@ -6911,7 +6935,27 @@ fn record_writer_rows(
 
 /// Upserts `path`'s `files` row, then writes its child rows where `index`
 /// differs from `old`.
-fn write_file<'tx>(
+#[cfg(test)]
+fn write_file(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    changes: &super::DirtyRows,
+    index: &FileIndex,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    write_file_with_usage_deletes(
+        transaction,
+        path,
+        ledger,
+        changes,
+        index,
+        measurements,
+        &mut UsageDeletes::default(),
+    )
+}
+
+fn write_file_with_usage_deletes<'tx>(
     transaction: &'tx Transaction<'_>,
     path: &str,
     ledger: &Ledger,
