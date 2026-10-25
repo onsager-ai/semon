@@ -327,6 +327,7 @@ impl SourceJournal {
             |_| Ok(1_i64),
         )
         .map_err(failed)?;
+        register_backfill_writer(&db, false)?;
         Ok(db)
     }
 
@@ -353,6 +354,7 @@ impl SourceJournal {
         tx.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA)
             .map_err(failed)?;
         qualify_operation_tables(&tx)?;
+        qualify_backfill_metadata(&tx)?;
         let old: Option<String> = tx
             .query_row(
                 crate::events::store::configured::metadata_sql(&tx,
@@ -613,6 +615,7 @@ impl SourceObservationStore for SourceJournal {
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
             return Ok(SourceMutationReceipt::Conflict);
         }
+        register_backfill_writer(&tx, true)?;
         tx.execute_batch(crate::events::store::configured::metadata_sql(
             &tx,
             "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';",
@@ -871,8 +874,7 @@ pub(crate) fn operation_replay(
     {
         return Err(StorageError::InvalidArguments);
     }
-    let expected = SourceOperation::capture(namespace.unwrap_or(""), kind, payload);
-    if operation.payload_digest != expected.payload_digest {
+    if operation.payload_digest != SourceOperation::digest(kind, payload) {
         return Ok(Some(SourceMutationReceipt::Conflict));
     }
     Ok(None)
@@ -888,6 +890,52 @@ fn diagnose_sql(phase: &'static str, error: rusqlite::Error) -> rusqlite::Error 
 
 fn phase_failed(phase: &'static str, error: rusqlite::Error) -> StorageError {
     failed(diagnose_sql(phase, error))
+}
+
+fn register_backfill_writer(db: &Connection, enabled: bool) -> Result<(), StorageError> {
+    db.create_scalar_function(
+        "semon_source_backfill_writer", 0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+        move |_| Ok(i64::from(enabled)),
+    ).map_err(failed)
+}
+
+/// The current admitted singleton metadata profile has no Catalog consumer
+/// yet. Qualify only the four backfill completion keys for this typed producer;
+/// all other metadata writes retain the admission fence. Native ownership's
+/// independently installed metadata guards are never removed or rewritten.
+fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
+    let fences: Vec<String> = db.prepare("SELECT name FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='meta' AND name GLOB 'storage_namespace_fence_*' ORDER BY name LIMIT 4").map_err(failed)?
+        .query_map([], |row| row.get(0)).map_err(failed)?
+        .collect::<rusqlite::Result<_>>().map_err(failed)?;
+    if fences.is_empty() {
+        return Ok(());
+    }
+    if fences.len() != 3 {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    let composite = crate::events::store::configured::metadata_sql(db, "", "namespace").map_err(failed)? == "namespace";
+    for name in fences {
+        let (action, rows): (&str, &[&str]) = if name.ends_with("_INSERT") {
+            ("INSERT", &["NEW"])
+        } else if name.ends_with("_UPDATE") {
+            ("UPDATE", &["OLD", "NEW"])
+        } else if name.ends_with("_DELETE") {
+            ("DELETE", &["OLD"])
+        } else {
+            return Err(StorageError::NamespaceUpgradePending);
+        };
+        let mut predicate = "semon_source_backfill_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_namespaces WHERE namespace=semon_namespace())".to_owned();
+        for row in rows {
+            predicate.push_str(&format!(" OR {row}.key NOT IN ('catalog_backfill_state','catalog_completeness','search_backfill_complete','catalog_recovery_reason')"));
+            if composite {
+                predicate.push_str(&format!(" OR {row}.namespace IS NOT semon_meta_scope({row}.key)"));
+            }
+        }
+        let quoted = name.replace('"', "\"\"");
+        db.execute_batch(&format!("DROP TRIGGER \"{quoted}\"; CREATE TRIGGER \"{quoted}\" BEFORE {action} ON meta WHEN {predicate} BEGIN SELECT RAISE(ABORT,'source backfill metadata refused'); END;")).map_err(failed)?;
+    }
+    Ok(())
 }
 
 /// Admission fences every existing table, including the already namespaced
@@ -969,7 +1017,11 @@ fn validate_intent(namespace: Option<&str>, intent: &SourceIntent) -> Result<(),
             ("discover", serde_json::to_vec(&(paths, complete)))
         }
         SourceIntent::Invalidate { expected, .. } => {
-            validate_paths(&expected.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>())?;
+            let paths = expected.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+            validate_paths(&paths)?;
+            if paths.iter().collect::<std::collections::BTreeSet<_>>().len() != paths.len() {
+                return Err(StorageError::InvalidArguments);
+            }
             ("invalidate", serde_json::to_vec(expected))
         }
         SourceIntent::FinishBackfill { expected_generation, .. } => {
@@ -1005,7 +1057,10 @@ fn persist_intent_sql(db: &Connection, namespace: Option<&str>, intent: &SourceI
         return Err(StorageError::Busy);
     }
     if matches!(stored_receipt(db, namespace, operation)?, Some(SourceMutationReceipt::Conflict)) {
-        return Err(StorageError::Conflict);
+        let same_payload: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
+        if !same_payload {
+            return Err(StorageError::Conflict);
+        }
     }
     db.execute("INSERT INTO source_observation_intents(namespace,operation_id,payload_digest,payload) VALUES(?1,?2,?3,?4)", params![namespace.unwrap_or(""), operation.id, operation.payload_digest, payload]).map_err(failed)?;
     Ok(())
@@ -1374,12 +1429,10 @@ mod tests {
                 .unwrap();
             drop(native);
             let database = EventCache::path(&cache_path);
+            let mut consumer = EventCache::open_scoped(&cache_path).unwrap();
+            assert!(matches!(consumer.acknowledge_source_for_test("acknowledged").unwrap(), crate::events::Outcome::Written));
+            drop(consumer);
             let db = Connection::open(&database).unwrap();
-            db.execute(
-                "DELETE FROM session_catalog_invalidations WHERE source_path='acknowledged'",
-                [],
-            )
-            .unwrap();
             let epoch = db
                 .query_row(
                     "SELECT value FROM meta WHERE key='catalog_changes_epoch'",
@@ -1449,6 +1502,7 @@ mod tests {
     struct LoseDiscoverAck {
         inner: Box<dyn SourceObservationStore>,
         first: bool,
+        block_replay: std::sync::Arc<std::sync::atomic::AtomicBool>,
         captured: std::sync::Arc<std::sync::Mutex<Option<SourceOperation>>>,
     }
 
@@ -1463,6 +1517,10 @@ mod tests {
             self.inner.acknowledge_intent(operation)
         }
         fn discover(&mut self, operation: &SourceOperation, paths: &[String], complete: bool) -> Result<SourceMutationReceipt, StorageError> {
+            if self.block_replay.load(Ordering::Relaxed) {
+                return Err(StorageError::Busy);
+            }
+            assert!(self.inner.pending_intents()?.iter().any(|intent| intent.operation() == operation));
             let receipt = self.inner.discover(operation, paths, complete)?;
             if self.first && receipt == SourceMutationReceipt::Applied {
                 self.first = false;
@@ -1507,8 +1565,9 @@ mod tests {
         let later_path = later.full_path(&options).to_string_lossy().into_owned();
         let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut cache = open_cache();
+        let block_replay = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         cache.inject_source_observations(Box::new(LoseDiscoverAck {
-            inner: open_store(), first: true, captured: captured.clone(),
+            inner: open_store(), first: true, block_replay: block_replay.clone(), captured: captured.clone(),
         }));
         assert!(cache.discover_catalog_sources(&options, &[first], false).is_err());
         let operation = captured.lock().unwrap().clone().unwrap();
@@ -1521,6 +1580,11 @@ mod tests {
         // the producer intent. The actual EventCache replay below does that.
         assert_eq!(pending[0].apply(open_store().as_mut()).unwrap(), SourceMutationReceipt::AlreadyApplied);
         assert_eq!(open_store().pending_intents().unwrap(), pending);
+        block_replay.store(true, Ordering::Relaxed);
+        assert!(cache.discover_catalog_sources(&options, std::slice::from_ref(&later), true).is_err());
+        assert_eq!(open_store().pending_intents().unwrap(), pending);
+        assert_eq!(open_store().claims(std::slice::from_ref(&later_path)).unwrap(), vec![(later_path.clone(), None)]);
+        block_replay.store(false, Ordering::Relaxed);
         if restart {
             drop(cache);
             cache = open_cache();
@@ -1533,6 +1597,8 @@ mod tests {
         let db = Connection::open(database).unwrap();
         let count: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND outcome='applied'", params![namespace, operation.id], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
+        let applied: i64 = db.query_row("SELECT count(*) FROM source_observation_receipts WHERE namespace=?1 AND outcome='applied'", [namespace], |row| row.get(0)).unwrap();
+        assert_eq!(applied, 2, "one original operation plus the later operation");
         assert_eq!(stored_receipt(&db, Some(namespace), &operation).unwrap(), Some(SourceMutationReceipt::AlreadyApplied));
         // Foreign intent capture and dispatch both refuse before any effects.
         let foreign_paths = vec!["foreign.jsonl".into()];
@@ -1562,6 +1628,81 @@ mod tests {
                 database, &configured.root, "configured\0source", restart,
             );
         }
+    }
+
+    #[test]
+    fn finish_backfill_uses_a_real_published_generation_on_both_sqlite_profiles() {
+        for configured in [false, true] {
+            let fixture = LegacyFixture::new();
+            let mut cache = EventCache::open_scoped(&fixture.cache_path).unwrap();
+            let generation = cache.publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication { rows: &[], transcripts: None }, None,
+            ).unwrap().expect("real publisher generation");
+            drop(cache);
+            let database = EventCache::path(&fixture.cache_path);
+            let config = if configured {
+                let db = Connection::open(&database).unwrap();
+                let epoch = db.query_row("SELECT value FROM meta WHERE key='catalog_changes_epoch'", [], |row| row.get(0)).unwrap();
+                let config = StoreConfig { backend: StoreBackend::Sqlite { database: database.clone() }, namespace: LogicalSourceNamespace::new("finish\0source").unwrap(), expected_stream_epoch: Some(epoch) };
+                config.admit_namespace().unwrap();
+                let mut complete = false;
+                for _ in 0..128 {
+                    if config.assign_catalog_namespace(64).unwrap().complete {
+                        complete = true;
+                        break;
+                    }
+                }
+                assert!(complete);
+                Some(config)
+            } else { None };
+            let open = || match &config {
+                Some(config) => config.source_observations().unwrap(),
+                None => fixture.open(),
+            };
+            let namespace = config.as_ref().map_or("", |config| config.namespace.as_str());
+            let mut store = open();
+            let discovery = discover_operation(namespace, &[], true);
+            store.discover(&discovery, &[], true).unwrap();
+            let wrong = finish_operation(namespace, Some("wrong-generation"));
+            assert_eq!(store.finish_backfill(&wrong, Some("wrong-generation")).unwrap(), SourceMutationReceipt::Conflict);
+            assert_eq!(store.backfill_state().unwrap().as_deref(), Some("draining"));
+            let operation = finish_operation(namespace, Some(&generation));
+            let intent = SourceIntent::FinishBackfill { operation: operation.clone(), expected_generation: Some(generation) };
+            store.persist_intent(&intent).unwrap();
+            assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::Applied);
+            drop(store);
+            let mut store = open();
+            assert_eq!(intent.apply(store.as_mut()).unwrap(), SourceMutationReceipt::AlreadyApplied);
+            store.acknowledge_intent(&operation).unwrap();
+            assert_eq!(store.backfill_state().unwrap().as_deref(), Some("complete"));
+            assert!(store.pending_intents().unwrap().is_empty());
+            if let Some(config) = &config {
+                let journal = SourceJournal(config.clone());
+                let db = journal.connection().unwrap();
+                journal.validate(&db).unwrap();
+                // The backfill-specific guard does not qualify other metadata.
+                assert!(db.execute("INSERT INTO meta(key,value) VALUES('native_forbidden','x')", []).is_err());
+                assert!(db.execute("INSERT INTO meta(key,value) VALUES('catalog_backfill_state','draining')", []).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn durable_source_queue_enforces_the_256_intent_admission_bound() {
+        let fixture = LegacyFixture::new();
+        let mut store = fixture.open();
+        for index in 0..256 {
+            let paths = vec![format!("source-{index}")];
+            let operation = discover_operation("", &paths, false);
+            store.persist_intent(&SourceIntent::Discover { operation, paths, complete: false }).unwrap();
+        }
+        let before = store.pending_intents().unwrap();
+        assert_eq!(before.len(), 256);
+        let paths = vec!["overflow".into()];
+        let operation = discover_operation("", &paths, false);
+        assert_eq!(store.persist_intent(&SourceIntent::Discover { operation, paths, complete: false }), Err(StorageError::Busy));
+        assert_eq!(store.pending_intents().unwrap(), before);
+        assert_eq!(store.claims(&["overflow".into()]).unwrap(), vec![("overflow".into(), None)]);
     }
 
     #[test]
