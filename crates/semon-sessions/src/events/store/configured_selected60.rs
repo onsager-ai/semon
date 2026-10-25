@@ -166,6 +166,130 @@ fn configured_semantic_selected70_real_native_multi_window_range_oracle() {
     cache.finish_semantic_stage(batch.epoch).unwrap();
 }
 
+// The frozen CI clock is intentionally supplied by the workflow command, not
+// mutated here: configured tests run concurrently in the normal contract job.
+#[cfg(all(feature = "test-clock", debug_assertions))]
+#[test]
+fn configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_before_raw() {
+    use std::{
+        io::Write,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    struct Count(AtomicUsize);
+    impl crate::SessionSourceReader for Count {
+        fn read_range(
+            &self,
+            _: &crate::SessionSourceRef,
+            _: Option<&str>,
+            _: u64,
+            _: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("unexpected Raw access"))
+        }
+    }
+
+    let (f, _, options, inputs) = model_sources();
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let options = &options[0];
+    let input = &inputs[0];
+    let path = input.full_path(options);
+    let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(
+        raw,
+        "{}",
+        json!({
+            "timestamp": "2026-10-01T00:02:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "selected71-active-call",
+                "name": "long_native_tool",
+                "arguments": "{\\\"payload\\\":\\\"active native call\\\"}",
+            },
+        })
+    )
+    .unwrap();
+    drop(raw);
+    cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected71-active");
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    // The CI constant is later than this fixture timestamp, but this lease is
+    // created under that same constant and so its 60 s TTL remains valid.
+    let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
+    let query = format!("sid={key}&after=0&limit=8");
+
+    let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+    let prepared = crate::model::prepare_sources(
+        options,
+        &mut ordinary,
+        std::slice::from_ref(input),
+        1_790_000_000_000,
+    )
+    .unwrap();
+    ordinary
+        .publish_catalog_projection(
+            &crate::slot_projection::Publication {
+                rows: &prepared.rows,
+                transcripts: Some(&prepared.transcripts),
+            },
+            prepared.base_generation.as_deref(),
+        )
+        .unwrap();
+    let db = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap()).connection().unwrap();
+    let actual = read(&lease, options, &host, &query);
+    let mut expected = body(crate::session_transcript_range_with_mode(
+        options,
+        &host.source_key,
+        &query,
+        None,
+        SessionSourceReadMode::LocalOrPinnedProvider,
+    ));
+    publication_oracle(&mut expected, &db, "source-a");
+    assert_eq!(actual, expected, "active native calls share the ordinary render clock");
+    assert!(actual.to_string().contains("long_native_tool"));
+
+    let provider = Count(AtomicUsize::new(0));
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let control = crate::SelectedReadControl::new(Instant::now() + Duration::from_secs(1), cancelled);
+    assert!(read_bound(
+        &lease,
+        options,
+        &host,
+        &query,
+        Some(&provider),
+        SessionSourceReadMode::ProviderOnly,
+        &control,
+    )
+    .is_err());
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0, "cancelled reads do not admit Raw");
+
+    db.execute("UPDATE storage_proof_leases SET expires=0 WHERE namespace='source-a'", []).unwrap();
+    assert!(read_bound(
+        &lease,
+        options,
+        &host,
+        &query,
+        Some(&provider),
+        SessionSourceReadMode::ProviderOnly,
+        &crate::SelectedReadControl::default(),
+    )
+    .is_err());
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0, "expired leases do not admit Raw");
+    cache.finish_semantic_stage(batch.epoch).unwrap();
+}
+
 #[test]
 fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows() {
     use crate::storage::selected::SelectedSnapshotStore;
