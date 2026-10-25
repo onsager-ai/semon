@@ -25,6 +25,15 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             .binding
             .listing_snapshot(namespace)
             .map_err(storage_error)?;
+        let runtime_binding = match &self.binding {
+            crate::storage::NativeReaderBinding::Semantic(owner) => Some(crate::storage::QueryRuntimeBinding {
+                namespace: owner.config().namespace.clone(),
+                admission: owner.admission(),
+                stream_epoch: owner.config().expected_stream_epoch.clone()
+                    .ok_or_else(|| unavailable("Missing source incarnation"))?,
+            }),
+            _ => None,
+        };
         read(
             &db,
             &self.options,
@@ -39,6 +48,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
                 self.binding,
                 crate::storage::NativeReaderBinding::Semantic(_)
             ),
+            runtime_binding.as_ref(),
         )
     }
     fn has_search_slots(
@@ -127,6 +137,7 @@ fn read(
     bytes_left: &mut usize,
     scoped: bool,
     private_listing: bool,
+    runtime_binding: Option<&crate::storage::QueryRuntimeBinding>,
 ) -> Result<Part, QueryError> {
     let generation = generation(db, scoped)?;
     let ready_sql = if private_listing {
@@ -151,7 +162,11 @@ fn read(
     }
     let runtime = crate::native_evidence::query_runtime_generation(options)
         .map_err(|error| QueryError::io(&error))?;
-    let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
+    let runtime_observations = match runtime_binding {
+        Some(binding) => crate::native_evidence::RuntimeObservations::bound(binding, &runtime)
+            .map_err(|error| QueryError::io(&error))?,
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    };
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     let base_sql = if cutoff.is_some() {

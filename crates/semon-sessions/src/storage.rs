@@ -69,6 +69,28 @@ impl NativeReaderBinding {
     }
 }
 
+/// Logical runtime observation fence. Physical database coordinates are absent.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryRuntimeBinding {
+    pub(crate) namespace: LogicalSourceNamespace,
+    pub(crate) admission: u64,
+    pub(crate) stream_epoch: String,
+}
+
+impl QueryRuntimeBinding {
+    pub(crate) fn witness(&self, runtime: &str) -> std::io::Result<String> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&(
+            "semon-source-runtime-v1",
+            self.namespace.as_str(),
+            self.admission,
+            &self.stream_epoch,
+            runtime,
+        )).map_err(std::io::Error::other)?;
+        Ok(format!("source-runtime-v1:{:x}", Sha256::digest(bytes)))
+    }
+}
+
 pub(crate) fn local_navigation_binding(
     options: &crate::Options,
     source: &str,

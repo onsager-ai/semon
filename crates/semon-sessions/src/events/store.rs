@@ -5010,7 +5010,7 @@ struct PhysicalLayout {
     core: bool,
     metadata: bool,
     catalog: bool,
-    // Only the authored header family; turns/edges remain unported.
+    // The complete authored header/turn/edge/bookmark family.
     trace: bool,
     copied_usage: bool,
     native_usage: bool,
@@ -5088,7 +5088,11 @@ fn authored_storage_ddl(p: PhysicalLayout) -> Result<[&'static str; 21], DdlProf
         semantic_stage::metadata_indexes(p.metadata),
         crate::overview::SCHEMA,
         crate::causal_trace::header_schema(p.trace),
-        crate::causal_trace::SCHEMA,
+        if p.trace {
+            crate::storage::sqlite::trace::SCHEMA
+        } else {
+            crate::causal_trace::SCHEMA
+        },
         if p.semantic_stage {
             crate::storage::sqlite::history::SCHEMA
         } else {

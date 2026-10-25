@@ -29,8 +29,8 @@ CREATE TABLE IF NOT EXISTS session_trace_bookmarks(target TEXT NOT NULL,session_
 CREATE INDEX IF NOT EXISTS session_trace_bookmark_owner ON session_trace_bookmarks(session_key);
 ";
 
-// Private assembled storage fixtures use the same authored header family.
-// This does not activate composite trace turns/edges or public producers.
+// Both physical profiles start with the same authored header family. The
+// adapter adds the matching complete turn/edge/bookmark family afterwards.
 pub(crate) fn header_schema(composite: bool) -> &'static str {
     if composite {
         "CREATE TABLE IF NOT EXISTS session_trace_headers(namespace TEXT NOT NULL,session_key TEXT NOT NULL,generation TEXT NOT NULL,source_generation TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,session_key)) STRICT, WITHOUT ROWID;"
@@ -48,6 +48,10 @@ pub(crate) struct Projection {
     bookmarks: Vec<(String, String)>,
 }
 impl Projection {
+    pub(crate) fn publication_witness(&self, row: &crate::model::summary::CatalogRow) -> String {
+        String::from_utf8(generation_bytes(&publication_session(row, self), self))
+            .expect("JSON trace publication witness")
+    }
     /// Reuse the producer's recorded edge ownership; never infer a parent turn
     /// from timing, session order or a body scan in a read request.
     pub(crate) fn with_origin_turns(
@@ -269,91 +273,103 @@ pub(crate) fn publish_measured(
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
     let total_started = measurements.start();
+    let record = publication_record(row, projection, measurements)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
+        query.publish(tx, row, summary, &record.0)?;
+    }
+    publish_record(
+        &crate::storage::sqlite::trace::TraceWriter::unbound(tx),
+        row, projection, record, measurements,
+    )?;
+    measurements.record("trace_total_inclusive", total_started, 1);
+    Ok(())
+}
+
+fn publication_record(
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+    measurements: &mut crate::native_timing::Measurements,
+) -> std::io::Result<(String, String, String)> {
     let started = measurements.start();
-    let mut session = projection.session.clone();
-    session["content_generation"] = json!(
-        row.overview
-            .as_ref()
-            .map(crate::overview::content_generation)
-    );
+    let session = publication_session(row, projection);
     measurements.record("trace_session", started, 1);
     let started = measurements.start();
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(generation_bytes(&session, projection))
-    );
+    let digest = format!("{:x}", Sha256::digest(generation_bytes(&session, projection)));
     measurements.record("trace_digest", started, 1);
     let started = measurements.start();
-    let source = crate::retention::source_generation(&row.sources)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let source = crate::retention::source_generation(&row.sources)?;
     measurements.record("trace_source_generation", started, 1);
-    if let (Some(query), Some(summary)) = (&projection.query, &row.overview) {
-        query.publish(tx, row, summary, &digest)?;
-    }
+    Ok((digest, source, session.to_string()))
+}
 
-    let changed = {
-        let started = measurements.start();
-        let mut statement=tx.prepare_cached("INSERT INTO session_trace_headers VALUES(?1,?2,?3,?4) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,metadata=excluded.metadata WHERE session_trace_headers.generation!=excluded.generation OR session_trace_headers.source_generation!=excluded.source_generation")?;
-        measurements.record("trace_header_prepare", started, 1);
-        let started = measurements.start();
-        let parameters = params![row.key, digest, source, session.to_string()];
-        measurements.record("trace_header_serialization", started, 1);
-        let started = measurements.start();
-        let changed = statement.execute(parameters)?;
-        measurements.record("trace_header_sql", started, 1);
-        changed
-    };
-    if changed == 0 {
-        measurements.record("trace_total_inclusive", total_started, 1);
+fn publication_session(row: &crate::model::summary::CatalogRow, projection: &Projection) -> Value {
+    let mut session = projection.session.clone();
+    session["content_generation"] = json!(row.overview.as_ref().map(crate::overview::content_generation));
+    session
+}
+
+/// The private listing publisher qualifies only the trace context family. The
+/// selected Query recipe reader remains closed; this never writes unported meta.
+pub(crate) fn is_published<P: crate::storage::catalog::TracePublicationStore>(
+    store: &P,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> Result<bool, P::Error> {
+    let (digest, source, _) = publication_record(row, projection, &mut crate::native_timing::Measurements::default()).map_err(P::invalid)?;
+    store.matches_header(&row.key, &digest, &source)
+}
+
+pub(crate) fn publish_with_store<P: crate::storage::catalog::TracePublicationStore>(
+    store: &P,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> Result<(), P::Error> {
+    let mut measurements = crate::native_timing::Measurements::default();
+    let total_started = measurements.start();
+    let record = publication_record(row, projection, &mut measurements).map_err(P::invalid)?;
+    publish_record(store, row, projection, record, &mut measurements)?;
+    measurements.record("trace_total_inclusive", total_started, 1);
+    Ok(())
+}
+
+fn publish_record<P: crate::storage::catalog::TracePublicationStore>(
+    store: &P,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+    (digest, source, metadata): (String, String, String),
+    measurements: &mut crate::native_timing::Measurements,
+) -> Result<(), P::Error> {
+    let started = measurements.start();
+    let changed = store.header(&row.key, &digest, &source, &metadata)?;
+    measurements.record("trace_header_sql", started, 1);
+    if !changed {
         return Ok(());
     }
     let started = measurements.start();
-    tx.prepare_cached("DELETE FROM session_trace_turns WHERE session_key=?1")?
-        .execute([&row.key])?;
-    tx.prepare_cached("DELETE FROM session_trace_edges WHERE session_key=?1")?
-        .execute([&row.key])?;
-    measurements.record("trace_turn_edge_removal", started, 2);
-    let started = measurements.start();
-    let mut turns = tx.prepare_cached("INSERT INTO session_trace_turns VALUES(?1,?2,?3,?4)")?;
-    measurements.record("trace_turn_prepare", started, 1);
+    store.clear(&row.key)?;
+    measurements.record("trace_turn_edge_removal", started, 3);
     for turn in &projection.turns {
         let started = measurements.start();
-        let parameters = params![
-            row.key,
-            turn["id"].as_str(),
-            turn["start"].as_str(),
-            turn.to_string()
-        ];
+        let metadata = turn.to_string();
         measurements.record("trace_turn_serialization", started, 1);
         let started = measurements.start();
-        turns.execute(parameters)?;
+        store.turn(&row.key, turn["id"].as_str(), turn["start"].as_str(), &metadata)?;
         measurements.record("trace_turn_sql", started, 1);
     }
-    let started = measurements.start();
-    let mut edges = tx.prepare_cached("INSERT INTO session_trace_edges VALUES(?1,?2,?3)")?;
-    measurements.record("trace_edge_prepare", started, 1);
     for edge in &projection.edges {
         let started = measurements.start();
-        let parameters = params![row.key, edge["id"].as_str(), edge.to_string()];
+        let metadata = edge.to_string();
         measurements.record("trace_edge_serialization", started, 1);
         let started = measurements.start();
-        edges.execute(parameters)?;
+        store.edge(&row.key, edge["id"].as_str(), &metadata)?;
         measurements.record("trace_edge_sql", started, 1);
     }
     let started = measurements.start();
-    tx.prepare_cached("DELETE FROM session_trace_bookmarks WHERE session_key=?1")?
-        .execute([&row.key])?;
-    measurements.record("trace_bookmark_removal", started, 1);
-    let started = measurements.start();
-    let mut bookmarks =
-        tx.prepare_cached("INSERT INTO session_trace_bookmarks VALUES(?1,?2,?3)")?;
-    measurements.record("trace_bookmark_prepare", started, 1);
-    let started = measurements.start();
     for (target, edge) in &projection.bookmarks {
-        bookmarks.execute(params![target, row.key, edge])?;
+        store.bookmark(&row.key, target, edge)?;
     }
     measurements.record("trace_bookmark_sql", started, projection.bookmarks.len());
-    measurements.record("trace_total_inclusive", total_started, 1);
     Ok(())
 }
 
