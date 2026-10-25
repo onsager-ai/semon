@@ -165,7 +165,7 @@ impl PgStoreMetadata {
             &LogicalSourceNamespace::new("host-control")?,
             TxnKind::ReadSnapshot,
             control,
-            |tx| authorize(tx),
+            authorize,
         )?;
         Ok(Self { pool })
     }
