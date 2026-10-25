@@ -77,6 +77,7 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
     for harness in ["claude", "codex", "copilot"] {
         let data = parser_fixture(harness);
         let metadata = oracle_metadata(&data);
+        if harness == "codex" { assert!(!metadata.is_empty(), "nonempty independent header oracle"); }
         let next = (harness != "copilot").then(|| append_fixture(&data, harness));
         let (pool, factory) = fixture(|_| {});
         let namespace = ns("bundle\0🦀");
@@ -102,7 +103,10 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
             Ok(())
         })
         .unwrap();
-        // Restoring the complete scalar/checkpoint uses the actual PG reader.
+        let bounds = pool.inner.limits;
+        drop(pool);
+        let pool = crate::storage::postgres::PgPool::open(factory.clone(), bounds).unwrap();
+        // Reopen before restoring the scalar/checkpoint through the PG reader.
         let restored = Snapshot::restore(
             pool.clone(),
             namespace.clone(),
