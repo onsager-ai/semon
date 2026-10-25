@@ -651,13 +651,14 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
                 observed.fetch_add(1, Ordering::Relaxed);
                 false
             }),
-        );
+        )
+        .unwrap();
         if family == "metadata" {
             crate::events::store::configured::metadata_sql(c, "", "namespace").unwrap();
         } else {
             crate::events::store::semantic_stage::support_sql(c, "", "namespace").unwrap();
         }
-        c.progress_handler(0, None::<fn() -> bool>);
+        c.progress_handler(0, None::<fn() -> bool>).unwrap();
         let elapsed = started.elapsed();
         let steps = steps.load(Ordering::Relaxed);
         eprintln!(
@@ -689,9 +690,10 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
             observed.fetch_add(1, Ordering::Relaxed);
             false
         }),
-    );
+    )
+    .unwrap();
     let layout = FrontierLayout::bind(&tx).unwrap();
-    c.progress_handler(0, None::<fn() -> bool>);
+    c.progress_handler(0, None::<fn() -> bool>).unwrap();
     let elapsed = started.elapsed();
     let setup = setup.load(Ordering::Relaxed);
     eprintln!(
@@ -734,7 +736,8 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
                 observed.fetch_add(1, Ordering::Relaxed);
                 false
             }),
-        );
+        )
+        .unwrap();
         match kind {
             "filename" => {
                 port.needed_filename(false, &format!("{id}.jsonl")).unwrap();
@@ -752,7 +755,7 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
                 frontier_page(&layout, ns).unwrap();
             }
         }
-        c.progress_handler(0, None::<fn() -> bool>);
+        c.progress_handler(0, None::<fn() -> bool>).unwrap();
         let elapsed = started.elapsed();
         let steps = steps.load(Ordering::Relaxed);
         eprintln!(
