@@ -2596,26 +2596,7 @@ impl IndexStore for SqliteStore {
             .optional()
             .map_err(failure)
     }
-    fn discover_recovery_sources(
-        &mut self,
-        operation: &crate::storage::source_observations::SourceOperation,
-    ) -> Result<
-        (
-            crate::storage::source_observations::SourceMutationReceipt,
-            bool,
-        ),
-        StoreError,
-    > {
-        if let Some(receipt) = crate::storage::sqlite::source_journal::operation_replay(
-            operation,
-            None,
-            "discover_recovery",
-            b"source-recovery-page-v1",
-        )
-        .map_err(StoreError::Configured)?
-        {
-            return Ok((receipt, false));
-        }
+    fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
         let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
         let cached = self.discovery.recovery.take();
         if !self.connection.is_autocommit() {
@@ -2629,24 +2610,12 @@ impl IndexStore for SqliteStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
-        if let Some(receipt) =
-            crate::storage::sqlite::source_journal::stored_receipt(&tx, None, operation)
-                .map_err(StoreError::Configured)?
-        {
-            tx.commit().map_err(failure)?;
-            return Ok((receipt, false));
-        }
         let witness = DiscoveryWitness::read(&tx, &self.discovery).map_err(failure)?;
         if cached == Some(witness) {
-            crate::storage::sqlite::source_journal::insert_receipt(&tx, None, operation)
-                .map_err(StoreError::Configured)?;
             tx.commit().map_err(failure)?;
             self.discovery.recovery = Some(witness);
             crate::native_timing::discovery_count(|counts| counts.skipped += 1);
-            return Ok((
-                crate::storage::source_observations::SourceMutationReceipt::Applied,
-                true,
-            ));
+            return Ok(true);
         }
         let before = tx.total_changes();
         let complete = recovery_page(&tx).map_err(|error| StoreError::Data(error.to_string()))?;
@@ -2657,8 +2626,6 @@ impl IndexStore for SqliteStore {
         {
             require_current_sql(&tx).map_err(failure)?;
         }
-        crate::storage::sqlite::source_journal::insert_receipt(&tx, None, operation)
-            .map_err(StoreError::Configured)?;
         tx.commit().map_err(failure)?;
         if complete {
             self.discovery.recovery = Some(committed);
@@ -2666,10 +2633,7 @@ impl IndexStore for SqliteStore {
         crate::native_timing::discovery_count(|counts| {
             counts.committed_changes += committed.changes - before
         });
-        Ok((
-            crate::storage::source_observations::SourceMutationReceipt::Applied,
-            complete,
-        ))
+        Ok(complete)
     }
     fn discover_catalog_sources(
         &mut self,
@@ -7673,27 +7637,6 @@ mod tests {
     use crate::events::{
         ASYNC, Kind, Links, PIN, RateLimitWindow, RateLimits, SENDS, STDIN, SignalKind, UNKNOWN,
     };
-
-    impl SqliteStore {
-        fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
-            let operation = crate::storage::source_observations::SourceOperation::capture(
-                "",
-                "discover_recovery",
-                b"source-recovery-page-v1",
-            );
-            match <Self as IndexStore>::discover_recovery_sources(self, &operation)? {
-                (crate::storage::source_observations::SourceMutationReceipt::Applied, complete) => {
-                    Ok(complete)
-                }
-                (crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied, _) => {
-                    Ok(false)
-                }
-                (crate::storage::source_observations::SourceMutationReceipt::Conflict, _) => Err(
-                    StoreError::Configured(crate::storage::StorageError::Conflict),
-                ),
-            }
-        }
-    }
 
     fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
