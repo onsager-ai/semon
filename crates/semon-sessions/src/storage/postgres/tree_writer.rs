@@ -294,7 +294,7 @@ pub(super) fn publish(
     Ok(true)
 }
 
-fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>, StorageError> {
+pub(super) fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>, StorageError> {
     let ns = tx.namespace.as_str().as_bytes();
     let rows=tx.driver.query("SELECT octet_length(value)::bigint FROM semon_pg_native_meta WHERE namespace=$1 AND key=$2", &[&ns,&key]).map_err(sqlstate::error)?;
     let Some(row) = rows.first() else {
@@ -320,7 +320,7 @@ fn metadata(tx: &mut PgTxn<'_>, key: &[u8]) -> Result<Option<String>, StorageErr
 
 // Read only persisted rows, bytea keyset order, one admitted row at a time.
 // This is distinct from hashing the input delta: old closed/model rows survive.
-fn persisted_witness(tx: &mut PgTxn<'_>, projection: i64) -> Result<String, StorageError> {
+pub(super) fn persisted_witness(tx: &mut PgTxn<'_>, projection: i64) -> Result<String, StorageError> {
     let mut writer = witness::Writer::new();
     for (family, key, columns, filter) in [
         ("labels", "label", "label,value", ""),
