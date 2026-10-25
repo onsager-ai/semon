@@ -51,7 +51,9 @@ fn wait_for_lock(client: &mut ::postgres::Client, table: &str) -> (i32, String) 
         // stays cached from an earlier poll while wait events remain live.
         // Capture the actual blocked command (including schema admission), so
         // the completion observer can require that same PID and exact query.
-        client.batch_execute("SELECT pg_stat_clear_snapshot()").unwrap();
+        client
+            .batch_execute("SELECT pg_stat_clear_snapshot()")
+            .unwrap();
         let blocked = client.query_opt("SELECT a.pid,a.query FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::text::regclass AND NOT l.granted AND a.state='active' AND a.wait_event_type='Lock' LIMIT 1", &[&table]).unwrap();
         if let Some(row) = blocked {
             return (row.get(0), row.get(1));
