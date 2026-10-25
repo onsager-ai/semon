@@ -2622,6 +2622,12 @@ mod tests {
         }
     }
 
+    fn publication_snapshot_digest(f: &Fixture) -> String {
+        use sha2::{Digest,Sha256};
+        // Ordered tables, rows and typed values give a deterministic witness.
+        format!("{:x}",Sha256::digest(format!("{:?}",shared_state(f)).as_bytes()))
+    }
+
     #[test]
     fn configured_semantic_competing_publisher_and_begin_zero_writes() {
         let (a,_,_)=same_db_sources();
@@ -2632,10 +2638,12 @@ mod tests {
         assert!(current.epoch>old.epoch);
         assert_eq!(winner.publish_semantic_catalog(&current,&prepared).unwrap().0,Outcome::Written);
         let before=shared_state(&a);
+        let digest=publication_snapshot_digest(&a);
         assert_eq!(stale.publish_semantic_catalog(&old,&old_prepared).unwrap().0,Outcome::Conflict);
         assert_eq!(shared_state(&a),before);
         assert_eq!(stale.begin_semantic_stage(&old.paths,"stale-begin",true).unwrap(),Outcome::Conflict);
         assert_eq!(shared_state(&a),before);
+        assert_eq!(publication_snapshot_digest(&a),digest);
     }
 
     #[test]
