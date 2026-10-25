@@ -95,7 +95,6 @@ impl Writer<'_, '_> {
 
 /// Stage real dimensions in the existing transaction. A staged family remains
 /// unreadable until the connected publication below has qualified its scalar.
-
 #[cfg(test)]
 pub(super) fn stage(
     tx: &mut PgTxn<'_>,
