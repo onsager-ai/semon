@@ -8465,7 +8465,11 @@ mod tests {
                     Ok(Some(batch)) => {
                         let cursor = f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind='claudeid' AND after_key<>'' AND done=0)",[],|r|r.get::<_,bool>(0)).unwrap();
                         if cursor {
-                            assert_eq!(batch.paths.len(), 64, "the real filename frontier returns one full bounded page");
+                            assert_eq!(
+                                batch.paths.len(),
+                                64,
+                                "the real filename frontier returns one full bounded page"
+                            );
                             assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a'", [], |r| r.get::<_,i64>(0)).unwrap(), 65, "seed plus exactly 64 discovered candidates precede the component refusal");
                         }
                         paged |= cursor;
@@ -8621,7 +8625,8 @@ mod tests {
                         } else {
                             format!("/unrelated/session-state/noise-{i}/events.jsonl")
                         };
-                        db.execute(&insert, params![namespace, 10000 + i, path]).unwrap();
+                        db.execute(&insert, params![namespace, 10000 + i, path])
+                            .unwrap();
                         db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'bounded-work-noise',0)",params![namespace,format!("/unrelated/invalidations/noise-{i}.jsonl")]).unwrap();
                         db.execute("INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",params![namespace,format!("native_codex_header:/unrelated/noise-{i}"),format!(r#"{{"header":{{"id":"noise-{i}","metadata":{{"parent_thread":"noise-parent-{i}"}}}}}}"#)]).unwrap();
                     }
