@@ -1723,7 +1723,8 @@ impl EventCache {
         let source_journal = capability.journal();
         let observation_namespace = source_journal.namespace().to_owned();
         let observation_path = Some(source_journal.database_path().clone());
-        let (store, claude_json_stamp) = crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
+        let (store, claude_json_stamp) =
+            crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
         let mut cache = Self {
             store: Some(store),
             claude_json_stamp,
