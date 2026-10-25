@@ -315,16 +315,18 @@ impl SourceJournal {
             |_| Ok(0_i64),
         )
         .map_err(failed)?;
-        if self.owner.is_some() {
-            db.create_scalar_function(
-                "semon_event_writer",
-                0,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-                |_| Ok(1_i64),
-            )
-            .map_err(failed)?;
-        }
+        // This typed, admitted source-observation producer is itself the
+        // writer authority for its fenced source tables.  Configured callers
+        // do not carry NativeOwnership, but their writes are still subject to
+        // the existing namespace and epoch checks in `validate` below.
+        db.create_scalar_function(
+            "semon_event_writer",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |_| Ok(1_i64),
+        )
+        .map_err(failed)?;
         Ok(db)
     }
 
@@ -1287,6 +1289,7 @@ mod tests {
 
     fn shared_source_observation_conformance(
         mut open: impl FnMut() -> Box<dyn SourceObservationStore>,
+        mut drain_before_finish: impl FnMut(),
         namespace: &str,
     ) {
         let paths = vec!["conformance-a".to_owned(), "conformance-b".to_owned()];
@@ -1360,11 +1363,24 @@ mod tests {
         assert!(!encoded.id.as_bytes().contains(&0));
         assert_eq!(encoded.namespace.as_bytes(), namespace.as_bytes());
 
+        // Finishing is a strict generation/CAS transition: source claims above
+        // deliberately left invalidations pending, so model the real consumer
+        // acknowledgement before attempting the finish.
+        drain_before_finish();
         let finish = finish_operation(namespace, None);
         assert_eq!(
             store.finish_backfill(&finish, None).unwrap(),
             SourceMutationReceipt::Applied
         );
+        let completed = store.backfill_state().unwrap();
+        let wrong_generation = finish_operation(namespace, Some("wrong-generation"));
+        assert_eq!(
+            store
+                .finish_backfill(&wrong_generation, Some("wrong-generation"))
+                .unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(store.backfill_state().unwrap(), completed);
         drop(store);
         let mut reopened = open();
         assert_eq!(
@@ -1376,12 +1392,27 @@ mod tests {
     #[test]
     fn shared_observation_conformance_runs_on_legacy_and_configured_sqlite() {
         let legacy = LegacyFixture::new();
-        shared_source_observation_conformance(|| legacy.open(), "");
+        shared_source_observation_conformance(
+            || legacy.open(),
+            || {
+                let db = Connection::open(EventCache::path(&legacy.cache_path)).unwrap();
+                db.execute("DELETE FROM session_catalog_invalidations", []).unwrap();
+            },
+            "",
+        );
 
         let configured = Fixture::new_with_namespace("configured\0source");
         configured.assign();
         shared_source_observation_conformance(
             || configured.config.source_observations().unwrap(),
+            || {
+                let db = SourceJournal(configured.config.clone()).connection().unwrap();
+                db.execute(
+                    "DELETE FROM session_catalog_invalidations WHERE namespace=?1",
+                    [configured.config.namespace.as_str()],
+                )
+                .unwrap();
+            },
             "configured\0source",
         );
     }
