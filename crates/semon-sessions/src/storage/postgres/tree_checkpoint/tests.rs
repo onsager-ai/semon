@@ -44,12 +44,12 @@ fn lock_table(factory: &super::super::tests::Factory, table: &str) -> ::postgres
     client
 }
 
-fn wait_for_lock(client: &mut ::postgres::Client, table: &str) -> i32 {
+fn wait_for_lock(client: &mut ::postgres::Client, table: &str) -> (i32, String) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let blocked = client.query_opt("SELECT a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::text::regclass AND NOT l.granted AND a.wait_event_type='Lock' LIMIT 1", &[&table]).unwrap();
+        let blocked = client.query_opt("SELECT a.pid,a.query FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE l.relation=$1::text::regclass AND NOT l.granted AND a.wait_event_type='Lock' LIMIT 1", &[&table]).unwrap();
         if let Some(row) = blocked {
-            return row.get(0);
+            return (row.get(0), row.get(1));
         }
         assert!(
             Instant::now() < deadline,
@@ -148,7 +148,7 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
             done.send(()).unwrap();
             result
         });
-        let pid = wait_for_lock(&mut lock, "semon_pg_native_tree_tools");
+        let (pid, blocked_query) = wait_for_lock(&mut lock, "semon_pg_native_tree_tools");
         cancelled.store(true, Ordering::Release);
         cancelling.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(
@@ -159,7 +159,7 @@ fn pg_tree_current_request_cancels_blocked_summary_and_holds_worker_and_pool() {
         lock.batch_execute("ROLLBACK").unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            if lock.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND state='idle in transaction' AND query LIKE 'SELECT coalesce(octet_length(name)%')", &[&pid]).unwrap().get::<_, bool>(0) {
+            if lock.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND state='idle in transaction' AND query=$2)", &[&pid, &blocked_query]).unwrap().get::<_, bool>(0) {
                 break;
             }
             assert!(
