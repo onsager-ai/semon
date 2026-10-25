@@ -11,7 +11,7 @@ mod txn;
 
 pub use cancel::PgCancellation;
 pub use operations::{OperationIdentity, Reconciliation};
-pub use pool::{PgConnection, PgConnectionFactory, PgPool, PoolLimits};
+pub use pool::{ConnectFuture, PgConnection, PgConnectionFactory, PgPool, PoolLimits};
 
 /// Lossless GUC transport for the common opaque UTF-8 bytes, including NUL.
 fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
@@ -26,3 +26,6 @@ fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod proxy_test;

@@ -12,6 +12,9 @@ pub(super) fn classify(code: Option<&str>, committing: bool) -> StorageError {
     }
 }
 
-pub(super) fn error(error: ::postgres::Error) -> StorageError {
-    classify(error.code().map(|code| code.code()), false)
+pub(super) fn error(error: super::pool::DriverError) -> StorageError {
+    match error {
+        super::pool::DriverError::Pg(error) => classify(error.code().map(|code| code.code()), false),
+        super::pool::DriverError::Interrupted => StorageError::Busy,
+    }
 }
