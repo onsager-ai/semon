@@ -1,7 +1,10 @@
 use crate::storage::StorageError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Failure { Storage(StorageError), Reconcile }
+pub(super) enum Failure {
+    Storage(StorageError),
+    Reconcile,
+}
 
 /// The one SQLSTATE policy table. No database diagnostics/credentials escape.
 pub(super) fn classify(code: Option<&str>, committing: bool, operation_key: bool) -> Failure {
