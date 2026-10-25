@@ -1,7 +1,10 @@
 //! One state machine for native usage. Backends supply only typed row effects;
 //! the caller owns the transaction, ledger CAS and durable operation receipt.
 use super::{Observation, header_ledger};
-use crate::{events::{FileIndex, Ledger}, storage::StorageError};
+use crate::{
+    events::{FileIndex, Ledger},
+    storage::StorageError,
+};
 use std::collections::BTreeSet;
 
 pub(crate) struct Fact<'a> {
@@ -20,10 +23,27 @@ pub(crate) trait Effects {
     fn receipt(&mut self, source: i64, receipt: &str) -> Result<(), StorageError>;
     fn unblock(&mut self, path: &str, receipt: &str) -> Result<(), StorageError>;
     fn fact(&mut self, source: i64, offset: u64) -> Result<Option<(String, String)>, StorageError>;
-    fn first(&mut self, source: i64, scope: &str, identity: &str) -> Result<Option<String>, StorageError>;
-    fn identity(&mut self, source: i64, scope: &str, identity: &str, offset: u64) -> Result<(), StorageError>;
+    fn first(
+        &mut self,
+        source: i64,
+        scope: &str,
+        identity: &str,
+    ) -> Result<Option<String>, StorageError>;
+    fn identity(
+        &mut self,
+        source: i64,
+        scope: &str,
+        identity: &str,
+        offset: u64,
+    ) -> Result<(), StorageError>;
     fn insert(&mut self, fact: Fact<'_>) -> Result<(), StorageError>;
-    fn dimension(&mut self, source: i64, kind: &str, key: &str, value: &str) -> Result<(), StorageError>;
+    fn dimension(
+        &mut self,
+        source: i64,
+        kind: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), StorageError>;
     fn ready(&mut self, source: i64, checkpoint: u64) -> Result<(), StorageError>;
 }
 
@@ -38,7 +58,10 @@ pub(crate) fn begin(
     let id = match effects.current(path)? {
         Some((id, old_receipt))
             if (append || expected == Some(ledger))
-                && expected.is_some_and(|old| old_receipt == header_ledger(old)) => id,
+                && expected.is_some_and(|old| old_receipt == header_ledger(old)) =>
+        {
+            id
+        }
         _ => effects.create(path, &receipt)?,
     };
     effects.receipt(id, &receipt)?;
@@ -57,20 +80,38 @@ fn outcome(
     observation: &Observation,
     payload: &str,
 ) -> Result<&'static str, StorageError> {
-    Ok(match effects.first(source, scope, &observation.identity)?.as_deref() {
-        None => {
-            effects.identity(source, scope, &observation.identity, observation.record.offset)?;
-            "accepted"
-        }
-        Some(first) if first == payload => "duplicate",
-        Some(_) => "conflict",
-    })
+    Ok(
+        match effects
+            .first(source, scope, &observation.identity)?
+            .as_deref()
+        {
+            None => {
+                effects.identity(
+                    source,
+                    scope,
+                    &observation.identity,
+                    observation.record.offset,
+                )?;
+                "accepted"
+            }
+            Some(first) if first == payload => "duplicate",
+            Some(_) => "conflict",
+        },
+    )
 }
 
-pub(crate) fn observations(effects: &mut impl Effects, source: i64, index: &FileIndex) -> Result<(), StorageError> {
+pub(crate) fn observations(
+    effects: &mut impl Effects,
+    source: i64,
+    index: &FileIndex,
+) -> Result<(), StorageError> {
     let mut models = BTreeSet::new();
     let mut days = BTreeSet::new();
-    for observation in index.native_usage_observations.as_deref().unwrap_or_default() {
+    for observation in index
+        .native_usage_observations
+        .as_deref()
+        .unwrap_or_default()
+    {
         let payload = encode(&observation.payload)?;
         let record = encode(&observation.record)?;
         if let Some(replay) = effects.fact(source, observation.record.offset)? {
@@ -85,9 +126,18 @@ pub(crate) fn observations(effects: &mut impl Effects, source: i64, index: &File
         } else {
             "unavailable"
         };
-        effects.insert(Fact { source, offset: observation.record.offset, identity: &observation.identity,
-            payload: &payload, record: &record, tree, model })?;
-        if model == "accepted" && let Some(model) = &observation.payload.model {
+        effects.insert(Fact {
+            source,
+            offset: observation.record.offset,
+            identity: &observation.identity,
+            payload: &payload,
+            record: &record,
+            tree,
+            model,
+        })?;
+        if model == "accepted"
+            && let Some(model) = &observation.payload.model
+        {
             models.insert(model.clone());
             if let Some(time) = observation.payload.timestamp {
                 days.insert(crate::pricing::utc_day(time));
@@ -113,7 +163,12 @@ pub(crate) fn observations(effects: &mut impl Effects, source: i64, index: &File
     Ok(())
 }
 
-pub(crate) fn write(effects: &mut impl Effects, path: &str, ledger: &Ledger, index: &FileIndex) -> Result<(), StorageError> {
+pub(crate) fn write(
+    effects: &mut impl Effects,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+) -> Result<(), StorageError> {
     if index.native_usage_observations.is_none() {
         return Ok(());
     }
