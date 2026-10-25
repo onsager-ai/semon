@@ -122,7 +122,10 @@ pub(super) fn source_factory(host: &Factory) -> Arc<Factory> {
     let tables = client.query("SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r'", &[]).unwrap();
     for row in tables {
         let name: String = row.get(0);
-        let privilege = if name.starts_with("semon_pg_store_") {
+        if !name.starts_with("semon_pg_") {
+            continue;
+        }
+        let privilege = if name.starts_with("semon_pg_store_") || name == "semon_pg_schema" {
             "SELECT"
         } else {
             "SELECT,INSERT,UPDATE,DELETE"
