@@ -2,7 +2,6 @@
 //!
 //! Physical stores own transactions, SQL dialects, row identifiers and RLS.
 //! This module owns only the stable value representation and its validation.
-#![allow(dead_code)] // PG physical adapter is intentionally not connected yet.
 use super::{StorageError, proof_lifetime::ProofGenerationId};
 use crate::model::summary::CatalogRow;
 
@@ -23,26 +22,6 @@ pub(crate) struct GenerationRecord {
     pub(crate) metadata: String,
     pub(crate) slots: String,
     pub(crate) prefix: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PresentationRoot {
-    pub(crate) publication: String,
-    pub(crate) base: String,
-    pub(crate) manifest: String,
-    pub(crate) digest: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PresentationEntry {
-    pub(crate) session_key: String,
-    pub(crate) digest: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceLedgerEntry {
-    pub(crate) path: String,
-    pub(crate) ledger: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,10 +71,26 @@ pub(crate) fn presentation_entry(
     ))
 }
 
+/// Coordinates supplied by the owner transaction, rather than by the record
+/// being decoded. A record may prove it is self-consistent, but cannot grant
+/// itself a namespace, admission, stream, proof, or generation identity.
+pub(crate) struct ExpectedGeneration<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) id: &'a ProofGenerationId,
+    pub(crate) admission: u64,
+    pub(crate) stream: &'a str,
+    pub(crate) proof: &'a str,
+}
+
 pub(crate) fn decode_generation(
     record: GenerationRecord,
+    expected: ExpectedGeneration<'_>,
 ) -> Result<(GenerationRecord, CatalogRow), StorageError> {
-    if record.namespace.is_empty()
+    if record.namespace != expected.namespace
+        || record.id != *expected.id
+        || record.admission != expected.admission
+        || record.stream != expected.stream
+        || record.proof != expected.proof
         || record.metadata.len() > METADATA_MAX
         || record.slots.len() > METADATA_MAX
     {
@@ -112,6 +107,8 @@ pub(crate) fn decode_generation(
     }
     let row: CatalogRow =
         serde_json::from_str(&record.metadata).map_err(|_| StorageError::Unavailable)?;
+    let _: Option<Vec<crate::slot_projection::SavedSlot>> =
+        serde_json::from_str(&record.slots).map_err(|_| StorageError::Unavailable)?;
     if row.key != record.session_key
         || crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?
