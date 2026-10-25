@@ -8396,7 +8396,8 @@ mod tests {
             let inputs = peer_inputs(options, 2, "claude72-1");
             // Identical native IDs, messages and physical paths in both namespaces.
             let mut foreign = open(&foreign_config);
-            let (foreign_batch, foreign_model) = claude_ready_from(&mut foreign, options, &inputs, &inputs[..1]);
+            let (foreign_batch, foreign_model) =
+                claude_ready_from(&mut foreign, options, &inputs, &inputs[..1]);
             let frontier = |namespace: &str| {
                 f.db().prepare("SELECT kind,value,harness,after_key,after_edge,done FROM catalog_semantic_frontier WHERE namespace=?1 ORDER BY kind,value,harness").unwrap().query_map([namespace], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
             };
@@ -8406,7 +8407,11 @@ mod tests {
             let before = namespace_state(&f, "source-b");
             let mut admitted = open(&f.config);
             let (batch, model) = claude_ready_from(&mut admitted, options, &inputs, &inputs[..1]);
-            assert_eq!(frontier("source-a"), control_frontier, "populated foreign Current/dependencies cannot alter the complete local frontier compared with the same Raw control");
+            assert_eq!(
+                frontier("source-a"),
+                control_frontier,
+                "populated foreign Current/dependencies cannot alter the complete local frontier compared with the same Raw control"
+            );
             oracle(&admitted, options, &inputs, model.prepared());
             publish(&mut admitted, &f, &batch, &model);
             admitted.finish_semantic_stage(batch.epoch).unwrap();
@@ -8430,7 +8435,7 @@ mod tests {
             let mut inputs = peer_inputs(options, 66, "peer81-target");
             for (i, input) in inputs.iter_mut().enumerate().skip(1) {
                 let old = input.full_path(options);
-                input.path = format!("projects/sanitized/peer81-{i}/peer81-target.jsonl").into();
+                input.path = format!("projects/peer81-{i}/peer81-target.jsonl").into();
                 let path = input.full_path(options);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::rename(old, path).unwrap();
@@ -8476,7 +8481,9 @@ mod tests {
                                     &batch,
                                     1_790_000_000_000,
                                 )
-                                .unwrap_or_else(|error| panic!("paging model phase {:?}: {error}", batch.phase));
+                                .unwrap_or_else(|error| {
+                                    panic!("paging model phase {:?}: {error}", batch.phase)
+                                });
                         }
                     }
                     Ok(None) => panic!("native frontier stage disappeared"),
