@@ -10,6 +10,7 @@ pub(crate) mod navigation;
 pub mod postgres;
 pub(crate) mod proof_lifetime;
 pub(crate) mod query;
+pub(crate) mod selected;
 pub mod source_observations;
 pub(crate) mod sqlite;
 pub use sqlite::catalog_namespace::CatalogAssignmentProgress;

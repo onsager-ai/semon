@@ -14,6 +14,10 @@ const TTL_MAX: u32 = 60_000;
 const LEASE_CAP: i64 = 64;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_presentation_roots(namespace TEXT NOT NULL,publication TEXT NOT NULL,base TEXT NOT NULL,manifest TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(namespace,digest)) STRICT, WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;
+CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_root_immutable BEFORE UPDATE ON storage_proof_presentation_roots BEGIN SELECT RAISE(ABORT,'immutable presentation root'); END;
 CREATE TABLE IF NOT EXISTS storage_proof_sources(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,path TEXT NOT NULL,ledger TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key,path)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_source_path ON storage_proof_sources(namespace,path,ledger,id);
 CREATE TABLE IF NOT EXISTS storage_proof_refs(namespace TEXT NOT NULL,session_key TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN('current','history')),id TEXT NOT NULL,PRIMARY KEY(namespace,session_key,kind,id)) STRICT, WITHOUT ROWID;
@@ -71,6 +75,11 @@ pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+pub(super) struct PreparedPresentations<'a> {
+    pub(super) prepared: &'a crate::model::PreparedSources,
+    pub(super) rows: &'a [(String, String)],
+}
+
 pub(super) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
@@ -78,8 +87,10 @@ pub(super) fn publish(
     stream: &str,
     publication: &str,
     proof: &str,
-    prepared: &crate::model::PreparedSources,
+    presentations: PreparedPresentations<'_>,
 ) -> Result<(), StorageError> {
+    let prepared = presentations.prepared;
+    let presentations = presentations.rows;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     for row in &prepared.rows {
@@ -103,6 +114,15 @@ pub(super) fn publish(
                 slots,
                 prefix
             ],
+        )
+        .map_err(failed)?;
+        let presentation = presentations
+            .iter()
+            .find(|(key, _)| key == &row.key)
+            .ok_or(StorageError::Unavailable)?;
+        tx.execute(
+            "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
+            params![namespace, id.0, row.key, presentation.1],
         )
         .map_err(failed)?;
         for source in &row.sources {
@@ -189,6 +209,8 @@ pub(crate) fn collect(
 ) -> rusqlite::Result<usize> {
     let candidates = tx.prepare("SELECT id,session_key FROM storage_proof_generations g WHERE namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=g.namespace AND r.id=g.id AND r.session_key=g.session_key) AND NOT EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_namespaces n ON n.namespace=l.namespace WHERE l.namespace=g.namespace AND l.id=g.id AND l.session_key=g.session_key AND l.admission=n.admission_generation AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.stream=g.stream AND l.stream=(SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch') AND l.expires>?2) ORDER BY id,session_key LIMIT ?3")?.query_map(params![namespace,crate::model::now_ms(),budget.min(64) as i64],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, key) in &candidates {
+        tx.execute("DELETE FROM storage_proof_presentations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![namespace,id,key])?;
+
         tx.execute(
             "DELETE FROM storage_proof_sources WHERE namespace=?1 AND id=?2 AND session_key=?3",
             params![namespace, id, key],
@@ -401,6 +423,7 @@ impl Lease {
         {
             return Err(StorageError::ScopeChanged);
         }
+        validate_presentation(db, &self.snapshot, &self.row.key, &proof)?;
         let metadata = serde_json::to_string(&self.row).map_err(|_| StorageError::Unavailable)?;
         let sql_admission =
             i64::try_from(self.snapshot.admission).map_err(|_| StorageError::ScopeChanged)?;
@@ -602,5 +625,260 @@ impl ProofReaderLease for Lease {
             snapshot: self.snapshot.clone(),
             records,
         })
+    }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
+    Ok(digest(
+        &serde_json::to_vec(&("selected-presentation-v2", base, manifest))
+            .map_err(|_| StorageError::Unavailable)?,
+    ))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresentationManifest {
+    entries: Vec<(String, String)>,
+    observations: Option<crate::storage::selected::PresentationObservations>,
+}
+
+/// The caller has completed every producer write in the same publication TX.
+/// Capture typed metadata, never Raw bodies, before committing the proof root.
+pub(super) fn capture_presentations(
+    tx: &Transaction<'_>,
+    ns: &str,
+    generation: &str,
+    prepared: &crate::model::PreparedSources,
+    observed_at: i64,
+) -> Result<Vec<(String, String)>, StorageError> {
+    use crate::storage::selected::{CapturedContext, PresentationWitness};
+    let lookup = super::selected::Context::owned(tx);
+    let mut result = Vec::new();
+    let mut bytes = 0usize;
+    for row in &prepared.rows {
+        let witness = if let Some(projection) =
+            prepared.transcripts.iter().find(|p| p.key == row.key)
+        {
+            let texts = projection
+                .slots
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| StorageError::Unavailable)?;
+            let header_generation = crate::slot_projection::generation(&texts, &row.sources)
+                .map_err(|_| StorageError::Unavailable)?;
+            let header: (String,u32,i64) = tx.query_row("SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",params![ns,row.key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+            if header.0 != header_generation
+                || header.1 != crate::slot_projection::VERSION
+                || usize::try_from(header.2).ok() != Some(texts.len())
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            let has_history = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",params![ns,row.key],|r|r.get(0)).map_err(failed)?;
+            let catalog = [
+                (
+                    "catalog_version".into(),
+                    crate::model::summary::CATALOG_VERSION.to_string(),
+                ),
+                ("catalog_generation".into(), generation.to_owned()),
+                (
+                    "slot_projection_catalog_generation".into(),
+                    generation.to_owned(),
+                ),
+                ("catalog_completeness".into(), "partial".into()),
+                ("catalog_observed_at".into(), observed_at.to_string()),
+            ]
+            .into_iter()
+            .collect();
+            let mut observations = prepared
+                .presentation_observations()
+                .cloned()
+                .ok_or(StorageError::Unavailable)?;
+            let context =
+                CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative| {
+                    observations.capture_relative_status(relative)
+                })
+                .map_err(|_| StorageError::Unavailable)?;
+            Some(PresentationWitness {
+                header_generation,
+                version: header.1,
+                total: texts.len(),
+                has_history,
+                catalog,
+                context,
+                relative_statuses: std::mem::take(&mut observations.relative_statuses),
+                observations,
+            })
+        } else {
+            None
+        };
+        let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
+        bytes = bytes.saturating_add(text.len());
+        if bytes > 8 * 1048576 {
+            return Err(StorageError::HistoryRetentionBounds);
+        }
+        result.push((row.key.clone(), text));
+    }
+    Ok(result)
+}
+
+pub(super) fn bind_presentations(
+    tx: &Transaction<'_>,
+    ns: &str,
+    publication: &str,
+    base: &str,
+    rows: &[(String, String)],
+    prepared: &crate::model::PreparedSources,
+) -> Result<String, StorageError> {
+    let mut entries = Vec::new();
+    for (key, text) in rows {
+        let row = prepared
+            .rows
+            .iter()
+            .find(|row| &row.key == key)
+            .ok_or(StorageError::Unavailable)?;
+        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
+        let projection = prepared
+            .transcripts
+            .iter()
+            .find(|projection| &projection.key == key);
+        let slots = serde_json::to_string(&projection.map(|projection| &projection.slots))
+            .map_err(|_| StorageError::Unavailable)?;
+        let bytes = serde_json::to_vec(&(&metadata, &slots, text))
+            .map_err(|_| StorageError::Unavailable)?;
+        entries.push((key.clone(), digest(&bytes)));
+    }
+    let manifest = serde_json::to_string(&PresentationManifest {
+        entries,
+        observations: prepared.presentation_observations().cloned(),
+    })
+    .map_err(|_| StorageError::Unavailable)?;
+    if manifest.len() > 1048576 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    let joined = joined_digest(base, &manifest)?;
+    tx.execute(
+        "INSERT INTO storage_proof_presentation_roots VALUES(?1,?2,?3,?4,?5)",
+        params![ns, publication, base, manifest, joined],
+    )
+    .map_err(failed)?;
+    Ok(joined)
+}
+pub(super) fn replayed_presentation(
+    db: &Connection,
+    ns: &str,
+    publication: &str,
+    base: &str,
+    expected: &str,
+) -> Result<bool, StorageError> {
+    let row: Option<(String,String,String)> = db.query_row("SELECT base,manifest,digest FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2 AND digest=?3",params![ns,publication,expected],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(failed)?;
+    let Some((saved, manifest, joined)) = row else {
+        return Ok(false);
+    };
+    Ok(saved == base
+        && manifest.len() <= 1048576
+        && joined == expected
+        && joined_digest(&saved, &manifest)? == joined)
+}
+fn validate_presentation(
+    db: &Connection,
+    snapshot: &ReaderSnapshot,
+    key: &str,
+    proof: &str,
+) -> Result<String, StorageError> {
+    let (base,manifest,joined): (String,String,String) = db.query_row("SELECT base,manifest,digest FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2 AND digest=?3",params![snapshot.namespace.as_str(),snapshot.publication_generation,proof],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+    if manifest.len() > 1048576 || joined != proof || joined_digest(&base, &manifest)? != joined {
+        return Err(StorageError::ScopeChanged);
+    }
+    let manifest: PresentationManifest =
+        serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
+    let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+    let bytes =
+        serde_json::to_vec(&(&metadata, &slots, &text)).map_err(|_| StorageError::Unavailable)?;
+    if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
+        || !manifest
+            .entries
+            .iter()
+            .any(|(k, d)| k == key && *d == digest(&bytes))
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(text)
+}
+
+impl crate::storage::selected::SelectedSnapshotStore for Lease {
+    fn open_selected(
+        &self,
+        options: &crate::Options,
+        host: &crate::storage::selected::HostSourceBinding,
+        control: &crate::SelectedReadControl,
+    ) -> std::io::Result<crate::storage::selected::SelectedRead> {
+        use std::io;
+        control.check()?;
+        host.validate(&self.snapshot)?;
+        let db = NativeReaderBinding::Semantic(self.owner.clone())
+            .connection()
+            .map_err(io::Error::other)?;
+        db.execute_batch("BEGIN DEFERRED")
+            .map_err(io::Error::other)?;
+        self.validate(&db).map_err(io::Error::other)?;
+        // validate() authenticated both blobs in this same read transaction.
+        let (text,manifest): (String,String) = db.query_row("SELECT p.metadata,r.manifest FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(io::Error::other)?;
+        let witness: Option<crate::storage::selected::PresentationWitness> =
+            serde_json::from_str(&text).map_err(io::Error::other)?;
+        let mut witness =
+            witness.ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
+        let manifest: PresentationManifest =
+            serde_json::from_str(&manifest).map_err(io::Error::other)?;
+        witness.observations = manifest
+            .observations
+            .ok_or_else(|| io::Error::other("selected observation witness unavailable"))?;
+        witness.observations.relative_statuses = std::mem::take(&mut witness.relative_statuses);
+        let text: String = db.query_row("SELECT CASE WHEN octet_length(slots)<=1048576 THEN slots END FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|r.get(0)).map_err(io::Error::other)?;
+        let slots: Option<Vec<crate::slot_projection::SavedSlot>> =
+            serde_json::from_str(&text).map_err(io::Error::other)?;
+        let slots = slots.ok_or_else(|| io::Error::other("selected recipes unavailable"))?;
+        let texts = slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::other)?;
+        if texts.iter().any(|text| text.len() > 65536)
+            || slots.len() != witness.total
+            || witness.version != crate::slot_projection::VERSION
+            || crate::slot_projection::generation(&texts, &self.row.sources)
+                .map_err(io::Error::other)?
+                != witness.header_generation
+            || witness.catalog.get("catalog_generation")
+                != Some(&self.snapshot.publication_generation)
+        {
+            return Err(io::Error::other("selected witness changed"));
+        }
+        let sources = crate::query_source::Sources::capture_bound_snapshot(
+            options,
+            &self.row.sources,
+            db,
+            &self.owner,
+        )?;
+        control.check()?;
+        Ok(crate::storage::selected::SelectedRead {
+            snapshot: self.snapshot.clone(),
+            row: self.row.clone(),
+            witness,
+            slots,
+            sources,
+        })
+    }
+    fn finish_selected(&self, control: &crate::SelectedReadControl) -> std::io::Result<()> {
+        control.check()?;
+        let db = NativeReaderBinding::Semantic(self.owner.clone())
+            .connection()
+            .map_err(std::io::Error::other)?;
+        self.validate(&db).map_err(std::io::Error::other)?;
+        control.check()
     }
 }

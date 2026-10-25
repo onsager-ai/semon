@@ -7317,6 +7317,22 @@ pub(crate) struct PreparedSources {
 }
 
 impl PreparedSources {
+    pub(crate) fn presentation_observations(
+        &self,
+    ) -> Option<&crate::storage::selected::PresentationObservations> {
+        self.relationships.presentation.as_ref()
+    }
+
+    /// Bind private model inputs separately from the ordinary row/projection
+    /// oracle. Record and publish compare this exact durable witness.
+    pub(crate) fn staged_model_witness(&self) -> io::Result<String> {
+        serde_json::to_string(&(
+            self.staged_projection_witness()?,
+            self.presentation_observations(),
+        ))
+        .map_err(io::Error::other)
+    }
+
     /// Exact content-free publication witness shared by staging and publish.
     pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
         serde_json::to_string(&(
@@ -7461,6 +7477,21 @@ pub(crate) fn prepare_semantic_batch(
             .filter(|old| !prepared.rows.iter().any(|row| row.key == old.key))
             .cloned()
             .collect();
+    }
+    if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
+        let binding = cache.query_runtime_binding()?;
+        prepared.relationships.presentation =
+            Some(crate::storage::selected::PresentationObservations::capture(
+                options,
+                binding.as_ref(),
+                prepared.rows.iter().chain(
+                    batch
+                        .context
+                        .endpoints
+                        .values()
+                        .map(|endpoint| &endpoint.row),
+                ),
+            ));
     }
     Ok(SemanticModelBatch { prepared })
 }
