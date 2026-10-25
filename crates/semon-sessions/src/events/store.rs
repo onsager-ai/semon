@@ -2185,7 +2185,7 @@ fn publication_storage_failure(error: crate::storage::StorageError) -> StoreErro
 }
 
 /// A rusqlite error, as the cache handles it.
-fn failure(error: rusqlite::Error) -> StoreError {
+pub(crate) fn failure(error: rusqlite::Error) -> StoreError {
     if is_busy(&error) {
         StoreError::Busy(error.to_string())
     } else if is_data_error(&error) {
@@ -3281,6 +3281,8 @@ enum CatalogWriter {
     #[cfg(test)]
     RowWise,
     #[cfg(test)]
+    OriginalPorts,
+    #[cfg(test)]
     Traversal {
         owners: usize,
         measured: bool,
@@ -3296,6 +3298,8 @@ fn catalog_batch_bytes(
 ) -> Option<usize> {
     match writer {
         CatalogWriter::Auto => {}
+        #[cfg(test)]
+        CatalogWriter::OriginalPorts => {}
         #[cfg(test)]
         CatalogWriter::Traversal { .. } => {}
         #[cfg(test)]
@@ -3595,9 +3599,19 @@ impl SqliteStore {
                 }
             }
             stage("fences", &transaction);
-            if !crate::history_projection::preserve_replacements(&transaction, publication)
-                .map_err(failure)?
-            {
+            #[cfg(test)]
+            let preserved = if matches!(writer, CatalogWriter::OriginalPorts) {
+                crate::history_projection::legacy_reference::preserve_replacements(
+                    &transaction,
+                    publication,
+                )
+            } else {
+                crate::history_projection::preserve_replacements(&transaction, publication)
+            };
+            #[cfg(not(test))]
+            let preserved =
+                crate::history_projection::preserve_replacements(&transaction, publication);
+            if !preserved.map_err(failure)? {
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);
             }
@@ -3990,48 +4004,22 @@ impl SqliteStore {
             }
             stage("generation", &transaction);
             if let Some(projections) = publication.transcripts {
-                let rows_by_key: BTreeMap<_, _> =
-                    rows.iter().map(|row| (row.key.as_str(), row)).collect();
-                for projection in projections {
-                    let Some(row) = rows_by_key.get(projection.key.as_str()) else {
-                        continue;
-                    };
-                    let metadata: Vec<String> = projection
-                        .slots
-                        .iter()
-                        .map(json)
-                        .collect::<Result<_, _>>()
-                        .map_err(failure)?;
-                    let source_generation = crate::retention::source_generation(&row.sources)
-                        .map_err(|_| {
-                            StoreError::Data("source projection metadata cannot serialize".into())
-                        })?;
-                    let slot_generation =
-                        crate::slot_projection::generation(&metadata, &row.sources)
-                            .map_err(|error| StoreError::Data(error.to_string()))?;
-                    let changed = transaction.execute(
-                        "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
-                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
-                    if changed > 0 || projection.repair {
-                        transaction
-                            .execute(
-                                "DELETE FROM session_slots WHERE session_key=?1",
-                                [&projection.key],
-                            )
-                            .map_err(failure)?;
-                        let mut put = transaction.prepare("INSERT INTO session_slots(session_key,slot,metadata) VALUES (?1,?2,?3)").map_err(failure)?;
-                        for (slot, metadata) in metadata.iter().enumerate() {
-                            put.execute(params![
-                                projection.key,
-                                i64::try_from(slot).map_err(|_| StoreError::Data(
-                                    "slot index exceeds SQL range".into()
-                                ))?,
-                                metadata
-                            ])
-                            .map_err(failure)?;
-                        }
-                    }
+                #[cfg(test)]
+                if matches!(writer, CatalogWriter::OriginalPorts) {
+                    original_slot_publication_reference(&transaction, rows, projections)?;
+                } else {
+                    crate::storage::catalog::publish_slot_rows(
+                        &crate::storage::sqlite::publication::SlotWriter::unbound(&transaction),
+                        rows,
+                        projections,
+                    )?;
                 }
+                #[cfg(not(test))]
+                crate::storage::catalog::publish_slot_rows(
+                    &crate::storage::sqlite::publication::SlotWriter::unbound(&transaction),
+                    rows,
+                    projections,
+                )?;
                 if claims.is_none() {
                     transaction.execute("DELETE FROM session_slots WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
                     transaction.execute("DELETE FROM session_slot_projections WHERE session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
@@ -9029,6 +9017,60 @@ mod tests {
     }
 
     #[test]
+    fn catalog_typed_custody_and_slots_match_original_publication_digest() {
+        use sha2::{Digest, Sha256};
+        let root = scratch("typed-publication-original-parity");
+        let (options, mut rows, projections) = catalog_native_fixture(&root, 4, false);
+        let (mut typed, mut original) = catalog_pair(&options);
+        for round in 0..3 {
+            if round == 1 {
+                // Cross-harness replacement exercises original custody and
+                // its exact recipe/header bytes before Current is overwritten.
+                rows[0].harness = if rows[0].harness == "claude" {
+                    "codex"
+                } else {
+                    "claude"
+                }
+                .into();
+                rows[0].name = "replaced native owner".into();
+            }
+            let left =
+                catalog_write(&mut typed, &rows, &projections, false, CatalogWriter::Auto).unwrap();
+            let right = catalog_write(
+                &mut original,
+                &rows,
+                &projections,
+                false,
+                CatalogWriter::OriginalPorts,
+            )
+            .unwrap();
+            assert_eq!(left, right);
+            assert_eq!(left.0, Outcome::Written);
+            let a = catalog_comparable_state(&typed.connection);
+            let b = catalog_comparable_state(&original.connection);
+            assert_eq!(a, b, "round {round}: every durable table and digest");
+            assert_eq!(
+                Sha256::digest(format!("{a:?}").as_bytes()),
+                Sha256::digest(format!("{b:?}").as_bytes())
+            );
+        }
+        assert!(
+            typed
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM session_history_slots WHERE session_key=?1",
+                    [&rows[0].key],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                > 0
+        );
+        drop(typed);
+        drop(original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn catalog_batch_complete_publisher_matches_row_wise_rows_feed_sources_slots_and_repairs() {
         let root = scratch("catalog-publisher-parity");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 64, false);
@@ -11827,4 +11869,53 @@ mod summary_tests {
         drop(store);
         fs::remove_file(path).unwrap();
     }
+}
+
+// Frozen pre-extraction slot publisher, used only by the full-Catalog CI oracle.
+#[cfg(test)]
+fn original_slot_publication_reference(
+    transaction: &rusqlite::Transaction<'_>,
+    rows: &[crate::model::summary::CatalogRow],
+    projections: &[crate::slot_projection::Projection],
+) -> Result<(), StoreError> {
+    let rows_by_key: BTreeMap<_, _> = rows.iter().map(|row| (row.key.as_str(), row)).collect();
+    for projection in projections {
+        let Some(row) = rows_by_key.get(projection.key.as_str()) else {
+            continue;
+        };
+        let metadata: Vec<String> = projection
+            .slots
+            .iter()
+            .map(json)
+            .collect::<Result<_, _>>()
+            .map_err(failure)?;
+        let source_generation = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StoreError::Data("source projection metadata cannot serialize".into()))?;
+        let slot_generation = crate::slot_projection::generation(&metadata, &row.sources)
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let changed = transaction.execute(
+                        "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
+                        params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
+        if changed > 0 || projection.repair {
+            transaction
+                .execute(
+                    "DELETE FROM session_slots WHERE session_key=?1",
+                    [&projection.key],
+                )
+                .map_err(failure)?;
+            let mut put = transaction
+                .prepare("INSERT INTO session_slots(session_key,slot,metadata) VALUES (?1,?2,?3)")
+                .map_err(failure)?;
+            for (slot, metadata) in metadata.iter().enumerate() {
+                put.execute(params![
+                    projection.key,
+                    i64::try_from(slot)
+                        .map_err(|_| StoreError::Data("slot index exceeds SQL range".into()))?,
+                    metadata
+                ])
+                .map_err(failure)?;
+            }
+        }
+    }
+    Ok(())
 }

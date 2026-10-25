@@ -3,6 +3,7 @@ pub(crate) mod catalog;
 pub(crate) mod catalog_namespace;
 pub(crate) mod changes;
 pub(crate) mod configured_index;
+pub(crate) mod history;
 pub(crate) mod namespace;
 pub(crate) mod navigation;
 pub(crate) mod publication;
