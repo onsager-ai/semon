@@ -6985,5 +6985,165 @@ mod tests {
             assert_eq!(namespace_state(&f, "source-b"), foreign);
             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND session_key='budget-64'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         }
+
+        #[test]
+        fn configured_semantic_domain61_late_child_restarts_complete_native_cohort() {
+            let (f, foreign_config, options, foreign_inputs) = model_sources();
+            {
+                let mut foreign = open(&foreign_config);
+                let input = &foreign_inputs[1];
+                foreign.ingest(&"7".repeat(64), &input.full_path(&options[1]), "claude").unwrap();
+                let (batch, model) = ready(&mut foreign, &f, &options[1], std::slice::from_ref(input));
+                publish(&mut foreign, &f, &batch, &model);
+                foreign.finish_semantic_stage(batch.epoch).unwrap();
+            }
+            let options = &options[0];
+            let inputs = (0..4).map(|i| crate::Input {
+                root: crate::InputRoot::Codex,
+                path: format!("sessions/late-{i}.jsonl"),
+            }).collect::<Vec<_>>();
+            let mut cache = open(&f.config);
+            for (i, input) in inputs[..3].iter().enumerate() {
+                write(options, input, &format!("late-{i}"), if i == 0 { None } else { Some("late-0") });
+                cache.ingest(&format!("{:064x}", 6100+i), &input.full_path(options), "codex").unwrap();
+            }
+            let (batch, model) = ready(&mut cache, &f, options, &inputs[..3]);
+            publish(&mut cache, &f, &batch, &model);
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            let foreign = namespace_state(&f, "source-b");
+            // Hold a fully prepared publication, stronger than merely passing
+            // indexing: re-entry must fence this exact old in-memory payload.
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            cache.begin_semantic_stage_with_journal(&[inputs[0].full_path(options).to_string_lossy().into_owned()], &runtime, true).unwrap();
+            let mut held = None;
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() { continue; }
+                let selected = inputs[..3].iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                assert_eq!(selected.len(), batch.paths.len());
+                let model = cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                if batch.phase == Phase::Publication {
+                    held = Some((batch, model));
+                    break;
+                }
+            }
+            let (held, held_model) = held.expect("parent seed discovers its whole prior family");
+            assert_eq!(held_model.prepared().rows.len(),3);
+            let prior = namespace_state(&f, "source-a").into_iter().filter(|(table,_)| {
+                (table.starts_with("session_") && table != "session_catalog_invalidations")
+                    || table.starts_with("storage_proof_") || table == "storage_semantic_publications"
+            }).collect::<BTreeMap<_,_>>();
+            write(options, &inputs[3], "late-3", Some("late-0"));
+            cache.ingest(&format!("{:064x}",6103), &inputs[3].full_path(options), "codex").unwrap();
+            let before = shared_state(&f);
+            FAIL_EFFECT.with(|p| p.set(Some("semantic_late_incident_reset")));
+            assert!(cache.semantic_batch(64).is_err());
+            assert_eq!(FAIL_EFFECT.with(|p| p.get()), None);
+            assert_eq!(shared_state(&f), before, "late reset is atomic");
+            let restarted = cache.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(restarted.phase, Phase::Indexing);
+            assert!(restarted.epoch > held.epoch);
+            assert!(restarted.paths.is_empty());
+            assert_eq!(f.db().query_row("SELECT count(*) FROM storage_semantic_model_batches WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let before = shared_state(&f);
+            assert_eq!(cache.publish_semantic_catalog(&held, held_model.prepared()).unwrap().0, Outcome::Conflict);
+            assert_eq!(shared_state(&f), before, "held model has zero effects");
+            let mut indexed_new_child = false;
+            let mut final_model = None;
+            for _ in 0..128 {
+                let published = namespace_state(&f, "source-a").into_iter().filter(|(table,_)| prior.contains_key(table)).collect::<BTreeMap<_,_>>();
+                assert_eq!(published, prior, "no intermediate publication loses a prior owner");
+                assert_eq!(namespace_state(&f, "source-b"), foreign);
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() { continue; }
+                let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                assert_eq!(selected.len(), batch.paths.len());
+                if batch.phase == Phase::Indexing && selected.contains(&inputs[3]) {
+                    indexed_new_child = true;
+                }
+                let model = cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                if batch.phase == Phase::Publication {
+                    final_model = Some((batch, model));
+                    break;
+                }
+            }
+            assert!(indexed_new_child, "real header frontier must discover the late child");
+            let (batch, model) = final_model.expect("bounded native restart reaches publication");
+            assert_eq!(model.prepared().rows.len(),4);
+            oracle(&cache, options, &inputs, model.prepared());
+            publish(&mut cache, &f, &batch, &model);
+            let db = f.db();
+            for table in ["session_catalog", "session_history_catalog"] {
+                assert_eq!(db.query_row(&format!("SELECT count(*) FROM {table} WHERE namespace='source-a'"),[],|r|r.get::<_,i64>(0)).unwrap(),4, "{table}");
+            }
+            assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND parent_key='late-0' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),3);
+            assert_eq!(db.query_row("SELECT count(*) FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",[],|r|r.get::<_,i64>(0)).unwrap(),4);
+            assert_eq!(namespace_state(&f, "source-b"), foreign);
+        }
+
+        #[test]
+        fn configured_semantic_domain61_progressive_index_overflow_is_capacity_not_conflict() {
+            // Use the existing admitted primitive staging profile: unlike the
+            // Current-owner profile, its discovery is not stopped earlier by
+            // the distinct affected-owner source-union guard.
+            let (_home, _, options, _) = model_sources();
+            let options = &options[0];
+            let f = semantic_fixture("source-a");
+            let capability = crate::storage::sqlite::semantic::SemanticStaging::validate(&f.config).unwrap();
+            let mut cache = EventCache::open_semantic(capability).unwrap();
+            let inputs = (0..65).map(|i| crate::Input {
+                root: crate::InputRoot::Codex,
+                path: format!("sessions/overflow-{i:02}.jsonl"),
+            }).collect::<Vec<_>>();
+            for (i,input) in inputs.iter().enumerate() {
+                // Real duplicate rollouts of one native identity exercise the
+                // header-id discovery index without an unqualified owner or
+                // a fabricated dependency/endpoint row.
+                write(options, input, "overflow", None);
+                cache.ingest(&format!("{:064x}",6200+i), &input.full_path(options), "codex").unwrap();
+            }
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            cache.begin_semantic_stage_with_journal(&[inputs[0].full_path(options).to_string_lossy().into_owned()], &runtime, true).unwrap();
+            let prior = namespace_state(&f,"source-a").into_iter().filter(|(table,_)| table.starts_with("session_") || table.starts_with("storage_proof_") || table == "storage_semantic_publications").collect::<BTreeMap<_,_>>();
+            let mut reached = false;
+            for _ in 0..128 {
+                let before = shared_state(&f);
+                match cache.semantic_batch(64) {
+                    Err(error) => {
+                        assert_eq!(error.to_string(), "semantic_component_source_budget");
+                        assert_eq!(shared_state(&f),before,"capacity refusal has zero effects");
+                        assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",[],|r|r.get::<_,i64>(0)).unwrap(),65);
+                        reached = true;
+                        break;
+                    }
+                    Ok(Some(batch)) => {
+                        assert_eq!(batch.phase,Phase::Indexing);
+                        if batch.paths.is_empty() { continue; }
+                        let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                        assert_eq!(selected.len(),batch.paths.len());
+                        cache.prepare_semantic_model_batch(options,&selected,&batch,1_790_000_000_000).unwrap();
+                    }
+                    Ok(None) => panic!("real progressive stage disappeared"),
+                }
+            }
+            assert!(reached,"65 real indexed sources must reach typed capacity guard");
+            let after = namespace_state(&f,"source-a").into_iter().filter(|(table,_)| prior.contains_key(table)).collect::<BTreeMap<_,_>>();
+            assert_eq!(after,prior,"exact prior publication survives progressive refusal");
+        }
+
+        #[test]
+        fn configured_semantic_domain61_real_ledger_change_remains_conflict() {
+            let (f, _, options, inputs) = model_sources();
+            let options = &options[0];
+            let input = &inputs[0];
+            let mut cache = open(&f.config);
+            cache.ingest(&format!("{:064x}",6300), &input.full_path(options), "codex").unwrap();
+            let (_batch, _model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            write(options, input, "changed-ledger", None);
+            cache.ingest(&format!("{:064x}",6301), &input.full_path(options), "codex").unwrap();
+            let before = shared_state(&f);
+            assert_eq!(cache.semantic_batch(64).unwrap_err().to_string(), StorageError::Conflict.to_string());
+            assert_eq!(shared_state(&f),before,"a genuine ledger/claim conflict has zero effects");
+        }
     }
 }

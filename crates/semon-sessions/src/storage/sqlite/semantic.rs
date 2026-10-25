@@ -250,22 +250,40 @@ fn reset_page(c: &Connection, ns: &str) -> rusqlite::Result<bool> {
     Ok(true)
 }
 
-fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<bool> {
+enum ReductionWitness {
+    Current,
+    Changed,
+    SourceBudget,
+    WithdrawalBudget,
+}
+
+impl ReductionWitness {
+    fn current(self) -> Result<bool, StoreError> {
+        match self {
+            Self::Current => Ok(true),
+            Self::Changed => Ok(false),
+            Self::SourceBudget => Err(refuse("semantic_component_source_budget")),
+            Self::WithdrawalBudget => Err(refuse("semantic_component_withdrawal_budget")),
+        }
+    }
+}
+
+fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWitness> {
     let rows=c.prepare("SELECT source_path,claim,ledger FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=1 ORDER BY source_path LIMIT 65")?.query_map([ns], |r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     // A bounded reducer cannot certify an unbounded component. Native owner
     // closure qualification remains a separate, explicitly limited port.
     if rows.len() > 64 {
-        return Ok(false);
+        return Ok(ReductionWitness::SourceBudget);
     }
     let negatives = c.prepare("SELECT withdrawal FROM main.catalog_semantic_sources WHERE namespace=?1 AND withdrawal IS NOT NULL ORDER BY source_path LIMIT 65")?.query_map([ns],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if negatives.len() > 64 {
-        return Ok(false);
+        return Ok(ReductionWitness::WithdrawalBudget);
     }
     for text in negatives {
         let withdrawal: crate::model::relation_stage::Withdrawal =
             serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if !withdrawal.current().unwrap_or(false) {
-            return Ok(false);
+            return Ok(ReductionWitness::Changed);
         }
     }
     for (path, claim, recorded) in rows {
@@ -275,10 +293,10 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<bool> {
             .transpose()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         if actual != claim || ledger != recorded {
-            return Ok(false);
+            return Ok(ReductionWitness::Changed);
         }
     }
-    Ok(true)
+    Ok(ReductionWitness::Current)
 }
 
 fn withdrawal_runtime_matches(
@@ -707,7 +725,7 @@ impl Stage {
         if pending {
             return Err(refuse("semantic_publication_recovery_intent_pending"));
         }
-        if !reduction_witnesses(&tx, ns).map_err(error)? {
+        if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
             return Ok((Outcome::Conflict, None));
         }
         for source in prepared.rows.iter().flat_map(|row| &row.sources) {
@@ -1485,7 +1503,7 @@ impl Stage {
         } else {
             true
         };
-        if !resetting && !reduction_witnesses(&tx, ns).map_err(error)? {
+        if !resetting && !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
             return Err(StoreError::Configured(StorageError::Conflict));
         }
         let mut result_phase = Phase::Indexing;
@@ -1512,14 +1530,61 @@ impl Stage {
             if paths.len() > 64 {
                 return Err(refuse("semantic_affected_owner_source_budget"));
             }
-            if phase != "indexing" && paths.iter().any(|path| !seeds.contains(path)) {
+            let added = paths.iter().any(|path| !seeds.contains(path));
+            if phase != "indexing"
+                && paths.iter().filter(|path| !seeds.contains(path)).any(|path| {
+                    !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+                })
+            {
                 return Err(refuse("semantic_affected_owner_late_incident_pending"));
             }
+            // A new native child has no Current owner yet. Revisit the real
+            // indexed header/dependency frontiers after a journal advance;
+            // the prior-owner closure alone cannot discover that child.
+            let revision: i64 = tx.query_row(
+                "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                [ns],
+                |r| r.get(0),
+            ).map_err(error)?;
+            let changed: bool = tx.query_row(
+                "SELECT revision<>?2 OR EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0) FROM main.catalog_semantic_stage WHERE namespace=?1",
+                params![ns,revision],
+                |r| r.get(0),
+            ).map_err(error)?;
             let paths = paths.into_iter().collect::<Vec<_>>();
             for (path, claim) in
                 super::source_journal::claims(&tx, Some(ns), &paths).map_err(error)?
             {
                 tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
+            }
+            if phase != "indexing" && (added || changed) {
+                // Use the existing bounded reset, including a fresh epoch.
+                // Old in-memory batches and the durable model witness cannot
+                // survive this transition. Raw and published custody stay put.
+                reset(&tx, ns, &runtime).map_err(error)?;
+                tx.execute(
+                    "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
+                    [ns],
+                ).map_err(error)?;
+                let next_epoch = tx.query_row(
+                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                ).map_err(error)?;
+                #[cfg(test)]
+                crate::events::store::configured::effect("semantic_late_incident_reset").map_err(error)?;
+                tx.commit().map_err(error)?;
+                self.epoch = Some(next_epoch);
+                return Ok(Some(Batch {
+                    epoch: next_epoch,
+                    phase: Phase::Indexing,
+                    paths: Vec::new(),
+                    base_generation,
+                    source_revision: revision,
+                    runtime,
+                    context: Context::default(),
+                    relation_cursor: None,
+                }));
             }
             #[cfg(test)]
             crate::events::store::configured::effect("semantic_lifecycle_enroll").map_err(error)?;
@@ -1672,7 +1737,7 @@ impl Stage {
             if !lifecycle_current(prepared) {
                 return Ok(Outcome::Conflict);
             }
-            if !reduction_witnesses(&tx, ns).map_err(error)? {
+            if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
                 return Ok(Outcome::Conflict);
             }
             if (prepared.rows.is_empty() && prepared.withdrawals.is_empty())
@@ -1738,7 +1803,7 @@ impl Stage {
             return Ok(Outcome::Written);
         }
         if batch.phase != Phase::Indexing {
-            if !reduction_witnesses(&tx, ns).map_err(error)? {
+            if !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
                 return Ok(Outcome::Conflict);
             }
             for path in &batch.paths {
