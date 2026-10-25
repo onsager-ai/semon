@@ -647,11 +647,17 @@ impl Stage {
             return Ok((Outcome::Conflict, None));
         }
         let old_owners: Vec<String> = tx.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=?1 AND lifecycle='current' AND source_path IN (SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1) ORDER BY session_key LIMIT 65").map_err(error)?.query_map([ns],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
-        if old_owners.len() > 64 || old_owners.iter().any(|key| !prepared.rows.iter().any(|row| &row.key == key)) {
+        if old_owners.len() > 64
+            || old_owners
+                .iter()
+                .any(|key| !prepared.rows.iter().any(|row| &row.key == key))
+        {
             return Err(refuse("semantic_affected_owner_retirement_pending"));
         }
         if prepared.rows.iter().any(|row| row.query.is_some()) || !prepared.transcripts.is_empty() {
-            let witness = prepared.staged_projection_witness().map_err(|e| StoreError::Data(e.to_string()))?;
+            let witness = prepared
+                .staged_projection_witness()
+                .map_err(|e| StoreError::Data(e.to_string()))?;
             let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5)",params![ns,batch.epoch,metadata_text,witness,claims_text],|r|r.get(0)).map_err(error)?;
             if !exact {
                 return Ok((Outcome::Conflict, None));
@@ -853,7 +859,11 @@ impl Stage {
             )
             .map_err(error)?;
         }
-        tx.execute("DELETE FROM storage_semantic_model_batches WHERE namespace=?1", [ns]).map_err(error)?;
+        tx.execute(
+            "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
+            [ns],
+        )
+        .map_err(error)?;
         tx.commit().map_err(error)?;
         self.epoch = None;
         Ok(Outcome::Written)
@@ -978,7 +988,10 @@ impl Stage {
         for table in crate::events::store::configured::semantic_tables()
             .iter()
             .copied()
-            .chain(["storage_semantic_profiles", "storage_semantic_model_batches"])
+            .chain([
+                "storage_semantic_profiles",
+                "storage_semantic_model_batches",
+            ])
         {
             for (operation, predicate) in [
                 ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
@@ -1256,7 +1269,9 @@ impl Stage {
         if !prepared.pids.is_empty() {
             return Err(refuse("semantic_nonprimitive_pid_pending"));
         }
-        if batch.phase == Phase::Indexing && (!prepared.rows.is_empty() || !prepared.transcripts.is_empty()) {
+        if batch.phase == Phase::Indexing
+            && (!prepared.rows.is_empty() || !prepared.transcripts.is_empty())
+        {
             return Err(refuse("semantic_indexing_projection_payload"));
         }
         if !prepared.relationships.relations.is_empty() {
@@ -1266,9 +1281,7 @@ impl Stage {
         {
             return Err(refuse("semantic_native_parent_lineage_pending"));
         }
-        if batch.phase != Phase::Indexing
-            && !self.reduction
-        {
+        if batch.phase != Phase::Indexing && !self.reduction {
             return Err(refuse("semantic_phase_pending"));
         }
         if batch.phase == Phase::Indexing && !prepared.relationships.endpoints.is_empty() {
@@ -1303,7 +1316,10 @@ impl Stage {
             if !reduction_witnesses(&tx, ns).map_err(error)? {
                 return Ok(Outcome::Conflict);
             }
-            if prepared.rows.is_empty() || prepared.rows.len() > 64 || prepared.transcripts.len() > 64 {
+            if prepared.rows.is_empty()
+                || prepared.rows.len() > 64
+                || prepared.transcripts.len() > 64
+            {
                 return Err(refuse("semantic_publication_component_budget"));
             }
             let mut metadata = Vec::new();
@@ -1314,22 +1330,37 @@ impl Stage {
                     return Ok(Outcome::Conflict);
                 }
                 let staged: Option<String> = tx.query_row("SELECT metadata FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![ns,row.key],|r|r.get(0)).optional().map_err(error)?;
-                let Some(staged) = staged else { return Ok(Outcome::Conflict); };
-                let endpoint: crate::model::relation_stage::Endpoint = serde_json::from_str(&staged).map_err(|e| StoreError::Data(e.to_string()))?;
+                let Some(staged) = staged else {
+                    return Ok(Outcome::Conflict);
+                };
+                let endpoint: crate::model::relation_stage::Endpoint =
+                    serde_json::from_str(&staged).map_err(|e| StoreError::Data(e.to_string()))?;
                 let mut identity = row.clone();
                 identity.query = None;
-                if serde_json::to_string(&identity).map_err(|e| StoreError::Data(e.to_string()))? != serde_json::to_string(&endpoint.row).map_err(|e| StoreError::Data(e.to_string()))? {
+                if serde_json::to_string(&identity).map_err(|e| StoreError::Data(e.to_string()))?
+                    != serde_json::to_string(&endpoint.row)
+                        .map_err(|e| StoreError::Data(e.to_string()))?
+                {
                     return Ok(Outcome::Conflict);
                 }
-                covered.extend(row.sources.iter().map(|s| s.path.to_string_lossy().into_owned()));
-                metadata.push(serde_json::to_string(row).map_err(|e| StoreError::Data(e.to_string()))?);
+                covered.extend(
+                    row.sources
+                        .iter()
+                        .map(|s| s.path.to_string_lossy().into_owned()),
+                );
+                metadata
+                    .push(serde_json::to_string(row).map_err(|e| StoreError::Data(e.to_string()))?);
             }
             if covered != batch.paths.iter().cloned().collect() {
                 return Ok(Outcome::Conflict);
             }
-            let metadata = serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
-            let projections = prepared.staged_projection_witness().map_err(|e| StoreError::Data(e.to_string()))?;
-            let claims = serde_json::to_string(&prepared.claims).map_err(|e| StoreError::Data(e.to_string()))?;
+            let metadata =
+                serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
+            let projections = prepared
+                .staged_projection_witness()
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+            let claims = serde_json::to_string(&prepared.claims)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
             if metadata.len().saturating_add(projections.len()) > 2 * 1048576 {
                 return Err(refuse("semantic_context_budget"));
             }
