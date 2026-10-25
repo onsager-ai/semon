@@ -4,14 +4,13 @@
 use super::failed;
 use crate::events::store::configured::NativeOwnership;
 use crate::model::summary::CatalogRow;
+use crate::storage::proof_codec::{self, LEASE_CAP, TTL_MAX};
 use crate::storage::proof_lifetime::{
     ProofGenerationId, ProofReaderLease, ReaderPage, ReaderSnapshot,
 };
 use crate::storage::{NativeReaderBinding, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const TTL_MAX: u32 = 60_000;
-const LEASE_CAP: i64 = 64;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
@@ -100,19 +99,33 @@ pub(super) fn publish(
             .map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
+        let record = proof_codec::GenerationRecord {
+            namespace: namespace.to_owned(),
+            id: id.clone(),
+            session_key: row.key.clone(),
+            publication: publication.to_owned(),
+            proof: proof.to_owned(),
+            admission,
+            stream: stream.to_owned(),
+            metadata,
+            slots,
+            prefix,
+        };
+        // These values came directly from the prepared model in this owner
+        // transaction. Decode only persisted input, not this freshly encoded row.
         tx.execute(
             "INSERT INTO storage_proof_generations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 namespace,
-                id.0,
-                row.key,
-                publication,
-                proof,
+                record.id.0,
+                record.session_key,
+                record.publication,
+                record.proof,
                 sql_admission,
-                stream,
-                metadata,
-                slots,
-                prefix
+                record.stream,
+                record.metadata,
+                record.slots,
+                record.prefix
             ],
         )
         .map_err(failed)?;
@@ -366,26 +379,41 @@ impl ReaderRuntime {
             .map_err(failed)?;
             (expected.0.clone(), serial)
         };
-        let (publication, proof, metadata, prefix, admission, stream): (String, String, String, String, i64, String) = tx.query_row("SELECT publication,proof,metadata,prefix,admission,stream FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).map_err(failed)?;
-        if ProofGenerationId::derive(ns, owner.admission(), &stream, &proof)
-            != ProofGenerationId(id.clone())
-        {
-            return Err(StorageError::ScopeChanged);
-        }
+        let (publication, proof, metadata, slots, prefix, admission, stream): (String, String, String, String, String, i64, String) = tx.query_row("SELECT g.publication,p.proof_digest,g.metadata,g.slots,g.prefix,g.admission,g.stream FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![ns, id, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).map_err(failed)?;
         let admission = u64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
         if admission != owner.admission()
             || Some(&stream) != owner.config().expected_stream_epoch.as_ref()
         {
             return Err(StorageError::ScopeChanged);
         }
-        let row: CatalogRow =
-            serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
-        if crate::retention::source_generation(&row.sources)
-            .map_err(|_| StorageError::Unavailable)?
-            != prefix
-        {
-            return Err(StorageError::ScopeChanged);
-        }
+        let (record, row) = proof_codec::decode_generation(
+            proof_codec::GenerationRecord {
+                namespace: ns.into(),
+                id: ProofGenerationId(id.clone()),
+                session_key: key.into(),
+                publication: publication.clone(),
+                proof: proof.clone(),
+                admission,
+                stream: stream.clone(),
+                metadata,
+                slots,
+                prefix: prefix.clone(),
+            },
+            proof_codec::ExpectedGeneration {
+                namespace: ns,
+                id: expected,
+                admission: owner.admission(),
+                stream: owner
+                    .config()
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or(StorageError::ScopeChanged)?,
+                proof: &proof,
+                publication: &publication,
+                prefix: &prefix,
+            },
+        )?;
+        let prefix = record.prefix;
         let lease = Lease {
             owner: owner.clone(),
             owner_epoch: self.epoch,
@@ -628,15 +656,8 @@ impl ProofReaderLease for Lease {
     }
 }
 
-fn digest(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
-}
 fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
-    Ok(digest(
-        &serde_json::to_vec(&("selected-presentation-v2", base, manifest))
-            .map_err(|_| StorageError::Unavailable)?,
-    ))
+    proof_codec::presentation_digest(base, manifest)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -748,9 +769,10 @@ pub(super) fn bind_presentations(
             .find(|projection| &projection.key == key);
         let slots = serde_json::to_string(&projection.map(|projection| &projection.slots))
             .map_err(|_| StorageError::Unavailable)?;
-        let bytes = serde_json::to_vec(&(&metadata, &slots, text))
-            .map_err(|_| StorageError::Unavailable)?;
-        entries.push((key.clone(), digest(&bytes)));
+        entries.push((
+            key.clone(),
+            proof_codec::presentation_entry(&metadata, &slots, text)?,
+        ));
     }
     let manifest = serde_json::to_string(&PresentationManifest {
         entries,
@@ -791,19 +813,19 @@ fn validate_presentation(
     proof: &str,
 ) -> Result<String, StorageError> {
     let (base,manifest,joined): (String,String,String) = db.query_row("SELECT base,manifest,digest FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2 AND digest=?3",params![snapshot.namespace.as_str(),snapshot.publication_generation,proof],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-    if manifest.len() > 1048576 || joined != proof || joined_digest(&base, &manifest)? != joined {
+    if manifest.len() > 1048576 || joined != proof {
         return Err(StorageError::ScopeChanged);
     }
+    proof_codec::verify_presentation_digest(&base, &manifest, &joined)?;
     let manifest: PresentationManifest =
         serde_json::from_str(&manifest).map_err(|_| StorageError::Unavailable)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-    let bytes =
-        serde_json::to_vec(&(&metadata, &slots, &text)).map_err(|_| StorageError::Unavailable)?;
+    let entry = proof_codec::presentation_entry(&metadata, &slots, &text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
         || !manifest
             .entries
             .iter()
-            .any(|(k, d)| k == key && *d == digest(&bytes))
+            .any(|(k, d)| k == key && *d == entry)
     {
         return Err(StorageError::ScopeChanged);
     }
