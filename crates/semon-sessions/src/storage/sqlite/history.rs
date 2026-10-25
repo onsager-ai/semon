@@ -191,7 +191,15 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         self.db.query_row(self.sql("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.meta m ON m.key=?3 WHERE h.session_key=?2)","SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.meta m ON m.namespace=h.namespace AND m.key=?3 WHERE h.namespace=?1 AND h.session_key=?2)"),params![self.namespace,key,format!("history_original_header:{key}")],|r|r.get(0))
     }
     fn previous(&self, key: &str) -> rusqlite::Result<Option<String>> {
-        self.db.query_row(self.sql("SELECT coalesce((SELECT metadata FROM main.session_history_catalog WHERE session_key=?2),(SELECT metadata FROM main.session_catalog WHERE session_key=?2))","SELECT coalesce((SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2),(SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2))"),params![self.namespace,key],|r|r.get(0))
+        let history: Option<Option<String>> = self.db.query_row(self.sql("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE session_key=?2", "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2"),params![self.namespace,key],|r|r.get(0)).optional()?;
+        let history = match history {
+            Some(None) => return Err(rusqlite::Error::InvalidQuery),
+            Some(value) => value,
+            None => None,
+        };
+        // Preserve the original eager Current read and its corruption errors.
+        let current = self.db.query_row(self.sql("SELECT metadata FROM main.session_catalog WHERE session_key=?2", "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2"),params![self.namespace,key],|r|r.get(0)).optional()?;
+        Ok(history.or(current))
     }
     fn history_exists(&self, key: &str) -> rusqlite::Result<bool> {
         <Self as OriginalHistoryStore>::retained(self,key)

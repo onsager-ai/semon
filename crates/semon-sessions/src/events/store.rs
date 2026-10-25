@@ -3811,10 +3811,10 @@ put
                                 metadata_measurements.record("catalog_sources", started, 1);
                             }
                             } else {
-                                crate::storage::catalog::publish_current_sources(&current_effects, row).map_err(failure)?;
+                                crate::storage::catalog::publish_current_sources_measured(&current_effects, row, &mut metadata_measurements).map_err(failure)?;
                             }
                             #[cfg(not(test))]
-                            crate::storage::catalog::publish_current_sources(&current_effects, row).map_err(failure)?;
+                            crate::storage::catalog::publish_current_sources_measured(&current_effects, row, &mut metadata_measurements).map_err(failure)?;
                         } else if let Some(sample) = sample.as_mut() {
                             sample.stage("source_retirement", &transaction);
                         }
