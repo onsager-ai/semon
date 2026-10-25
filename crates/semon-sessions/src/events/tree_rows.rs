@@ -44,8 +44,7 @@ impl<'a> TreeRows<'a> {
 pub(crate) mod witness {
     use sha2::{Digest, Sha256};
 
-    const LABELS: &str =
-        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label";
+    const LABELS: &str = "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label";
     const MODELS: &str =
         "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model";
     const TOOLS: &str = "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id";
