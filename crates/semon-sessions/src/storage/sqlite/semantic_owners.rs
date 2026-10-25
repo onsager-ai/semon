@@ -156,14 +156,28 @@ impl crate::model::relation_stage::LifecycleStore for Owners<'_> {
     }
     fn owner(&self, key: &str) -> std::io::Result<crate::model::summary::CatalogRow> {
         let text: String = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'",params![self.namespace,key],|r|r.get(0)).map_err(std::io::Error::other)?;
-        let row: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+        let row: crate::model::summary::CatalogRow =
+            serde_json::from_str(&text).map_err(std::io::Error::other)?;
         let members = (|| -> rusqlite::Result<Vec<(String,String,String)>> {
             self.db.prepare("SELECT source_path,harness,native_id FROM main.session_catalog_sources WHERE namespace=?1 AND session_key=?2 AND lifecycle='current' ORDER BY source_path LIMIT 65")?
                 .query_map(params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect()
         })().map_err(std::io::Error::other)?;
-        let mut expected = row.sources.iter().map(|s| (s.path.to_string_lossy().into_owned(),row.harness.clone(),s.native_id.clone())).collect::<Vec<_>>();
+        let mut expected = row
+            .sources
+            .iter()
+            .map(|s| {
+                (
+                    s.path.to_string_lossy().into_owned(),
+                    row.harness.clone(),
+                    s.native_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         expected.sort();
-        if row.lifecycle != crate::model::summary::CatalogLifecycle::Current || members.len()>64 || members != expected {
+        if row.lifecycle != crate::model::summary::CatalogLifecycle::Current
+            || members.len() > 64
+            || members != expected
+        {
             return Err(std::io::Error::other("semantic_affected_owner_membership"));
         }
         Ok(row)
@@ -174,8 +188,12 @@ impl crate::model::relation_stage::LifecycleStore for Owners<'_> {
         // real Current neighbor is enrolled and parsed by the shared producer.
         let result = (|| -> rusqlite::Result<Vec<String>> {
             let mut q = self.db.prepare("SELECT session_key FROM main.session_catalog WHERE namespace=?1 AND lifecycle='current' AND session_key IN (SELECT parent_key FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 UNION SELECT session_key FROM main.session_catalog WHERE namespace=?1 AND parent_key=?2 AND lifecycle='current' UNION SELECT json_extract(metadata,'$.from') FROM main.session_trace_edges WHERE namespace=?1 AND (json_extract(metadata,'$.from')=?2 OR json_extract(metadata,'$.to')=?2) UNION SELECT json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=?1 AND (json_extract(metadata,'$.from')=?2 OR json_extract(metadata,'$.to')=?2) UNION SELECT peer.session_key FROM main.session_catalog_sources own JOIN main.catalog_native_dependencies d ON d.namespace=own.namespace AND d.source_path=own.source_path JOIN main.catalog_native_dependencies p ON p.namespace=d.namespace AND p.harness=d.harness AND p.native_id=d.native_id JOIN main.session_catalog_sources peer ON peer.namespace=p.namespace AND peer.source_path=p.source_path AND peer.lifecycle='current' WHERE own.namespace=?1 AND own.session_key=?2 AND own.lifecycle='current' AND (d.harness='runtime:pid' OR d.harness LIKE 'lineage:%' OR d.harness LIKE 'bridge:%')) ORDER BY session_key LIMIT 65")?;
-            let rows = q.query_map(params![self.namespace,key],|r|r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-            if rows.len() > 64 { return Err(invalid("semantic_affected_owner_budget")); }
+            let rows = q
+                .query_map(params![self.namespace, key], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            if rows.len() > 64 {
+                return Err(invalid("semantic_affected_owner_budget"));
+            }
             Ok(rows)
         })();
         result.map_err(std::io::Error::other)
@@ -186,7 +204,8 @@ impl Owners<'_> {
     pub(super) fn affected(
         &self,
         paths: &[String],
-    ) -> std::io::Result<std::collections::BTreeMap<String, crate::model::summary::CatalogRow>> {
+    ) -> std::io::Result<std::collections::BTreeMap<String, crate::model::summary::CatalogRow>>
+    {
         crate::model::relation_stage::affected_owners(self, paths)
     }
 
