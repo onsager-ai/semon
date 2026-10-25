@@ -25,24 +25,27 @@ struct Writer<'a, 'tx> {
 }
 
 #[cfg(test)]
-thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+static BOUNDARIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 pub(super) fn page_boundary(tx: &PgTxn<'_>) -> Result<(), StorageError> {
-        #[cfg(test)]
-        if FAIL_AFTER.with(|point| match point.get() {
-            Some(1) => {
-                point.set(None);
-                true
-            }
-            Some(n) => {
-                point.set(Some(n - 1));
-                false
-            }
-            None => false,
-        }) {
-            return Err(StorageError::Unavailable);
+    #[cfg(test)]
+    BOUNDARIES.with(|count| count.set(count.get() + 1));
+    #[cfg(test)]
+    if FAIL_AFTER.with(|point| match point.get() {
+        Some(1) => {
+            point.set(None);
+            true
         }
-        tx.check()
+        Some(n) => {
+            point.set(Some(n - 1));
+            false
+        }
+        None => false,
+    }) {
+        return Err(StorageError::Unavailable);
+    }
+    tx.check()
 }
 
 impl Writer<'_, '_> {
@@ -208,7 +211,14 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
         }
     }
     let pages = super::native_pages::prepare(input.ledger, input.index)?;
-    shared::write(&mut Writer { tx, source: 0, pages: Some(pages) }, input)?;
+    shared::write(
+        &mut Writer {
+            tx,
+            source: 0,
+            pages: Some(pages),
+        },
+        input,
+    )?;
     Ok(PartialFile {
         missing: &[
             "Catalog proof references, reader leases and GC",

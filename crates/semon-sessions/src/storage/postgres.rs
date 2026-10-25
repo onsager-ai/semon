@@ -4,9 +4,9 @@
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
 mod native_bundle;
-mod native_pages;
 mod native_commit;
 mod native_core;
+mod native_pages;
 mod native_usage;
 mod native_usage_identity;
 mod operations;

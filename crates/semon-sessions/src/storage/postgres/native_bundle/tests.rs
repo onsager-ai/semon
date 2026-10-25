@@ -295,9 +295,17 @@ fn pg_native_bundle_every_connected_boundary_rolls_back_and_stale_cas_refuses() 
     let before = pool
         .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
         .unwrap();
-    // Ten actual bundle boundaries for this fixture, plus every nested
-    // Core/Usage/Tree boundary remains covered by the inherited family tests.
-    for point in 1..=10 {
+    // Measure the actual connected path, then roll it back. This includes
+    // every page blob, generation reference, header and Current-pointer effect.
+    BOUNDARIES.with(|count| count.set(0));
+    let probe: Result<(), StorageError> = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        apply(tx, &data.path, ledger, index, None, None)?;
+        Err(StorageError::Busy)
+    });
+    assert!(matches!(probe, Err(StorageError::Busy)));
+    let boundaries = BOUNDARIES.with(|count| count.get());
+    assert!((11..128).contains(&boundaries));
+    for point in 1..=boundaries {
         FAIL_AFTER.with(|p| p.set(Some(point)));
         let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
             apply(tx, &data.path, ledger, index, None, None)
@@ -369,4 +377,102 @@ fn pg_native_bundle_copilot_cannot_bypass_existing_tree() {
     drop(factory);
     std::fs::remove_dir_all(codex.root).unwrap();
     std::fs::remove_dir_all(copilot.root).unwrap();
+}
+
+fn page_oracle(data: &Fixture) -> (String, Option<String>, Vec<(i16, String, String)>) {
+    use sha2::{Digest, Sha256};
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(&data.root.join("index.json"))).unwrap();
+    let physical = data.path.strip_suffix("\0🦀").unwrap();
+    let prefix = format!("native_source_chunks:{:x}:", Sha256::digest(physical.as_bytes()));
+    let launch = format!("native_launch_calls:{:x}:", Sha256::digest(physical.as_bytes()));
+    let header = db.query_row("SELECT value FROM meta WHERE key=?1", [format!("{prefix}header")], |r| r.get(0)).unwrap();
+    use rusqlite::OptionalExtension;
+    let launch_header = db.query_row("SELECT value FROM meta WHERE key=?1", [format!("{launch}header")], |r| r.get(0)).optional().unwrap();
+    let mut pages = Vec::new();
+    for (kind, prefix) in [(0i16, prefix.clone()), (1, launch), (2, format!("native_proof_tree:{prefix}:"))] {
+        let mut statement = db.prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key").unwrap();
+        let rows = statement.query_map(rusqlite::params![&prefix, format!("{prefix}~")], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?))).unwrap();
+        for row in rows {
+            let (key, value) = row.unwrap();
+            if key != format!("{prefix}header") { pages.push((kind, key.strip_prefix(&prefix).unwrap().to_owned(), value)); }
+        }
+    }
+    (header, launch_header, pages)
+}
+
+#[test]
+fn pg_native_pages_sqlite_bytes_retained_through_append_replacement_restart() {
+    use crate::storage::postgres::{native_pages, PgPool, tests::limits};
+    let data = complete_fixture(parser_fixture("codex"), "codex");
+    let oracle = page_oracle(&data);
+    let next = complete_fixture(append_fixture(&data, "codex"), "codex");
+    let next_oracle = page_oracle(&next);
+    // All SQLite work and independent oracle materialization precedes PG.
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("pages\0🦀");
+    let control = PgCancellation::default();
+    let (_, ledger, index) = &data.sources[0];
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, ledger, index, None, None)).unwrap();
+    let pinned = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| native_pages::current(tx, &data.path, ledger)).unwrap();
+    assert!(pinned.chunks_header == oracle.0 && pinned.launch_header == oracle.1, "SQLite header bytes");
+    let (_, new_ledger, new_index) = &next.sources[0];
+    let changes = DirtyRows::between(index, new_index);
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &next.path, new_ledger, new_index, Some(ledger), Some(&changes))).unwrap();
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let current = native_pages::current(tx, &next.path, new_ledger)?;
+        assert_ne!(current.id, pinned.id);
+        assert!(current.chunks_header == next_oracle.0 && current.launch_header == next_oracle.1, "append oracle bytes");
+        for (kind, key, expected) in &oracle.2 { assert!(pinned.page(tx, *kind, key)? == *expected, "retained SQLite page bytes"); }
+        let chunks = index.source_chunks.as_ref().unwrap();
+        assert_eq!(pinned.chunk_hash(tx, 0)?, chunks.hashes[0]);
+        Ok(())
+    }).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, ledger, index, Some(new_ledger), None)).unwrap();
+    drop(pool);
+    let reopened = PgPool::open(factory.clone(), limits()).unwrap();
+    reopened.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let retained = native_pages::open(tx, &data.path, ledger, pinned.id.clone())?;
+        for (kind, key, expected) in &oracle.2 { assert!(retained.page(tx, *kind, key)? == *expected, "restart immutable bytes"); }
+        let later = native_pages::current(tx, &data.path, ledger)?;
+        assert!(later.chunks_header == oracle.0, "replacement oracle");
+        assert!(native_pages::open(tx, &data.path, new_ledger, retained.id.clone()).is_err(), "wrong ledger refused");
+        Ok(())
+    }).unwrap();
+    drop(reopened);
+    drop(factory);
+    std::fs::remove_dir_all(data.root).unwrap();
+}
+
+#[test]
+fn pg_native_pages_tamper_namespace_and_missing_generation_refuse() {
+    use crate::storage::postgres::native_pages;
+    let data = complete_fixture(parser_fixture("codex"), "codex");
+    let (pool, factory) = fixture(|_| {});
+    let namespace = ns("proof-owner\0🦀");
+    let foreign = ns("proof-foreign\0🦀");
+    let control = PgCancellation::default();
+    let (_, ledger, index) = &data.sources[0];
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| apply(tx, &data.path, ledger, index, None, None)).unwrap();
+    let pinned = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| native_pages::current(tx, &data.path, ledger)).unwrap();
+    pool.transaction(&foreign, TxnKind::ReadSnapshot, &control, |tx| {
+        assert!(pinned.chunk_hash(tx, 0).is_err());
+        assert!(native_pages::open(tx, &data.path, ledger, pinned.id.clone()).is_err());
+        Ok(())
+    }).unwrap();
+    let result: Result<(), StorageError> = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver.execute("UPDATE semon_pg_native_page_blobs SET payload=$2 WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes(), &b"tampered".as_slice()]).map_err(sqlstate::error)?;
+        assert!(pinned.chunk_hash(tx, 0).is_err(), "tampered old page refuses");
+        Err(StorageError::Busy)
+    });
+    assert!(matches!(result, Err(StorageError::Busy)));
+    let result: Result<(), StorageError> = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver.execute("DELETE FROM semon_pg_native_page_generations WHERE namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(sqlstate::error)?;
+        assert!(native_pages::open(tx, &data.path, ledger, pinned.id.clone()).is_err(), "missing authority refuses");
+        Err(StorageError::Busy)
+    });
+    assert!(matches!(result, Err(StorageError::Busy)));
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| { assert_eq!(pinned.chunk_hash(tx, 0)?, index.source_chunks.as_ref().unwrap().hashes[0]); Ok(()) }).unwrap();
+    drop(pool);
+    drop(factory);
+    std::fs::remove_dir_all(data.root).unwrap();
 }
