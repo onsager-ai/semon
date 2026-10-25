@@ -40,11 +40,11 @@ fn put(tx: &mut PgTxn<'_>, id: &[u8], kind: i16, key: &str, payload: &str) -> Re
     let digest: Vec<u8> = Sha256::digest(payload.as_bytes()).to_vec();
     tx.driver.execute("INSERT INTO semon_pg_native_page_blobs(namespace,digest,payload) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", &[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?;
     effect(tx)?;
-    let equal: bool = tx.driver.query_one("SELECT payload=$3 FROM semon_pg_native_page_blobs WHERE namespace=$1 AND digest=$2", &[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    let equal: bool = tx.driver.query_one("SELECT payload=$3 FROM semon_pg_native_page_blobs WHERE namespace_digest=sha256($1) AND namespace=$1 AND digest=$2", &[&ns,&digest,&payload.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if !equal { return Err(StorageError::ScopeChanged); }
     let changed = tx.driver.execute("INSERT INTO semon_pg_native_page_refs(namespace,generation,kind,page_key,digest) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", &[&ns,&id,&kind,&key.as_bytes(),&digest]).map_err(sqlstate::error)?;
     if changed == 0 {
-        let equal: bool = tx.driver.query_one("SELECT digest=$5 FROM semon_pg_native_page_refs WHERE namespace=$1 AND generation=$2 AND kind=$3 AND page_key=$4", &[&ns,&id,&kind,&key.as_bytes(),&digest]).map_err(sqlstate::error)?.get(0);
+        let equal: bool = tx.driver.query_one("SELECT digest=$5 FROM semon_pg_native_page_refs WHERE namespace_digest=sha256($1) AND namespace=$1 AND generation=$2 AND kind=$3 AND page_key=$4", &[&ns,&id,&kind,&key.as_bytes(),&digest]).map_err(sqlstate::error)?.get(0);
         if !equal { return Err(StorageError::ScopeChanged); }
     }
     effect(tx)
@@ -55,6 +55,10 @@ pub(super) fn write(tx: &mut PgTxn<'_>, source: i64, path: &str, ledger: &Ledger
     let admission = u64::try_from(source).map_err(|_| StorageError::ScopeChanged)?;
     if admission == 0 { return Err(StorageError::ScopeChanged); }
     let receipt = crate::events::store::header_ledger(ledger);
+    let ns = tx.namespace.as_str().as_bytes();
+    let source_rows = tx.driver.query("SELECT source_path=$3 AND receipt=$4 FROM semon_pg_native_usage_sources WHERE namespace_digest=sha256($1) AND namespace=$1 AND source_id=$2", &[&ns,&source,&path.as_bytes(),&receipt.as_bytes()]).map_err(sqlstate::error)?;
+    if source_rows.len() != 1 || !source_rows[0].get::<_, bool>(0) { return Err(StorageError::ScopeChanged); }
+
     let binding = serde_json::to_string(&(path, &receipt, &prepared.chunks.header, prepared.launch.as_ref().map(|p| &p.header))).map_err(|_| StorageError::Unavailable)?;
     // Actual Usage source generation, exact ledger and native header roots.
     // This ID is not a Catalog publication generation.
@@ -63,7 +67,7 @@ pub(super) fn write(tx: &mut PgTxn<'_>, source: i64, path: &str, ledger: &Ledger
     let launch = prepared.launch.as_ref().map(|p| p.header.as_bytes());
     let changed = tx.driver.execute("INSERT INTO semon_pg_native_page_generations(namespace,generation,source_id,source_path,ledger,chunks_header,launch_header) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", &[&ns,&id.0.as_bytes(),&source,&path.as_bytes(),&receipt.as_bytes(),&prepared.chunks.header.as_bytes(),&launch]).map_err(sqlstate::error)?;
     if changed == 0 {
-        let equal: bool = tx.driver.query_one("SELECT source_id=$3 AND source_path=$4 AND ledger=$5 AND chunks_header=$6 AND launch_header IS NOT DISTINCT FROM $7 FROM semon_pg_native_page_generations WHERE namespace=$1 AND generation=$2", &[&ns,&id.0.as_bytes(),&source,&path.as_bytes(),&receipt.as_bytes(),&prepared.chunks.header.as_bytes(),&launch]).map_err(sqlstate::error)?.get(0);
+        let equal: bool = tx.driver.query_one("SELECT source_id=$3 AND source_path=$4 AND ledger=$5 AND chunks_header=$6 AND launch_header IS NOT DISTINCT FROM $7 FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1) AND namespace=$1 AND generation=$2", &[&ns,&id.0.as_bytes(),&source,&path.as_bytes(),&receipt.as_bytes(),&prepared.chunks.header.as_bytes(),&launch]).map_err(sqlstate::error)?.get(0);
         if !equal { return Err(StorageError::ScopeChanged); }
     }
     effect(tx)?;
@@ -99,7 +103,7 @@ pub(super) struct Pinned {
 pub(super) fn current(tx: &mut PgTxn<'_>, path: &str, ledger: &Ledger) -> Result<Pinned, StorageError> {
     tx.check()?;
     let digest: Vec<u8> = Sha256::digest(path.as_bytes()).to_vec();
-    let rows = tx.driver.query("SELECT generation,source_path FROM semon_pg_native_page_current WHERE namespace=$1 AND path_digest=$2", &[&tx.namespace.as_str().as_bytes(),&digest]).map_err(sqlstate::error)?;
+    let rows = tx.driver.query("SELECT generation,source_path FROM semon_pg_native_page_current WHERE namespace_digest=sha256($1) AND namespace=$1 AND path_digest=$2", &[&tx.namespace.as_str().as_bytes(),&digest]).map_err(sqlstate::error)?;
     let row = rows.first().ok_or(StorageError::ScopeChanged)?;
     if row.get::<_, Vec<u8>>(1) != path.as_bytes() { return Err(StorageError::ScopeChanged); }
     let id = String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)?;
@@ -109,7 +113,7 @@ pub(super) fn current(tx: &mut PgTxn<'_>, path: &str, ledger: &Ledger) -> Result
 pub(super) fn open(tx: &mut PgTxn<'_>, path: &str, ledger: &Ledger, id: ProofGenerationId) -> Result<Pinned, StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes();
-    let rows = tx.driver.query("SELECT source_path,ledger,CASE WHEN octet_length(chunks_header)<=$3 THEN chunks_header END,CASE WHEN octet_length(launch_header)<=$3 THEN launch_header END,launch_header IS NULL,source_id FROM semon_pg_native_page_generations WHERE namespace=$1 AND generation=$2", &[&ns,&id.0.as_bytes(),&(MAX as i32)]).map_err(sqlstate::error)?;
+    let rows = tx.driver.query("SELECT source_path,ledger,CASE WHEN octet_length(chunks_header)<=$3 THEN chunks_header END,CASE WHEN octet_length(launch_header)<=$3 THEN launch_header END,launch_header IS NULL,source_id FROM semon_pg_native_page_generations WHERE namespace_digest=sha256($1) AND namespace=$1 AND generation=$2", &[&ns,&id.0.as_bytes(),&(MAX as i32)]).map_err(sqlstate::error)?;
     let row = rows.first().ok_or(StorageError::ScopeChanged)?;
     if row.get::<_, Vec<u8>>(0) != path.as_bytes() || row.get::<_, Vec<u8>>(1) != crate::events::store::header_ledger(ledger).as_bytes() { return Err(StorageError::ScopeChanged); }
     let chunks = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::ScopeChanged)?;
@@ -176,7 +180,7 @@ impl Pinned {
     pub(super) fn page(&self, tx: &mut PgTxn<'_>, kind: i16, key: &str) -> Result<String, StorageError> {
         tx.check()?;
         if tx.namespace.as_str() != self.namespace || key.len() > 32 || !(0..=2).contains(&kind) { return Err(StorageError::ScopeChanged); }
-        let rows = tx.driver.query("SELECT r.digest,CASE WHEN octet_length(b.payload)<=$5 THEN b.payload END FROM semon_pg_native_page_refs r JOIN semon_pg_native_page_blobs b ON b.namespace=r.namespace AND b.digest=r.digest WHERE r.namespace=$1 AND r.generation=$2 AND r.kind=$3 AND r.page_key=$4", &[&tx.namespace.as_str().as_bytes(),&self.id.0.as_bytes(),&kind,&key.as_bytes(),&(MAX as i32)]).map_err(sqlstate::error)?;
+        let rows = tx.driver.query("SELECT r.digest,CASE WHEN octet_length(b.payload)<=$5 THEN b.payload END FROM semon_pg_native_page_refs r JOIN semon_pg_native_page_blobs b ON b.namespace_digest=r.namespace_digest AND b.namespace=r.namespace AND b.digest=r.digest WHERE r.namespace_digest=sha256($1) AND r.namespace=$1 AND r.generation=$2 AND r.kind=$3 AND r.page_key=$4", &[&tx.namespace.as_str().as_bytes(),&self.id.0.as_bytes(),&kind,&key.as_bytes(),&(MAX as i32)]).map_err(sqlstate::error)?;
         let row = rows.first().ok_or(StorageError::ScopeChanged)?;
         let payload = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::ScopeChanged)?;
         tx.check()?;
