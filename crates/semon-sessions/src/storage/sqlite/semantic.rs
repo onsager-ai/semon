@@ -105,6 +105,7 @@ pub(crate) struct Stage {
     source: AdmittedSource,
     reduction: bool,
     epoch: Option<i64>,
+    begun: bool,
 }
 
 /// Internal runtime qualification, deliberately absent from public configuration.
@@ -117,6 +118,12 @@ pub(crate) struct SemanticStaging {
 }
 
 impl SemanticStaging {
+    /// Same typed custody used by the producer; no public qualification grant.
+    #[allow(dead_code)] // Private producer/reader qualification; no public factory.
+    pub(crate) fn reader_binding(&self) -> Result<NativeReaderBinding, StorageError> {
+        self.owner.clone().map(NativeReaderBinding::Semantic)
+            .ok_or(StorageError::NamespaceUpgradePending)
+    }
     /// Explicit private admission into the authored composite native profile.
     #[allow(dead_code)]
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
@@ -181,7 +188,7 @@ fn refuse(reason: &'static str) -> StoreError {
 // The admitted transaction has already fenced epoch/generation before these
 // namespace-owned physical operations. Claims are observations, never ACKs.
 fn reset(c: &Connection, ns: &str, runtime: &str) -> rusqlite::Result<()> {
-    if c.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
+    if c.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,(SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1))+1 WHERE namespace=?1 AND max(epoch,(SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1))<9223372036854775807", [ns])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
     c.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1),phase='indexing',runtime=?2,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL WHERE namespace=?1", params![ns,runtime])?;
     Ok(())
 }
@@ -806,15 +813,15 @@ impl Stage {
             .publish_generation(&generation, &version)
             .map_err(StoreError::Configured)?;
         tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,crate::model::now_ms().to_string()]).map_err(error)?;
-        // A bounded component is a complete metadata cohort only when every
-        // admitted indexed source and Current owner is covered. Other components
-        // retain the ordinary partial-publication refusal at Query.
+        // Readiness is solely for the private listing cohort. No global
+        // completeness claim can qualify selected/proof/search readers.
+        tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='semantic_listing_generation'",[ns]).map_err(error)?;
         if prepared.rows.iter().all(|row| row.query.is_some())
             && projection_keys.len() == prepared.rows.len()
         {
             let complete: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.files f WHERE f.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path)) AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints e WHERE e.namespace=c.namespace AND e.session_key=c.session_key))",[ns],|r|r.get(0)).map_err(error)?;
             if complete {
-                tx.execute("UPDATE main.meta SET value='complete' WHERE namespace=?1 AND key='catalog_completeness'",[ns]).map_err(error)?;
+                tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'semantic_listing_generation',?2)",params![ns,generation]).map_err(error)?;
             }
         }
         tx.execute("UPDATE main.catalog_semantic_sources SET publication_done=1,ack_done=1,claim=NULL WHERE namespace=?1",[ns]).map_err(error)?;
@@ -1028,6 +1035,7 @@ impl Stage {
             db,
             reduction: capability.reduction,
             epoch,
+            begun: false,
             source: AdmittedSource {
                 config: config.clone(),
                 owner: capability.owner.clone(),
@@ -1090,9 +1098,8 @@ impl Stage {
             )
             .optional()
             .map_err(error)?;
-        // A quiescent handle has no outstanding epoch to fence. Like a newly
-        // opened handle, it may observe/take over a successor at the same head.
-        // A handle bound to an older epoch must still make zero writes.
+        // An observed old epoch cannot seize a successor. A quiescent handle
+        // may take over, but must fence every old holder atomically below.
         if actual_epoch != self.epoch && self.epoch.is_some() {
             return Ok(Outcome::Conflict);
         }
@@ -1116,6 +1123,13 @@ impl Stage {
                 ));
             }
             reset(&tx, ns, runtime).map_err(error)?;
+        } else if existing.is_some() && (!self.begun || self.epoch.is_none()) {
+            // Same-runtime crash resume retains valid reduction progress and
+            // its exact model witness; only ownership changes. All updates
+            // commit together, including overflow/fault rollback.
+            if tx.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,?2)+1 WHERE namespace=?1 AND max(epoch,?2)<9223372036854775807", params![ns,actual_epoch]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
+            tx.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1) WHERE namespace=?1",[ns]).map_err(error)?;
+            tx.execute("UPDATE storage_semantic_model_batches SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1) WHERE namespace=?1",[ns]).map_err(error)?;
         }
         if existing.is_none() {
             if tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
@@ -1137,6 +1151,7 @@ impl Stage {
         crate::events::store::configured::effect("semantic_reset").map_err(error)?;
         tx.commit().map_err(error)?;
         self.epoch = Some(epoch);
+        self.begun = true;
         Ok(Outcome::Written)
     }
 

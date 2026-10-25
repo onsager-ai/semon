@@ -21,7 +21,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         now: i64,
         bytes_left: &mut usize,
     ) -> Result<Part, QueryError> {
-        let db = self.binding.snapshot(namespace).map_err(storage_error)?;
+        let db = self.binding.listing_snapshot(namespace).map_err(storage_error)?;
         read(
             &db,
             &self.options,
@@ -29,8 +29,9 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             bytes_left,
             matches!(
                 self.binding,
-                crate::storage::NativeReaderBinding::Admitted(_)
+                crate::storage::NativeReaderBinding::Admitted(_) | crate::storage::NativeReaderBinding::Semantic(_)
             ),
+            matches!(self.binding, crate::storage::NativeReaderBinding::Semantic(_)),
         )
     }
     fn has_search_slots(
@@ -39,6 +40,9 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         key: &str,
         since: Option<i64>,
     ) -> Result<bool, QueryError> {
+        if matches!(self.binding, crate::storage::NativeReaderBinding::Semantic(_)) {
+            return Err(QueryError::new("namespace_upgrade_pending", "Admitted search reader is not qualified"));
+        }
         let db = self.binding.snapshot(namespace).map_err(storage_error)?;
         has_search_slots(
             &db,
@@ -46,16 +50,16 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             since,
             matches!(
                 self.binding,
-                crate::storage::NativeReaderBinding::Admitted(_)
+                crate::storage::NativeReaderBinding::Admitted(_) | crate::storage::NativeReaderBinding::Semantic(_)
             ),
         )
     }
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError> {
-        let db = self.binding.snapshot(namespace).map_err(storage_error)?;
+        let db = self.binding.listing_snapshot(namespace).map_err(storage_error)?;
         let options = &self.options;
         let scoped = matches!(
             self.binding,
-            crate::storage::NativeReaderBinding::Admitted(_)
+            crate::storage::NativeReaderBinding::Admitted(_) | crate::storage::NativeReaderBinding::Semantic(_)
         );
         if generation(&db, scoped)? != part.generation
             || crate::native_evidence::query_runtime_generation(options)
@@ -104,9 +108,17 @@ fn read(
     now: i64,
     bytes_left: &mut usize,
     scoped: bool,
+    private_listing: bool,
 ) -> Result<Part, QueryError> {
     let generation = generation(db, scoped)?;
-    let ready: bool = db.query_row(if scoped { "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())" } else { "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)" },rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(),generation],|row|row.get(0)).map_err(unavailable)?;
+    let ready_sql = if private_listing {
+        "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='semantic_listing_generation')=?2 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
+    } else if scoped {
+        "SELECT (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version')=?1 AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness')='complete' AND (SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace())"
+    } else {
+        "SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND COALESCE((SELECT value FROM meta WHERE key='catalog_completeness'),'complete')='complete' AND (SELECT value FROM meta WHERE key='slot_projection_catalog_generation')=?2 AND NOT EXISTS(SELECT 1 FROM session_catalog_invalidations)"
+    };
+    let ready: bool = db.query_row(ready_sql,rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(),generation],|row|row.get(0)).map_err(unavailable)?;
     if !ready {
         return Err(unavailable("Native Catalog publication is incomplete"));
     }
