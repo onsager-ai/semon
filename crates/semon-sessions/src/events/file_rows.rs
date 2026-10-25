@@ -76,13 +76,14 @@ impl<'a> FileRow<'a> {
             rate_limits,
         } = index;
         let Ledger {
-            stat: super::Stat {
-                dev,
-                ino,
-                size,
-                modified_ns,
-                changed_ns,
-            },
+            stat:
+                super::Stat {
+                    dev,
+                    ino,
+                    size,
+                    modified_ns,
+                    changed_ns,
+                },
             offset,
             prefix,
             tail,
