@@ -624,13 +624,14 @@ pub(crate) fn id(index: &Path) -> String {
     format!("{:x}", Sha256::digest(index.as_os_str().as_encoded_bytes()))
 }
 
-/// Authored discovery work counters. Rows count bounded inputs/materialized
+/// Authored discovery work counters. Rows count bounded source inputs/materialized
 /// results, not an estimate of SQLite's physical page or index visits.
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct DiscoveryCounts {
     pub(crate) statements: usize,
     pub(crate) schema_probes: usize,
     pub(crate) rows: usize,
+    pub(crate) source_fullscan_steps: usize,
     pub(crate) committed_changes: u64,
     pub(crate) factory_opens: usize,
     pub(crate) skipped: usize,
@@ -657,7 +658,7 @@ impl Drop for DiscoveryProbe {
     fn drop(&mut self) {
         if let Some((producer,phase,start))=&self.0 {
             let counts=DISCOVERY_COUNTS.with(|cell|cell.take()).unwrap_or_default();
-            eprintln!("semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} authored_statements={} metadata_schema_probes={} input_or_selected_rows={} committed_changes={} selected_factory_opens={} witness_skipped={}",start.elapsed().as_micros(),counts.statements,counts.schema_probes,counts.rows,counts.committed_changes,counts.factory_opens,counts.skipped);
+            eprintln!("semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} authored_statements={} schema_probes={} source_input_or_selected_rows={} recovery_source_fullscan_steps={} committed_changes={} changed_state={} selected_factory_opens={} witness_skipped={}",start.elapsed().as_micros(),counts.statements,counts.schema_probes,counts.rows,counts.source_fullscan_steps,counts.committed_changes,counts.committed_changes>0,counts.factory_opens,counts.skipped);
             #[cfg(test)]
             DISCOVERY_RECORDS.with(|records|records.borrow_mut().push((phase,counts)));
         }
