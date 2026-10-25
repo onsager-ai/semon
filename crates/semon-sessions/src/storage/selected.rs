@@ -346,84 +346,97 @@ pub(crate) struct PresentationWitness {
 }
 
 /// Body-free runtime and source-selection inputs captured by the real model.
-/// They enter its staged row witness and the publication manifest together.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// They enter its private staged model witness and publication manifest together.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PresentationObservations {
-    pub(crate) runtime: String,
+    pub(crate) runtime: Option<String>,
     pub(crate) facts_known: bool,
     pub(crate) selection_known: bool,
     pub(crate) machine_label: Option<String>,
-    current_codex: Option<BTreeSet<std::path::PathBuf>>,
-    roots: BTreeMap<String, std::path::PathBuf>,
+    sources: BTreeMap<String, SourceObservation>,
     relative_statuses: BTreeMap<String, Value>,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceObservation {
+    relative: String,
+    current_codex: Option<bool>,
+    cached: bool,
+}
 impl PresentationObservations {
-    pub(crate) fn capture(
+    pub(crate) fn capture<'a>(
         options: &crate::Options,
-        binding: &crate::storage::QueryRuntimeBinding,
-    ) -> io::Result<Self> {
-        let runtime = crate::native_evidence::query_runtime_generation(options)?;
+        binding: Option<&crate::storage::QueryRuntimeBinding>,
+        rows: impl Iterator<Item = &'a crate::model::summary::CatalogRow>,
+    ) -> Self {
+        let runtime = crate::native_evidence::query_runtime_generation(options).ok();
         let recorded = options
             .facts
             .as_ref()
             .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-        let facts_known =
+        let mut facts_known =
             options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
-        let selection_known = options.facts.is_none()
+        let mut selection_known = options.facts.is_none()
             || recorded
                 .as_ref()
                 .is_some_and(|source| source.selection_known());
-        let machine_label = match &options.facts {
+        let mut machine_label = match &options.facts {
             None => Some(crate::facts::MachineFacts::Local.hostname(options)),
             Some(_) => recorded.as_ref().and_then(|source| source.hostname()),
         };
-        let current_codex = if options.facts.is_some() && selection_known {
-            let bytes = crate::read_regular_at_most(
-                options.facts.as_ref().expect("recorded facts"),
-                8 * 1048576,
-            )?;
-            let facts: crate::Facts = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            Some(
-                facts
-                    .codex_rollouts
-                    .iter()
-                    .chain(&facts.codex_provisional_rollouts)
-                    .flatten()
-                    .map(|path| options.codex_home.join(path))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-        if let Some(recorded) = recorded {
-            recorded.validate()?;
+        let mut sources = BTreeMap::new();
+        // Only this bounded cohort and its typed family endpoints participate.
+        // No full-host manifest scan, absolute home root, or second Facts read.
+        for row in rows.take(128) {
+            for source in row.sources.iter().take(64) {
+                let Some(relative) = crate::catalog::source_relative(options, &row.harness, source) else {
+                    continue;
+                };
+                let current_codex = if row.harness == "codex" {
+                    match recorded.as_ref().map(|head| head.codex_current(&relative)).transpose() {
+                        Ok(value) => value.flatten(),
+                        Err(_) => {
+                            selection_known = false;
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Ok(key) = Self::source_key(source) {
+                    sources.insert(key, SourceObservation {
+                        relative,
+                        current_codex,
+                        cached: crate::catalog::source_state(source) == "cached",
+                    });
+                }
+            }
         }
-        if crate::native_evidence::query_runtime_generation(options)? != runtime {
-            return Err(io::Error::other(
-                "selected presentation observations changed",
-            ));
+        if recorded.as_ref().is_some_and(|head| head.validate().is_err()) {
+            facts_known = false;
+            selection_known = false;
+            machine_label = None;
+            sources.clear();
         }
-        let roots = [
-            ("codex".into(), options.codex_home.clone()),
-            ("claude".into(), options.claude_home.clone()),
-            ("copilot".into(), options.copilot_home.clone()),
-        ]
-        .into_iter()
-        .collect();
-        Ok(Self {
-            runtime: binding.witness(&runtime)?,
+        let runtime = runtime.filter(|initial| {
+            crate::native_evidence::query_runtime_generation(options).ok().as_ref() == Some(initial)
+        }).and_then(|runtime| binding.and_then(|binding| binding.witness(&runtime).ok()));
+        Self {
+            runtime,
             facts_known,
             selection_known,
             machine_label,
-            current_codex,
-            roots,
+            sources,
             relative_statuses: BTreeMap::new(),
-        })
+        }
+    }
+    fn source_key(source: &crate::model::summary::CatalogSource) -> io::Result<String> {
+        crate::retention::source_generation(std::slice::from_ref(source)).map_err(io::Error::other)
     }
     pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
-        self.current_codex
-            .as_ref()
-            .is_some_and(|paths| !paths.contains(&source.path))
+        Self::source_key(source).ok().and_then(|key| self.sources.get(&key))
+            .is_some_and(|saved| saved.current_codex == Some(false))
     }
     pub(crate) fn capture_relative_status(
         &mut self,
@@ -440,22 +453,17 @@ impl PresentationObservations {
             || (row.lifecycle == crate::model::summary::CatalogLifecycle::Current
                 && (!self.facts_known || (row.harness == "codex" && !self.selection_known)))
             || row.sources.iter().any(|source| {
-                self.roots
-                    .get(&row.harness)
-                    .and_then(|home| {
-                        crate::catalog::source_relative_from_home(home, &row.harness, source)
-                    })
-                    .is_none()
+                Self::source_key(source).ok().and_then(|key| self.sources.get(&key)).is_none()
             })
         {
             return json!({"state":null,"observation":"unavailable"});
         }
         crate::catalog::recorded_status(
             row,
-            Some(&self.runtime),
+            self.runtime.as_deref(),
             row.sources
                 .iter()
-                .all(|source| crate::catalog::source_state(source) == "cached"),
+                .all(|source| Self::source_key(source).ok().and_then(|key| self.sources.get(&key)).is_some_and(|saved| saved.cached)),
             self.facts_known,
             row.harness == "codex" && row.sources.iter().any(|source| self.retired(source)),
         )
@@ -530,7 +538,9 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
         &self,
         request: &crate::catalog::Request,
     ) -> io::Result<Vec<crate::model::summary::CatalogRow>> {
-        if request.sid.as_deref() != Some(self.row.key.as_str()) {
+        if request.sid.as_deref() != Some(self.row.key.as_str())
+            || !matches!(request.scope, crate::CatalogReadScope::Current | crate::CatalogReadScope::RetainedHistory)
+        {
             return Err(io::Error::other("immutable selected scope"));
         }
         Ok(vec![self.row.clone()])

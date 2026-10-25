@@ -568,7 +568,7 @@ impl Stage {
             .map(|p| (&p.key, &p.slots, p.repair))
             .collect::<Vec<_>>();
         let producer_witness = prepared
-            .staged_projection_witness()
+            .staged_model_witness()
             .map_err(|e| StoreError::Data(e.to_string()))?;
         if producer_witness.len() > 2 * 1048576 {
             return Err(refuse("semantic_context_budget"));
@@ -785,7 +785,7 @@ impl Stage {
             || !prepared.lineage_dependencies.is_empty()
         {
             let witness = prepared
-                .staged_projection_witness()
+                .staged_model_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5)",params![ns,batch.epoch,metadata_text,witness,claims_text],|r|r.get(0)).map_err(error)?;
             if !exact {
@@ -1637,7 +1637,7 @@ impl Stage {
             let metadata =
                 serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
             let projections = prepared
-                .staged_projection_witness()
+                .staged_model_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let claims = serde_json::to_string(&prepared.claims)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
