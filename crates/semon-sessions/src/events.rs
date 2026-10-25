@@ -1544,6 +1544,15 @@ impl EventCache {
         self.source_observations = Some(store);
     }
 
+    #[cfg(test)]
+    pub(crate) fn acknowledge_source_for_test(&mut self, path: &str) -> Result<Outcome, StoreError> {
+        let store = self.store.as_mut().expect("test producer store");
+        let revision = store.catalog_claims(&[path.to_owned()])?[0]
+            .1
+            .expect("test source claim");
+        store.resolve_catalog_input(path, revision, None, None)
+    }
+
     /// Reopen and replay the durable queue before capturing any new identity.
     /// A failed apply/ack leaves the original payload available to the next open.
     pub(crate) fn reconcile_pending_source_operation(&mut self) -> io::Result<()> {

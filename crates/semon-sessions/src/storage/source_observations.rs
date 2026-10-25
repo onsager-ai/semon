@@ -22,13 +22,7 @@ impl SourceOperation {
     /// every retry; a separate call captures a distinct logical operation.
     /// The payload is encoded by the typed producer, not supplied as SQL.
     pub fn capture(namespace: &str, operation: &str, payload: &[u8]) -> Self {
-        let mut payload_hash = Sha256::new();
-        payload_hash.update(b"semon-source-observation-payload-v1\0");
-        payload_hash.update((operation.len() as u64).to_be_bytes());
-        payload_hash.update(operation.as_bytes());
-        payload_hash.update((payload.len() as u64).to_be_bytes());
-        payload_hash.update(payload);
-        let payload_digest = format!("{:x}", payload_hash.finalize());
+        let payload_digest = Self::digest(operation, payload);
 
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let timestamp = SystemTime::now()
@@ -47,6 +41,16 @@ impl SourceOperation {
             id,
             payload_digest,
         }
+    }
+
+    pub(crate) fn digest(operation: &str, payload: &[u8]) -> String {
+        let mut payload_hash = Sha256::new();
+        payload_hash.update(b"semon-source-observation-payload-v1\0");
+        payload_hash.update((operation.len() as u64).to_be_bytes());
+        payload_hash.update(operation.as_bytes());
+        payload_hash.update((payload.len() as u64).to_be_bytes());
+        payload_hash.update(payload);
+        format!("{:x}", payload_hash.finalize())
     }
 
     pub(crate) fn namespace_tag(namespace: &str) -> String {
@@ -70,9 +74,19 @@ pub enum SourceMutationReceipt {
 /// capture, through an uncertain acknowledgement, to restart reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SourceIntent {
-    Discover { operation: SourceOperation, paths: Vec<String>, complete: bool },
-    Invalidate { operation: SourceOperation, expected: SourceClaims },
-    FinishBackfill { operation: SourceOperation, expected_generation: Option<String> },
+    Discover {
+        operation: SourceOperation,
+        paths: Vec<String>,
+        complete: bool,
+    },
+    Invalidate {
+        operation: SourceOperation,
+        expected: SourceClaims,
+    },
+    FinishBackfill {
+        operation: SourceOperation,
+        expected_generation: Option<String>,
+    },
 }
 
 impl SourceIntent {
@@ -84,11 +98,24 @@ impl SourceIntent {
         }
     }
 
-    pub fn apply(&self, store: &mut dyn SourceObservationStore) -> Result<SourceMutationReceipt, StorageError> {
+    pub fn apply(
+        &self,
+        store: &mut dyn SourceObservationStore,
+    ) -> Result<SourceMutationReceipt, StorageError> {
         match self {
-            Self::Discover { operation, paths, complete } => store.discover(operation, paths, *complete),
-            Self::Invalidate { operation, expected } => store.invalidate(operation, expected),
-            Self::FinishBackfill { operation, expected_generation } => store.finish_backfill(operation, expected_generation.as_deref()),
+            Self::Discover {
+                operation,
+                paths,
+                complete,
+            } => store.discover(operation, paths, *complete),
+            Self::Invalidate {
+                operation,
+                expected,
+            } => store.invalidate(operation, expected),
+            Self::FinishBackfill {
+                operation,
+                expected_generation,
+            } => store.finish_backfill(operation, expected_generation.as_deref()),
         }
     }
 }
