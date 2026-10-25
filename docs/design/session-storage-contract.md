@@ -1542,3 +1542,31 @@ locally. Exact-head CI, formatting/clippy, PostgreSQL parity, full-domain select
 presentation and retained lifecycle qualification, hosted custody/RLS, migration,
 performance and fresh independent review remain required. Public qualifications
 remain zero. #380 completion still precedes any #477 main merge.
+
+### Bounded affected-owner lifecycle (Worker52, unqualified)
+
+The private semantic publisher now uses the shared typed `LifecycleStore`
+closure traversal. A Source's recorded Current path owners, parents, trace
+incident endpoints, PID peers and lineage peers enroll their complete Raw
+membership before the existing native parser/identity/matcher runs. The bound
+is 64 owners, 64 sources and 1 MiB of old owner metadata. This is recorded
+ownership traversal, not a second relationship reducer.
+
+The typed model captures exact outgoing Catalog observations and the physical
+Facts identity plus the existing recorded runtime fingerprint. Record and
+publication compare those observations under the Source/epoch/generation and
+claim fences. Non-withdrawal retirement requires positive replacement Raw for
+every outgoing path; only Current and its source mappings retire. History,
+slots, retained recipes, trace headers and retained-history search remain in
+custody. The existing S2 publish/collect and proof-ref union are unchanged.
+Facts replacement or changed runtime refuses with Conflict, including ACK
+replay; hostname alone is not authority.
+
+Path retargeting with a retained verifiable old carrier and explicit collector
+selection uses the existing withdrawal and history composition policy. Missing
+or tampered old Raw is an explicit reader/producer refusal, never reconstructed
+bytes. Local authority without recorded Facts, late-discovered incident owners,
+over-budget components and transitions without a complete positive replacement
+remain explicit pending/refusal classes. Public qualification remains 0/None,
+completeness partial, and selected factories closed. This increment requires
+exact-head CI and fresh scoped review; it does not complete D3/D4 or #477.

@@ -7358,6 +7358,8 @@ impl PreparedSources {
             &self.relationships.endpoints,
             &self.relationships.relations,
             &self.message_dependencies,
+            &self.relationships.retired_owners,
+            &self.relationships.lifecycle_authority,
         ))
         .map_err(io::Error::other)
     }
@@ -7462,6 +7464,19 @@ pub(crate) fn prepare_semantic_batch(
     prepared.claims.sort_by_key(|(path, _)| ranks[path]);
     if prepared.base_generation != batch.base_generation {
         return Err(io::Error::other("semantic model generation changed"));
+    }
+    if batch.phase == relation_stage::Phase::Publication {
+        if !batch.context.prior_owners.is_empty() {
+            prepared.relationships.lifecycle_authority =
+                Some(relation_stage::LifecycleAuthority::capture(options)?);
+        }
+        prepared.relationships.retired_owners = batch
+            .context
+            .prior_owners
+            .values()
+            .filter(|old| !prepared.rows.iter().any(|row| row.key == old.key))
+            .cloned()
+            .collect();
     }
     if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
         let binding = cache.query_runtime_binding()?;

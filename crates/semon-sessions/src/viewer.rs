@@ -7114,7 +7114,9 @@ mod tests {
                 if indexed > observed {
                     observed = indexed;
                 }
-                let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                // Poll through the served route so these ongoing reads retain
+                // Catalog interest under the production idle policy.
+                let page = native_api(&view, "/api/sessions", "limit=60");
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
                 if page.status == 200
                     && body["completeness"]["state"] == "complete"
