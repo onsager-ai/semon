@@ -3,17 +3,35 @@ use crate::storage::selected::ContextLookup;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::io;
 
-pub(crate) struct Context<'a> { db: &'a Connection, owned: bool }
+pub(crate) struct Context<'a> {
+    db: &'a Connection,
+    owned: bool,
+}
 impl<'a> Context<'a> {
-    pub(crate) fn local(db: &'a Connection) -> Self { Self { db, owned: false } }
-    pub(crate) fn owned(db: &'a Connection) -> Self { Self { db, owned: true } }
+    pub(crate) fn local(db: &'a Connection) -> Self {
+        Self { db, owned: false }
+    }
+    pub(crate) fn owned(db: &'a Connection) -> Self {
+        Self { db, owned: true }
+    }
     // Only authored statements below enter this adapter-local scope helper.
     // No SQL text or callback is exposed through the metadata port.
     fn sql(&self, sql: &str) -> String {
-        if !self.owned { return sql.to_owned(); }
+        if !self.owned {
+            return sql.to_owned();
+        }
         let mut sql = sql.to_owned();
-        for table in ["session_trace_headers", "session_trace_turns", "session_trace_edges", "session_history_catalog", "session_catalog"] {
-            sql = sql.replace(table, &format!("(SELECT * FROM main.{table} WHERE namespace=semon_namespace())"));
+        for table in [
+            "session_trace_headers",
+            "session_trace_turns",
+            "session_trace_edges",
+            "session_history_catalog",
+            "session_catalog",
+        ] {
+            sql = sql.replace(
+                table,
+                &format!("(SELECT * FROM main.{table} WHERE namespace=semon_namespace())"),
+            );
         }
         sql
     }
@@ -48,7 +66,23 @@ impl ContextLookup for Context<'_> {
         self.db.query_row(&self.sql("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1"),[key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
     }
     fn preview_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        let history = self.db.query_row(&self.sql("SELECT metadata FROM session_history_catalog WHERE session_key=?1"), [key],|r|r.get(0)).optional().map_err(io::Error::other)?;
-        Ok(history.or(self.db.query_row(&self.sql("SELECT metadata FROM session_catalog WHERE session_key=?1"),[key],|r|r.get(0)).optional().map_err(io::Error::other)?))
+        let history = self
+            .db
+            .query_row(
+                &self.sql("SELECT metadata FROM session_history_catalog WHERE session_key=?1"),
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        Ok(history.or(self
+            .db
+            .query_row(
+                &self.sql("SELECT metadata FROM session_catalog WHERE session_key=?1"),
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?))
     }
 }

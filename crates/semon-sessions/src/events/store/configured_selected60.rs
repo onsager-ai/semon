@@ -37,7 +37,7 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     let path = input.full_path(options);
     let facts_path = options.facts.as_ref().unwrap();
     let mut facts = crate::facts::read_facts(facts_path).unwrap();
-    facts.codex_rollouts = Some([input.path.to_string_lossy().into_owned()].into_iter().collect());
+    facts.codex_rollouts = Some([input.path.clone()].into_iter().collect());
     crate::facts::write_facts(facts_path, &facts).unwrap();
     cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
     let (batch, model) = model_ready(&f, &mut cache, options, input, "selected60");

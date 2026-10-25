@@ -7460,7 +7460,10 @@ pub(crate) fn prepare_semantic_batch(
                 .as_mut()
                 .and_then(serde_json::Value::as_object_mut)
                 .ok_or_else(|| io::Error::other("selected presentation requires Query facts"))?;
-            query.insert("selected_presentation_observations".into(), observations.clone());
+            query.insert(
+                "selected_presentation_observations".into(),
+                observations.clone(),
+            );
         }
     }
     Ok(SemanticModelBatch { prepared })
