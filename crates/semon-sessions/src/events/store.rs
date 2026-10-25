@@ -851,6 +851,10 @@ struct SqliteStore {
 struct DiscoveryWitness { data:i64, main_schema:i64, temp_schema:i64, changes:u64, rollback:u64, contract:[u8;32] }
 impl DiscoveryWitness {
     fn read(c:&Connection, state:&DiscoveryState) -> rusqlite::Result<Self> {
+        crate::native_timing::discovery_count(|counts| { counts.statements+=1; counts.schema_probes+=1; });
+        if crate::storage::sqlite::namespace::is_bound(c)? {
+            return Err(rusqlite::Error::InvalidParameterName("namespace writer upgrade is pending".into()));
+        }
         crate::native_timing::discovery_count(|counts| { counts.statements+=4; counts.schema_probes+=2; });
         let mut digest=sha2::Sha256::new();
         let mut statement=c.prepare_cached("SELECT key,CASE WHEN octet_length(value)<=2048 THEN value END FROM main.meta WHERE key IN('cache_version','catalog_version','search_version','catalog_semantic_recipe') ORDER BY key LIMIT 5")?;
@@ -7626,7 +7630,7 @@ mod tests {
         assert_eq!(records.len(),2);
         for (_,counts) in records {
             assert_eq!(counts.skipped,1);
-            assert_eq!(counts.statements,6,"only the transaction and committed witness probes may execute");
+            assert_eq!(counts.statements,7,"only the transaction and committed witness probes may execute");
             assert_eq!(counts.rows,0);
             assert_eq!(counts.factory_opens,0);
             assert_eq!(counts.committed_changes,0);
